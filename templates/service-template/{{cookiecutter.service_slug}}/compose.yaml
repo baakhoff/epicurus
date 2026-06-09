@@ -1,0 +1,19 @@
+# {{ cookiecutter.service_name }} module — a per-module compose fragment (ADR-0006).
+# Add it to the top-level compose.yaml `include:` list to run it in the stack.
+services:
+  {{ cookiecutter.service_slug }}:
+    build:
+      context: ../..
+      dockerfile: services/{{ cookiecutter.service_slug }}/Dockerfile
+    image: {{ cookiecutter.image }}:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "{{ cookiecutter.port }}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+    networks: [epicurus]

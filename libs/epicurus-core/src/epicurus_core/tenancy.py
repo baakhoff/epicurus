@@ -2,7 +2,7 @@
 
 Every persisted or addressable resource is namespaced by tenant, even when a
 single tenant is running, so the *same* code serves self-host (one tenant) and
-multi-tenant SaaS. See docs/DUAL-TRACK.md. This module is dependency-free on
+multi-tenant SaaS. This module is dependency-free on
 purpose: it is the lowest layer and everything else may import it.
 """
 

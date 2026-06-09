@@ -103,3 +103,6 @@ desktop.ini
 
 # Local agent/editor tool state is excluded via .git/info/exclude (per-repo,
 # untracked) so it never appears in version control.
+
+# Internal agent/planning docs — kept local, never published
+.workspace/

@@ -1,0 +1,42 @@
+# Dev commands. Requires go-task (https://taskfile.dev) — optional; each task is
+# a thin wrapper over uv, so you can always run the underlying command directly.
+version: "3"
+
+tasks:
+  setup:
+    desc: Install all dependencies into the uv-managed virtualenv
+    cmds:
+      - uv sync --all-packages
+
+  lint:
+    desc: Lint with ruff
+    cmds:
+      - uv run ruff check .
+
+  fmt:
+    desc: Auto-format with ruff
+    cmds:
+      - uv run ruff format .
+
+  fmt-check:
+    desc: Check formatting without writing changes
+    cmds:
+      - uv run ruff format --check .
+
+  type:
+    desc: Type-check with mypy (strict)
+    cmds:
+      - uv run mypy -p epicurus_core
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - uv run pytest
+
+  check:
+    desc: Run every quality gate (lint, format check, types, tests) — mirrors CI
+    cmds:
+      - task: lint
+      - task: fmt-check
+      - task: type
+      - task: test

@@ -4,9 +4,9 @@
 > a growing fleet of integration modules (calendar, notes, tasks, mail, chat,
 > knowledge base, cloud storage), accessed privately over Tailscale.
 
-**Status:** 🌱 _Bootstrapping._ This is a void repo — the architecture is being
-planned before any service code lands. See the plan in the issue tracker /
-`docs/` once approved.
+**Status:** 🚧 _Phase 0 — building the platform skeleton._ The architecture is
+settled (see [`docs/`](docs)); the development workflow and module contract live
+in [`AGENTS.md`](AGENTS.md).
 
 ## Vision
 
@@ -45,6 +45,28 @@ capabilities can be added as self-contained services.
   the repo is private: zero secrets in git, clean config boundaries, documented
   contracts.
 - **Scalable, sustainable, boring-where-it-counts.** Build the core to last.
+
+## Development
+
+Prerequisites: [uv](https://docs.astral.sh/uv/) and Docker. Optionally
+[go-task](https://taskfile.dev) for the `task` shortcuts.
+
+```bash
+uv sync --all-packages         # install everything into a managed virtualenv
+uv run pytest                  # tests
+uv run ruff check .            # lint
+uv run ruff format --check .   # formatting
+uv run mypy -p epicurus_core   # types (strict)
+```
+
+Or with go-task: `task setup`, then `task check` runs every gate (lint, format,
+types, tests) exactly as CI does.
+
+The repo is a uv **workspace**: shared code in `libs/`, deployable services in
+`services/`, infra in `infra/`, scaffolding in `templates/`. New modules are
+generated from `templates/service-template`. See [`AGENTS.md`](AGENTS.md) for the
+development workflow (worktree → branch → tests → docs → PR) and the rules for
+working in parallel.
 
 ## License
 

@@ -10,6 +10,7 @@ dependencies = [
     "fastapi>=0.115",
     "prometheus-client>=0.21",
     "nats-py>=2.6",
+    "mcp>=1.2",
 ]
 
 [build-system]

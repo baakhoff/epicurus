@@ -16,10 +16,14 @@ Shared contract and runtime used by every epicurus service.
   `GET /health` + `GET /metrics` (Prometheus) surface.
 - **`events`** — `EventBus`: async NATS client (the event backbone). Tenant-scoped
   `publish` / `subscribe` / `request` / `reply`.
+- **`module`** — `EpicurusModule`: the MCP module base (wraps `FastMCP`). Register
+  tools, declare emitted/consumed events, serve over HTTP (`http_app()`), and
+  generate the **manifest**.
+- **`manifest`** — `ModuleManifest` / `ToolSpec` / `EventSpec` + `CONTRACT_VERSION`:
+  the descriptor a module ships (ADR-0004); basis for the template and installer.
 
 ## Pending (follow-up changes)
 
-- MCP base classes (the module tool contract)
 - OpenBao client (secret access)
 - OpenTelemetry tracing helpers
 - NATS JetStream persistence (durable streams)

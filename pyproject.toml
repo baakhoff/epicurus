@@ -1,0 +1,51 @@
+# Root of the epicurus uv workspace.
+#
+# This root is a *virtual* project (package = false): it is not built or
+# published. It exists to pin shared dev tooling and tool config for every
+# workspace member, and to declare which members make up the monorepo.
+#
+# Add new packages under libs/ (shared) or services/ (deployable modules).
+# `members = ["libs/*"]` auto-discovers libs packages; the `services/*` glob is
+# added by the PR that introduces the first service.
+
+[project]
+name = "epicurus"
+version = "0.0.0"
+description = "Self-hosted, modular, local-first personal-assistant platform."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["libs", "services"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["epicurus_core"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+pretty = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["libs", "services"]
+addopts = "-q"

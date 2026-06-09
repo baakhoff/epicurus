@@ -32,5 +32,29 @@ jobs:
             --verify-tag \
             $PRERELEASE
 
-      # Container images are published here once services ship Dockerfiles
-      # (added with the first releasable service).
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push service images to GHCR
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          for df in services/*/Dockerfile; do
+            svc="$(basename "$(dirname "$df")")"
+            img="ghcr.io/${owner}/epicurus-${svc}"
+            docker build -f "$df" -t "${img}:${version}" -t "${img}:latest" .
+            docker push "${img}:${version}"
+            docker push "${img}:latest"
+          done

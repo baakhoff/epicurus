@@ -2,7 +2,7 @@
 
 > A self-hosted, modular, **local-first** personal-assistant platform: an AI agent
 > plus a growing fleet of sidecar modules (calendar, notes, tasks, mail, chat,
-> knowledge base, storage), reachable privately over Tailscale.
+> knowledge base, storage), private and self-hosted on your own machine or server.
 
 **Status:** 🚧 _Phase 0 — building the platform skeleton._ ·
 **License:** [AGPL-3.0](LICENSE)

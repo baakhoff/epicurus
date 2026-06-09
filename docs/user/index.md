@@ -3,8 +3,9 @@
 This guide is for running epicurus on your own machine or server.
 
 epicurus runs as a set of Docker containers: a core service plus the modules and
-backing services it needs. You reach it privately over Tailscale — it is not
-exposed to the public internet by default.
+backing services it needs. It is not exposed to the public internet by default —
+you choose how to reach it (locally, over your LAN, behind a VPN, or however you
+expose your own server).
 
 > **Early development.** There is not yet an end-user app to log into. Today this
 > guide covers standing up the platform's **data plane** (its backing services).
@@ -21,6 +22,7 @@ exposed to the public internet by default.
 
 - **Local-first.** Everything runs on your box; data stays there unless a module
   you enable explicitly needs to reach out.
-- **Private.** Access is over your Tailscale network only.
+- **Private.** Not exposed to the public internet by default; you decide how to
+  reach it (local, LAN, VPN, or your own server).
 - **Modular.** You add capabilities by running additional module containers
   alongside the core.

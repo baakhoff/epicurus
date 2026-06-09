@@ -32,8 +32,8 @@ The compose stack reads its own optional `infra/compose/.env` for host ports and
 cp infra/compose/.env.example infra/compose/.env
 ```
 
-The default Postgres password and OpenBao root token there are **for a local
-Tailscale-only box only**.
+The default Postgres password and OpenBao root token there are **for a local,
+private deployment only**.
 
 ## Secrets
 

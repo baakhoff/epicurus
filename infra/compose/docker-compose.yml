@@ -3,7 +3,7 @@
 # Local-dev defaults are inline (the `:-` fallbacks); override them in a local
 # `infra/compose/.env` (gitignored). Real secrets do NOT live here — in
 # staging/prod these are injected from OpenBao. The dev credentials below are
-# intentionally weak and for a Tailscale-only local box.
+# intentionally weak and for a local, private box.
 #
 # Bring up:   docker compose -f infra/compose/docker-compose.yml up -d
 # (or `task infra:up`).  Observability (Grafana/Loki/Prometheus/Tempo/OTel)

@@ -106,3 +106,6 @@ desktop.ini
 
 # Internal agent/planning docs — kept local, never published
 .workspace/
+
+# mkdocs build output
+site/

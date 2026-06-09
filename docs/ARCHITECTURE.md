@@ -13,11 +13,21 @@ choice lives in [DECISIONS.md](DECISIONS.md).
   explicitly needs it. Ingress is Tailscale-only.
 - **Microservices from day one.** Every capability is an independently
   deployable, replaceable service behind a stable contract.
-- **Two backbone contracts.** Modules talk to the core in exactly two ways:
-  - **MCP (Model Context Protocol)** for synchronous *tools* the agent can call.
-  - **NATS events** for asynchronous *things that happened* (e.g. a new message).
-  Adding a new block = implement one MCP server (+ optional event consumer) and
-  register it. This is the single decision that makes the system extensible.
+- **Core + sidecar modules.** The core container *is* epicurus (agent +
+  platform). Every capability is a **sidecar container** added alongside it,
+  acting as a tool/function for the agent. Adding a block = run one more
+  container that speaks the contract.
+- **One standardized, bidirectional contract.** It will evolve, but its shape is
+  fixed, and any container can reach anything epicurus provides:
+  - **Outbound (module → agent): MCP** — typed *tools* the agent can call.
+  - **Inbound (module → core): the platform API** — a module can call *anything
+    epicurus provides* (secrets, events, storage, the agent/LLM, the tool
+    registry) over a stable local API.
+  - **Events: NATS** — asynchronous *things that happened*, in either direction.
+- **Local-only trust boundary.** The module↔core contract is private to the
+  internal Docker network and **never exposed externally** by default. External
+  access is a deliberate, gated **business-tier** capability added later. (This is
+  distinct from Tailscale, which is *user* ingress, not module traffic.)
 - **Built public-ready.** Developed to open-source / SaaS hygiene even while the
   repo is private: zero secrets in git, clean config boundaries, documented
   contracts, ADRs. Going public/SaaS later is a switch, not a cleanup.
@@ -81,18 +91,31 @@ choice lives in [DECISIONS.md](DECISIONS.md).
 
 ## 4. The module contract
 
-A module is a container that:
+The core container is epicurus; each module is a **sidecar container** that
+speaks one standardized, **bidirectional** contract. A module:
 
-1. **Serves MCP tools.** Each tool = a typed capability the agent may call
+1. **Serves MCP tools** — typed capabilities the agent may call
    (`calendar.create_event`, `knowledge.search`, `storage.read_file`, …).
-2. **Optionally consumes/publishes NATS events.** e.g. the Telegram module
+2. **Calls the core platform API** — anything epicurus provides: secrets,
+   events, storage, the agent/LLM, the tool registry. The contract runs both
+   ways; a module is a first-class participant, not just a callee.
+3. **Optionally consumes/publishes NATS events** — e.g. the Telegram module
    publishes `inbox.message.received`; the agent subscribes and may reply.
-3. **Exposes standard ops endpoints** — `/health`, `/metrics` — and emits
+4. **Exposes standard ops endpoints** — `/health`, `/metrics` — and emits
    structured logs + OTel traces via the shared `epicurus-core` library.
-4. **Fetches its own secrets from OpenBao** at runtime; nothing in env files or git.
+5. **Fetches its own secrets from OpenBao** at runtime; nothing in env or git.
 
-New blocks are scaffolded from `templates/service-template/` so every module
-starts with the contract wired in.
+**Networking — local-only.** All of the above happens on the internal Docker
+network; the contract is never exposed externally by default (see the
+trust-boundary principle). External exposure is a later, gated business-tier
+capability.
+
+**Manifest.** A module ships a small manifest describing its image, the tools it
+provides, the events it emits/consumes, the config/secrets it needs, and the
+contract version it targets. New blocks are scaffolded from
+`templates/service-template/` with the contract pre-wired; the manifest is also
+what the future one-click installer (Phase 7) reads to add a community module by
+URL.
 
 ## 5. Repo shape (monorepo)
 

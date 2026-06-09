@@ -32,6 +32,10 @@ from-the-beginning, not a someday-feature. Before writing or changing anything:
    overlay, **absent from the OSS build**. Core emits usage events; the overlay
    consumes them. Never import the overlay from core.
 6. **Secrets never touch git.** gitleaks + OpenBao. Precondition for going public.
+7. **The module↔core contract is local-only.** Modules speak the bidirectional
+   contract (MCP tools out, platform API in, NATS events) over the internal Docker
+   network only — never exposed externally by default. External access is a
+   deliberate, gated business-tier capability, never a default.
 
 Full rationale and checklists: [docs/DUAL-TRACK.md](docs/DUAL-TRACK.md).
 

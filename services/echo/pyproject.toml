@@ -1,0 +1,16 @@
+[project]
+name = "epicurus-echo"
+version = "0.1.0"
+description = "Echo module — proves the epicurus module contract end-to-end."
+requires-python = ">=3.11"
+dependencies = ["epicurus-core"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/epicurus_echo"]
+
+[tool.uv.sources]
+epicurus-core = { workspace = true }

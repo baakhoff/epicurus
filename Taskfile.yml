@@ -26,7 +26,7 @@ tasks:
   type:
     desc: Type-check with mypy (strict)
     cmds:
-      - uv run mypy -p epicurus_core
+      - uv run mypy -p epicurus_core -p epicurus_echo
 
   test:
     desc: Run the test suite

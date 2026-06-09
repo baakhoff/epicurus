@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets & local config  —  NEVER commit these (this repo is built public-ready)
+# ─────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials.json
+client_secret*.json
+token.json
+*token*.json
+service-account*.json
+*.tfvars
+.vault-token
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ─── Tooling / caches ────────────────────────────────────────────────────────
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+.dmypy.json
+
+# ─── Node / frontend ─────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+.pnpm-store/
+*.tsbuildinfo
+.eslintcache
+
+# ─── Data, models, storage (large / private / machine-local) ────────────────
+data/
+storage/
+volumes/
+*.db
+*.sqlite
+*.sqlite3
+models/
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.onnx
+vector-store/
+backups/
+
+# ─── Docker / runtime ────────────────────────────────────────────────────────
+docker-compose.override.yml
+*.local.yml
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ─── OS / editor cruft ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local agent/editor tool state is excluded via .git/info/exclude (per-repo,
+# untracked) so it never appears in version control.

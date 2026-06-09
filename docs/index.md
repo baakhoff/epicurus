@@ -4,8 +4,9 @@
 platform. A core service runs an AI agent and a set of platform capabilities;
 every additional capability is a **sidecar module** that the agent can use.
 
-It is designed to run on your own machine under Docker and to be reached only
-over your private [Tailscale](https://tailscale.com) network.
+It is designed to run on your own machine or server under Docker and to stay
+private — you choose how to reach it (locally, over your LAN, behind a VPN, or
+however you expose your own server).
 
 > **Early development.** epicurus is being built. This documentation covers what
 > exists today and grows as capabilities land. There is not yet an end-user app —

@@ -1,68 +1,51 @@
 # epicurus
 
-> A self-hosted, modular personal-assistant platform. Local-first AI agent +
-> a growing fleet of integration modules (calendar, notes, tasks, mail, chat,
-> knowledge base, cloud storage), accessed privately over Tailscale.
+> A self-hosted, modular, **local-first** personal-assistant platform: an AI agent
+> plus a growing fleet of sidecar modules (calendar, notes, tasks, mail, chat,
+> knowledge base, storage), reachable privately over Tailscale.
 
-**Status:** 🚧 _Phase 0 — building the platform skeleton._
+**Status:** 🚧 _Phase 0 — building the platform skeleton._ ·
+**License:** [AGPL-3.0](LICENSE)
 
-## Vision
+epicurus runs on your own machine under Docker. A **core** service runs the agent
+and platform capabilities; every capability is a **sidecar module** the agent can
+use. Modules talk to the core over one standardized, local-only contract.
 
-A private, extensible "second brain + operator" that runs on a home Windows
-machine under Docker, reachable only over Tailscale. It pairs a local-first AI
-agent (with optional hosted-API fallback) with pluggable modules so new
-capabilities can be added as self-contained services.
+## Documentation
 
-### North-star capabilities
+Full documentation lives in **[`docs/`](docs/)** (and is published to the GitHub
+Wiki once the wiki is enabled). Start here:
 
-- **AI agent** with tool/function calling; **local models prioritized**, hosted
-  API optional.
-- **RAG** over an Obsidian knowledge base.
-- **Google** Calendar / Tasks / Notes / Mail integration.
-- **Cloud storage** layered over an existing HDD of files, browsable by the agent.
-- **Chat bridges**: Telegram, WhatsApp, Discord (read + reply from the app).
-- **Work tools**: Jira, Slack personal-profile integration.
-- **Cross-chat long-term memory.**
-- **Web search** for the agent via free providers.
-- **Per-service VPN routing** profiles.
-- **Work "sub-user"** isolation.
-- **Extensive public API** for connecting external services.
-- **Strong secret storage** for the many personal credentials involved.
-- **Backups** of everything (chats, data, config) — restorable from anywhere.
-- **Logging & debugging** at every stage.
-- **Model management UI**: download/switch models, with quality guidance.
-- **Phone-friendly web UI.**
+| If you want to… | Read |
+| --- | --- |
+| Install & run epicurus | [User Guide → Installation](docs/user/installation.md) |
+| Configure it / manage secrets | [User Guide → Configuration](docs/user/configuration.md) |
+| Understand how it's built | [Developer Guide → Architecture](docs/developer/architecture.md) |
+| Build a module | [Developer Guide → Building a module](docs/developer/building-a-module.md) |
+| Look up a class or function | [API Reference](docs/reference/index.md) |
+| Contribute | [Contributing](docs/developer/contributing.md) |
 
-## Principles
+## Quickstart
 
-- **Local-first, private-by-default.** No data leaves the box unless a module
-  explicitly needs it.
-- **Microservices from day one** — each block is an independently deployable,
-  replaceable service behind a stable contract.
-- **Zero secrets in git.** Credentials live in a secrets manager, never the repo.
-- **Scalable, sustainable, boring-where-it-counts.** Build the core to last.
-
-## Development
-
-Prerequisites: [uv](https://docs.astral.sh/uv/) and Docker. Optionally
-[go-task](https://taskfile.dev) for the `task` shortcuts.
+Bring up the platform's backing services (Postgres, Valkey, NATS, Qdrant, OpenBao):
 
 ```bash
-uv sync --all-packages         # install everything into a managed virtualenv
-uv run pytest                  # tests
-uv run ruff check .            # lint
-uv run ruff format --check .   # formatting
-uv run mypy -p epicurus_core   # types (strict)
+git clone https://github.com/baakhoff/epicurus.git
+cd epicurus
+docker compose -f infra/compose/docker-compose.yml up -d   # or: task infra-up
 ```
 
-Or with go-task: `task setup`, then `task check` runs every gate (lint, format,
-types, tests) exactly as CI does.
+Develop against the shared library and run the gates:
 
-The repo is a uv **workspace**: shared code in `libs/`, deployable services in
-`services/`, infra in `infra/`, scaffolding in `templates/`. New modules are
-generated from `templates/service-template`.
+```bash
+uv sync --all-packages
+uv run pytest           # and: ruff check . · ruff format --check . · mypy -p epicurus_core
+# or simply: task check
+```
 
-## License
+See the [Developer Guide](docs/developer/index.md) for the full setup.
 
-[GNU AGPL-3.0](LICENSE). Network-copyleft: if you run a modified epicurus as a
-network service, you must release your changes under the same license.
+## Contributing
+
+Issues and pull requests welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). By
+contributing you agree your contributions are licensed under the AGPL-3.0.

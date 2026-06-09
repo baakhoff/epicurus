@@ -1,0 +1,53 @@
+name: Wiki
+
+# Publishes docs/ to the GitHub Wiki on merge to main. The wiki is unavailable on
+# free *private* repos, so this no-ops until the wiki is enabled (make the repo
+# public, or GitHub Pro). The source of truth always stays in docs/.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/wiki.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync docs/ to the wiki (only if the wiki is enabled)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh api "repos/${GITHUB_REPOSITORY}" --jq .has_wiki)" != "true" ]; then
+            echo "::notice::Wiki not enabled (needs a public repo or GitHub Pro) — skipping sync."
+            exit 0
+          fi
+          wiki_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          work="$(mktemp -d)"
+          if ! git clone --depth 1 "$wiki_url" "$work" 2>/dev/null; then
+            git -C "$work" init -q
+            git -C "$work" remote add origin "$wiki_url"
+          fi
+          # Mirror docs/ into the wiki (it supports subdirectory pages).
+          # docs/index.md becomes the wiki Home page.
+          find "$work" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -r docs/. "$work"/
+          [ -f "$work/index.md" ] && mv "$work/index.md" "$work/Home.md"
+          cd "$work"
+          git add -A
+          if git diff --cached --quiet; then echo "wiki already up to date"; exit 0; fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "docs: sync wiki from ${GITHUB_SHA}"
+          git push -q origin HEAD:master

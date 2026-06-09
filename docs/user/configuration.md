@@ -20,8 +20,8 @@ Current keys:
 | `DEFAULT_TENANT_ID` | `local` | The tenant used for a single-tenant / self-host install. |
 | `NATS_URL` | `nats://localhost:4222` | The event bus. On the internal Docker network this is `nats://nats:4222`. |
 
-!!! warning "Never commit `.env`"
-    `.env` is gitignored. Real secrets do **not** belong in it.
+> **Warning — never commit `.env`.** It is gitignored. Real secrets do **not**
+> belong in it.
 
 ## Data-plane configuration (`infra/compose/.env`)
 
@@ -42,7 +42,6 @@ in environment files or git. The compose stack runs OpenBao in dev mode for loca
 development; a production deployment uses a non-dev OpenBao. Modules fetch their
 own secrets from OpenBao at runtime.
 
-!!! info "AI access"
-    Modules do not hold model API keys. All AI/LLM access goes through the core,
-    which owns the model keys and routing — so there is one place to configure
-    and secure them.
+> **AI access.** Modules do not hold model API keys. All AI/LLM access goes
+> through the core, which owns the model keys and routing — so there is one place
+> to configure and secure them.

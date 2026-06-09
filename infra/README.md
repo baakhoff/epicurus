@@ -2,8 +2,10 @@
 
 Operational stacks and orchestration that are not application services:
 
-- **compose** — the `docker-compose` files that bring up the platform
-  (Traefik, Postgres, Valkey, NATS, Qdrant, OpenBao) and supporting stacks.
+- **[compose](compose/)** — the data-plane stack (Postgres, Valkey, NATS, Qdrant,
+  OpenBao). ✅ available.
+- **edge** — Traefik gateway + Tailscale ingress. Paired and added later (the
+  gateway has nothing to route until app services exist).
 - **observability** — Grafana / Loki / Prometheus / Tempo + the OTel collector.
 - **backup** — Restic configuration (encrypted, restore-from-anywhere).
 - **vpn** — gluetun profiles for per-service VPN routing.

@@ -40,3 +40,23 @@ tasks:
       - task: fmt-check
       - task: type
       - task: test
+
+  infra-up:
+    desc: Start the data-plane stack (Postgres, Valkey, NATS, Qdrant, OpenBao)
+    cmds:
+      - docker compose -f infra/compose/docker-compose.yml up -d
+
+  infra-down:
+    desc: Stop the data-plane stack (append `-- -v` to also drop volumes)
+    cmds:
+      - docker compose -f infra/compose/docker-compose.yml down {{.CLI_ARGS}}
+
+  infra-ps:
+    desc: Show data-plane service status
+    cmds:
+      - docker compose -f infra/compose/docker-compose.yml ps
+
+  infra-logs:
+    desc: Tail data-plane logs
+    cmds:
+      - docker compose -f infra/compose/docker-compose.yml logs -f

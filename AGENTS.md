@@ -49,19 +49,27 @@ it brand-neutral.
 
 ## Development workflow (every unit of work)
 
-1. **Create a worktree** for the task (isolated working directory — see
-   [Parallel work](#parallel-work-multiple-agents-at-once)).
-2. **Create a branch** off `main` inside that worktree.
-3. **Build** the change.
-4. **Test it thoroughly** — write detailed, meaningful tests (unit + integration;
-   cover the contract, edge cases, and failure modes). Tests must pass.
-5. **Document it thoroughly** — module README, docstrings, and an ADR in
+1. **Claim a tracking issue.** Pick the issue from the project board (or create
+   one for new, substantive work — it lands on the board). Move it to
+   **In Progress** and put your branch in its **Branch** field. Trivial chores (a
+   typo, a tiny doc tweak) may skip the issue.
+2. **Create a worktree** for the task (isolated working directory — see
+   [Parallel work](#parallel-work-multiple-agents-at-once)), then a local
+   `instruction` shim (`@AGENTS.md`).
+3. **Create a branch** off `main` inside that worktree.
+4. **Build** the change.
+5. **Test it thoroughly** — detailed, meaningful tests (unit + integration; cover
+   the contract, edge cases, and failure modes). Tests must pass.
+6. **Document it thoroughly** — module README, docstrings, and an ADR in
    `docs/DECISIONS.md` for any significant choice; update ROADMAP status.
-6. **Commit** (clean, conventional message — no AI attribution) and **open a PR**.
+7. **Commit** (clean, conventional message — no AI attribution) and **open a PR
+   that links the issue** — `Closes #N` (or `Part of #N` if it doesn't fully
+   resolve it). This populates the issue's linked-PR and, on merge, its closed date.
 
 Then **stop and wait**. Only on the owner's explicit request do you:
 
-7. **Switch to `main`**, **review** the PR, **merge**, and **rebuild Docker**.
+8. **Switch to `main`**, **review** the PR, **merge** (which closes the linked
+   issue → board **Done**), and **rebuild Docker**.
 
 `main` is protected by convention: it changes only through reviewed, merged PRs —
 never direct pushes, never force-pushes once others may have branched.
@@ -94,9 +102,11 @@ Up to several agents may work this repo simultaneously. Avoid clashes by design:
 ## Task board & claiming work
 
 Work is tracked on the repo's project board (columns: **Todo → In Progress →
-In Review → Done**), reachable from the repository's *Projects* tab. Because every
-agent pushes as the same GitHub user, the assignee can't tell agents apart — so
-the **claim signal is the board state, not the assignee**:
+In Review → Done**), reachable from the repository's *Projects* tab. **Cards are
+real GitHub issues** — a PR that says `Closes #N` links to the card and moves it
+to Done on merge. Because every agent pushes as the same GitHub user, the assignee
+can't tell agents apart — so the **claim signal is the board state, not the
+assignee**:
 
 1. **Claim:** move a `Todo` card to **In Progress** and put your branch name in the
    card's **Branch** field. A card already In Progress is taken — pick another.

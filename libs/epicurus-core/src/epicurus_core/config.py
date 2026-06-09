@@ -44,6 +44,10 @@ class CoreSettings(BaseSettings):
     # tenant per request instead (see the tenancy module and docs/DUAL-TRACK.md).
     default_tenant_id: str = "local"
 
+    # NATS event backbone. On the internal Docker network this is nats://nats:4222;
+    # the contract is local-only (see docs/ARCHITECTURE.md trust boundary).
+    nats_url: str = "nats://localhost:4222"
+
     @field_validator("default_tenant_id")
     @classmethod
     def _validate_default_tenant(cls, value: str) -> str:

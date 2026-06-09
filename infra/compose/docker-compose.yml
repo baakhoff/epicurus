@@ -1,0 +1,97 @@
+# epicurus data plane — the stateful backing services every module builds on.
+#
+# Local-dev defaults are inline (the `:-` fallbacks); override them in a local
+# `infra/compose/.env` (gitignored). Real secrets do NOT live here — in
+# staging/prod these are injected from OpenBao. The dev credentials below are
+# intentionally weak and for a Tailscale-only local box.
+#
+# Bring up:   docker compose -f infra/compose/docker-compose.yml up -d
+# (or `task infra:up`).  Observability (Grafana/Loki/Prometheus/Tempo/OTel)
+# ships as a separate stack in a follow-up change.
+
+name: epicurus
+
+networks:
+  epicurus:
+    name: epicurus
+
+volumes:
+  postgres-data:
+  valkey-data:
+  nats-data:
+  qdrant-data:
+  openbao-data:
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-epicurus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-epicurus-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-epicurus}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-epicurus} -d ${POSTGRES_DB:-epicurus}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [epicurus]
+
+  valkey:
+    image: valkey/valkey:8
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      - "${VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [epicurus]
+
+  nats:
+    image: nats:2.10
+    restart: unless-stopped
+    # JetStream on, store dir, HTTP monitoring on :8222. The nats image has no
+    # shell, so readiness is checked from the host via http://localhost:8222/healthz.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats-data:/data
+    networks: [epicurus]
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks: [epicurus]
+
+  openbao:
+    image: openbao/openbao:2.2.0
+    restart: unless-stopped
+    cap_add: [IPC_LOCK]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    command: ["server", "-dev"]
+    ports:
+      - "${OPENBAO_PORT:-8200}:8200"
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [epicurus]

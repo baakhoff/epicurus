@@ -92,4 +92,42 @@ this, so the cost is mostly discipline, not redesign.
   Must be decided **before** the repo goes public.
 - **Public auth/IdP** for SaaS (Authentik or hosted provider) — designed in
   Phase 5, hardened before SaaS launch.
-```
+
+---
+
+## ADR-0003 — Engineering process & tooling — 2026-06-09 — Accepted
+
+**Context.** Up to four agents (plus the owner) work this repo in parallel, all
+pushing as the same GitHub account. We need a workflow that keeps `main` clean,
+prevents agents clashing, and stays reproducible — while remaining public-ready.
+
+**Decision.**
+
+- **Workflow:** every unit of work goes worktree → branch → build → thorough
+  tests → thorough docs → commit → PR, then waits for the owner to review, merge,
+  and rebuild. Detailed in [AGENTS.md](AGENTS.md).
+- **`main` protection:** PR-only, no direct/force pushes. Server-side rulesets
+  need GitHub Pro (or a public repo), so for now this is enforced by a local
+  `pre-push` hook in `.git/hooks` (covers every worktree on this machine); owner
+  override is `git push --no-verify`. Revisit on upgrade or open-sourcing.
+- **Parallel coordination:** a GitHub **Projects board** (Todo → In Progress →
+  In Review → Done). Since all agents share one GitHub identity, the claim signal
+  is board state + a **Branch** field on the card, not the assignee.
+- **Dependency & env tooling: uv** (workspace + single lockfile). Chosen for a
+  multi-service monorepo maintained largely with AI assistance: one fast tool,
+  uniform commands, one `uv.lock` keeping every package coherent, and fast
+  edit→lock→test loops. Preferred over Poetry (per-project, slower) and pip.
+- **Conventional Commits**, `.editorconfig`, and a `pre-commit` config (ruff +
+  gitleaks + hygiene hooks) mirrored by CI (ruff, mypy --strict, pytest, gitleaks).
+- **No AI/assistant attribution anywhere in the repo** (commits, PRs, comments,
+  docs, branch names). History was squashed to a clean root to honor this.
+
+**Consequences.** New work is uniform and low-conflict; CI gates quality on every
+PR. The local-hook protection is weaker than server-side rules — accepted
+trade-off until Pro/public.
+
+**Open / deferred.**
+
+- Server-side branch protection (needs Pro or public).
+- Automated changelog / release tagging from Conventional Commits (later).
+- Community-health files (CONTRIBUTING, SECURITY, issue/PR templates) before public.

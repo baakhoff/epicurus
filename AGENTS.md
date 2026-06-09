@@ -71,7 +71,8 @@ Up to several agents may work this repo simultaneously. Avoid clashes by design:
   `../epicurus-trees/<branch>`, so they never nest inside the main checkout.
 - **Own a service, not a file.** The microservice layout means each task should
   target a distinct `services/<name>` directory. Two agents editing different
-  services almost never conflict. Coordinate by claiming a ROADMAP item.
+  services almost never conflict. Coordinate by claiming a card on the task
+  board (see below).
 - **Shared code (`libs/epicurus-core`) is high-contention.** Change it in small,
   reviewed PRs; announce/claim it so others rebase promptly.
 - **Branch naming:** `feat/<service>-<short-desc>`, `fix/<service>-<desc>`,
@@ -82,6 +83,23 @@ Up to several agents may work this repo simultaneously. Avoid clashes by design:
   shared long-running stack.
 - **DB migrations are per-service and ordered.** Two agents must not author
   conflicting migrations for the same service; namespace by service and rebase.
+- **Each worktree needs a local `CLAUDE.md` shim** containing `@AGENTS.md` so the
+  agent guide auto-loads there. It is untracked (excluded via `.git/info/exclude`),
+  so create it right after `git worktree add`.
+
+## Task board & claiming work
+
+Work is tracked on the repo's project board (columns: **Todo → In Progress →
+In Review → Done**), reachable from the repository's *Projects* tab. Because every
+agent pushes as the same GitHub user, the assignee can't tell agents apart — so
+the **claim signal is the board state, not the assignee**:
+
+1. **Claim:** move a `Todo` card to **In Progress** and put your branch name in the
+   card's **Branch** field. A card already In Progress is taken — pick another.
+2. **Review:** once the PR is open, move the card to **In Review** (awaiting the owner).
+3. **Done:** the owner merges and moves the card to **Done**.
+
+Never start a task whose card is already In Progress.
 
 ## Testing standards
 
@@ -96,6 +114,9 @@ Up to several agents may work this repo simultaneously. Avoid clashes by design:
 
 - Python 3.11+ async throughout; FastAPI + Pydantic v2. Ruff (line length 100),
   mypy `--strict`, pytest (`asyncio_mode=auto`).
+- **Dependencies & env: uv workspace.** `uv sync` to install; add deps with
+  `uv add`; commit `uv.lock`. Shared dev tooling and tool config live in the root
+  `pyproject.toml`; each package/service has its own `pyproject.toml`.
 - **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, …) for clean
   history and future automated changelog/versioning.
 - One responsibility per service. Cross-service contracts are MCP or NATS — never
@@ -106,4 +127,5 @@ Up to several agents may work this repo simultaneously. Avoid clashes by design:
 
 ## Status
 
-Bootstrapping. Phase 0 (platform skeleton) not yet started — see the ROADMAP.
+Phase 0 (platform skeleton) in progress — see the [ROADMAP](docs/ROADMAP.md) and
+the task board.

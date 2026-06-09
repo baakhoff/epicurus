@@ -6,7 +6,8 @@ Operational stacks and orchestration that are not application services:
   OpenBao). ✅ available.
 - **edge** — gateway + private ingress. Paired and added later (the gateway has
   nothing to route until app services exist).
-- **observability** — Grafana / Loki / Prometheus / Tempo + the OTel collector.
+- **[observability](observability/)** — Grafana / Loki / Prometheus / Tempo (OTLP
+  straight into Tempo). ✅ available.
 - **backup** — Restic configuration (encrypted, restore-from-anywhere).
 - **vpn** — gluetun profiles for per-service VPN routing.
 

@@ -61,6 +61,11 @@ docker compose down -v    # also remove volumes
 | Qdrant | 6333 (HTTP), 6334 (gRPC) |
 | OpenBao | 8200 |
 | echo (module) | 8080 |
+| Grafana | 3000 |
+| Prometheus | 9090 |
+| Loki | 3100 |
+| Tempo (OTLP) | 4317 (gRPC), 4318 (HTTP) |
 
-Override any of them in a local `infra/compose/.env` — see
+Once the stack is up, open **Grafana** at <http://localhost:3000> for logs,
+metrics, and traces. Override any port in a local `infra/compose/.env` — see
 [Configuration](configuration.md).

@@ -7,9 +7,14 @@ you can actually use.
 
 Status legend: ⬜ not started · 🟡 in progress · ✅ done
 
+**Build phasing.** Phase 0 (the foundation) is built by a single agent and
+self-merged, PR by PR, until it is solid. Parallel agents are onboarded at the
+start of Phase 1, when work shifts to services/modules. Live status is on the
+project board.
+
 ---
 
-## Phase 0 — Platform skeleton (the foundation) ⬜
+## Phase 0 — Platform skeleton (the foundation) 🟡
 
 The scalable, sustainable core — built right before anything hangs off it.
 
@@ -82,6 +87,30 @@ across sessions, from your phone over Tailscale.
 - Full **PWA** (installable, offline shell).
 - Docs + ADRs complete.
 
+## Phase 7 — Ecosystem & extensibility ⬜
+
+Make epicurus a platform others build on.
+
+- **Module manifest spec** — the standardized descriptor a module ships (image,
+  tools, events, required config/secrets, contract version).
+- **One-click installer ("add by domain")** — OpenWebUI-style: paste a module's
+  URL/domain → epicurus fetches the manifest, starts the container, wires it onto
+  the local contract, and registers its tools with the agent. Press add, it appears.
+- **Module SDK & docs** so open-source contributors can build their own modules.
+
+> The community **marketplace website** (browse/share modules) is a **separate
+> project**, out of scope for this repo. This phase ships only what the core
+> needs: the manifest spec and the installer that consumes it.
+
+---
+
+## Future directions (beyond the phased build)
+
+- **Native desktop apps — Windows, Linux, macOS.** Package the full platform to
+  run entirely locally on a machine, keeping the same modular, local-first
+  principles (agent, modules, and contract — no cloud required). A large,
+  separate track; recorded here so it is not forgotten.
+
 ---
 
 ## Requirement → where it lands
@@ -106,4 +135,6 @@ across sessions, from your phone over Tailscale.
 | Strong secret storage | 0, 3 | OpenBao |
 | Agent access to container file storage | 2 | storage |
 | Download/change models via UI | 1, 6 | LLM + web |
-```
+| Standardized module contract (bidirectional, local-only) | 0 | epicurus-core (MCP + platform API + NATS) |
+| Community modules + one-click "add by domain" | 7 | manifest spec + installer |
+| Native Windows / Linux / macOS apps | Future | desktop packaging |

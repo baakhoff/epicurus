@@ -1,0 +1,8 @@
+{
+  "service_name": "My Module",
+  "service_slug": "{{ cookiecutter.service_name.lower().replace(' ', '-').replace('_', '-') }}",
+  "package_name": "epicurus_{{ cookiecutter.service_slug.replace('-', '_') }}",
+  "description": "An epicurus module.",
+  "image": "ghcr.io/baakhoff/epicurus-{{ cookiecutter.service_slug }}",
+  "port": "8090"
+}

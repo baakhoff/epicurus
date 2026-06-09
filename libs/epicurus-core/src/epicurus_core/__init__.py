@@ -1,8 +1,8 @@
 """epicurus-core — shared contract and runtime for epicurus services.
 
 Cross-service building blocks: configuration, structured logging, the tenant
-scoping primitive, the NATS event backbone, the MCP module contract, and the
-operational ``/health`` + ``/metrics`` surface. The OpenBao client lands next.
+scoping primitive, the NATS event backbone, the MCP module contract, the OpenBao
+secret client, and the operational ``/health`` + ``/metrics`` surface.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from epicurus_core.logging import configure_logging, get_logger
 from epicurus_core.manifest import CONTRACT_VERSION, EventSpec, ModuleManifest, ToolSpec
 from epicurus_core.module import EpicurusModule
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
+from epicurus_core.secret_store import SecretError, SecretStore
 from epicurus_core.tenancy import (
     TenantError,
     current_tenant,
@@ -41,6 +42,8 @@ __all__ = [
     "ModuleManifest",
     "Payload",
     "Replier",
+    "SecretError",
+    "SecretStore",
     "TenantError",
     "ToolSpec",
     "__version__",

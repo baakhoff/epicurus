@@ -48,6 +48,12 @@ class CoreSettings(BaseSettings):
     # the contract is local-only.
     nats_url: str = "nats://localhost:4222"
 
+    # OpenBao (secrets). On the internal Docker network the address is
+    # http://openbao:8200. The token is the bootstrap secret, injected at runtime
+    # (env or a mounted file) and never committed.
+    openbao_url: str = "http://localhost:8200"
+    openbao_token: str | None = None
+
     @field_validator("default_tenant_id")
     @classmethod
     def _validate_default_tenant(cls, value: str) -> str:

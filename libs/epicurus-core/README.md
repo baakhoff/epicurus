@@ -20,10 +20,11 @@ Shared contract and runtime used by every epicurus service.
   generate the **manifest**.
 - **`manifest`** — `ModuleManifest` / `ToolSpec` / `EventSpec` + `CONTRACT_VERSION`:
   the descriptor a module ships (ADR-0004); basis for the template and installer.
+- **`secret_store`** — `SecretStore`: tenant-scoped secret access in OpenBao
+  (KV v2, via `hvac`); `get` / `set` / `delete`.
 
 ## Pending (follow-up changes)
 
-- OpenBao client (secret access)
 - OpenTelemetry tracing helpers
 - NATS JetStream persistence (durable streams)
 

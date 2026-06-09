@@ -1,0 +1,13 @@
+# Categorize auto-generated release notes by our type:* labels.
+changelog:
+  categories:
+    - title: Features
+      labels: ["type:feat"]
+    - title: Fixes
+      labels: ["type:fix"]
+    - title: Documentation
+      labels: ["type:docs"]
+    - title: Maintenance
+      labels: ["type:chore", "type:test"]
+    - title: Other Changes
+      labels: ["*"]

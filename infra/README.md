@@ -4,8 +4,9 @@ Operational stacks and orchestration that are not application services:
 
 - **[compose](compose/)** — the data-plane stack (Postgres, Valkey, NATS, Qdrant,
   OpenBao). ✅ available.
-- **edge** — gateway + private ingress. Paired and added later (the gateway has
-  nothing to route until app services exist).
+- **[edge](edge/)** — Traefik gateway routing services on one entry point;
+  access-agnostic (the operator layers Tailscale / reverse proxy / Keycloak in
+  front — ADR-0008). ✅ available.
 - **[observability](observability/)** — Grafana / Loki / Prometheus / Tempo (OTLP
   straight into Tempo). ✅ available.
 - **backup** — Restic configuration (encrypted, restore-from-anywhere).

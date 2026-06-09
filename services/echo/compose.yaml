@@ -16,4 +16,10 @@ services:
     depends_on:
       nats:
         condition: service_started
+    labels:
+      # Routed by the edge gateway (ADR-0008). No effect if no gateway is running.
+      - traefik.enable=true
+      - traefik.http.routers.echo.rule=Host(`echo.localhost`)
+      - traefik.http.routers.echo.entrypoints=web
+      - traefik.http.services.echo.loadbalancer.server.port=8080
     networks: [epicurus]

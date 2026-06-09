@@ -38,6 +38,10 @@ jobs:
 
       - name: Tests
         run: uv run pytest
+        env:
+          # Integration tests manage their own container lifecycle; the reaper
+          # is unnecessary on ephemeral CI runners and avoids flakiness.
+          TESTCONTAINERS_RYUK_DISABLED: "true"
 
   secret-scan:
     runs-on: ubuntu-latest

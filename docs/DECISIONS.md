@@ -131,3 +131,45 @@ trade-off until Pro/public.
 - Server-side branch protection (needs Pro or public).
 - Automated changelog / release tagging from Conventional Commits (later).
 - Community-health files (CONTRIBUTING, SECURITY, issue/PR templates) before public.
+
+---
+
+## ADR-0004 — Module model: core + sidecars, bidirectional local-only contract — 2026-06-09 — Accepted
+
+**Context.** The product is a core container (epicurus = agent + platform) with
+each capability added as a sidecar container that acts as a tool/function for the
+agent. We need a connection model that lets any container call anything epicurus
+provides, stays safe, and supports a future community ecosystem.
+
+**Decision.**
+
+- **Core + sidecar modules.** epicurus runs as the core container; capabilities
+  are sidecar containers. Adding a block = running one more container that speaks
+  the contract.
+- **One standardized, bidirectional contract:** MCP (module → agent tools), a
+  core **platform API** (module → core: secrets, events, storage, agent/LLM, tool
+  registry), and NATS events (either direction). Its shape stays stable as it
+  improves.
+- **Local-only trust boundary.** The contract is private to the internal Docker
+  network, not exposed externally by default. External access is a deliberate,
+  gated **business-tier** capability later (distinct from Tailscale user ingress).
+- **Module manifest.** Each module ships a manifest (image, tools, events,
+  config/secrets, contract version) — the basis for both the service template and
+  the future installer.
+- **Ecosystem (Phase 7).** A one-click "add by domain" installer reads a module's
+  manifest from a URL, starts the container, and registers its tools. The
+  community **marketplace website is a separate project**; this repo provides only
+  the manifest spec + installer.
+- **Native apps (future).** Windows / Linux / macOS desktop apps that package the
+  full platform to run entirely locally — a separate track, recorded in the roadmap.
+
+**Consequences.** The Phase 0 MCP base + core platform API must be designed
+bidirectional and local-only from the start. The manifest becomes a first-class
+artifact. External exposure aligns with the SaaS / business overlay (ADR-0002,
+DUAL-TRACK), not the OSS default.
+
+**Open / deferred.**
+
+- Exact platform-API surface and transport (REST/gRPC over the Docker network) —
+  designed alongside the MCP base classes.
+- Manifest schema and contract-versioning scheme — drafted before Phase 7.

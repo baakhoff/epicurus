@@ -28,6 +28,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
+    "testcontainers>=4.8",
 ]
 
 [tool.ruff]
@@ -46,12 +47,15 @@ strict = true
 python_version = "3.11"
 pretty = true
 
-# prometheus_client ships no py.typed in some releases; don't fail strict on it.
+# Third-party packages without a py.typed marker; don't fail strict on them.
 [[tool.mypy.overrides]]
-module = ["prometheus_client.*"]
+module = ["prometheus_client.*", "nats.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["libs", "services"]
 addopts = "-q"
+markers = [
+    "integration: requires Docker (spins ephemeral containers via testcontainers)",
+]

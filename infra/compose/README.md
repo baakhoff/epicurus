@@ -1,7 +1,7 @@
 # Data-plane compose
 
 The stateful backing services every epicurus module builds on. Application
-services and the edge (Traefik gateway + Tailscale) are layered on separately.
+services and the edge (a gateway and private ingress) are layered on separately.
 
 ## Services
 
@@ -29,13 +29,13 @@ in-container healthchecks (`docker compose ps` shows `healthy`).
 
 Local-dev defaults are inline in the compose file. Override them in a local
 `infra/compose/.env` (gitignored) — copy from `.env.example`. The dev credentials
-(Postgres password, OpenBao root token) are **for a local Tailscale-only box
-only**. In staging/production these come from OpenBao and a non-dev OpenBao
+(Postgres password, OpenBao root token) are **for a local, private box only**.
+In staging/production these come from OpenBao and a non-dev OpenBao
 deployment; nothing sensitive is committed.
 
 ## Not here yet (follow-ups)
 
-- **Edge** — Traefik gateway + Tailscale ingress (paired, since the gateway has
+- **Edge** — gateway + private ingress (paired, since the gateway has
   nothing to route until app services exist).
 - **Observability** — Grafana / Loki / Prometheus / Tempo + OTel collector, as a
   separate stack.

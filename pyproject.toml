@@ -52,7 +52,7 @@ pretty = true
 
 # Third-party packages without a py.typed marker; don't fail strict on them.
 [[tool.mypy.overrides]]
-module = ["prometheus_client.*", "nats.*"]
+module = ["prometheus_client.*", "nats.*", "hvac.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

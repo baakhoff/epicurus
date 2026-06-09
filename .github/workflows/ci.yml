@@ -62,16 +62,3 @@ jobs:
 
       - name: Validate data-plane compose
         run: docker compose -f infra/compose/docker-compose.yml config -q
-
-  docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Build docs (strict)
-        run: uv run --group docs mkdocs build --strict

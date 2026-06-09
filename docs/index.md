@@ -7,22 +7,19 @@ every additional capability is a **sidecar module** that the agent can use.
 It is designed to run on your own machine under Docker and to be reached only
 over your private [Tailscale](https://tailscale.com) network.
 
-!!! note "Early development"
-    epicurus is being built. This documentation covers what exists today and
-    grows as capabilities land. There is not yet an end-user app — the current
-    surface is the platform itself (the data-plane services and the
-    `epicurus-core` library that modules are built on).
+> **Early development.** epicurus is being built. This documentation covers what
+> exists today and grows as capabilities land. There is not yet an end-user app —
+> the current surface is the platform itself (the data-plane services and the
+> `epicurus-core` library that modules are built on).
 
 ## Documentation layers
-
-<div class="grid cards" markdown>
 
 - **[User Guide](user/index.md)** — run and configure epicurus on your own
   machine or server.
 - **[Developer Guide](developer/index.md)** — the architecture and how to build
   a module, fix a bug, or contribute.
-
-</div>
+- **[API Reference](reference/index.md)** — every class and function in
+  `epicurus-core`.
 
 ## What's here today
 

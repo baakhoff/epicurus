@@ -1,0 +1,18 @@
+# Normalize all text files to LF in the repo and on checkout, so Windows dev and
+# Linux CI agree on line endings. Keeps diffs clean and shell scripts runnable.
+* text=auto eol=lf
+
+# Treat known binary types as binary (never line-ending-normalized).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.gguf  binary
+*.bin   binary
+*.safetensors binary
+*.onnx  binary
+*.pt    binary

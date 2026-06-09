@@ -1,5 +1,0 @@
-# Deployable services / modules live here, one directory per service.
-# Each is a container exposing MCP tools + NATS events per the module contract
-# (see the module READMEs). Scaffold new ones from
-# templates/service-template. When the first service lands, add "services/*" to
-# the workspace members in the root pyproject.toml.

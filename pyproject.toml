@@ -4,9 +4,8 @@
 # published. It exists to pin shared dev tooling and tool config for every
 # workspace member, and to declare which members make up the monorepo.
 #
-# Add new packages under libs/ (shared) or services/ (deployable modules).
-# `members = ["libs/*"]` auto-discovers libs packages; the `services/*` glob is
-# added by the PR that introduces the first service.
+# Add new packages under libs/ (shared) or services/ (deployable modules); the
+# member globs below auto-discover them.
 
 [project]
 name = "epicurus"
@@ -19,7 +18,7 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-members = ["libs/*"]
+members = ["libs/*", "services/*"]
 
 [dependency-groups]
 dev = [
@@ -40,7 +39,7 @@ src = ["libs", "services"]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["epicurus_core"]
+known-first-party = ["epicurus_core", "epicurus_echo"]
 
 [tool.mypy]
 strict = true

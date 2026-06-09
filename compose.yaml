@@ -8,4 +8,5 @@ name: epicurus
 
 include:
   - infra/compose/docker-compose.yml
+  - infra/observability/compose.yaml
   - services/echo/compose.yaml

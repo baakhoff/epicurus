@@ -1,0 +1,19 @@
+# Echo module — a per-module compose fragment (ADR-0006), assembled into the
+# top-level stack via the root compose.yaml `include`.
+services:
+  echo:
+    build:
+      context: ../..
+      dockerfile: services/echo/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-echo:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${ECHO_PORT:-8080}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+    networks: [epicurus]

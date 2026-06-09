@@ -60,5 +60,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate data-plane compose
-        run: docker compose -f infra/compose/docker-compose.yml config -q
+      - name: Validate the assembled compose stack
+        run: docker compose -f compose.yaml config -q
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build service images (validate Dockerfiles)
+        run: |
+          for df in services/*/Dockerfile; do
+            svc="$(basename "$(dirname "$df")")"
+            echo "::group::build $svc"
+            docker build -f "$df" -t "epicurus-$svc:ci" .
+            echo "::endgroup::"
+          done

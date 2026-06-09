@@ -41,8 +41,18 @@ tasks:
       - task: type
       - task: test
 
+  up:
+    desc: Start the full stack (data plane + enabled modules)
+    cmds:
+      - docker compose up -d
+
+  down:
+    desc: Stop the full stack (append `-- -v` to also drop volumes)
+    cmds:
+      - docker compose down {{.CLI_ARGS}}
+
   infra-up:
-    desc: Start the data-plane stack (Postgres, Valkey, NATS, Qdrant, OpenBao)
+    desc: Start only the data-plane stack (Postgres, Valkey, NATS, Qdrant, OpenBao)
     cmds:
       - docker compose -f infra/compose/docker-compose.yml up -d
 

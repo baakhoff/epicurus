@@ -15,22 +15,22 @@ git clone https://github.com/baakhoff/epicurus.git
 cd epicurus
 ```
 
-## Bring up the data plane
+## Bring up the stack
 
-The platform's backing services (Postgres, Valkey, NATS, Qdrant, OpenBao) come up
-with one command:
+The whole stack — the backing services plus the modules — comes up with one
+command (the top-level `compose.yaml` assembles them from per-module fragments):
 
 ```bash
-docker compose -f infra/compose/docker-compose.yml up -d
+docker compose up -d
 # or, with go-task:
-task infra-up
+task up
 ```
 
-Check status:
+Check status with `docker compose ps`. To run *only* the data-plane backing
+services (Postgres, Valkey, NATS, Qdrant, OpenBao) without any modules:
 
 ```bash
-docker compose -f infra/compose/docker-compose.yml ps
-# or: task infra-ps
+docker compose -f infra/compose/docker-compose.yml up -d   # or: task infra-up
 ```
 
 Postgres, Valkey, and OpenBao report a `healthy` status. NATS and Qdrant are
@@ -40,14 +40,15 @@ verified from the host:
 curl localhost:8222/healthz        # NATS  -> {"status":"ok"}
 curl localhost:6333/readyz         # Qdrant -> all shards are ready
 curl localhost:8200/v1/sys/health  # OpenBao -> sealed:false (dev mode)
+curl localhost:8080/health         # echo module -> {"status":"ok","service":"echo",...}
 ```
 
 ## Stop it
 
 ```bash
-docker compose -f infra/compose/docker-compose.yml down       # keep data
-docker compose -f infra/compose/docker-compose.yml down -v    # also remove volumes
-# or: task infra-down  (append `-- -v` to drop volumes)
+docker compose down       # keep data
+docker compose down -v    # also remove volumes
+# or: task down  (append `-- -v` to drop volumes)
 ```
 
 ## Default ports
@@ -59,6 +60,7 @@ docker compose -f infra/compose/docker-compose.yml down -v    # also remove volu
 | NATS | 4222 (client), 8222 (monitoring) |
 | Qdrant | 6333 (HTTP), 6334 (gRPC) |
 | OpenBao | 8200 |
+| echo (module) | 8080 |
 
 Override any of them in a local `infra/compose/.env` — see
 [Configuration](configuration.md).

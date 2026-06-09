@@ -1,0 +1,36 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The first release is v0.1.0 — the first version usable on a server with a UI.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE=""
+          case "${{ github.ref_name }}" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag \
+            $PRERELEASE
+
+      # Container images are published here once services ship Dockerfiles
+      # (added with the first releasable service).

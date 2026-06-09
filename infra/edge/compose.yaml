@@ -1,0 +1,32 @@
+# Edge gateway — a compose fragment (ADR-0006), assembled into the top-level stack.
+#
+# Traefik routes to services via Docker labels. It is ACCESS-AGNOSTIC (ADR-0008):
+# no authentication is baked in and no ingress is assumed. The operator chooses how
+# to expose and protect this entry point — Tailscale, a VPN, a reverse proxy, or an
+# auth proxy / IdP such as Keycloak or oauth2-proxy in front. See README.
+services:
+  gateway:
+    # v3.7+ negotiates the Docker API version with the daemon. Older Traefik (v3.3)
+    # pins to API 1.24, which Docker Engine 29 / Moby v2 (min API 1.40) rejects —
+    # provider discovery then fails with an empty "Error response from daemon".
+    image: traefik:v3.7.4
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=epicurus
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+      - --api.insecure=true # dashboard has no auth — protect the perimeter yourself
+      - --ping=true
+    ports:
+      - "${EDGE_HTTP_PORT:-8088}:80"
+      - "${EDGE_DASHBOARD_PORT:-8089}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [epicurus]

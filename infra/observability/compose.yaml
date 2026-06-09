@@ -66,6 +66,11 @@ services:
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
     depends_on: [prometheus, loki, tempo]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=Host(`grafana.localhost`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
     networks: [epicurus]
 
 volumes:

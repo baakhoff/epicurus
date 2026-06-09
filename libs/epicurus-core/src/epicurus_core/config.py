@@ -41,11 +41,11 @@ class CoreSettings(BaseSettings):
     json_logs: bool | None = None
 
     # Default tenant for single-tenant / self-host. Multi-tenant SaaS resolves the
-    # tenant per request instead (see the tenancy module and docs/DUAL-TRACK.md).
+    # tenant per request instead (see the tenancy module).
     default_tenant_id: str = "local"
 
     # NATS event backbone. On the internal Docker network this is nats://nats:4222;
-    # the contract is local-only (see docs/ARCHITECTURE.md trust boundary).
+    # the contract is local-only.
     nats_url: str = "nats://localhost:4222"
 
     @field_validator("default_tenant_id")

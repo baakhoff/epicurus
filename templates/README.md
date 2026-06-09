@@ -7,5 +7,4 @@ Scaffolding templates.
   `/health` + `/metrics` surface, OpenBao secret access, and the tenant context.
 
 The goal: a new "block" starts as a one-command scaffold, not a blank directory.
-See the module contract in [AGENTS.md](../AGENTS.md) and
-[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
+See the module READMEs for the contract.

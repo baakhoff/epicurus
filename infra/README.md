@@ -10,4 +10,4 @@ Operational stacks and orchestration that are not application services:
 - **backup** — Restic configuration (encrypted, restore-from-anywhere).
 - **vpn** — gluetun profiles for per-service VPN routing.
 
-These land across Phase 0+ — see [docs/ROADMAP.md](../docs/ROADMAP.md).
+These land across Phase 0+.

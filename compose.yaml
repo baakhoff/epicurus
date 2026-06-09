@@ -1,0 +1,11 @@
+# Top-level stack (ADR-0006): the data plane plus enabled modules, assembled from
+# fragments. `docker compose up -d` (or `task up`) brings up everything.
+#
+# Each module contributes its own services/<name>/compose.yaml fragment; add a
+# module by including its fragment here (the installer does this dynamically
+# later). Shared infra lives in infra/compose/docker-compose.yml.
+name: epicurus
+
+include:
+  - infra/compose/docker-compose.yml
+  - services/echo/compose.yaml

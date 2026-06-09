@@ -3,7 +3,7 @@
 Wraps the MCP SDK's ``FastMCP`` with epicurus conventions: register tools, declare
 the events the module emits/consumes, generate the module manifest, and expose the
 HTTP (streamable-http) app to serve over the internal Docker network. The contract
-is local-only (see docs/ARCHITECTURE.md trust boundary).
+is local-only.
 """
 
 from __future__ import annotations

@@ -4,9 +4,7 @@
 > a growing fleet of integration modules (calendar, notes, tasks, mail, chat,
 > knowledge base, cloud storage), accessed privately over Tailscale.
 
-**Status:** 🚧 _Phase 0 — building the platform skeleton._ The architecture is
-settled (see [`docs/`](docs)); the development workflow and module contract live
-in [`AGENTS.md`](AGENTS.md).
+**Status:** 🚧 _Phase 0 — building the platform skeleton._
 
 ## Vision
 
@@ -41,9 +39,7 @@ capabilities can be added as self-contained services.
   explicitly needs it.
 - **Microservices from day one** — each block is an independently deployable,
   replaceable service behind a stable contract.
-- **Prepared to be public.** Developed to open-source / SaaS hygiene even while
-  the repo is private: zero secrets in git, clean config boundaries, documented
-  contracts.
+- **Zero secrets in git.** Credentials live in a secrets manager, never the repo.
 - **Scalable, sustainable, boring-where-it-counts.** Build the core to last.
 
 ## Development
@@ -64,11 +60,9 @@ types, tests) exactly as CI does.
 
 The repo is a uv **workspace**: shared code in `libs/`, deployable services in
 `services/`, infra in `infra/`, scaffolding in `templates/`. New modules are
-generated from `templates/service-template`. See [`AGENTS.md`](AGENTS.md) for the
-development workflow (worktree → branch → tests → docs → PR) and the rules for
-working in parallel.
+generated from `templates/service-template`.
 
 ## License
 
-Not yet chosen — see the planning discussion. Until a license is added, all
-rights reserved.
+[GNU AGPL-3.0](LICENSE). Network-copyleft: if you run a modified epicurus as a
+network service, you must release your changes under the same license.

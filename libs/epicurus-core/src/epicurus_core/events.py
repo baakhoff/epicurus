@@ -2,8 +2,7 @@
 
 Subjects are tenant-scoped via :func:`scope_subject`, so publishers and
 subscribers address ``<tenant>.<base>`` without hand-building names. This talks
-to NATS on the internal Docker network only — the contract is local-only (see
-docs/ARCHITECTURE.md trust boundary).
+to NATS on the internal Docker network only — the contract is local-only.
 
 Covers core NATS pub/sub and request/reply. JetStream persistence is a follow-up;
 the infra already runs NATS with ``-js`` enabled.

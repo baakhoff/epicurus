@@ -10,8 +10,7 @@ Shared contract and runtime used by every epicurus service.
   dev and JSON otherwise, with contextvar-based correlation.
 - **`tenancy`** — the dual-track primitive. Scopes every NATS subject, Qdrant
   collection, OpenBao secret path, and object bucket by tenant, plus a
-  contextvar-bound "current tenant" (see [AGENTS.md](../../AGENTS.md)
-  non-negotiables and [docs/DUAL-TRACK.md](../../docs/DUAL-TRACK.md)).
+  contextvar-bound "current tenant".
 - **`observability`** — `add_ops_routes` / `create_ops_router`: the shared
   `GET /health` + `GET /metrics` (Prometheus) surface.
 - **`events`** — `EventBus`: async NATS client (the event backbone). Tenant-scoped

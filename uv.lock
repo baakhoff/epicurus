@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "epicurus",
     "epicurus-core",
+    "epicurus-echo",
 ]
 
 [[package]]
@@ -407,6 +408,17 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "structlog", specifier = ">=24.4" },
 ]
+
+[[package]]
+name = "epicurus-echo"
+version = "0.1.0"
+source = { editable = "services/echo" }
+dependencies = [
+    { name = "epicurus-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "epicurus-core", editable = "libs/epicurus-core" }]
 
 [[package]]
 name = "fastapi"

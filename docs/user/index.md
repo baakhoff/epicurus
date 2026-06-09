@@ -6,10 +6,9 @@ epicurus runs as a set of Docker containers: a core service plus the modules and
 backing services it needs. You reach it privately over Tailscale — it is not
 exposed to the public internet by default.
 
-!!! note "Early development"
-    There is not yet an end-user app to log into. Today this guide covers
-    standing up the platform's **data plane** (its backing services). As the
-    agent and web UI land, this guide gains the sections for using them.
+> **Early development.** There is not yet an end-user app to log into. Today this
+> guide covers standing up the platform's **data plane** (its backing services).
+> As the agent and web UI land, this guide gains the sections for using them.
 
 ## Sections
 

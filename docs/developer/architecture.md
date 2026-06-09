@@ -23,9 +23,8 @@ Modules and the core talk over one standardized, **bidirectional** contract:
 - **Events (either direction).** Asynchronous "something happened" messages over
   NATS (e.g. a module publishes `inbox.message.received`; the agent reacts).
 
-!!! info "Local-only"
-    The module↔core contract runs over the internal Docker network only. It is
-    not exposed externally by default.
+> **Local-only.** The module↔core contract runs over the internal Docker network
+> only. It is not exposed externally by default.
 
 ## All AI goes through the core
 

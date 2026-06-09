@@ -10,6 +10,8 @@ epicurus.
 - **[Development setup](development-setup.md)** — get a working dev environment.
 - **[Building a module](building-a-module.md)** — add a capability with the
   `epicurus-core` library.
+- **[API Reference](../reference/index.md)** — every class and function in
+  `epicurus-core`, and how they fit together.
 - **[Testing](testing.md)** — the quality gates and how tests are written.
 - **[Contributing](contributing.md)** — the workflow for getting a change merged.
 - **[Releases](releases.md)** — versioning and how releases are cut.

@@ -32,9 +32,8 @@ Or all at once with go-task:
 task check
 ```
 
-!!! tip "pre-commit"
-    Install the git hooks so the gates run before each commit:
-    `uv run pre-commit install`.
+> **Tip — pre-commit.** Install the git hooks so the gates run before each commit:
+> `uv run pre-commit install`.
 
 ## Run the data plane
 

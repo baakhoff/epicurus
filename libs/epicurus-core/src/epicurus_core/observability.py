@@ -26,14 +26,20 @@ class HealthResponse(BaseModel):
 
 def create_ops_router(
     service_name: str,
+    *,
+    version: str = __version__,
     registry: CollectorRegistry = DEFAULT_REGISTRY,
 ) -> APIRouter:
-    """Build a router exposing ``GET /health`` and ``GET /metrics``."""
+    """Build a router exposing ``GET /health`` and ``GET /metrics``.
+
+    ``version`` defaults to the ``epicurus-core`` version; pass the service's own
+    version (e.g. via :func:`importlib.metadata.version`) so ``/health`` reports it.
+    """
     router = APIRouter(tags=["ops"])
 
     @router.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok", service=service_name, version=__version__)
+        return HealthResponse(status="ok", service=service_name, version=version)
 
     @router.get("/metrics")
     def metrics() -> Response:
@@ -45,7 +51,9 @@ def create_ops_router(
 def add_ops_routes(
     app: FastAPI,
     service_name: str,
+    *,
+    version: str = __version__,
     registry: CollectorRegistry = DEFAULT_REGISTRY,
 ) -> None:
     """Mount the ops router onto an existing FastAPI app."""
-    app.include_router(create_ops_router(service_name, registry))
+    app.include_router(create_ops_router(service_name, version=version, registry=registry))

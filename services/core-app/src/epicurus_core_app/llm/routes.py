@@ -6,7 +6,13 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from epicurus_core_app.llm.gateway import LlmGateway
-from epicurus_core_app.llm.models import ChatMessage, ChatResult, ModelInfo, PowerState
+from epicurus_core_app.llm.models import (
+    ChatMessage,
+    ChatResult,
+    ModelInfo,
+    PowerState,
+    ProviderInfo,
+)
 from epicurus_core_app.llm.power import PowerController
 
 
@@ -38,6 +44,10 @@ def create_llm_router(gateway: LlmGateway) -> APIRouter:
     @router.get("/models", response_model=list[ModelInfo])
     async def list_models() -> list[ModelInfo]:
         return await gateway.models()
+
+    @router.get("/providers", response_model=list[ProviderInfo])
+    async def list_providers() -> list[ProviderInfo]:
+        return await gateway.providers()
 
     @router.post("/pull")
     async def pull(request: PullRequest) -> dict[str, str]:

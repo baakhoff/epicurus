@@ -15,14 +15,18 @@ What it serves today:
 - `GET /health` + `GET /metrics` — the ops surface every service exposes.
 - A connected **NATS** event bus for the process lifetime.
 - `GET /platform/v1/info` — the platform-API discovery surface.
-- The **LLM gateway** (ADR-0010), via LiteLLM over a local **Ollama** runtime:
-  - `POST /platform/v1/llm/chat` — a completion for a list of messages.
-  - `GET /platform/v1/llm/models` · `POST /platform/v1/llm/pull` — list / fetch models.
+- The **LLM gateway** (ADR-0010), via LiteLLM over local **Ollama** *and* hosted
+  providers (Claude, ChatGPT, Grok, DeepSeek, Gemini, and a generic
+  OpenAI-compatible "any LLM"):
+  - `POST /platform/v1/llm/chat` — a completion for a list of messages. `model` is
+    `<provider>/<model>` (e.g. `claude/claude-3-5-sonnet-latest`); a bare name
+    (e.g. `llama3.2`) targets local Ollama.
+  - `GET /platform/v1/llm/models` · `POST /platform/v1/llm/pull` — list / fetch local models.
+  - `GET /platform/v1/llm/providers` — providers and whether each one's key is set.
   - `GET` + `PUT /platform/v1/power` — the main-page power toggle (ADR-0005):
     `paused` unloads models and refuses inference (`503`); `idle` resumes.
 
-The agent loop, cross-chat memory, and hosted LLM providers land with their later
-Phase-1 cards (#36–#40).
+The agent loop and cross-chat memory land with their later Phase-1 cards (#38–#40).
 
 ## Develop
 
@@ -47,3 +51,8 @@ The gateway reaches Ollama at `OLLAMA_URL` (default `http://ollama:11434` in the
 stack) and defaults to the `LLM_DEFAULT_MODEL` model (`llama3.2`). Models are pulled
 and managed at runtime via `/platform/v1/llm/pull` — never baked into an image.
 See [`infra/ollama`](../../infra/ollama/) (CPU by default, GPU opt-in).
+
+Hosted-provider API keys live in **OpenBao**, never in env or git: store
+`{"api_key": ...}` (plus `api_base` for `custom`) at `tenants/<tenant>/llm/<provider>`
+(e.g. `llm/anthropic`, `llm/openai`, `llm/google`). The gateway fetches them per
+request and never logs them.

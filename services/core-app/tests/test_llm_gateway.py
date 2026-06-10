@@ -1,4 +1,4 @@
-"""Unit tests for the LLM gateway — LiteLLM and Ollama are mocked (no network)."""
+"""Unit tests for the LLM gateway — LiteLLM, Ollama, and OpenBao are mocked (no network)."""
 
 from __future__ import annotations
 
@@ -6,18 +6,34 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
+from epicurus_core import SecretError
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 
 
-def _gateway(power: PowerController | None = None) -> LlmGateway:
+class _FakeSecrets:
+    """A stand-in for SecretStore: returns seeded secrets, else raises SecretError."""
+
+    def __init__(self, data: dict[str, dict[str, Any]] | None = None) -> None:
+        self._data = data or {}
+
+    async def get(self, path: str, tenant_id: str | None = None) -> dict[str, Any]:
+        if path in self._data:
+            return self._data[path]
+        raise SecretError(f"not found: {path}")
+
+
+def _gateway(power: PowerController | None = None, secrets: Any = None) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
         default_model="llama3.2",
         keep_alive="5m",
         power=power or PowerController(),
+        secrets=secrets or _FakeSecrets(),
+        default_tenant="local",
     )
 
 
@@ -62,6 +78,63 @@ async def test_chat_uses_explicit_model(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
     await _gateway().chat([ChatMessage(role="user", content="hi")], model="qwen2.5:0.5b")
     assert captured["model"] == "ollama_chat/qwen2.5:0.5b"
+
+
+async def test_hosted_chat_fetches_key_and_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "hey"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "fixture-anthropic"}})
+    result = await _gateway(secrets=secrets).chat(
+        [ChatMessage(role="user", content="hi")], model="claude/claude-3-5-sonnet-latest"
+    )
+
+    assert captured["model"] == "anthropic/claude-3-5-sonnet-latest"
+    assert captured["api_key"] == "fixture-anthropic"
+    assert "api_base" not in captured  # hosted Anthropic uses its own endpoint
+    assert "keep_alive" not in captured  # only the local runtime gets keep_alive
+    assert result.content == "hey"
+
+
+async def test_custom_provider_uses_base_url_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "openai/m", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/custom": {"api_key": "k", "api_base": "http://my-llm:8000/v1"}})
+    await _gateway(secrets=secrets).chat([ChatMessage(role="user", content="hi")], model="custom/m")
+
+    assert captured["model"] == "openai/m"
+    assert captured["api_key"] == "k"
+    assert captured["api_base"] == "http://my-llm:8000/v1"
+
+
+async def test_api_key_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "fixture-redaction-sentinel"}})
+    with capture_logs() as logs:
+        await _gateway(secrets=secrets).chat(
+            [ChatMessage(role="user", content="hi")], model="claude/c"
+        )
+    assert not any("fixture-redaction-sentinel" in str(entry) for entry in logs)
+
+
+async def test_providers_reports_configured() -> None:
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    infos = {p.alias: p for p in await _gateway(secrets=secrets).providers()}
+    assert infos["local"].local and infos["local"].configured
+    assert infos["claude"].configured  # key seeded
+    assert not infos["gpt"].configured  # no key
 
 
 async def test_paused_gateway_refuses() -> None:

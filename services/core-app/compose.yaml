@@ -10,6 +10,8 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       OLLAMA_URL: http://ollama:11434
+      OPENBAO_URL: http://openbao:8200
+      OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Loopback-bound by default; the gateway is the intended front door. Set
@@ -20,6 +22,8 @@ services:
       nats:
         condition: service_started
       ollama:
+        condition: service_started
+      openbao:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]

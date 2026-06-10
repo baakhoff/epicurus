@@ -9,6 +9,8 @@ Operational stacks and orchestration that are not application services:
   front — ADR-0008). ✅ available.
 - **[observability](observability/)** — Grafana / Loki / Prometheus / Tempo (OTLP
   straight into Tempo). ✅ available.
+- **[ollama](ollama/)** — local LLM runtime the core's gateway drives; containerized,
+  CPU by default with a GPU opt-in overlay (ADR-0011). ✅ available.
 - **backup** — Restic configuration (encrypted, restore-from-anywhere).
 - **vpn** — gluetun profiles for per-service VPN routing.
 

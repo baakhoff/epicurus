@@ -1,0 +1,16 @@
+# GPU overlay for Ollama (opt-in). Requires the NVIDIA Container Toolkit on the
+# host (on Windows: Docker Desktop + WSL2 with the NVIDIA driver).
+#
+# Enable by layering it on top of the stack:
+#   docker compose -f compose.yaml -f infra/ollama/gpu.yaml up -d
+#
+# Without this overlay Ollama runs on CPU, so the stack comes up on any hardware.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

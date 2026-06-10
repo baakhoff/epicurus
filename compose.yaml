@@ -10,5 +10,6 @@ include:
   - infra/compose/docker-compose.yml
   - infra/edge/compose.yaml
   - infra/observability/compose.yaml
+  - infra/ollama/compose.yaml
   - services/echo/compose.yaml
   - services/core-app/compose.yaml

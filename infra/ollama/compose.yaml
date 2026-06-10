@@ -1,0 +1,28 @@
+# Ollama — the local LLM runtime the core's LLM gateway drives (ADR-0010 / ADR-0011).
+#
+# Runs as a container so the platform works on any hardware and OS. CPU by default
+# (runs everywhere); GPU is opt-in via infra/ollama/gpu.yaml. Models are NOT baked
+# into the image — the core pulls and manages them at runtime through Ollama's API.
+#
+# Internal-only: the core reaches it at http://ollama:11434 on the epicurus network;
+# it is not published to the host (private-by-default — the core is the front door).
+services:
+  ollama:
+    image: ollama/ollama:0.30.7
+    restart: unless-stopped
+    environment:
+      # Unload a model this long after its last use to free memory / VRAM at idle
+      # (ADR-0005). The core also sets keep_alive per request.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [epicurus]
+
+volumes:
+  ollama-models:

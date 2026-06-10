@@ -4,16 +4,27 @@
 # Prometheus (metrics) scrapes services' /metrics; Alloy ships container logs to
 # Loki; Tempo receives OTLP traces directly (gRPC/HTTP, no separate collector);
 # Grafana ties them together with pre-provisioned datasources.
+#
+# Published ports bind to BIND_ADDRESS (default 127.0.0.1) — Grafana runs with
+# anonymous admin for local dev, so keep it on this machine unless you put your
+# own perimeter in front.
 services:
   prometheus:
     image: prom/prometheus:v3.1.0
     restart: unless-stopped
+    # Root so Docker service discovery can read the (read-only) docker socket —
+    # the stock image's `nobody` user cannot. Acceptable for a local,
+    # loopback-bound stack; swap in a docker-socket proxy if this ever hardens.
+    user: root
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
+      # Docker service discovery: modules are scraped by container label
+      # (epicurus.metrics.port) instead of a hand-maintained target list.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     networks: [epicurus]
 
   loki:
@@ -24,7 +35,7 @@ services:
       - ./loki/config.yml:/etc/loki/config.yml:ro
       - loki-data:/loki
     ports:
-      - "${LOKI_PORT:-3100}:3100"
+      - "${BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
     networks: [epicurus]
 
   tempo:
@@ -36,8 +47,8 @@ services:
       - tempo-data:/var/tempo
     ports:
       # OTLP — services send traces straight to Tempo's built-in receiver.
-      - "${OTLP_GRPC_PORT:-4317}:4317"
-      - "${OTLP_HTTP_PORT:-4318}:4318"
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_GRPC_PORT:-4317}:4317"
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_HTTP_PORT:-4318}:4318"
     networks: [epicurus]
 
   alloy:
@@ -64,7 +75,7 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
     depends_on: [prometheus, loki, tempo]
     labels:
       - traefik.enable=true

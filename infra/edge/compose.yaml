@@ -17,11 +17,14 @@ services:
       - --providers.docker.network=epicurus
       - --entrypoints.web.address=:80
       - --api.dashboard=true
-      - --api.insecure=true # dashboard has no auth — protect the perimeter yourself
+      - --api.insecure=true # dashboard has no auth — loopback-bound below; protect any wider exposure yourself
       - --ping=true
+    # Bound to BIND_ADDRESS (default 127.0.0.1): reachable only from this machine
+    # until the operator opts into wider exposure (ADR-0008) — e.g. tailscale serve
+    # against loopback, or BIND_ADDRESS=0.0.0.0 behind their own perimeter.
     ports:
-      - "${EDGE_HTTP_PORT:-8088}:80"
-      - "${EDGE_DASHBOARD_PORT:-8089}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_HTTP_PORT:-8088}:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_DASHBOARD_PORT:-8089}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:

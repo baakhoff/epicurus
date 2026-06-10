@@ -5,6 +5,10 @@
 # staging/prod these are injected from OpenBao. The dev credentials below are
 # intentionally weak and for a local, private box.
 #
+# Published ports bind to BIND_ADDRESS (default 127.0.0.1) — nothing is reachable
+# from outside this machine unless the operator opts in (e.g. BIND_ADDRESS=0.0.0.0).
+# Containers always reach each other on the internal `epicurus` network.
+#
 # Bring up:   docker compose -f infra/compose/docker-compose.yml up -d
 # (or `task infra-up`). The edge gateway and the observability stack
 # (Grafana/Loki/Prometheus/Tempo) assemble on top via the root compose.yaml.
@@ -20,7 +24,6 @@ volumes:
   valkey-data:
   nats-data:
   qdrant-data:
-  openbao-data:
 
 services:
   postgres:
@@ -31,7 +34,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-epicurus-dev}
       POSTGRES_DB: ${POSTGRES_DB:-epicurus}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -46,7 +49,7 @@ services:
     restart: unless-stopped
     command: ["valkey-server", "--save", "60", "1", "--appendonly", "no"]
     ports:
-      - "${VALKEY_PORT:-6379}:6379"
+      - "${BIND_ADDRESS:-127.0.0.1}:${VALKEY_PORT:-6379}:6379"
     volumes:
       - valkey-data:/data
     healthcheck:
@@ -63,8 +66,8 @@ services:
     # shell, so readiness is checked from the host via http://localhost:8222/healthz.
     command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "${NATS_PORT:-4222}:4222"
-      - "${NATS_MONITOR_PORT:-8222}:8222"
+      - "${BIND_ADDRESS:-127.0.0.1}:${NATS_PORT:-4222}:4222"
+      - "${BIND_ADDRESS:-127.0.0.1}:${NATS_MONITOR_PORT:-8222}:8222"
     volumes:
       - nats-data:/data
     networks: [epicurus]
@@ -73,8 +76,8 @@ services:
     image: qdrant/qdrant:v1.12.4
     restart: unless-stopped
     ports:
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+      - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-data:/qdrant/storage
     networks: [epicurus]
@@ -86,9 +89,13 @@ services:
     environment:
       BAO_DEV_ROOT_TOKEN_ID: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
       BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    # Dev mode is IN-MEMORY: every restart of this container wipes all stored
+    # secrets (re-seed afterwards). Fine while nothing critical lives here; a
+    # non-dev server config (persistent storage, init + unseal) replaces this
+    # when OpenBao becomes the live credential source (Phase 3).
     command: ["server", "-dev"]
     ports:
-      - "${OPENBAO_PORT:-8200}:8200"
+      - "${BIND_ADDRESS:-127.0.0.1}:${OPENBAO_PORT:-8200}:8200"
     healthcheck:
       test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
       interval: 10s

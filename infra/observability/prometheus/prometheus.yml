@@ -7,6 +7,24 @@ scrape_configs:
       - targets: ["localhost:9090"]
 
   # epicurus services expose Prometheus metrics at /metrics via epicurus-core.
-  - job_name: echo
-    static_configs:
-      - targets: ["echo:8080"]
+  # They are discovered from Docker by the `epicurus.metrics.port` container
+  # label (every module's compose fragment sets it), so adding a module needs
+  # no Prometheus edit.
+  - job_name: epicurus-services
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+    relabel_configs:
+      # Only containers that opt in via the label are scraped.
+      - source_labels: [__meta_docker_container_label_epicurus_metrics_port]
+        regex: (.+)
+        action: keep
+      # Scrape <container network IP>:<labelled port>.
+      - source_labels: [__meta_docker_network_ip, __meta_docker_container_label_epicurus_metrics_port]
+        separator: ":"
+        target_label: __address__
+      # Friendly identity labels from compose metadata.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container

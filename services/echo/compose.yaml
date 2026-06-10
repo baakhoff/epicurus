@@ -11,15 +11,25 @@ services:
       NATS_URL: nats://nats:4222
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Loopback-bound by default; the gateway is the intended front door. Set
+    # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     ports:
-      - "${ECHO_PORT:-8080}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${ECHO_PORT:-8080}:8080"
     depends_on:
       nats:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     labels:
       # Routed by the edge gateway (ADR-0008). No effect if no gateway is running.
       - traefik.enable=true
       - traefik.http.routers.echo.rule=Host(`echo.localhost`)
       - traefik.http.routers.echo.entrypoints=web
       - traefik.http.services.echo.loadbalancer.server.port=8080
+      # Scraped by Prometheus via Docker service discovery.
+      - epicurus.metrics.port=8080
     networks: [epicurus]

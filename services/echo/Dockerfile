@@ -16,5 +16,8 @@ FROM python:3.13-slim-bookworm
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 COPY --from=build /app/.venv /app/.venv
+# Run as a non-root user; the service needs no write access at runtime.
+RUN useradd --create-home --uid 10001 epicurus
+USER epicurus
 EXPOSE 8080
 CMD ["python", "-m", "epicurus_echo"]

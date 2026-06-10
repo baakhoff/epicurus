@@ -6,7 +6,7 @@ The observability stack — a compose fragment assembled into the top-level stac
 
 | Service | Image | Role |
 | --- | --- | --- |
-| Prometheus | `prom/prometheus` | Scrapes services' `/metrics` (every service exposes them via `epicurus-core`). |
+| Prometheus | `prom/prometheus` | Scrapes services' `/metrics`, discovered from Docker by the `epicurus.metrics.port` container label. |
 | Loki | `grafana/loki` | Log store. |
 | Alloy | `grafana/alloy` | Ships Docker container logs → Loki. |
 | Tempo | `grafana/tempo` | Trace store; receives OTLP directly (gRPC/HTTP). |
@@ -17,13 +17,15 @@ The observability stack — a compose fragment assembled into the top-level stac
 Open **Grafana** at <http://localhost:3000> (anonymous admin in local dev). The
 three datasources are pre-wired:
 
-- **Metrics** flow today (Prometheus scrapes `echo:8080/metrics`, etc.).
+- **Metrics** flow today — Prometheus discovers modules from Docker by the
+  `epicurus.metrics.port` container label (set in each module's compose
+  fragment; the service-template includes it) and scrapes their `/metrics`.
 - **Logs** flow today (Alloy → Loki; explore them in Grafana).
 - **Traces** infrastructure is ready — Tempo receives OTLP directly; services
   start emitting spans when OpenTelemetry tracing is wired into `epicurus-core`
   (a follow-up).
 
 Send OTLP traces to Tempo at `tempo:4317` (gRPC) / `tempo:4318` (HTTP) on the
-internal network (also published on the host). A dedicated OTel collector (for
+internal network (also published on the host, loopback-bound by default). A dedicated OTel collector (for
 batching / fan-out) can be added later — the contrib/core collector images don't
 run on this Docker Desktop, and Tempo's built-in receiver covers the need for now.

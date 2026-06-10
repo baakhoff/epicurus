@@ -53,6 +53,11 @@ docker compose down -v    # also remove volumes
 
 ## Default ports
 
+All host ports bind to **127.0.0.1** by default — nothing is reachable from
+another machine until you opt in. To expose the stack more widely, set
+`BIND_ADDRESS` (e.g. `0.0.0.0`) in your `.env` and put your own perimeter (VPN,
+reverse proxy, auth proxy) in front — see [Configuration](configuration.md).
+
 | Service | Port(s) |
 | --- | --- |
 | Postgres | 5432 |
@@ -60,6 +65,7 @@ docker compose down -v    # also remove volumes
 | NATS | 4222 (client), 8222 (monitoring) |
 | Qdrant | 6333 (HTTP), 6334 (gRPC) |
 | OpenBao | 8200 |
+| Gateway (Traefik) | 8088 (web), 8089 (dashboard) |
 | echo (module) | 8080 |
 | Grafana | 3000 |
 | Prometheus | 9090 |

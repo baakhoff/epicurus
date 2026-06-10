@@ -11,3 +11,4 @@ include:
   - infra/edge/compose.yaml
   - infra/observability/compose.yaml
   - services/echo/compose.yaml
+  - services/core-app/compose.yaml

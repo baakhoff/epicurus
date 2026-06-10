@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "epicurus",
     "epicurus-core",
+    "epicurus-core-app",
     "epicurus-echo",
 ]
 
@@ -470,6 +471,23 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "structlog", specifier = ">=24.4" },
+]
+
+[[package]]
+name = "epicurus-core-app"
+version = "0.1.0"
+source = { editable = "services/core-app" }
+dependencies = [
+    { name = "epicurus-core" },
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
 [[package]]

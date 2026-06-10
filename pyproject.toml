@@ -43,7 +43,7 @@ extend-exclude = ["templates"]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["epicurus_core", "epicurus_echo"]
+known-first-party = ["epicurus_core", "epicurus_core_app", "epicurus_echo"]
 
 [tool.mypy]
 strict = true
@@ -52,7 +52,7 @@ pretty = true
 # The single source of truth for what gets type-checked: `uv run mypy` (no
 # args) reads this. Register every new workspace package here (and in ruff's
 # known-first-party above).
-packages = ["epicurus_core", "epicurus_echo"]
+packages = ["epicurus_core", "epicurus_core_app", "epicurus_echo"]
 
 # Third-party packages without a py.typed marker; don't fail strict on them.
 [[tool.mypy.overrides]]

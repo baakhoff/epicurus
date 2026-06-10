@@ -10,11 +10,21 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI
 
 from epicurus_core import CoreSettings, EventBus, add_ops_routes, configure_logging, get_logger
 from epicurus_echo.service import build_module, serve_responder
+
+
+def _service_version() -> str:
+    """The installed echo distribution version, for ``/health``."""
+    try:
+        return pkg_version("epicurus-echo")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 def create_app() -> FastAPI:
@@ -33,11 +43,13 @@ def create_app() -> FastAPI:
             await bus.connect()
             await serve_responder(bus, settings.default_tenant_id)
             log.info("echo service ready", tenant=settings.default_tenant_id)
-            yield
-            await bus.close()
+            try:
+                yield
+            finally:
+                await bus.close()
 
     app = FastAPI(title="echo", lifespan=lifespan)
-    add_ops_routes(app, service_name="echo")
+    add_ops_routes(app, service_name="echo", version=_service_version())
     app.mount("/mcp", mcp_app)
     return app
 

@@ -23,17 +23,24 @@ Current keys:
 > **Warning — never commit `.env`.** It is gitignored. Real secrets do **not**
 > belong in it.
 
-## Data-plane configuration (`infra/compose/.env`)
+## Host ports & dev credentials
 
-The compose stack reads its own optional `infra/compose/.env` for host ports and
-**dev-only** credentials. Copy the example to override defaults:
+Which `.env` applies depends on **how you start the stack**:
+
+- **Full stack** — `docker compose up` from the repo root reads the **root `.env`**.
+  It governs everything (data plane + edge + observability + modules); the host
+  ports and dev credentials are listed, commented with their defaults, in
+  [`.env.example`](../../.env.example).
+- **Data plane only** — `docker compose -f infra/compose/docker-compose.yml …`
+  reads **`infra/compose/.env`** (copy from `infra/compose/.env.example`).
 
 ```bash
-cp infra/compose/.env.example infra/compose/.env
+cp .env.example .env                               # full stack
+cp infra/compose/.env.example infra/compose/.env   # data-plane-only stack
 ```
 
-The default Postgres password and OpenBao root token there are **for a local,
-private deployment only**.
+The default Postgres password and OpenBao root token are **dev-only**, for a local,
+private deployment.
 
 ## Secrets
 

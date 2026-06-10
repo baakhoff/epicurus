@@ -39,7 +39,7 @@ A change is ready when all of these pass (this is exactly what CI runs):
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy -p epicurus_core
+uv run mypy -p epicurus_core -p epicurus_echo
 uv run pytest
 ```
 

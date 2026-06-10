@@ -39,7 +39,7 @@ Develop against the shared library and run the gates:
 
 ```bash
 uv sync --all-packages
-uv run pytest           # and: ruff check . · ruff format --check . · mypy -p epicurus_core
+uv run pytest           # and: ruff check . · ruff format --check . · mypy -p epicurus_core -p epicurus_echo
 # or simply: task check
 ```
 

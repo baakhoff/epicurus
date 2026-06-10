@@ -15,7 +15,8 @@ Configure structlog for the process. Call once at startup. It:
 - renders JSON or console output per `settings.use_json_logs`,
 - binds `service = settings.service_name` onto every line.
 
-Safe to call again (idempotent).
+Call it once, at startup, before creating loggers — calling it again reconfigures
+the process and resets the bound context.
 
 ## `get_logger`
 

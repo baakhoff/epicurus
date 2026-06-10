@@ -26,3 +26,10 @@ def test_metrics() -> None:
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
     assert isinstance(resp.text, str)
+
+
+def test_health_reports_given_version() -> None:
+    app = FastAPI()
+    add_ops_routes(app, service_name="svc", version="9.9.9")
+    resp = TestClient(app).get("/health")
+    assert resp.json() == {"status": "ok", "service": "svc", "version": "9.9.9"}

@@ -24,9 +24,9 @@ __all__ = [
     "validate_tenant_id",
 ]
 
-# Lowercase alphanumerics with single internal hyphens; 1-63 chars. Deliberately
-# strict so one id is safe across NATS subjects, Qdrant collection names,
-# object-store buckets, and OpenBao secret paths without escaping.
+# Lowercase alphanumerics and hyphens; 1-63 chars, no leading or trailing hyphen.
+# Deliberately strict so one id is safe across NATS subjects, Qdrant collection
+# names, object-store buckets, and OpenBao secret paths without escaping.
 _TENANT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 _current_tenant: ContextVar[str | None] = ContextVar("epicurus_current_tenant", default=None)

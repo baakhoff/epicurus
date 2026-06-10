@@ -67,5 +67,5 @@ docker compose down -v    # also remove volumes
 | Tempo (OTLP) | 4317 (gRPC), 4318 (HTTP) |
 
 Once the stack is up, open **Grafana** at <http://localhost:3000> for logs,
-metrics, and traces. Override any port in a local `infra/compose/.env` — see
-[Configuration](configuration.md).
+metrics, and traces. To change any host port, set it in your root `.env` (the full
+stack reads it) — see [Configuration](configuration.md).

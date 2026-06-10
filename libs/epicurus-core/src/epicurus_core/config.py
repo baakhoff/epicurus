@@ -7,6 +7,7 @@ machine-local configuration only.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import field_validator
@@ -50,9 +51,11 @@ class CoreSettings(BaseSettings):
 
     # OpenBao (secrets). On the internal Docker network the address is
     # http://openbao:8200. The token is the bootstrap secret, injected at runtime
-    # (env or a mounted file) and never committed.
+    # — directly via OPENBAO_TOKEN, or via OPENBAO_TOKEN_FILE pointing at a
+    # mounted file (e.g. a Docker secret) — and never committed.
     openbao_url: str = "http://localhost:8200"
     openbao_token: str | None = None
+    openbao_token_file: str | None = None
 
     @field_validator("default_tenant_id")
     @classmethod
@@ -63,6 +66,15 @@ class CoreSettings(BaseSettings):
                 "alphanumeric and hyphens (1-63 chars, no leading/trailing hyphen)"
             )
         return value
+
+    def resolve_openbao_token(self) -> str | None:
+        """The OpenBao bootstrap token: the explicit value, else the token file's
+        content (stripped), else ``None``."""
+        if self.openbao_token is not None:
+            return self.openbao_token
+        if self.openbao_token_file is not None:
+            return Path(self.openbao_token_file).read_text(encoding="utf-8").strip()
+        return None
 
     @property
     def is_production(self) -> bool:

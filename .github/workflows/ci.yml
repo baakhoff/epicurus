@@ -34,7 +34,8 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Mypy (strict)
-        run: uv run mypy -p epicurus_core -p epicurus_echo
+        # The package list lives in [tool.mypy] in pyproject.toml.
+        run: uv run mypy
 
       - name: Tests
         run: uv run pytest

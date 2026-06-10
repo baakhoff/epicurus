@@ -29,6 +29,7 @@ dev = [
     "httpx>=0.27",
     "testcontainers>=4.8",
     "cookiecutter>=2.5",
+    "pre-commit>=4.0",
 ]
 
 [tool.ruff]
@@ -48,6 +49,10 @@ known-first-party = ["epicurus_core", "epicurus_echo"]
 strict = true
 python_version = "3.11"
 pretty = true
+# The single source of truth for what gets type-checked: `uv run mypy` (no
+# args) reads this. Register every new workspace package here (and in ruff's
+# known-first-party above).
+packages = ["epicurus_core", "epicurus_echo"]
 
 # Third-party packages without a py.typed marker; don't fail strict on them.
 [[tool.mypy.overrides]]

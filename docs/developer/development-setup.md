@@ -22,7 +22,7 @@ The same gates CI runs:
 ```bash
 uv run ruff check .             # lint
 uv run ruff format --check .    # formatting
-uv run mypy -p epicurus_core -p epicurus_echo  # types (strict)
+uv run mypy                     # types (strict; packages listed in pyproject.toml)
 uv run pytest                   # tests
 ```
 

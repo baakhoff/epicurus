@@ -24,6 +24,13 @@ class SecretStore:
 
 `hvac` is synchronous, so calls run in a worker thread to keep this API async.
 
+Authentication is verified **once**, when the underlying client is first built;
+afterwards calls go straight to the backend (a token revoked later still fails
+loudly as a `SecretError`). After rotating the token, construct a new store.
+`from_settings` resolves the token from `OPENBAO_TOKEN` or, failing that, from
+the file named by `OPENBAO_TOKEN_FILE` (e.g. a mounted Docker secret) — see
+[`config`](config.md).
+
 ## `SecretError`
 
 Raised when a secret can't be read or written — missing, authentication failure,

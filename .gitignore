@@ -32,11 +32,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
-var/
+/var/
 wheels/
 *.egg-info/
 .installed.cfg
@@ -69,27 +69,29 @@ dist/
 .eslintcache
 
 # ─── Data, models, storage (large / private / machine-local) ────────────────
-data/
-storage/
-volumes/
+# Anchored to the repo root: unanchored `storage/` etc. would silently ignore
+# real source directories like services/storage/ or a models/ package.
+/data/
+/storage/
+/volumes/
 *.db
 *.sqlite
 *.sqlite3
-models/
+/models/
 *.gguf
 *.bin
 *.safetensors
 *.pt
 *.onnx
-vector-store/
-backups/
+/vector-store/
+/backups/
 
 # ─── Docker / runtime ────────────────────────────────────────────────────────
 docker-compose.override.yml
 *.local.yml
 
 # ─── Logs ────────────────────────────────────────────────────────────────────
-logs/
+/logs/
 *.log
 
 # ─── OS / editor cruft ───────────────────────────────────────────────────────

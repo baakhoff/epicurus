@@ -14,6 +14,10 @@ uv sync --all-packages
 uv run pytest services/{{ cookiecutter.service_slug }}
 ```
 
+Register the package in the root `pyproject.toml` so the gates cover it:
+add `{{ cookiecutter.package_name }}` to `[tool.mypy] packages` and to
+`[tool.ruff.lint.isort] known-first-party`.
+
 ## Run in the stack
 
 Add this fragment to the top-level `compose.yaml` `include:` list, then:

@@ -6,6 +6,12 @@ to NATS on the internal Docker network only — the contract is local-only.
 
 Covers core NATS pub/sub and request/reply. JetStream persistence is a follow-up;
 the infra already runs NATS with ``-js`` enabled.
+
+Failure behavior: a subscriber handler or replier that raises is logged (with
+traceback) and does not break the subscription — later messages are still
+delivered. A raising replier sends no response, so the requester times out;
+the failure is visible in the *replier's* logs. Connection drops, reconnects,
+and client errors are logged too.
 """
 
 from __future__ import annotations
@@ -22,11 +28,14 @@ from nats.aio.msg import Msg
 from nats.aio.subscription import Subscription
 
 from epicurus_core.config import CoreSettings
+from epicurus_core.logging import get_logger
 from epicurus_core.tenancy import scope_subject
 
 __all__ = ["Event", "EventBus", "EventHandler", "Payload", "Replier"]
 
 Payload = bytes | str | dict[str, Any]
+
+log = get_logger("epicurus_core.events")
 
 
 def _encode(data: Payload) -> bytes:
@@ -74,12 +83,26 @@ class EventBus:
         return self._nc
 
     async def connect(self) -> None:
-        self._nc = await nats.connect(self._url)
+        self._nc = await nats.connect(
+            self._url,
+            error_cb=self._on_error,
+            disconnected_cb=self._on_disconnected,
+            reconnected_cb=self._on_reconnected,
+        )
 
     async def close(self) -> None:
         if self._nc is not None:
             await self._nc.drain()
             self._nc = None
+
+    async def _on_error(self, exc: Exception) -> None:
+        log.error("nats client error", url=self._url, error=str(exc))
+
+    async def _on_disconnected(self) -> None:
+        log.warning("nats disconnected", url=self._url)
+
+    async def _on_reconnected(self) -> None:
+        log.info("nats reconnected", url=self._url)
 
     async def __aenter__(self) -> EventBus:
         await self.connect()
@@ -119,10 +142,17 @@ class EventBus:
         tenant_id: str | None = None,
         queue: str = "",
     ) -> Subscription:
-        """Invoke ``handler`` for every message on the tenant-scoped ``subject``."""
+        """Invoke ``handler`` for every message on the tenant-scoped ``subject``.
+
+        A raising handler is logged and skipped; the subscription keeps
+        delivering subsequent messages.
+        """
 
         async def _cb(msg: Msg) -> None:
-            await handler(Event(subject=msg.subject, data=msg.data))
+            try:
+                await handler(Event(subject=msg.subject, data=msg.data))
+            except Exception:
+                log.exception("event handler raised", subject=msg.subject)
 
         return await self.client.subscribe(scope_subject(subject, tenant_id), queue=queue, cb=_cb)
 
@@ -134,10 +164,18 @@ class EventBus:
         tenant_id: str | None = None,
         queue: str = "",
     ) -> Subscription:
-        """Serve request/reply: respond to each request with ``replier``'s result."""
+        """Serve request/reply: respond to each request with ``replier``'s result.
+
+        A raising replier is logged and sends no response — the requester times
+        out — and the subscription keeps serving subsequent requests.
+        """
 
         async def _cb(msg: Msg) -> None:
-            result = await replier(Event(subject=msg.subject, data=msg.data))
+            try:
+                result = await replier(Event(subject=msg.subject, data=msg.data))
+            except Exception:
+                log.exception("replier raised; the request will time out", subject=msg.subject)
+                return
             if msg.reply:
                 await msg.respond(_encode(result))
 

@@ -30,6 +30,16 @@ Use it as an async context manager (`async with EventBus(...) as bus:`) or call
 `data` may be `bytes`, `str`, or a JSON-serializable `dict`. A non-empty `queue`
 joins a queue group for load-balanced delivery.
 
+### Failure behavior
+
+- A **handler** passed to `subscribe` that raises is logged (with traceback)
+  and skipped — the subscription keeps delivering subsequent messages.
+- A **replier** passed to `reply` that raises is logged and sends **no
+  response**: the requester times out, and the subscription keeps serving
+  subsequent requests. Look for the failure in the replier's logs.
+- Connection drops, reconnects, and client errors are logged
+  (`nats disconnected` / `nats reconnected` / `nats client error`).
+
 ### Types
 
 ```python

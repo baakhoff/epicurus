@@ -33,6 +33,12 @@ Local-dev defaults are inline in the compose file. Override them in a local
 In staging/production these come from OpenBao and a non-dev OpenBao
 deployment; nothing sensitive is committed.
 
+Published ports bind to `BIND_ADDRESS` (default `127.0.0.1`): the data plane is
+reachable only from this machine unless the operator opts in. **OpenBao runs in
+dev mode and is in-memory** — restarting its container wipes stored secrets
+(re-seed afterwards); a persistent non-dev configuration lands when OpenBao
+becomes the live credential source (Phase 3).
+
 ## Layered on top
 
 The full stack (`docker compose up` from the repo root) also assembles:

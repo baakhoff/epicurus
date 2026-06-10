@@ -88,13 +88,13 @@ async def test_hosted_chat_fetches_key_and_routes(monkeypatch: pytest.MonkeyPatc
         return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "hey"}}]})
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
-    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "sk-test-key"}})
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "fixture-anthropic"}})
     result = await _gateway(secrets=secrets).chat(
         [ChatMessage(role="user", content="hi")], model="claude/claude-3-5-sonnet-latest"
     )
 
     assert captured["model"] == "anthropic/claude-3-5-sonnet-latest"
-    assert captured["api_key"] == "sk-test-key"
+    assert captured["api_key"] == "fixture-anthropic"
     assert "api_base" not in captured  # hosted Anthropic uses its own endpoint
     assert "keep_alive" not in captured  # only the local runtime gets keep_alive
     assert result.content == "hey"
@@ -121,12 +121,12 @@ async def test_api_key_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
         return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
-    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "sk-secret-123"}})
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "fixture-redaction-sentinel"}})
     with capture_logs() as logs:
         await _gateway(secrets=secrets).chat(
             [ChatMessage(role="user", content="hi")], model="claude/c"
         )
-    assert not any("sk-secret-123" in str(entry) for entry in logs)
+    assert not any("fixture-redaction-sentinel" in str(entry) for entry in logs)
 
 
 async def test_providers_reports_configured() -> None:

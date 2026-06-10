@@ -1,0 +1,12 @@
+# gitleaks configuration.
+#
+# Extends the default ruleset (so real code is still scanned for secrets), but
+# allowlists files under any `tests/` directory: test fixtures and assertions use
+# fake, secret-shaped values (e.g. `secret_path == "llm/anthropic"`) that are not
+# real secrets. Non-test code is unaffected.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures use fake, non-secret values."
+paths = ['''(^|/)tests/''']

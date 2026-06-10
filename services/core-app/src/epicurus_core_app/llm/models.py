@@ -34,6 +34,14 @@ class ModelInfo(BaseModel):
     size: int | None = None
 
 
+class ProviderInfo(BaseModel):
+    """A configured LLM provider and whether its key is present."""
+
+    alias: str
+    local: bool
+    configured: bool
+
+
 class PowerState(StrEnum):
     """Runtime power state (ADR-0005)."""
 

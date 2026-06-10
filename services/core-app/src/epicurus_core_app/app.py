@@ -20,7 +20,7 @@ from importlib.metadata import version as pkg_version
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from epicurus_core import EventBus, add_ops_routes, configure_logging, get_logger
+from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
@@ -50,6 +50,8 @@ def create_app() -> FastAPI:
         default_model=settings.llm_default_model,
         keep_alive=settings.llm_keep_alive,
         power=power,
+        secrets=SecretStore.from_settings(settings),
+        default_tenant=settings.default_tenant_id,
     )
 
     @asynccontextmanager

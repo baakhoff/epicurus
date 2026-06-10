@@ -6,6 +6,7 @@ import time
 from collections.abc import Iterator
 
 import httpx
+import hvac
 import pytest
 from testcontainers.core.container import DockerContainer
 
@@ -63,3 +64,23 @@ async def test_bad_token_raises(openbao_url: str) -> None:
     store = SecretStore(openbao_url, "wrong-token")
     with pytest.raises(SecretError):
         await store.get("api/key", tenant_id="acme")
+
+
+async def test_authentication_is_checked_once(
+    openbao_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    original = hvac.Client.is_authenticated
+
+    def counting(self: hvac.Client) -> bool:
+        nonlocal calls
+        calls += 1
+        return bool(original(self))
+
+    monkeypatch.setattr(hvac.Client, "is_authenticated", counting)
+    store = SecretStore(openbao_url, _TOKEN)
+    await store.set("auth/check", {"v": "1"}, tenant_id="acme")
+    await store.get("auth/check", tenant_id="acme")
+    await store.get("auth/check", tenant_id="acme")
+    # The auth round-trip happens once, when the client is first built.
+    assert calls == 1

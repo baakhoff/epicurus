@@ -9,6 +9,7 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
+      OLLAMA_URL: http://ollama:11434
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Loopback-bound by default; the gateway is the intended front door. Set
@@ -17,6 +18,8 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${CORE_PORT:-8082}:8080"
     depends_on:
       nats:
+        condition: service_started
+      ollama:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]

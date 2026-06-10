@@ -10,13 +10,19 @@ it serves the module-facing **platform API**.
 > modules, and the platform other services depend on (ADR-0004 / ADR-0009). So it
 > serves a platform API rather than mounting its own MCP tool server.
 
-This skeleton stands the service up:
+What it serves today:
 
 - `GET /health` + `GET /metrics` — the ops surface every service exposes.
 - A connected **NATS** event bus for the process lifetime.
-- `GET /platform/v1/info` — the first slice of the platform API.
+- `GET /platform/v1/info` — the platform-API discovery surface.
+- The **LLM gateway** (ADR-0010), via LiteLLM over a local **Ollama** runtime:
+  - `POST /platform/v1/llm/chat` — a completion for a list of messages.
+  - `GET /platform/v1/llm/models` · `POST /platform/v1/llm/pull` — list / fetch models.
+  - `GET` + `PUT /platform/v1/power` — the main-page power toggle (ADR-0005):
+    `paused` unloads models and refuses inference (`503`); `idle` resumes.
 
-The agent loop, LLM gateway, memory, and power states land with their Phase-1 cards.
+The agent loop, cross-chat memory, and hosted LLM providers land with their later
+Phase-1 cards (#36–#40).
 
 ## Develop
 
@@ -36,3 +42,8 @@ docker compose up -d core-app
 
 Routed by the edge gateway at `core-app.localhost`; reachable directly (loopback) on
 `${CORE_PORT:-8082}`.
+
+The gateway reaches Ollama at `OLLAMA_URL` (default `http://ollama:11434` in the
+stack) and defaults to the `LLM_DEFAULT_MODEL` model (`llama3.2`). Models are pulled
+and managed at runtime via `/platform/v1/llm/pull` — never baked into an image.
+See [`infra/ollama`](../../infra/ollama/) (CPU by default, GPU opt-in).

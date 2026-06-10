@@ -2,7 +2,7 @@
 # top-level stack via the root compose.yaml `include`.
 #
 # Prometheus (metrics) scrapes services' /metrics; Alloy ships container logs to
-# Loki; the OTel collector receives OTLP traces and forwards them to Tempo;
+# Loki; Tempo receives OTLP traces directly (gRPC/HTTP, no separate collector);
 # Grafana ties them together with pre-provisioned datasources.
 services:
   prometheus:

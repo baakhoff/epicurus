@@ -6,19 +6,21 @@ exposes: `/health` and `/metrics`.
 ## `create_ops_router`
 
 ```python
-def create_ops_router(service_name: str, registry: CollectorRegistry = REGISTRY) -> fastapi.APIRouter
+def create_ops_router(service_name: str, *, version: str = __version__, registry: CollectorRegistry = REGISTRY) -> fastapi.APIRouter
 ```
 
 Build a router exposing:
 
-- **`GET /health`** — returns a [`HealthResponse`](#healthresponse).
+- **`GET /health`** — returns a [`HealthResponse`](#healthresponse). `version`
+  defaults to the `epicurus-core` version; pass the service's own (e.g. from
+  `importlib.metadata.version`) so `/health` reports the service version.
 - **`GET /metrics`** — Prometheus exposition for `registry` (defaults to the
   process-wide registry).
 
 ## `add_ops_routes`
 
 ```python
-def add_ops_routes(app: fastapi.FastAPI, service_name: str, registry: CollectorRegistry = REGISTRY) -> None
+def add_ops_routes(app: fastapi.FastAPI, service_name: str, *, version: str = __version__, registry: CollectorRegistry = REGISTRY) -> None
 ```
 
 Mount the ops router onto an existing FastAPI app.

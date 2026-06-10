@@ -33,9 +33,11 @@ Local-dev defaults are inline in the compose file. Override them in a local
 In staging/production these come from OpenBao and a non-dev OpenBao
 deployment; nothing sensitive is committed.
 
-## Not here yet (follow-ups)
+## Layered on top
 
-- **Edge** — gateway + private ingress (paired, since the gateway has
-  nothing to route until app services exist).
-- **Observability** — Grafana / Loki / Prometheus / Tempo + OTel collector, as a
-  separate stack.
+The full stack (`docker compose up` from the repo root) also assembles:
+
+- **[Edge](../edge/)** — a Traefik gateway routing services on one entry point
+  (access-agnostic; the operator chooses how to expose it).
+- **[Observability](../observability/)** — Grafana / Loki / Prometheus / Tempo
+  (Tempo receives OTLP directly; no separate collector).

@@ -6,8 +6,8 @@
 # intentionally weak and for a local, private box.
 #
 # Bring up:   docker compose -f infra/compose/docker-compose.yml up -d
-# (or `task infra:up`).  Observability (Grafana/Loki/Prometheus/Tempo/OTel)
-# ships as a separate stack in a follow-up change.
+# (or `task infra-up`). The edge gateway and the observability stack
+# (Grafana/Loki/Prometheus/Tempo) assemble on top via the root compose.yaml.
 
 name: epicurus
 

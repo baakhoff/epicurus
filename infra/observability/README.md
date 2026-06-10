@@ -1,7 +1,7 @@
 # Observability
 
 The observability stack — a compose fragment assembled into the top-level stack
-([ADR-0006](../../docs/DECISIONS.md)). Brought up with the rest via
+(ADR-0006). Brought up with the rest via
 `docker compose up -d` / `task up`.
 
 | Service | Image | Role |

@@ -1,12 +1,43 @@
-// Grafana Alloy — discover Docker containers and ship their logs to Loki.
+// Grafana Alloy — discover epicurus's Docker containers and ship their logs to Loki.
+//
+// Alloy reads the Docker socket directly. This works on Docker Engine 29 / Moby v2
+// (min API 1.40): Alloy's client negotiates the API version, unlike Traefik v3.3.
 
 discovery.docker "containers" {
   host = "unix:///var/run/docker.sock"
 }
 
+// Keep only this compose project's containers, and turn Docker metadata into useful
+// Loki labels. Without this, every container's logs land in one undifferentiated
+// `service_name="unknown_service"` stream — and logs from unrelated containers on
+// the host get ingested too.
+discovery.relabel "epicurus" {
+  targets = discovery.docker.containers.targets
+
+  // Drop anything that is not part of the epicurus stack.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "epicurus"
+    action        = "keep"
+  }
+
+  // Compose service ("echo", "nats", …) -> the Loki `service_name` label.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service_name"
+  }
+
+  // Full container name, minus the leading slash -> `container`.
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+}
+
 loki.source.docker "containers" {
   host       = "unix:///var/run/docker.sock"
-  targets    = discovery.docker.containers.targets
+  targets    = discovery.relabel.epicurus.output
   forward_to = [loki.write.default.receiver]
 }
 

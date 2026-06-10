@@ -8,7 +8,7 @@ The observability stack — a compose fragment assembled into the top-level stac
 | --- | --- | --- |
 | Prometheus | `prom/prometheus` | Scrapes services' `/metrics`, discovered from Docker by the `epicurus.metrics.port` container label. |
 | Loki | `grafana/loki` | Log store. |
-| Alloy | `grafana/alloy` | Ships Docker container logs → Loki. |
+| Alloy | `grafana/alloy` | Ships **epicurus** containers' logs → Loki, labelled by `service_name` + `container`. |
 | Tempo | `grafana/tempo` | Trace store; receives OTLP directly (gRPC/HTTP). |
 | Grafana | `grafana/grafana` | UI, with Prometheus / Loki / Tempo datasources pre-provisioned. |
 
@@ -20,7 +20,10 @@ three datasources are pre-wired:
 - **Metrics** flow today — Prometheus discovers modules from Docker by the
   `epicurus.metrics.port` container label (set in each module's compose
   fragment; the service-template includes it) and scrapes their `/metrics`.
-- **Logs** flow today (Alloy → Loki; explore them in Grafana).
+- **Logs** flow today (Alloy → Loki; explore them in Grafana). Alloy ships logs
+  only for containers in the `epicurus` compose project and labels each stream with
+  `service_name` (the compose service) and `container`, so unrelated containers on
+  the host are ignored and you can filter by service.
 - **Traces** infrastructure is ready — Tempo receives OTLP directly; services
   start emitting spans when OpenTelemetry tracing is wired into `epicurus-core`
   (a follow-up).

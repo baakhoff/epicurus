@@ -26,12 +26,16 @@ add service-specific fields.
 | `nats_url` | `NATS_URL` | `str` | `nats://localhost:4222` | Event bus — see [`events`](events.md). |
 | `openbao_url` | `OPENBAO_URL` | `str` | `http://localhost:8200` | Secrets — see [`secrets`](secrets.md). |
 | `openbao_token` | `OPENBAO_TOKEN` | `str \| None` | `None` | Bootstrap token, injected at runtime. |
+| `openbao_token_file` | `OPENBAO_TOKEN_FILE` | `str \| None` | `None` | Path to a file holding the token (e.g. a mounted Docker secret); used when `openbao_token` is unset. |
 
-### Properties
+### Properties & methods
 
 - **`is_production -> bool`** — `True` when `app_env == "production"`.
 - **`use_json_logs -> bool`** — whether logs render as JSON: the `json_logs`
   override when set, otherwise `True` everywhere except `local`.
+- **`resolve_openbao_token() -> str | None`** — the bootstrap token: the
+  explicit `openbao_token` when set, else the stripped content of
+  `openbao_token_file`, else `None`. Used by `SecretStore.from_settings`.
 
 ### Validation
 

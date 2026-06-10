@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -38,3 +40,23 @@ def test_invalid_default_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEFAULT_TENANT_ID", "Bad_Tenant")
     with pytest.raises(ValidationError):
         CoreSettings()
+
+
+def test_resolve_openbao_token_prefers_explicit(tmp_path: Path) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text("from-file\n", encoding="utf-8")
+    s = CoreSettings(openbao_token="explicit", openbao_token_file=str(token_file))
+    assert s.resolve_openbao_token() == "explicit"
+
+
+def test_resolve_openbao_token_reads_file(tmp_path: Path) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text("  from-file\n", encoding="utf-8")
+    s = CoreSettings(openbao_token=None, openbao_token_file=str(token_file))
+    assert s.resolve_openbao_token() == "from-file"
+
+
+def test_resolve_openbao_token_default_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENBAO_TOKEN", raising=False)
+    monkeypatch.delenv("OPENBAO_TOKEN_FILE", raising=False)
+    assert CoreSettings().resolve_openbao_token() is None

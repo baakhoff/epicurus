@@ -45,13 +45,22 @@ class SecretStore:
 
     @classmethod
     def from_settings(cls, settings: CoreSettings) -> SecretStore:
-        return cls(settings.openbao_url, settings.openbao_token)
+        """Build from settings; the token may come from ``OPENBAO_TOKEN`` or
+        ``OPENBAO_TOKEN_FILE`` (a mounted file, e.g. a Docker secret)."""
+        return cls(settings.openbao_url, settings.resolve_openbao_token())
 
     def _client_sync(self) -> hvac.Client:
+        """Build the client and verify auth once; reuse it afterwards.
+
+        A token revoked later still fails loudly — the backend rejects the call
+        and it surfaces as :class:`SecretError`. After rotating the token,
+        construct a new store.
+        """
         if self._client is None:
-            self._client = hvac.Client(url=self._url, token=self._token)
-        if not self._client.is_authenticated():
-            raise SecretError("OpenBao client is not authenticated (check the token)")
+            client = hvac.Client(url=self._url, token=self._token)
+            if not client.is_authenticated():
+                raise SecretError("OpenBao client is not authenticated (check the token)")
+            self._client = client
         return self._client
 
     async def get(self, path: str, tenant_id: str | None = None) -> dict[str, Any]:

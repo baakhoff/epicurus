@@ -4,7 +4,7 @@
 > plus a growing fleet of sidecar modules (calendar, notes, tasks, mail, chat,
 > knowledge base, storage), private and self-hosted on your own machine or server.
 
-**Status:** 🚧 _Phase 0 — building the platform skeleton._ ·
+**Status:** 🚧 _Phase 1 — building the core runtime (agent, LLM gateway, memory, UI shell); the Phase 0 platform skeleton is complete._ ·
 **License:** [AGPL-3.0](LICENSE)
 
 epicurus runs on your own machine under Docker. A **core** service runs the agent
@@ -39,7 +39,7 @@ Develop against the shared library and run the gates:
 
 ```bash
 uv sync --all-packages
-uv run pytest           # and: ruff check . · ruff format --check . · mypy -p epicurus_core -p epicurus_echo
+uv run pytest           # and: ruff check . · ruff format --check . · mypy
 # or simply: task check
 ```
 

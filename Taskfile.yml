@@ -24,9 +24,9 @@ tasks:
       - uv run ruff format --check .
 
   type:
-    desc: Type-check with mypy (strict)
+    desc: Type-check with mypy (strict; packages come from pyproject.toml)
     cmds:
-      - uv run mypy -p epicurus_core -p epicurus_echo
+      - uv run mypy
 
   test:
     desc: Run the test suite

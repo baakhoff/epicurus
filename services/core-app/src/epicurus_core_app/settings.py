@@ -14,3 +14,13 @@ class CoreAppSettings(CoreSettings):
     llm_default_model: str = "llama3.2"
     # How long Ollama keeps a model loaded after its last use (idle unload, ADR-0005).
     llm_keep_alive: str = "5m"
+    # Comma-separated fallback models, tried in order when the primary fails or is
+    # unavailable (e.g. "claude/claude-3-5-sonnet-latest,gpt/gpt-4o").
+    llm_fallbacks: str = ""
+    # Per-model retries on 429 / 5xx (exponential backoff), handled by LiteLLM.
+    llm_num_retries: int = 2
+
+    @property
+    def fallback_models(self) -> list[str]:
+        """The fallback chain parsed from ``llm_fallbacks``."""
+        return [m.strip() for m in self.llm_fallbacks.split(",") if m.strip()]

@@ -26,7 +26,22 @@ class _FakeSecrets:
         raise SecretError(f"not found: {path}")
 
 
-def _gateway(power: PowerController | None = None, secrets: Any = None) -> LlmGateway:
+class _FakeBus:
+    """A stand-in for EventBus that records published events."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, Any, str | None]] = []
+
+    async def publish(self, subject: str, data: Any, tenant_id: str | None = None) -> None:
+        self.published.append((subject, data, tenant_id))
+
+
+def _gateway(
+    power: PowerController | None = None,
+    secrets: Any = None,
+    bus: Any = None,
+    fallbacks: list[str] | None = None,
+) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
         default_model="llama3.2",
@@ -34,6 +49,9 @@ def _gateway(power: PowerController | None = None, secrets: Any = None) -> LlmGa
         power=power or PowerController(),
         secrets=secrets or _FakeSecrets(),
         default_tenant="local",
+        bus=bus or _FakeBus(),
+        fallbacks=fallbacks or [],
+        num_retries=2,
     )
 
 
@@ -135,6 +153,89 @@ async def test_providers_reports_configured() -> None:
     assert infos["local"].local and infos["local"].configured
     assert infos["claude"].configured  # key seeded
     assert not infos["gpt"].configured  # no key
+
+
+async def test_falls_back_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        calls.append(kwargs["model"])
+        if kwargs["model"].startswith("ollama_chat/"):
+            raise RuntimeError("local is down")
+        return _Response(
+            {"model": kwargs["model"], "choices": [{"message": {"content": "from fallback"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    gw = _gateway(secrets=secrets, fallbacks=["claude/claude-3-5-sonnet-latest"])
+    result = await gw.chat([ChatMessage(role="user", content="hi")])
+
+    assert calls == ["ollama_chat/llama3.2", "anthropic/claude-3-5-sonnet-latest"]
+    assert result.content == "from fallback"
+
+
+async def test_paused_skips_local_and_uses_hosted_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        calls.append(kwargs["model"])
+        return _Response({"model": kwargs["model"], "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    power = PowerController()
+    power.pause()
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    gw = _gateway(power=power, secrets=secrets, fallbacks=["claude/claude-3-5-sonnet-latest"])
+    result = await gw.chat([ChatMessage(role="user", content="hi")])
+
+    assert calls == ["anthropic/claude-3-5-sonnet-latest"]  # local primary was skipped
+    assert result.content == "ok"
+
+
+async def test_usage_event_emitted_without_key_or_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            {
+                "model": "ollama_chat/llama3.2",
+                "choices": [{"message": {"content": "secret-reply"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+            }
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    bus = _FakeBus()
+    await _gateway(bus=bus).chat([ChatMessage(role="user", content="hi")])
+
+    assert len(bus.published) == 1
+    subject, data, tenant = bus.published[0]
+    assert subject == "llm.usage"
+    assert tenant == "local"
+    assert data["model"] == "ollama_chat/llama3.2"
+    assert data["completion_tokens"] == 7
+    assert "api_key" not in data
+    assert "secret-reply" not in str(data)  # no prompt/response content in the event
+
+
+async def test_num_retries_passed_to_litellm(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    await _gateway().chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_retries"] == 2
+
+
+async def test_embed_refuses_when_paused() -> None:
+    power = PowerController()
+    power.pause()
+    with pytest.raises(GatewayPausedError):
+        await _gateway(power).embed(["text"])
 
 
 async def test_paused_gateway_refuses() -> None:

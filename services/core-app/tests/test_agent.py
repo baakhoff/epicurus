@@ -111,3 +111,78 @@ async def test_agent_handles_tool_error() -> None:
 
     assert turn.content == "recovered"
     assert any(m.role == "tool" and "boom" in (m.content or "") for m in gw.calls[1])
+
+
+class _FakeMemory:
+    def __init__(
+        self,
+        *,
+        recalled: list[str] | None = None,
+        history: list[ChatMessage] | None = None,
+        fail: bool = False,
+    ) -> None:
+        self._recalled = recalled or []
+        self._history = history or []
+        self._fail = fail
+        self.remembered: list[tuple[str, str]] = []  # (role, content)
+
+    async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
+        if self._fail:
+            raise RuntimeError("qdrant down")
+        return list(self._recalled)
+
+    async def history(self, *, tenant: str, session_id: str) -> list[ChatMessage]:
+        if self._fail:
+            raise RuntimeError("db down")
+        return list(self._history)
+
+    async def remember(self, *, tenant: str, session_id: str, role: str, content: str) -> None:
+        if self._fail:
+            raise RuntimeError("db down")
+        self.remembered.append((role, content))
+
+
+async def test_agent_uses_memory_when_session_given() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    memory = _FakeMemory(
+        recalled=["the user's name is Sam"],
+        history=[
+            ChatMessage(role="user", content="earlier question"),
+            ChatMessage(role="assistant", content="earlier answer"),
+        ],
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory)
+    turn = await agent.run([ChatMessage(role="user", content="what's my name?")], session_id="s1")
+
+    assert turn.content == "answer"
+    # the model saw recalled context + prior history + the new message, in order
+    sent = gw.calls[0]
+    assert sent[0].role == "system" and "Sam" in (sent[0].content or "")
+    assert [m.content for m in sent if m.role == "user"] == ["earlier question", "what's my name?"]
+    assert any(m.role == "assistant" and m.content == "earlier answer" for m in sent)
+    # both the new user turn and the answer were persisted
+    assert memory.remembered == [("user", "what's my name?"), ("assistant", "answer")]
+
+
+async def test_agent_without_session_skips_memory() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    memory = _FakeMemory(recalled=["should not appear"])
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), memory=memory).run(
+        [ChatMessage(role="user", content="hi")]
+    )
+    assert turn.content == "hi"
+    assert memory.remembered == []
+    assert all("should not appear" not in (m.content or "") for m in gw.calls[0])
+
+
+async def test_agent_memory_failure_degrades_to_plain_turn() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="still works")])
+    memory = _FakeMemory(fail=True)
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), memory=memory).run(
+        [ChatMessage(role="user", content="hi")], session_id="s1"
+    )
+    # memory blew up on read and write, but the chat still answered
+    assert turn.content == "still works"
+    assert turn.stopped == "completed"
+    # no memory context was prepended — the model just got the user message
+    assert [m.content for m in gw.calls[0]] == ["hi"]

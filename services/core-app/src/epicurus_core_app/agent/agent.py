@@ -17,6 +17,7 @@ from epicurus_core import get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage
+from epicurus_core_app.memory.memory import Memory
 
 log = get_logger("epicurus_core_app.agent")
 
@@ -49,10 +50,20 @@ def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
 class Agent:
     """Drives the LLM gateway plus module tools to answer a turn."""
 
-    def __init__(self, *, gateway: LlmGateway, mcp: McpHost, max_steps: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        gateway: LlmGateway,
+        mcp: McpHost,
+        memory: Memory | None = None,
+        max_steps: int = 4,
+        default_tenant: str = "local",
+    ) -> None:
         self._gateway = gateway
         self._mcp = mcp
+        self._memory = memory
         self._max_steps = max_steps
+        self._default_tenant = default_tenant
 
     async def run(
         self,
@@ -60,8 +71,67 @@ class Agent:
         *,
         model: str | None = None,
         tenant_id: str | None = None,
+        session_id: str | None = None,
     ) -> AgentTurn:
-        """Run one turn to completion (or until ``max_steps`` tool rounds)."""
+        """Run one turn to completion (or until ``max_steps`` tool rounds).
+
+        With ``session_id`` and memory configured, the turn is grounded in the
+        session's prior messages plus semantically recalled context, and both the
+        new user input and the answer are persisted for future turns.
+        """
+        tenant = tenant_id or self._default_tenant
+        convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
+        turn = await self._loop(convo, model=model, tenant_id=tenant_id)
+        if self._memory is not None and session_id:
+            try:
+                await self._memory.remember(
+                    tenant=tenant, session_id=session_id, role="assistant", content=turn.content
+                )
+            except Exception as exc:  # a failed write must not lose the answer
+                log.warning("memory write failed", error=str(exc))
+        return turn
+
+    async def _assemble(
+        self, messages: list[ChatMessage], *, tenant: str, session_id: str | None
+    ) -> list[ChatMessage]:
+        """Prepend recalled context + session history, then persist the new input.
+
+        Memory is best-effort: any failure (DB, Qdrant, embeddings) degrades to a
+        plain turn rather than breaking the chat.
+        """
+        if self._memory is None or not session_id:
+            return list(messages)
+        try:
+            convo: list[ChatMessage] = []
+            last_user = next(
+                (m.content for m in reversed(messages) if m.role == "user" and m.content), None
+            )
+            if last_user:
+                recalled = await self._memory.recall(tenant=tenant, query=last_user)
+                if recalled:
+                    joined = "\n".join(f"- {snippet}" for snippet in recalled)
+                    convo.append(
+                        ChatMessage(
+                            role="system",
+                            content=f"Relevant context from earlier conversations:\n{joined}",
+                        )
+                    )
+            convo.extend(await self._memory.history(tenant=tenant, session_id=session_id))
+            convo.extend(messages)
+            for message in messages:
+                if message.role == "user" and message.content:
+                    await self._memory.remember(
+                        tenant=tenant, session_id=session_id, role="user", content=message.content
+                    )
+            return convo
+        except Exception as exc:  # memory is an enhancement, never a hard dependency
+            log.warning("memory read failed; proceeding without it", error=str(exc))
+            return list(messages)
+
+    async def _loop(
+        self, messages: list[ChatMessage], *, model: str | None, tenant_id: str | None
+    ) -> AgentTurn:
+        """The tool-calling loop: ask, run tools, feed results back, until an answer."""
         specs, route = await self._mcp.discover()
         convo = list(messages)
         tools_used: list[str] = []

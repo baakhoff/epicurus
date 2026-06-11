@@ -56,3 +56,9 @@ Hosted-provider API keys live in **OpenBao**, never in env or git: store
 `{"api_key": ...}` (plus `api_base` for `custom`) at `tenants/<tenant>/llm/<provider>`
 (e.g. `llm/anthropic`, `llm/openai`, `llm/google`). The gateway fetches them per
 request and never logs them.
+
+**Routing & usage.** A request tries the chosen model, then `LLM_FALLBACKS` (a
+comma-separated chain) on failure; while paused, local models are skipped but a
+hosted fallback still serves (ADR-0005). Retries on 429/5xx use LiteLLM's backoff
+(`LLM_NUM_RETRIES`, default 2). Every call emits a usage event on NATS
+(`<tenant>.llm.usage`: model, tokens, latency — no prompt content, no keys).

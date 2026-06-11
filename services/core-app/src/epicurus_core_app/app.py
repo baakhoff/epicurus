@@ -52,6 +52,9 @@ def create_app() -> FastAPI:
         power=power,
         secrets=SecretStore.from_settings(settings),
         default_tenant=settings.default_tenant_id,
+        bus=bus,
+        fallbacks=settings.fallback_models,
+        num_retries=settings.llm_num_retries,
     )
 
     @asynccontextmanager

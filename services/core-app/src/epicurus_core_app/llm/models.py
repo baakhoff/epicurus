@@ -42,6 +42,16 @@ class ProviderInfo(BaseModel):
     configured: bool
 
 
+class UsageEvent(BaseModel):
+    """Emitted on NATS (``<tenant>.llm.usage``) after each call — no content, no keys."""
+
+    model: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    latency_ms: int
+    tenant: str
+
+
 class PowerState(StrEnum):
     """Runtime power state (ADR-0005)."""
 

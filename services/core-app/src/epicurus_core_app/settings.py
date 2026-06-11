@@ -19,8 +19,17 @@ class CoreAppSettings(CoreSettings):
     llm_fallbacks: str = ""
     # Per-model retries on 429 / 5xx (exponential backoff), handled by LiteLLM.
     llm_num_retries: int = 2
+    # Comma-separated module MCP endpoints the agent discovers + calls tools from.
+    mcp_module_urls: str = "http://echo:8080/mcp"
+    # Max tool-calling rounds in one agent turn before it must answer.
+    agent_max_steps: int = 4
 
     @property
     def fallback_models(self) -> list[str]:
         """The fallback chain parsed from ``llm_fallbacks``."""
         return [m.strip() for m in self.llm_fallbacks.split(",") if m.strip()]
+
+    @property
+    def module_mcp_urls(self) -> list[str]:
+        """The module MCP endpoints parsed from ``mcp_module_urls``."""
+        return [u.strip() for u in self.mcp_module_urls.split(",") if u.strip()]

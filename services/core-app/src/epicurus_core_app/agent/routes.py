@@ -12,6 +12,8 @@ from epicurus_core_app.llm.models import ChatMessage
 class AgentRequest(BaseModel):
     messages: list[ChatMessage]
     model: str | None = None
+    # Opt into cross-chat memory: persist this turn and recall prior context.
+    session_id: str | None = None
 
 
 def create_agent_router(agent: Agent) -> APIRouter:
@@ -20,6 +22,6 @@ def create_agent_router(agent: Agent) -> APIRouter:
 
     @router.post("/chat", response_model=AgentTurn)
     async def chat(request: AgentRequest) -> AgentTurn:
-        return await agent.run(request.messages, model=request.model)
+        return await agent.run(request.messages, model=request.model, session_id=request.session_id)
 
     return router

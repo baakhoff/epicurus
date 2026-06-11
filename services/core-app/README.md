@@ -30,8 +30,14 @@ What it serves today:
     LLM, runs any tool calls over MCP, feeds the results back, and loops to an answer
     (`AGENT_MAX_STEPS`, default 4). The core is the **MCP host**; the modules it
     discovers tools from are set by `MCP_MODULE_URLS` (default the echo module).
+- **Cross-chat memory** — pass a `session_id` to `POST /platform/v1/agent/chat` and the
+  turn is grounded in that session's prior messages **plus** semantically recalled
+  snippets from earlier conversations (same tenant); the new input and the answer are
+  then persisted. History lives in **Postgres**; recall is **Qdrant** over embeddings
+  from a local model. Memory is best-effort — if the store, vector DB, or embedder is
+  down, the turn still answers, just without memory. Omit `session_id` for a stateless turn.
 
-Cross-chat memory and the web UI shell land with their later Phase-1 cards (#39–#40).
+The web UI shell lands with its Phase-1 card (#40).
 
 ## Develop
 
@@ -67,3 +73,9 @@ comma-separated chain) on failure; while paused, local models are skipped but a
 hosted fallback still serves (ADR-0005). Retries on 429/5xx use LiteLLM's backoff
 (`LLM_NUM_RETRIES`, default 2). Every call emits a usage event on NATS
 (`<tenant>.llm.usage`: model, tokens, latency — no prompt content, no keys).
+
+**Memory.** Conversation history is persisted to **Postgres** (`DATABASE_URL`) and
+indexed for semantic recall in **Qdrant** (`QDRANT_URL`), embedded with a local model
+(`MEMORY_EMBED_MODEL`, default `nomic-embed-text`, pulled at runtime like any other).
+Recall is tenant-scoped — one Qdrant collection (`<tenant>__memory`) per tenant. Both
+default to the stack's data-plane services; memory is opt-in per request via `session_id`.

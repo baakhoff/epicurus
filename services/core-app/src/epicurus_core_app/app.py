@@ -19,6 +19,8 @@ from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from qdrant_client import AsyncQdrantClient
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
 from epicurus_core_app.agent.agent import Agent
@@ -27,6 +29,9 @@ from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
+from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.memory.recall import SemanticRecall
+from epicurus_core_app.memory.store import ConversationStore
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.settings import CoreAppSettings
 
@@ -59,20 +64,36 @@ def create_app() -> FastAPI:
         fallbacks=settings.fallback_models,
         num_retries=settings.llm_num_retries,
     )
+
+    engine = create_async_engine(settings.database_url)
+    qdrant = AsyncQdrantClient(url=settings.qdrant_url)
+
+    async def embed(texts: list[str]) -> list[list[float]]:
+        return await gateway.embed(texts, model=settings.memory_embed_model)
+
+    memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
     agent = Agent(
         gateway=gateway,
         mcp=McpHost(settings.module_mcp_urls),
+        memory=memory,
         max_steps=settings.agent_max_steps,
+        default_tenant=settings.default_tenant_id,
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await bus.connect()
+        try:
+            await memory.init()
+        except Exception as exc:  # core stays up; cross-chat memory just degrades
+            log.error("memory init failed; cross-chat memory disabled", error=str(exc))
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
         finally:
             await bus.close()
+            await engine.dispose()
+            await qdrant.close()
 
     app = FastAPI(title="epicurus core", lifespan=lifespan)
     add_ops_routes(app, service_name=SERVICE_NAME, version=_service_version())

@@ -23,6 +23,12 @@ class CoreAppSettings(CoreSettings):
     mcp_module_urls: str = "http://echo:8080/mcp"
     # Max tool-calling rounds in one agent turn before it must answer.
     agent_max_steps: int = 4
+    # Postgres DSN (async driver) for conversation persistence.
+    database_url: str = "postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus"
+    # Qdrant endpoint for semantic recall.
+    qdrant_url: str = "http://localhost:6333"
+    # Ollama embedding model used to vectorize conversation text for recall.
+    memory_embed_model: str = "nomic-embed-text"
 
     @property
     def fallback_models(self) -> list[str]:

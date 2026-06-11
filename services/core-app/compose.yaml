@@ -13,6 +13,9 @@ services:
       OPENBAO_URL: http://openbao:8200
       OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
+      QDRANT_URL: http://qdrant:6333
+      MEMORY_EMBED_MODEL: ${MEMORY_EMBED_MODEL:-nomic-embed-text}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
@@ -24,6 +27,10 @@ services:
       ollama:
         condition: service_started
       openbao:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      qdrant:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]

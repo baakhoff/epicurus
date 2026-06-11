@@ -21,6 +21,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
+from epicurus_core_app.agent.agent import Agent
+from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
@@ -56,6 +59,11 @@ def create_app() -> FastAPI:
         fallbacks=settings.fallback_models,
         num_retries=settings.llm_num_retries,
     )
+    agent = Agent(
+        gateway=gateway,
+        mcp=McpHost(settings.module_mcp_urls),
+        max_steps=settings.agent_max_steps,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -71,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(create_platform_router(settings))
     app.include_router(create_llm_router(gateway))
     app.include_router(create_power_router(gateway, power))
+    app.include_router(create_agent_router(agent))
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:

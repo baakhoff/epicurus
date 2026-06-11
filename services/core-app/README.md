@@ -25,8 +25,13 @@ What it serves today:
   - `GET /platform/v1/llm/providers` — providers and whether each one's key is set.
   - `GET` + `PUT /platform/v1/power` — the main-page power toggle (ADR-0005):
     `paused` unloads models and refuses inference (`503`); `idle` resumes.
+- The **agent** (ADR-0001) — a thin tool-calling loop:
+  - `POST /platform/v1/agent/chat` — runs a turn: offers the modules' tools to the
+    LLM, runs any tool calls over MCP, feeds the results back, and loops to an answer
+    (`AGENT_MAX_STEPS`, default 4). The core is the **MCP host**; the modules it
+    discovers tools from are set by `MCP_MODULE_URLS` (default the echo module).
 
-The agent loop and cross-chat memory land with their later Phase-1 cards (#38–#40).
+Cross-chat memory and the web UI shell land with their later Phase-1 cards (#39–#40).
 
 ## Develop
 

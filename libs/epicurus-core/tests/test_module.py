@@ -44,3 +44,13 @@ async def test_tool_is_callable() -> None:
 def test_http_app_builds() -> None:
     app = _greeter().http_app()
     assert hasattr(app, "routes")
+
+
+def test_mcp_is_reachable_for_clients() -> None:
+    # The MCP endpoint must be reachable by an MCP client over the internal network:
+    # served at the app root (so mounting under "/mcp" is not double-prefixed to
+    # "/mcp/mcp") with DNS-rebinding protection off (it rejects service hostnames like
+    # "echo:8080" with HTTP 421 — the contract is local-only, ADR-0004).
+    settings = _greeter().mcp.settings
+    assert settings.streamable_http_path == "/"
+    assert settings.transport_security.enable_dns_rebinding_protection is False

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
 from epicurus_core.manifest import CONTRACT_VERSION, EventSpec, ModuleManifest, ToolSpec
@@ -43,7 +44,17 @@ class EpicurusModule:
         self._version = version
         self._description = description
         self._image = image
-        self._mcp = FastMCP(name, instructions=instructions)
+        self._mcp = FastMCP(
+            name,
+            instructions=instructions,
+            # Serve MCP at the app root so mounting at "/mcp" yields a clean endpoint
+            # (the default "/mcp" path would become "/mcp/mcp" once mounted).
+            streamable_http_path="/",
+            # The module<->agent contract is local-only on the internal Docker network
+            # (ADR-0004); DNS-rebinding protection would reject service hostnames like
+            # "echo:8080" with HTTP 421 and block agent-to-module calls, so disable it.
+            transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        )
         self._events_emitted: list[EventSpec] = []
         self._events_consumed: list[EventSpec] = []
 

@@ -1,0 +1,41 @@
+# Storage module — per-module compose fragment (ADR-0006).
+# Add to the top-level compose.yaml `include:` list to enable this module.
+services:
+  storage:
+    build:
+      context: ../..
+      dockerfile: services/storage/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-storage:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
+      # Absolute path inside the container to the directory tree to index.
+      # Mount the HDD (or any directory) here and point STORAGE_ROOT at it.
+      STORAGE_ROOT: ${STORAGE_ROOT:-/data}
+    volumes:
+      # Read-only bind-mount of the host directory to index. Set STORAGE_HOST_ROOT
+      # in .env to the path you want to expose (defaults to the user's home).
+      - ${STORAGE_HOST_ROOT:-~}:/data:ro
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${STORAGE_PORT:-8083}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.storage.rule=Host(`storage.localhost`)
+      - traefik.http.routers.storage.entrypoints=web
+      - traefik.http.services.storage.loadbalancer.server.port=8080
+      - epicurus.metrics.port=8080
+    networks: [epicurus]

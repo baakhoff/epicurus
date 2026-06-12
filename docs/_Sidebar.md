@@ -14,6 +14,7 @@
 - [web — the UI shell](services/web.md)
 - [storage](services/storage.md)
 - [knowledge](services/knowledge.md)
+- [websearch](services/websearch.md)
 - [echo](services/echo.md)
 
 **API Reference**

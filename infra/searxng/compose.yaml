@@ -1,0 +1,30 @@
+# SearXNG — self-hosted, privacy-preserving web search.
+#
+# Internal-only by design: no ports are published to the host. The websearch
+# module (services/websearch) reaches SearXNG at http://searxng:8080 on the
+# internal epicurus Docker network.
+#
+# To customise engines or the secret key, edit infra/searxng/settings.yml (or
+# override the mount with your own file via SEARXNG_SETTINGS_FILE in .env).
+services:
+  searxng:
+    image: searxng/searxng:2024.10.27-67bfba9
+    restart: unless-stopped
+    volumes:
+      - ${SEARXNG_SETTINGS_FILE:-./infra/searxng/settings.yml}:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [epicurus]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.searxng.rule=Host(`searxng.localhost`)
+      - traefik.http.routers.searxng.entrypoints=web
+      - traefik.http.services.searxng.loadbalancer.server.port=8080

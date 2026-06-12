@@ -11,8 +11,10 @@ include:
   - infra/edge/compose.yaml
   - infra/observability/compose.yaml
   - infra/ollama/compose.yaml
+  - infra/searxng/compose.yaml
   - services/echo/compose.yaml
   - services/core-app/compose.yaml
   - services/storage/compose.yaml
   - services/knowledge/compose.yaml
+  - services/websearch/compose.yaml
   - services/web/compose.yaml

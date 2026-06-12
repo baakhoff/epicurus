@@ -157,6 +157,17 @@ class FileIndex:
                 result.append(_row_to_entry(row))
         return result
 
+    async def count(self, *, tenant: str) -> dict[str, int]:
+        """Return the number of indexed files and directories for *tenant*."""
+        async with self._session() as session:
+            files = await session.scalar(
+                select(func.count()).where(_StoredFile.tenant == tenant, _StoredFile.kind == "file")
+            )
+            dirs_ = await session.scalar(
+                select(func.count()).where(_StoredFile.tenant == tenant, _StoredFile.kind == "dir")
+            )
+        return {"files": int(files or 0), "dirs": int(dirs_ or 0)}
+
     async def search(self, *, tenant: str, query: str, limit: int = 50) -> list[FileEntry]:
         """Full-path and name case-insensitive search."""
         async with self._session() as session:

@@ -62,6 +62,10 @@ packages = ["epicurus_core", "epicurus_core_app", "epicurus_echo", "epicurus_sto
 module = ["prometheus_client.*", "nats.*", "hvac.*", "litellm.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["aioboto3.*", "aiobotocore.*", "botocore.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["libs", "services", "tests"]

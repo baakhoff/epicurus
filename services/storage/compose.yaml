@@ -15,6 +15,10 @@ services:
       # Absolute path inside the container to the directory tree to index.
       # Mount the HDD (or any directory) here and point STORAGE_ROOT at it.
       STORAGE_ROOT: ${STORAGE_ROOT:-/data}
+      # MinIO (S3-compatible) object store for app-managed objects.
+      MINIO_URL: ${MINIO_URL:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-epicurus}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-epicurus-dev}
     volumes:
       # By default an EMPTY named volume — nothing on the host is exposed until you
       # opt in. Set STORAGE_HOST_ROOT in .env to a host directory (e.g. your HDD) to
@@ -27,6 +31,8 @@ services:
       nats:
         condition: service_started
       postgres:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]

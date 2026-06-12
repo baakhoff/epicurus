@@ -19,6 +19,7 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_storage.db import FileIndex
+from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.scanner import scan
 from epicurus_storage.service import MODULE_NAME, build_module
 from epicurus_storage.settings import StorageSettings
@@ -39,9 +40,15 @@ def create_app() -> FastAPI:
 
     engine = create_async_engine(settings.database_url)
     index = FileIndex(engine)
+    objects = ObjectStore(
+        url=settings.minio_url,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+    )
     bus = EventBus.from_settings(settings)
     module = build_module(
         index,
+        objects,
         storage_root=str(settings.storage_root),
         tenant=settings.default_tenant_id,
     )

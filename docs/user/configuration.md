@@ -26,6 +26,12 @@ Current keys:
 > **Warning — never commit `.env`.** It is gitignored. Real secrets do **not**
 > belong in it.
 
+The **core runtime** has further settings — the LLM backend, the modules it
+reaches, and memory storage; the full list is in the
+[`config` reference](../reference/config.md#coreappsettings). Model selection and
+provider **API keys** are managed at runtime through the web UI (and stored in
+OpenBao), not in `.env`.
+
 ## Host bind address & ports
 
 Published container ports bind to `BIND_ADDRESS`, which defaults to

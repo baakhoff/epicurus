@@ -48,6 +48,19 @@ collections, OpenBao secret paths, and object-storage buckets all carry a tenant
 prefix. A single-tenant self-host install uses one tenant (`local` by default);
 the same code keeps tenants isolated when there is more than one.
 
+## Core services
+
+Alongside the data plane, three application services run in the stack:
+
+| Service | Role |
+| --- | --- |
+| **core-app** | the brain — the agent loop, the LLM gateway, cross-chat memory, power states, the MCP host, and the platform API ([details](../../services/core-app/README.md)). |
+| **web** | the web UI shell — a phone-first PWA: chat, model manager, power toggle, and manifest-driven module UI ([details](../../services/web/README.md)). |
+| **echo** | the reference module — proves the MCP tool + NATS event contract end to end. |
+
+`core-app` and `web` are the foundational core (ADR-0009); `echo` is the template
+every new module follows.
+
 ## Data plane
 
 The backing services every module can rely on:
@@ -72,5 +85,6 @@ contract is made of:
 - **tenancy** — tenant validation and the scoping helpers above.
 - **events** — the async NATS client (`EventBus`).
 - **module / manifest** — the MCP module base (`EpicurusModule`) and the manifest
-  model.
+  model (including the declarative module UI, ADR-0007).
+- **secrets** — the OpenBao-backed secret store (`SecretStore`).
 - **observability** — the shared `/health` and `/metrics` endpoints.

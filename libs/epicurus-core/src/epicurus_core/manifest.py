@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 CONTRACT_VERSION = "0.1"
 """Version of the module<->core contract this manifest targets."""
@@ -51,6 +51,14 @@ class UiAction(BaseModel):
     description: str = ""
     intent: Literal["default", "primary", "danger"] = "default"
     confirm: str | None = None
+
+    @model_validator(mode="after")
+    def _danger_requires_confirm(self) -> UiAction:
+        # The contract: a destructive action must carry a confirmation prompt, so the
+        # shell never renders a one-tap "danger" button. Enforced, not just documented.
+        if self.intent == "danger" and not self.confirm:
+            raise ValueError("a danger action must set a confirm prompt")
+        return self
 
 
 class UiSection(BaseModel):

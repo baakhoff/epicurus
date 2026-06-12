@@ -7,9 +7,9 @@ backing services it needs. It is not exposed to the public internet by default â
 you choose how to reach it (locally, over your LAN, behind a VPN, or however you
 expose your own server).
 
-> **Early development.** There is not yet an end-user app to log into. Today this
-> guide covers standing up the platform's **data plane** (its backing services).
-> As the agent and web UI land, this guide gains the sections for using them.
+> **Status.** The web UI is live â€” once the stack is up, open
+> <http://localhost:8088/> to chat with the agent, manage models, and configure
+> modules. This guide covers standing the platform up and configuring it.
 
 ## Sections
 

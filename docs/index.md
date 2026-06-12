@@ -8,10 +8,9 @@ It is designed to run on your own machine or server under Docker and to stay
 private — you choose how to reach it (locally, over your LAN, behind a VPN, or
 however you expose your own server).
 
-> **Early development.** epicurus is being built. This documentation covers what
-> exists today and grows as capabilities land. There is not yet an end-user app —
-> the current surface is the platform itself (the data-plane services and the
-> `epicurus-core` library that modules are built on).
+> **Status.** Phase 1 is complete: the agent, LLM gateway, cross-chat memory, and
+> the web UI shell are live. This documentation covers what exists today and grows
+> as capabilities land. Phase 2 (knowledge & storage) is next.
 
 ## Documentation layers
 
@@ -24,11 +23,15 @@ however you expose your own server).
 
 ## What's here today
 
+- **Web UI shell** — a phone-first PWA: chat with the agent, manage models and
+  provider keys, toggle power, and configure modules.
+- **Core runtime** — the agent loop, the multi-provider LLM gateway (local Ollama +
+  hosted providers), cross-chat memory, power states, and the platform API.
 - **`epicurus-core`** — the shared library modules are built on: configuration,
   structured logging, tenant scoping, the NATS event client, and the MCP module
   base + manifest.
-- **Data plane** — the backing services (Postgres, Valkey, NATS, Qdrant,
-  OpenBao) brought up with one command.
+- **Data plane** — the backing services (Postgres, Valkey, NATS, Qdrant, OpenBao)
+  brought up with one command.
 
 ## License
 

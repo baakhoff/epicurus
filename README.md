@@ -4,7 +4,7 @@
 > plus a growing fleet of sidecar modules (calendar, notes, tasks, mail, chat,
 > knowledge base, storage), private and self-hosted on your own machine or server.
 
-**Status:** 🚧 _Phase 1 — building the core runtime (agent, LLM gateway, memory, UI shell); the Phase 0 platform skeleton is complete._ ·
+**Status:** ✅ _Phase 1 complete — the agent, LLM gateway, cross-chat memory, and the web UI shell are live. Building Phase 2 (knowledge & storage)._ ·
 **License:** [AGPL-3.0](LICENSE)
 
 epicurus runs on your own machine under Docker. A **core** service runs the agent
@@ -33,6 +33,14 @@ Bring up the platform's backing services (Postgres, Valkey, NATS, Qdrant, OpenBa
 git clone https://github.com/baakhoff/epicurus.git
 cd epicurus
 docker compose -f infra/compose/docker-compose.yml up -d   # or: task infra-up
+```
+
+…or bring up the **whole platform** (core, web UI, and the echo demo module) and
+open the shell in a browser:
+
+```bash
+docker compose up -d           # or: task up
+# then open http://localhost:8088/  — chat, model manager, modules, power toggle
 ```
 
 Develop against the shared library and run the gates:

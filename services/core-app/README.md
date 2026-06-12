@@ -33,7 +33,7 @@ What it serves today:
   - `POST /platform/v1/agent/chat` — runs a turn: offers the modules' tools to the
     LLM, runs any tool calls over MCP, feeds the results back, and loops to an answer
     (`AGENT_MAX_STEPS`, default 4). The core is the **MCP host**; the modules it
-    discovers tools from are set by `MCP_MODULE_URLS` (default the echo module).
+    discovers tools from are set by `MODULE_URLS` (default the echo module).
   - `POST /platform/v1/agent/chat/stream` — the same turn as **SSE**: `delta`
     (content tokens), `tool` (a tool call ran), `done` (the final `AgentTurn`),
     `error`. This is what the web shell's chat speaks.

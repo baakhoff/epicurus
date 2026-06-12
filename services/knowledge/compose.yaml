@@ -13,8 +13,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
       QDRANT_URL: http://qdrant:6333
-      # Base URL of the core service on the internal Docker network.
-      PLATFORM_URL: http://core:8080
+      # Base URL of the core service on the internal Docker network (service name
+      # is `core-app`, not `core`).
+      PLATFORM_URL: http://core-app:8080
       # Absolute path inside the container to the Obsidian vault.
       # Mount your vault directory here (e.g. KNOWLEDGE_HOST_VAULT in .env).
       VAULT_PATH: ${VAULT_PATH:-/vault}

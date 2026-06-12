@@ -8,7 +8,10 @@
 # override the mount with your own file via SEARXNG_SETTINGS_FILE in .env).
 services:
   searxng:
-    image: searxng/searxng:2024.10.27-67bfba9
+    # SearXNG prunes old date-tags from Docker Hub, so a pin eventually 404s on a
+    # fresh pull (the previous 2024.10.27 tag is gone). Bump to a current verified
+    # tag; settings.yml uses `use_default_settings: true`, so it stays compatible.
+    image: searxng/searxng:2026.6.10-de03f4eb1
     restart: unless-stopped
     volumes:
       - ${SEARXNG_SETTINGS_FILE:-./infra/searxng/settings.yml}:/etc/searxng/settings.yml:ro

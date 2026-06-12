@@ -68,6 +68,7 @@ Passing a `session_id` opts a turn into cross-chat memory (below).
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI) + live health. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). |
+| `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 
 ### Events (NATS)
 

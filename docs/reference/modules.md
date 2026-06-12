@@ -96,6 +96,7 @@ surfaces its settings/status with **no shell rebuild and no module JS** (ADR-000
 | `summary` | `str` | `""` | one-line blurb shown on the module card |
 | `config_schema` | `dict \| None` | `None` | JSON Schema (object) rendered as the module's settings form; values round-trip through the core into OpenBao (`modules/<name>/config`, tenant-scoped) |
 | `actions` | `list[UiAction]` | `[]` | buttons that invoke the module's MCP tools through the core |
+| `status_url` | `str \| None` | `None` | relative path on the module (e.g. `/status`) returning a flat JSON object of live status fields; proxied by the core at `GET /platform/v1/modules/{name}/status` and displayed in the shell's **Status** panel — the shell never calls the module directly |
 | `ui_url` | `str \| None` | `None` | reserved for Tier 2 (module-served page in a sandboxed iframe) — not rendered yet |
 
 ### `UiAction`

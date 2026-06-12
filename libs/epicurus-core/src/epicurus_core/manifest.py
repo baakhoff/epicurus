@@ -71,7 +71,10 @@ class UiSection(BaseModel):
     falls back to a plain card). ``icon`` names a glyph from the shell's vendored
     icon set — never an image URL or script. ``config_schema`` is a JSON Schema
     (object) the shell renders as the module's settings form; values round-trip
-    through the core. ``ui_url`` opts into Tier 2 (a module-served page in a
+    through the core. ``status_url`` is a relative path on the module (e.g.
+    ``/status``) that returns live status data as a flat JSON object; the core
+    proxies it at ``GET /platform/v1/modules/{name}/status`` so the shell never
+    calls a module directly. ``ui_url`` opts into Tier 2 (a module-served page in a
     sandboxed iframe) — reserved, not yet rendered by the shell.
     """
 
@@ -80,6 +83,7 @@ class UiSection(BaseModel):
     summary: str = ""
     config_schema: dict[str, Any] | None = None
     actions: list[UiAction] = Field(default_factory=list)
+    status_url: str | None = None
     ui_url: str | None = None
 
 

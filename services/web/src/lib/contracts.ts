@@ -93,6 +93,7 @@ export const UiSection = z.object({
   summary: z.string().default(""),
   config_schema: z.record(z.string(), z.unknown()).nullish(),
   actions: z.array(UiAction).default([]),
+  status_url: z.string().nullish(),
   ui_url: z.string().nullish(),
 });
 export type UiSection = z.infer<typeof UiSection>;

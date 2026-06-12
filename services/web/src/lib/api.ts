@@ -96,6 +96,8 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/tools/${encodeURIComponent(tool)}`,
       { method: "POST", body: JSON.stringify({ arguments: args }) },
     ),
+  moduleStatus: (name: string) =>
+    request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/status`),
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
 };

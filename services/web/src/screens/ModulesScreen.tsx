@@ -32,7 +32,7 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Card, Confirm, Dot, Spinner, cn } from "@/components/ui";
@@ -138,6 +138,31 @@ function ActionRow({ module, action }: { module: string; action: UiAction; }) {
   );
 }
 
+function ModuleStatus({ name }: { name: string }) {
+  const status = useQuery({
+    queryKey: ["module-status", name],
+    queryFn: () => api.moduleStatus(name),
+    refetchInterval: 60_000,
+  });
+
+  if (status.isLoading) return <Spinner />;
+  if (!status.data || Object.keys(status.data).length === 0) return null;
+
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Status</h4>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        {Object.entries(status.data).map(([k, v]) => (
+          <Fragment key={k}>
+            <dt className="text-ink-dim">{k.replace(/_/g, " ")}</dt>
+            <dd className="text-ink">{v == null ? "—" : String(v)}</dd>
+          </Fragment>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 function ModuleConfig({ snapshot }: { snapshot: ModuleSnapshot }) {
   const name = snapshot.manifest.name;
   const queryClient = useQueryClient();
@@ -215,6 +240,8 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
               This module speaks a newer UI vocabulary (v{ui?.ui_version}) than this shell.
             </p>
           )}
+
+          {known && status.healthy && ui?.status_url && <ModuleStatus name={manifest.name} />}
 
           {known && status.healthy && <ModuleConfig snapshot={snapshot} />}
 

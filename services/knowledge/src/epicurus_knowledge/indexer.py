@@ -11,6 +11,7 @@ import hashlib
 import os
 import uuid
 from pathlib import Path
+from typing import TypedDict
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
@@ -26,6 +27,16 @@ from qdrant_client.models import (
 from epicurus_core import PlatformClient, get_logger, scope_collection
 from epicurus_knowledge.chunker import Chunk, chunk_note
 from epicurus_knowledge.db import NoteIndex
+
+
+class SearchHit(TypedDict):
+    """One chunk returned by a semantic search query."""
+
+    note_path: str
+    heading: str | None
+    text: str
+    score: float
+
 
 log = get_logger("knowledge.indexer")
 
@@ -121,6 +132,42 @@ class KnowledgeIndexer:
         ]
         await self._qdrant.upsert(collection_name=self._collection, points=points)
         return len(chunks)
+
+    async def search(self, query: str, k: int = 5) -> list[SearchHit]:
+        """Return the top-*k* chunks most semantically similar to *query*.
+
+        Embeds *query* via the core's LLM gateway, then queries the tenant's
+        Qdrant collection.  Returns an empty list if the collection has not been
+        created yet (i.e. no notes have been indexed).
+
+        Args:
+            query: Natural-language question or search phrase.
+            k: Maximum number of chunks to return.
+
+        Returns a list of :class:`SearchHit` dicts ordered by descending score.
+        """
+        if not await self._qdrant.collection_exists(self._collection):
+            return []
+        [query_vec] = await self._platform.embed([query])
+        hits = await self._qdrant.search(
+            collection_name=self._collection,
+            query_vector=query_vec,
+            limit=k,
+            with_payload=True,
+        )
+        results: list[SearchHit] = []
+        for hit in hits:
+            if not hit.payload:
+                continue
+            results.append(
+                SearchHit(
+                    note_path=str(hit.payload.get("note_path", "")),
+                    heading=str(hit.payload["heading"]) if hit.payload.get("heading") else None,
+                    text=str(hit.payload.get("text", "")),
+                    score=float(hit.score),
+                )
+            )
+        return results
 
     async def run(self) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.

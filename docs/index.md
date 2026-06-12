@@ -12,26 +12,37 @@ however you expose your own server).
 > the web UI shell are live. This documentation covers what exists today and grows
 > as capabilities land. Phase 2 (knowledge & storage) is next.
 
-## Documentation layers
+## Navigate
 
-- **[User Guide](user/index.md)** — run and configure epicurus on your own
-  machine or server.
-- **[Developer Guide](developer/index.md)** — the architecture and how to build
-  a module, fix a bug, or contribute.
-- **[API Reference](reference/index.md)** — every class and function in
-  `epicurus-core`.
+- **[User Guide](user/index.md)** — install, configure, and run epicurus.
+- **[Services & Modules](services/index.md)** — a page per running block: the core
+  runtime, the web shell, and each module — what it does, its tools/endpoints, config,
+  and data.
+- **[API Reference](reference/index.md)** — the `epicurus-core` library and the
+  module↔core contracts (platform API, MCP, NATS, manifest).
+- **[Infrastructure](../infra/README.md)** — the data plane (Postgres, Valkey, NATS,
+  Qdrant, OpenBao, MinIO), the edge gateway, observability, and Ollama.
+- **[Developer Guide](developer/index.md)** — architecture, building a module, testing,
+  contributing, releases.
 
-## What's here today
+## The platform at a glance
 
-- **Web UI shell** — a phone-first PWA: chat with the agent, manage models and
-  provider keys, toggle power, and configure modules.
-- **Core runtime** — the agent loop, the multi-provider LLM gateway (local Ollama +
-  hosted providers), cross-chat memory, power states, and the platform API.
-- **`epicurus-core`** — the shared library modules are built on: configuration,
-  structured logging, tenant scoping, the NATS event client, and the MCP module
-  base + manifest.
-- **Data plane** — the backing services (Postgres, Valkey, NATS, Qdrant, OpenBao)
-  brought up with one command.
+```text
+epicurus
+├─ core
+│  ├─ core-app    the brain — agent · LLM gateway · memory · power · platform API · MCP host
+│  └─ web         the phone-first PWA shell — chat · models · modules · power
+├─ modules        (sidecars; add one by running one more container)
+│  ├─ storage     file-tree index (list / search / read) + MinIO object store
+│  ├─ knowledge   Obsidian-vault RAG (incremental index + search)
+│  └─ echo        the contract-proof reference module
+├─ data plane     Postgres · Valkey · NATS · Qdrant · OpenBao · MinIO
+└─ edge & ops     Traefik gateway · Grafana / Loki / Prometheus / Tempo · Ollama
+```
+
+Every module speaks one **local-only** contract to the core — MCP tools to the agent, the
+platform API to the core, NATS events either way (ADR-0004). The deep dive is in the
+[Architecture](developer/architecture.md) guide.
 
 ## License
 

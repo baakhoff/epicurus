@@ -88,7 +88,17 @@ services:
     image: openbao/openbao:2.2.0
     restart: unless-stopped
     cap_add: [IPC_LOCK]
-    command: ["server", "-config=/openbao/config/config.hcl"]
+    # The image entrypoint drops the server to the `openbao` user (uid 100), which
+    # cannot write the root-owned named volume. Start as root, chown the volume to
+    # openbao, then hand off to the image entrypoint (which re-drops to openbao).
+    user: root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "chown -R openbao:openbao /openbao/data && exec docker-entrypoint.sh server -config=/openbao/config/config.hcl"
+    environment:
+      # The `bao` CLI (healthcheck + the bootstrap script's `exec`) talks to the
+      # local HTTP listener; without this it defaults to https and fails.
+      BAO_ADDR: http://127.0.0.1:8200
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${OPENBAO_PORT:-8200}:8200"
     volumes:

@@ -16,9 +16,11 @@ services:
       # Mount the HDD (or any directory) here and point STORAGE_ROOT at it.
       STORAGE_ROOT: ${STORAGE_ROOT:-/data}
     volumes:
-      # Read-only bind-mount of the host directory to index. Set STORAGE_HOST_ROOT
-      # in .env to the path you want to expose (defaults to the user's home).
-      - ${STORAGE_HOST_ROOT:-~}:/data:ro
+      # By default an EMPTY named volume — nothing on the host is exposed until you
+      # opt in. Set STORAGE_HOST_ROOT in .env to a host directory (e.g. your HDD) to
+      # index real files. A bare name is a named volume; a path is a host bind-mount.
+      # (Never default to the host home dir: it would index ~/.ssh etc. read-only.)
+      - ${STORAGE_HOST_ROOT:-storage-root-data}:/data:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${STORAGE_PORT:-8083}:8080"
     depends_on:
@@ -39,3 +41,7 @@ services:
       - traefik.http.services.storage.loadbalancer.server.port=8080
       - epicurus.metrics.port=8080
     networks: [epicurus]
+
+# Default index target: an empty named volume (overridden by STORAGE_HOST_ROOT).
+volumes:
+  storage-root-data:

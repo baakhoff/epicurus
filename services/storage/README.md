@@ -24,7 +24,7 @@ to the agent and the web shell.
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Async Postgres DSN. |
 | `NATS_URL` | `nats://localhost:4222` | NATS server (inherited from CoreSettings). |
 | `DEFAULT_TENANT_ID` | `local` | Tenant scope for all indexed rows. |
-| `STORAGE_HOST_ROOT` | `~` | Host path bound to `/data` in compose (set in `.env`). |
+| `STORAGE_HOST_ROOT` | _(empty named volume)_ | Host directory to index, bound read-only to `/data`. Unset → an empty named volume (nothing on the host is exposed); set it to your data directory to index real files. |
 
 ## Running locally
 

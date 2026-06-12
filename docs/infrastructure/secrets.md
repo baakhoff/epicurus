@@ -77,7 +77,10 @@ secret/data/tenants/<tenant_id>/<base>
 ```
 
 The `epicurus-core` policy grants the app token `create / read / update / delete / list`
-on `secret/data/tenants/*` and `list / delete` on `secret/metadata/tenants/*`.
+on `secret/data/tenants/*` and `list / delete` on `secret/metadata/tenants/*`. Because the
+token is issued with `-no-default-policy`, the policy also grants `read` on
+`auth/token/lookup-self` and `update` on `auth/token/renew-self` — the core's secret client
+verifies its token with a lookup-self on connect, which would otherwise be denied.
 
 Registered base paths (set by the core service at runtime):
 

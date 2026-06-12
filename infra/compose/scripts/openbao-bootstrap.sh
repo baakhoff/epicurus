@@ -104,6 +104,16 @@ path "secret/data/tenants/*" {
 path "secret/metadata/tenants/*" {
   capabilities = ["list", "delete"]
 }
+# The app token is created with -no-default-policy, so grant the self-management
+# paths the default policy would have. core-app's SecretStore calls hvac's
+# is_authenticated() (a token lookup-self) before every connection; without this
+# the token works for KV but the auth preflight 403s and core-app refuses to start.
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
 POLICY
 
 # ── 5. App token (non-expiring) ────────────────────────────────────────────────

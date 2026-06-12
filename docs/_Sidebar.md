@@ -10,11 +10,11 @@
 **Services & Modules**
 
 - [Overview](services/index.md)
-- [core-app — the runtime](../../services/core-app/README.md)
-- [web — the UI shell](../../services/web/README.md)
-- [storage](../../services/storage/README.md)
-- [knowledge](../../services/knowledge/README.md)
-- [echo](../../services/echo/README.md)
+- [core-app — the runtime](services/core-app.md)
+- [web — the UI shell](services/web.md)
+- [storage](services/storage.md)
+- [knowledge](services/knowledge.md)
+- [echo](services/echo.md)
 
 **API Reference**
 
@@ -27,10 +27,11 @@
 - [observability](reference/observability.md)
 - [modules & manifest](reference/modules.md)
 - [platform API](reference/platform-api.md)
+- [platform client](reference/platform-client.md)
 
 **Infrastructure**
 
-- [Data plane, edge & ops](../../infra/README.md)
+- [Overview](infrastructure/index.md)
 
 **Developer Guide**
 

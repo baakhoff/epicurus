@@ -30,7 +30,10 @@ COMPOSE_FILE="${COMPOSE_FILE:-infra/compose/docker-compose.yml}"
 SECRETS_FILE="${SECRETS_FILE:-infra/compose/.env.secrets}"
 
 BAO() {
-    docker compose -f "$COMPOSE_FILE" exec -T openbao bao "$@"
+    # Forward BAO_TOKEN into the container — `docker compose exec` does NOT inherit
+    # the host shell's env, so the `BAO_TOKEN=… BAO …` prefixes on the authenticated
+    # calls below would otherwise run tokenless (403). Empty for the pre-auth calls.
+    docker compose -f "$COMPOSE_FILE" exec -T -e BAO_TOKEN="${BAO_TOKEN:-}" openbao bao "$@"
 }
 
 # ── Wait for OpenBao API ──────────────────────────────────────────────────────
@@ -39,7 +42,8 @@ echo ""
 printf "Waiting for OpenBao to be reachable"
 i=0
 while true; do
-    BAO status > /dev/null 2>&1; s=$?
+    # `|| s=$?` keeps `set -e` from killing us on a sealed vault (bao status exits 2).
+    s=0; BAO status > /dev/null 2>&1 || s=$?
     [ "$s" -ne 1 ] && break   # exit 0 = active, 2 = sealed — both mean "running"
     i=$((i + 1))
     [ $i -ge 30 ] && { echo ""; echo "Timed out waiting for OpenBao"; exit 1; }
@@ -55,15 +59,20 @@ initialized=$(printf '%s' "$init_json" | grep -o '"initialized":[^,}]*' | cut -d
 if [ "$initialized" = "false" ]; then
     echo "Initialising (1-of-1 Shamir shares)..."
     init_out=$(BAO operator init -key-shares=1 -key-threshold=1 -format=json)
+    # `-format=json` pretty-prints across multiple lines; flatten whitespace so the
+    # grep/sed below match (b64 keys / tokens never contain spaces, so this is safe).
+    init_out=$(printf '%s' "$init_out" | tr -d ' \t\r\n')
 
-    UNSEAL_KEY=$(printf '%s' "$init_out" | grep -o '"unseal_keys_b64":\["[^"]*"' | sed 's/.*\["\(.*\)"/\1/')
-    ROOT_TOKEN=$(printf '%s' "$init_out" | grep -o '"root_token":"[^"]*"' | cut -d'"' -f4)
+    # Use the OPENBAO_* names the unseal/policy steps below read (and that the
+    # else-branch sources from the file) — not bare UNSEAL_KEY/ROOT_TOKEN.
+    OPENBAO_UNSEAL_KEY=$(printf '%s' "$init_out" | grep -o '"unseal_keys_b64":\["[^"]*"' | sed 's/.*\["\(.*\)"/\1/')
+    OPENBAO_ROOT_TOKEN=$(printf '%s' "$init_out" | grep -o '"root_token":"[^"]*"' | cut -d'"' -f4)
 
     mkdir -p "$(dirname "$SECRETS_FILE")"
     {
         printf '# OpenBao bootstrap secrets — NEVER commit this file.\n'
-        printf 'OPENBAO_UNSEAL_KEY=%s\n' "$UNSEAL_KEY"
-        printf 'OPENBAO_ROOT_TOKEN=%s\n' "$ROOT_TOKEN"
+        printf 'OPENBAO_UNSEAL_KEY=%s\n' "$OPENBAO_UNSEAL_KEY"
+        printf 'OPENBAO_ROOT_TOKEN=%s\n' "$OPENBAO_ROOT_TOKEN"
     } > "$SECRETS_FILE"
     chmod 600 "$SECRETS_FILE"
     echo "Init secrets written to $SECRETS_FILE"
@@ -105,6 +114,8 @@ token_json=$(BAO_TOKEN="$OPENBAO_ROOT_TOKEN" BAO token create \
     -no-default-policy \
     -explicit-max-ttl=0 \
     -format=json)
+# Flatten the pretty-printed JSON (as with init above) before extracting the token.
+token_json=$(printf '%s' "$token_json" | tr -d ' \t\r\n')
 
 APP_TOKEN=$(printf '%s' "$token_json" | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4)
 
@@ -116,7 +127,7 @@ echo "=== Bootstrap complete ==="
 echo ""
 echo "Add these two lines to your .env (or: source $SECRETS_FILE):"
 echo ""
-printf '  OPENBAO_UNSEAL_KEY=%s\n' "$UNSEAL_KEY"
+printf '  OPENBAO_UNSEAL_KEY=%s\n' "$OPENBAO_UNSEAL_KEY"
 printf '  OPENBAO_TOKEN=%s\n'      "$APP_TOKEN"
 echo ""
 echo "The openbao-unseal container uses OPENBAO_UNSEAL_KEY to auto-unseal on"

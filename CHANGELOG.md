@@ -4,16 +4,20 @@ All notable changes to epicurus are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Releases begin at **v0.1.0** — the first version usable on a server with a UI.
-Until then the platform is being built and there is nothing to release.
+`v0.1.0` is the first release — the first version usable on a server with a UI.
 
 A release is cut by pushing a semver tag (`git tag v0.1.0 && git push origin
-v0.1.0`); GitHub Actions publishes a Release with notes grouped by `type:*` label.
+v0.1.0`); GitHub Actions then publishes the GitHub Release and versioned container
+images to GHCR.
 
 ## [Unreleased]
 
-**Phase 1 (the core runtime) is complete** — the platform now runs end to end,
-though it stays pre-release until the first tagged version.
+Phase 2 (knowledge & storage) is in progress.
+
+## [0.1.0] — 2026-06-12
+
+**Phase 1 — the core runtime.** The platform runs end to end: chat from a phone with
+a local or hosted model that calls tools and remembers across sessions.
 
 ### Added
 
@@ -29,4 +33,14 @@ though it stays pre-release until the first tagged version.
   toggle) that renders each module's UI declaratively from its manifest (ADR-0007).
 - **Module manifest UI** — `UiSection` / `UiAction`, served at `GET /manifest`.
 
-Phase 2 (knowledge & storage) is next.
+### Known limitations
+
+An early `0.x` release for personal / self-host use:
+
+- **Secrets are not yet persistent** — OpenBao runs in dev (in-memory) mode, so
+  provider keys and module config are lost when the `openbao` container restarts.
+  Persistent secret storage lands in Phase 3.
+- **The event bus has no authentication** — NATS tenant isolation is cooperative
+  (fine single-user, not multi-tenant). Tracked in #50.
+- **No perimeter is bundled** — the edge gateway only routes; put your own access
+  layer (VPN / reverse proxy / auth proxy) in front (ADR-0008).

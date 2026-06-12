@@ -54,6 +54,36 @@ settings = GreeterSettings()         # reads env / .env
 settings.greeting, settings.is_production, settings.use_json_logs
 ```
 
+## `CoreAppSettings`
+
+```python
+class CoreAppSettings(CoreSettings)
+```
+
+The **core runtime** service's settings (`epicurus_core_app.settings`) — everything
+in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
+
+### Fields (in addition to `CoreSettings`)
+
+| Field | Env var | Type | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). |
+| `llm_default_model` | `LLM_DEFAULT_MODEL` | `str` | `llama3.2` | Model used when a request names none. |
+| `llm_keep_alive` | `LLM_KEEP_ALIVE` | `str` | `5m` | How long Ollama keeps a model loaded after use (ADR-0005). |
+| `llm_fallbacks` | `LLM_FALLBACKS` | `str` | `""` | Comma-separated fallback models, tried in order (e.g. `claude/claude-3-5-sonnet-latest,gpt/gpt-4o`). |
+| `llm_num_retries` | `LLM_NUM_RETRIES` | `int` | `2` | Per-model retries on 429/5xx (LiteLLM backoff). |
+| `module_urls` | `MODULE_URLS` | `str` | `http://echo:8080` | Comma-separated module base URLs; each serves MCP at `<base>/mcp` and its manifest at `<base>/manifest`. |
+| `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | Max tool-calling rounds per agent turn. |
+| `database_url` | `DATABASE_URL` | `str` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for conversation persistence. |
+| `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
+| `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |
+
+### Properties
+
+- **`fallback_models -> list[str]`** — the `llm_fallbacks` chain, parsed.
+- **`module_base_urls -> list[str]`** — the `module_urls`, trimmed of a trailing `/`.
+- **`module_mcp_urls -> list[str]`** — each module's `<base>/mcp` endpoint.
+
 ## Type aliases
 
 ```python

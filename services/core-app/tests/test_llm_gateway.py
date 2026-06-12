@@ -296,3 +296,66 @@ async def test_models_lists_from_ollama(monkeypatch: pytest.MonkeyPatch) -> None
     models = await _gateway().models()
     assert models[0].name == "llama3.2"
     assert models[0].size == 42
+
+
+async def test_stream_chat_assembles_tool_call_fragments(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A streamed tool call arrives in fragments: the name in one chunk, then the JSON
+    # arguments split across two more. stream_chat must coalesce them by index.
+    class _Fn:
+        def __init__(self, name: str | None = None, arguments: str | None = None) -> None:
+            self.name = name
+            self.arguments = arguments
+
+    class _Fragment:
+        def __init__(
+            self,
+            index: int,
+            call_id: str | None = None,
+            name: str | None = None,
+            arguments: str | None = None,
+        ) -> None:
+            self.index = index
+            self.id = call_id
+            self.function = _Fn(name, arguments)
+
+    class _Delta:
+        def __init__(
+            self, content: str | None = None, tool_calls: list[_Fragment] | None = None
+        ) -> None:
+            self.content = content
+            self.tool_calls = tool_calls
+
+    class _Choice:
+        def __init__(self, delta: _Delta) -> None:
+            self.delta = delta
+
+    class _Chunk:
+        def __init__(self, delta: _Delta) -> None:
+            self.choices = [_Choice(delta)]
+
+    async def fake_chunks() -> AsyncIterator[_Chunk]:
+        yield _Chunk(_Delta(content="on it"))
+        yield _Chunk(_Delta(tool_calls=[_Fragment(0, call_id="call_1", name="echo")]))
+        yield _Chunk(_Delta(tool_calls=[_Fragment(0, arguments='{"mess')]))
+        yield _Chunk(_Delta(tool_calls=[_Fragment(0, arguments='age": "hi"}')]))
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[_Chunk]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    events = [
+        event
+        async for event in _gateway().stream_chat(
+            [ChatMessage(role="user", content="echo hi")],
+            tools=[{"type": "function", "function": {"name": "echo"}}],
+        )
+    ]
+
+    assert [e.delta for e in events if e.delta] == ["on it"]
+    results = [e.result for e in events if e.result is not None]
+    assert len(results) == 1
+    call = (results[0].tool_calls or [])[0]
+    assert call["id"] == "call_1"
+    assert call["function"]["name"] == "echo"
+    # the two argument fragments were concatenated into valid JSON
+    assert call["function"]["arguments"] == '{"message": "hi"}'

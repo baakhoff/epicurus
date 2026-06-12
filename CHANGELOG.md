@@ -12,4 +12,21 @@ v0.1.0`); GitHub Actions publishes a Release with notes grouped by `type:*` labe
 
 ## [Unreleased]
 
-Platform foundation in progress. No user-facing release yet.
+**Phase 1 (the core runtime) is complete** — the platform now runs end to end,
+though it stays pre-release until the first tagged version.
+
+### Added
+
+- **Agent** — a thin MCP tool-calling loop with streaming chat (SSE).
+- **LLM gateway** — one provider-agnostic interface over local **Ollama** and hosted
+  providers (Claude, ChatGPT, Grok, DeepSeek, Gemini, and any OpenAI-compatible
+  endpoint): routing, fallback chains, and tenant-scoped usage accounting. Keys live
+  in OpenBao, never in env or logs.
+- **Power states** (Active / Idle / Paused) with idle model unload (ADR-0005).
+- **Cross-chat memory** — conversation history in Postgres plus semantic recall over
+  Qdrant embeddings, scoped per tenant.
+- **Web UI shell** — a phone-first PWA (chat, model manager, provider keys, power
+  toggle) that renders each module's UI declaratively from its manifest (ADR-0007).
+- **Module manifest UI** — `UiSection` / `UiAction`, served at `GET /manifest`.
+
+Phase 2 (knowledge & storage) is next.

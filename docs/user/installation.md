@@ -66,12 +66,16 @@ reverse proxy, auth proxy) in front — see [Configuration](configuration.md).
 | Qdrant | 6333 (HTTP), 6334 (gRPC) |
 | OpenBao | 8200 |
 | Gateway (Traefik) | 8088 (web), 8089 (dashboard) |
+| core-app (runtime) | 8082 |
+| web (UI shell) | 8084 |
 | echo (module) | 8080 |
 | Grafana | 3000 |
 | Prometheus | 9090 |
 | Loki | 3100 |
 | Tempo (OTLP) | 4317 (gRPC), 4318 (HTTP) |
 
-Once the stack is up, open **Grafana** at <http://localhost:3000> for logs,
-metrics, and traces. To change any host port, set it in your root `.env` (the full
-stack reads it) — see [Configuration](configuration.md).
+Once the stack is up, open the **web UI** at <http://localhost:8088/> — chat with
+the agent, manage models and provider keys, configure modules, and toggle power.
+**Grafana** at <http://localhost:3000> has logs, metrics, and traces. To change any
+host port, set it in your root `.env` (the full stack reads it) — see
+[Configuration](configuration.md).

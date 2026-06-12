@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from epicurus_core.manifest import CONTRACT_VERSION
-from epicurus_core.module import EpicurusModule
+from epicurus_core.module import EpicurusModule, add_manifest_route
 
 
 def _greeter() -> EpicurusModule:
@@ -54,3 +57,16 @@ def test_mcp_is_reachable_for_clients() -> None:
     settings = _greeter().mcp.settings
     assert settings.streamable_http_path == "/"
     assert settings.transport_security.enable_dns_rebinding_protection is False
+
+
+def test_manifest_route_serves_the_manifest() -> None:
+    # The core's module registry (and the web shell) read each module's GET /manifest.
+    app = FastAPI()
+    add_manifest_route(app, _greeter())
+    response = TestClient(app).get("/manifest")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "greeter"
+    assert body["version"] == "1.0.0"
+    assert any(tool["name"] == "greet" for tool in body["tools"])

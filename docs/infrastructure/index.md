@@ -15,11 +15,12 @@ The stateful services every block builds on (`infra/compose/`):
 | **Valkey** | `valkey/valkey:8` | 6379 | Cache / queues (Redis-compatible, SSPL-free — ADR-0002). |
 | **NATS** | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring. |
 | **Qdrant** | `qdrant/qdrant:v1.12.4` | 6333, 6334 | Vector DB — memory recall + knowledge RAG. |
-| **OpenBao** | `openbao/openbao:2.2.0` | 8200 | Secrets (dev/in-memory now; persistent in Phase 3). |
+| **OpenBao** | `openbao/openbao:2.2.0` | 8200 | Secrets — persistent file storage, auto-unseal sidecar. See [Secrets](secrets.md). |
 | **MinIO** | `minio/minio` | 9000, 9001 | S3-compatible object store for app-managed objects. |
 
-Dev credentials are intentionally weak and for a local, private box; real secrets come from
-OpenBao in staging/prod. Details: [`infra/compose/README.md`](../../infra/compose/README.md).
+Dev credentials are intentionally weak and for a local, private box. OpenBao is the live
+credential source — provider API keys set via the UI survive full stack restarts.
+Details: [`infra/compose/README.md`](../../infra/compose/README.md).
 
 ## Edge gateway
 

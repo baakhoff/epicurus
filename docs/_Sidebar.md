@@ -33,6 +33,7 @@
 **Infrastructure**
 
 - [Overview](infrastructure/index.md)
+- [Secrets (OpenBao)](infrastructure/secrets.md)
 
 **Developer Guide**
 

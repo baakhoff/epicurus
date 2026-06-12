@@ -1,0 +1,123 @@
+#!/usr/bin/env sh
+# Bootstrap script for OpenBao persistent mode.
+# Run ONCE after the first `docker compose up` (or `task infra-up`).
+#
+# What it does:
+#   1. Initialises OpenBao (1-of-1 Shamir share) if not already done.
+#   2. Unseals OpenBao using the generated key.
+#   3. Enables the KV v2 secrets engine on the `secret/` mount.
+#   4. Creates the `epicurus-core` policy (full tenant-scoped KV access).
+#   5. Creates a non-expiring app token for the core service.
+#   6. Writes OPENBAO_UNSEAL_KEY and OPENBAO_TOKEN to infra/compose/.env.secrets.
+#
+# After running:
+#   - Add OPENBAO_UNSEAL_KEY and OPENBAO_TOKEN from .env.secrets to your .env.
+#   - The openbao-unseal container reads OPENBAO_UNSEAL_KEY from .env on every
+#     stack restart and automatically unseals the vault.
+#   - Keep .env.secrets safe; it holds the single unseal key and the root token.
+#
+# Usage:
+#   sh infra/compose/scripts/openbao-bootstrap.sh
+# or, targeting a non-default OpenBao address:
+#   BAO_ADDR=http://localhost:8200 sh infra/compose/scripts/openbao-bootstrap.sh
+#
+# The script runs the `bao` CLI via `docker compose exec` — no local `bao`
+# installation needed. Set COMPOSE_FILE if you are not running from the repo root.
+
+set -e
+
+COMPOSE_FILE="${COMPOSE_FILE:-infra/compose/docker-compose.yml}"
+SECRETS_FILE="${SECRETS_FILE:-infra/compose/.env.secrets}"
+
+BAO() {
+    docker compose -f "$COMPOSE_FILE" exec -T openbao bao "$@"
+}
+
+# ── Wait for OpenBao API ──────────────────────────────────────────────────────
+echo "=== OpenBao bootstrap ==="
+echo ""
+printf "Waiting for OpenBao to be reachable"
+i=0
+while true; do
+    BAO status > /dev/null 2>&1; s=$?
+    [ "$s" -ne 1 ] && break   # exit 0 = active, 2 = sealed — both mean "running"
+    i=$((i + 1))
+    [ $i -ge 30 ] && { echo ""; echo "Timed out waiting for OpenBao"; exit 1; }
+    printf "."
+    sleep 2
+done
+echo " ready."
+
+# ── 1. Initialise ─────────────────────────────────────────────────────────────
+init_json=$(BAO operator init -status -format=json 2>/dev/null || echo '{"initialized":false}')
+initialized=$(printf '%s' "$init_json" | grep -o '"initialized":[^,}]*' | cut -d: -f2 | tr -d ' "')
+
+if [ "$initialized" = "false" ]; then
+    echo "Initialising (1-of-1 Shamir shares)..."
+    init_out=$(BAO operator init -key-shares=1 -key-threshold=1 -format=json)
+
+    UNSEAL_KEY=$(printf '%s' "$init_out" | grep -o '"unseal_keys_b64":\["[^"]*"' | sed 's/.*\["\(.*\)"/\1/')
+    ROOT_TOKEN=$(printf '%s' "$init_out" | grep -o '"root_token":"[^"]*"' | cut -d'"' -f4)
+
+    mkdir -p "$(dirname "$SECRETS_FILE")"
+    {
+        printf '# OpenBao bootstrap secrets — NEVER commit this file.\n'
+        printf 'OPENBAO_UNSEAL_KEY=%s\n' "$UNSEAL_KEY"
+        printf 'OPENBAO_ROOT_TOKEN=%s\n' "$ROOT_TOKEN"
+    } > "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
+    echo "Init secrets written to $SECRETS_FILE"
+else
+    echo "Already initialised — reading secrets from $SECRETS_FILE"
+    if [ ! -f "$SECRETS_FILE" ]; then
+        echo "ERROR: $SECRETS_FILE not found; cannot unseal. Recreate the volume and re-run."
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    . "$SECRETS_FILE"
+fi
+
+# ── 2. Unseal ─────────────────────────────────────────────────────────────────
+echo "Unsealing..."
+BAO operator unseal "$OPENBAO_UNSEAL_KEY"
+
+# ── 3. KV v2 engine ───────────────────────────────────────────────────────────
+echo "Enabling KV v2 secrets engine at secret/..."
+BAO_TOKEN="$OPENBAO_ROOT_TOKEN" BAO secrets enable -version=2 -path=secret kv 2>/dev/null \
+    || echo "  (already enabled)"
+
+# ── 4. epicurus-core policy ────────────────────────────────────────────────────
+echo "Writing epicurus-core policy..."
+BAO_TOKEN="$OPENBAO_ROOT_TOKEN" BAO policy write epicurus-core - <<'POLICY'
+path "secret/data/tenants/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+path "secret/metadata/tenants/*" {
+  capabilities = ["list", "delete"]
+}
+POLICY
+
+# ── 5. App token (non-expiring) ────────────────────────────────────────────────
+echo "Creating non-expiring app token..."
+token_json=$(BAO_TOKEN="$OPENBAO_ROOT_TOKEN" BAO token create \
+    -display-name=epicurus-core-app \
+    -policy=epicurus-core \
+    -no-default-policy \
+    -explicit-max-ttl=0 \
+    -format=json)
+
+APP_TOKEN=$(printf '%s' "$token_json" | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4)
+
+printf 'OPENBAO_TOKEN=%s\n' "$APP_TOKEN" >> "$SECRETS_FILE"
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+echo ""
+echo "=== Bootstrap complete ==="
+echo ""
+echo "Add these two lines to your .env (or: source $SECRETS_FILE):"
+echo ""
+printf '  OPENBAO_UNSEAL_KEY=%s\n' "$UNSEAL_KEY"
+printf '  OPENBAO_TOKEN=%s\n'      "$APP_TOKEN"
+echo ""
+echo "The openbao-unseal container uses OPENBAO_UNSEAL_KEY to auto-unseal on"
+echo "every stack restart. Keep $SECRETS_FILE safe."

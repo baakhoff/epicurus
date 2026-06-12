@@ -24,5 +24,6 @@
 - [tenancy](reference/tenancy.md)
 - [events](reference/events.md)
 - [modules](reference/modules.md)
+- [platform-api](reference/platform-api.md)
 - [observability](reference/observability.md)
 - [secrets](reference/secrets.md)

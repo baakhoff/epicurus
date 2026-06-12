@@ -93,9 +93,46 @@ log = get_logger(__name__)
 # add_ops_routes(fastapi_app, service_name="greeter")
 ```
 
+## Call the LLM gateway via `PlatformClient`
+
+Modules must never call a language model directly or hold provider API keys.
+Use `PlatformClient` (ADR-0004, ADR-0010) — it proxies through the core's LLM
+gateway and keeps all secrets in the core.
+
+```python
+from epicurus_core import CoreSettings, PlatformClient, PlatformMessage
+
+settings = CoreSettings()
+platform = PlatformClient(
+    base_url=settings.platform_url,      # http://core:8080 on the Docker network
+    tenant_id=settings.default_tenant_id,
+)
+
+# Embed texts — useful for RAG indexing, semantic search, etc.
+vectors = await platform.embed(["text to index", "another chunk"])
+# -> [[0.023, -0.117, ...], [0.089, 0.042, ...]]
+
+# Chat completion — the core routes, falls back, and meters usage
+result = await platform.chat(
+    [PlatformMessage(role="user", content="summarise this document")],
+    model="claude/claude-3-5-sonnet-latest",  # optional override
+)
+print(result.content)
+```
+
+- The core's configured embedding model is used when `model` is omitted from
+  `embed()`.
+- The core handles fallback chains (local → hosted) and power-state checks
+  (ADR-0005).
+- A usage event is emitted on NATS after every call — no prompt content,
+  no keys.
+
+See [Platform API reference](../reference/platform-api.md) for the full HTTP
+contract and `PlatformChatResponse` type.
+
 ## Conventions
 
-- **Don't call language models directly.** Request AI from the core — it owns the
-  model keys and routing.
+- **Don't call language models directly.** Use `PlatformClient` — it owns the
+  model keys, routing, and usage accounting.
 - **Fetch secrets from OpenBao at runtime**, never from env files or git.
 - **Keep the module stateless**; put state in the data-plane services.

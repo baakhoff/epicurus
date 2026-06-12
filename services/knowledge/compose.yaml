@@ -23,7 +23,7 @@ services:
       # Set KNOWLEDGE_HOST_VAULT in .env to a host directory (your Obsidian vault).
       - ${KNOWLEDGE_HOST_VAULT:-knowledge-vault-data}:/vault:ro
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${KNOWLEDGE_PORT:-8084}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${KNOWLEDGE_PORT:-8085}:8080"
     depends_on:
       nats:
         condition: service_started

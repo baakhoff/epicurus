@@ -231,6 +231,26 @@ async def test_num_retries_passed_to_litellm(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["num_retries"] == 2
 
 
+async def test_embed_emits_usage_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _EmbedResp:
+        def model_dump(self) -> dict[str, Any]:
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbedResp:
+        return _EmbedResp()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    bus = _FakeBus()
+    await _gateway(bus=bus).embed(["hello"])
+
+    assert len(bus.published) == 1
+    subject, data, tenant = bus.published[0]
+    assert subject == "llm.usage"
+    assert tenant == "local"
+    assert data["model"].startswith("ollama/")
+    assert "api_key" not in data
+
+
 async def test_embed_refuses_when_paused() -> None:
     power = PowerController()
     power.pause()

@@ -12,6 +12,7 @@ dependencies = [
     "nats-py>=2.6",
     "mcp>=1.2",
     "hvac>=2.1",
+    "httpx>=0.27",
 ]
 
 [build-system]

@@ -106,7 +106,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="epicurus core", lifespan=lifespan)
     add_ops_routes(app, service_name=SERVICE_NAME, version=_service_version())
-    app.include_router(create_platform_router(settings))
+    app.include_router(create_platform_router(settings, gateway))
     app.include_router(create_llm_router(gateway))
     app.include_router(create_power_router(gateway, power))
     app.include_router(create_agent_router(agent, memory, settings.default_tenant_id))

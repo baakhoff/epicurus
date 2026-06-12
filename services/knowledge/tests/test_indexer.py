@@ -175,4 +175,94 @@ async def test_manifest_declares_tool_and_event(note_index: NoteIndex, vault: Pa
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert "knowledge_reindex" in tool_names
+    assert "knowledge_search" in tool_names
     assert any(e.subject == "knowledge.index.completed" for e in manifest.events_emitted)
+    assert manifest.ui is not None
+    assert manifest.ui.status_url == "/status"
+
+
+async def test_search_empty_when_no_collection(note_index: NoteIndex, vault: Path) -> None:
+    qdrant = _make_mock_qdrant()
+    qdrant.collection_exists = AsyncMock(return_value=False)
+    indexer = KnowledgeIndexer(
+        note_index,
+        qdrant,
+        _make_mock_platform(),
+        vault_path=vault,
+        tenant=TENANT,
+    )
+    results = await indexer.search("anything")
+    assert results == []
+
+
+async def test_search_returns_hits(note_index: NoteIndex, vault: Path) -> None:
+    from unittest.mock import MagicMock
+
+    qdrant = _make_mock_qdrant()
+
+    # Fake Qdrant ScoredPoint result.
+    hit = MagicMock()
+    hit.score = 0.9
+    hit.payload = {
+        "note_path": "note_a.md",
+        "heading": "Note A",
+        "text": "Content of A.",
+    }
+    qdrant.search = AsyncMock(return_value=[hit])
+
+    indexer = KnowledgeIndexer(
+        note_index,
+        qdrant,
+        _make_mock_platform(),
+        vault_path=vault,
+        tenant=TENANT,
+    )
+    results = await indexer.search("content of A", k=1)
+    assert len(results) == 1
+    assert results[0]["note_path"] == "note_a.md"
+    assert results[0]["heading"] == "Note A"
+    assert results[0]["text"] == "Content of A."
+    assert results[0]["score"] == pytest.approx(0.9)
+
+
+async def test_search_skips_hits_with_no_payload(note_index: NoteIndex, vault: Path) -> None:
+    from unittest.mock import MagicMock
+
+    qdrant = _make_mock_qdrant()
+    hit_no_payload = MagicMock()
+    hit_no_payload.score = 0.5
+    hit_no_payload.payload = None
+    qdrant.search = AsyncMock(return_value=[hit_no_payload])
+
+    indexer = KnowledgeIndexer(
+        note_index,
+        qdrant,
+        _make_mock_platform(),
+        vault_path=vault,
+        tenant=TENANT,
+    )
+    results = await indexer.search("query")
+    assert results == []
+
+
+async def test_mcp_tool_search(note_index: NoteIndex, vault: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from epicurus_knowledge.service import build_module
+
+    qdrant = _make_mock_qdrant()
+    hit = MagicMock()
+    hit.score = 0.8
+    hit.payload = {"note_path": "note_b.md", "heading": None, "text": "Content of B."}
+    qdrant.search = AsyncMock(return_value=[hit])
+
+    indexer = KnowledgeIndexer(
+        note_index,
+        qdrant,
+        _make_mock_platform(),
+        vault_path=vault,
+        tenant=TENANT,
+    )
+    module = build_module(indexer)
+    _content, structured = await module.mcp.call_tool("knowledge_search", {"query": "B", "k": 1})
+    assert structured is not None

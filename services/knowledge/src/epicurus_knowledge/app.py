@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
+from typing import Any
 
 from fastapi import FastAPI
 from qdrant_client import AsyncQdrantClient
@@ -81,6 +82,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+
+    @app.get("/status")
+    async def get_status() -> dict[str, Any]:
+        """Vault index statistics for the manifest-driven UI status panel."""
+        note_count = await note_index.count(tenant=settings.default_tenant_id)
+        last_indexed_at = await note_index.last_indexed_at(tenant=settings.default_tenant_id)
+        return {"note_count": note_count, "last_indexed_at": last_indexed_at}
+
     app.mount("/mcp", mcp_app)
 
     return app

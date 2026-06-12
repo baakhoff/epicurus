@@ -132,3 +132,19 @@ class NoteIndex:
                 select(_StoredNote.note_path).where(_StoredNote.tenant == tenant)
             )
             return list(rows)
+
+    async def count(self, *, tenant: str) -> int:
+        """Return the number of indexed notes for *tenant*."""
+        async with self._session() as session:
+            result = await session.scalar(
+                select(func.count(_StoredNote.id)).where(_StoredNote.tenant == tenant)
+            )
+            return int(result) if result is not None else 0
+
+    async def last_indexed_at(self, *, tenant: str) -> str | None:
+        """Return the ISO-8601 timestamp of the most recent index run for *tenant*, or None."""
+        async with self._session() as session:
+            result = await session.scalar(
+                select(func.max(_StoredNote.indexed_at)).where(_StoredNote.tenant == tenant)
+            )
+            return result.isoformat() if result is not None else None

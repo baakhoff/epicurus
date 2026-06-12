@@ -4,29 +4,49 @@
 for retrieval-augmented generation: it chunks notes, embeds them **through the core**, and
 maintains a tenant-scoped Qdrant collection — fully incrementally. Host port **8085**.
 
-> Today the module **ingests and maintains the index**. The retrieval tool that lets the
-> agent answer from the vault (`knowledge_search`) lands with its own card (#69); this
-> page covers the ingestion half that exists now.
-
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
 
-| Tool | Purpose |
-| --- | --- |
-| `knowledge_reindex()` | Re-walk the vault and update the index; returns counts (`indexed` / `deleted` / `unchanged`). |
+| Tool | Inputs | Returns |
+| --- | --- | --- |
+| `knowledge_search(query, k=5)` | `query`: search phrase; `k`: max results | List of `{note_path, heading, text, score}` ordered by relevance. |
+| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts. |
+
+The agent calls `knowledge_search` to ground answers in vault content and cite the source
+note. It calls `knowledge_reindex` to refresh the index after notes have changed.
 
 ### Events (NATS)
 
 Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 
-### Web UI (manifest)
+### Web UI (manifest, ADR-0007 Tier 1)
 
-A **Reindex** action and a vault-path config field, auto-rendered by the shell.
+| Panel | What it shows / does |
+| --- | --- |
+| **Status** | `note_count` (notes indexed) · `last_indexed_at` (ISO-8601 timestamp). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
+| **Settings** | Vault path (`VAULT_PATH`) — editable in the shell. |
+| **Actions** | **Re-index vault** — triggers `knowledge_reindex` through the core. |
+
+No module code runs in the shell; all data flows through the core.
 
 ### HTTP
 
-`GET /health` · `GET /metrics` · `GET /manifest`.
+| Endpoint | Description |
+| --- | --- |
+| `GET /health` | Liveness probe. |
+| `GET /metrics` | Prometheus metrics. |
+| `GET /manifest` | Module manifest (tools, events, UI declaration). |
+| `GET /status` | Live index stats: `{note_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
+
+## How search works
+
+1. The agent calls `knowledge_search(query, k)`.
+2. The module embeds `query` via the core's platform API (`POST /platform/v1/embed`).
+3. It queries the tenant's Qdrant collection for the top-k nearest vectors.
+4. Returns the matching chunks with `note_path` and `heading` so the agent can cite the
+   source note in its reply.
 
 ## How indexing works
 
@@ -63,13 +83,13 @@ which defaults to an **empty named volume** (point it at your vault to index rea
 - **Postgres `knowledge_notes`** — the incremental-index ledger: `id`, `tenant`,
   `note_path`, `mtime_ns` (BigInteger — nanosecond mtimes overflow int32), `content_hash`
   (sha-256), `chunk_count`, `indexed_at`; unique on `(tenant, note_path)`.
-- **Qdrant `<tenant>__knowledge`** — chunk embeddings (768-dim, cosine), one collection
-  per tenant.
+- **Qdrant `<tenant>__knowledge`** — chunk embeddings (cosine), one collection per tenant.
+  Each point payload: `{note_path, chunk_index, heading, text}`.
 
 ## Dependencies
 
-core-app (embeddings via the platform API) · Qdrant (vectors) · Postgres (note tracking)
-· NATS (the index-completed event) · the mounted vault.
+core-app (embeddings + status proxy via the platform API) · Qdrant (vectors) · Postgres
+(note tracking) · NATS (the index-completed event) · the mounted vault.
 
 ## Run & extend
 
@@ -77,6 +97,13 @@ core-app (embeddings via the platform API) · Qdrant (vectors) · Postgres (note
 KNOWLEDGE_HOST_VAULT=/path/to/your/vault docker compose up -d knowledge
 ```
 
-Package `epicurus_knowledge`: `chunker.py` (heading-aware splitter), `db.py`
-(`knowledge_notes`), `indexer.py` (the diff + embed + upsert run), `service.py` (the MCP
-tool + manifest UI), `app.py` (lifespan + initial index on startup).
+Package `epicurus_knowledge`:
+
+| Module | Responsibility |
+| --- | --- |
+| `chunker.py` | Heading-aware markdown splitter. |
+| `db.py` | `knowledge_notes` Postgres ledger (`NoteIndex`). |
+| `indexer.py` | Diff + embed + upsert run + semantic search (`KnowledgeIndexer`). |
+| `service.py` | MCP tools (`knowledge_search`, `knowledge_reindex`) + manifest UI. |
+| `app.py` | Lifespan, `GET /status` endpoint, initial index on startup. |
+| `settings.py` | `KnowledgeSettings`. |

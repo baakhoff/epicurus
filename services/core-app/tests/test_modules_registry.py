@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -42,20 +43,39 @@ def _echo_manifest() -> ModuleManifest:
     )
 
 
+def _knowledge_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="knowledge",
+        version="0.2.0",
+        ui=UiSection(summary="vault RAG", status_url="/status", actions=[]),
+    )
+
+
 class _StubRegistry(ModuleRegistry):
     """Registry with the network probe replaced by a canned snapshot."""
 
-    def __init__(self, *, healthy: bool = True, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        healthy: bool = True,
+        manifest: ModuleManifest | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(["http://echo:8080"], **kwargs)
         self._healthy = healthy
+        self._manifest = manifest or _echo_manifest()
 
     async def _probe(self, base: str) -> ModuleSnapshot:
-        return ModuleSnapshot(manifest=_echo_manifest(), status=ModuleStatus(healthy=self._healthy))
+        return ModuleSnapshot(manifest=self._manifest, status=ModuleStatus(healthy=self._healthy))
 
 
-def _registry(*, healthy: bool = True) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
+def _registry(
+    *, healthy: bool = True, manifest: ModuleManifest | None = None
+) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
     mcp, secrets = _FakeMcp(), _FakeSecrets()
-    registry = _StubRegistry(healthy=healthy, mcp=mcp, secrets=secrets, tenant="local")  # type: ignore[arg-type]
+    registry = _StubRegistry(  # type: ignore[arg-type]
+        healthy=healthy, manifest=manifest, mcp=mcp, secrets=secrets, tenant="local"
+    )
     return registry, mcp, secrets
 
 
@@ -99,3 +119,38 @@ async def test_set_config_for_unknown_module_is_404() -> None:
     registry, _, _ = _registry()
     with pytest.raises(HTTPException):
         await registry.set_config("ghost", {"a": 1})
+
+
+async def test_get_status_proxies_module_status_url() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_knowledge_manifest())
+
+    # httpx Response.raise_for_status() and .json() are synchronous.
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"note_count": 42, "last_indexed_at": "2026-06-13T10:00:00"}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.get_status("knowledge")
+
+    assert result["note_count"] == 42
+    mock_client.get.assert_called_once_with("/status")
+
+
+async def test_get_status_404_when_no_status_url() -> None:
+    registry, _, _ = _registry()  # echo manifest has no status_url
+    with pytest.raises(HTTPException) as err:
+        await registry.get_status("echo")
+    assert err.value.status_code == 404
+
+
+async def test_get_status_404_for_unknown_module() -> None:
+    registry, _, _ = _registry(manifest=_knowledge_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_status("ghost")
+    assert err.value.status_code == 404

@@ -10,7 +10,7 @@ os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("PLATFORM_URL", "http://localhost:8080")
 
 
-def test_app_exposes_ops_mcp_and_manifest_routes() -> None:
+def test_app_exposes_ops_mcp_manifest_and_status_routes() -> None:
     from epicurus_knowledge.app import create_app
 
     app = create_app()
@@ -18,6 +18,7 @@ def test_app_exposes_ops_mcp_and_manifest_routes() -> None:
     assert "/health" in paths
     assert "/metrics" in paths
     assert "/manifest" in paths
+    assert "/status" in paths
     assert any(p.startswith("/mcp") for p in paths)
 
 

@@ -106,6 +106,23 @@ class ModuleRegistry:
         await self._resolve(name)  # only known modules
         await self._secrets.set(f"modules/{name}/config", values, self._tenant)
 
+    async def get_status(self, name: str) -> dict[str, Any]:
+        """Proxy the module's declared ``status_url`` endpoint to the caller.
+
+        The module's manifest must declare ``ui.status_url`` (e.g. ``/status``);
+        the core fetches that path on the module and returns the JSON body.
+        Returns 404 if the module is unreachable or has no ``status_url``.
+        """
+        base, manifest = await self._resolve(name)
+        status_url = manifest.ui.status_url if manifest.ui else None
+        if not status_url:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no status_url")
+        async with httpx.AsyncClient(base_url=base, timeout=5) as client:
+            resp = await client.get(status_url)
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -127,5 +144,9 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.post("/{name}/tools/{tool}", response_model=ToolResult)
     async def invoke_tool(name: str, tool: str, request: ToolInvocation) -> ToolResult:
         return ToolResult(result=await registry.invoke(name, tool, request.arguments))
+
+    @router.get("/{name}/status")
+    async def get_module_status(name: str) -> dict[str, Any]:
+        return await registry.get_status(name)
 
     return router

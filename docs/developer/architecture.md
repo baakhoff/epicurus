@@ -72,6 +72,7 @@ The backing services every module can rely on:
 | **NATS** (JetStream) | the event backbone |
 | **Qdrant** | vector database |
 | **OpenBao** | secrets |
+| **MinIO** | S3-compatible object store for app-managed objects (buckets are tenant-scoped; the storage module writes here) |
 
 These come up with the [compose stack](../user/installation.md).
 

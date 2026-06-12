@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, UniqueConstraint, delete, func, select
+from sqlalchemy import BigInteger, DateTime, Integer, String, UniqueConstraint, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -44,8 +44,9 @@ class _StoredNote(_Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant: Mapped[str] = mapped_column(String(63), index=True)
     note_path: Mapped[str] = mapped_column(String(4096))
-    # Modification time in nanoseconds for precise change detection.
-    mtime_ns: Mapped[int] = mapped_column(Integer)
+    # Modification time in nanoseconds for precise change detection. BigInteger:
+    # nanosecond epochs (~1.8e18) overflow Postgres INTEGER (int32); SQLite hides this.
+    mtime_ns: Mapped[int] = mapped_column(BigInteger)
     # SHA-256 hex digest of the note's raw bytes.
     content_hash: Mapped[str] = mapped_column(String(64))
     # Number of chunks currently indexed in Qdrant for this note.

@@ -1,0 +1,50 @@
+# Knowledge module — per-module compose fragment (ADR-0006).
+# Add to the top-level compose.yaml `include:` list to enable this module.
+services:
+  knowledge:
+    build:
+      context: ../..
+      dockerfile: services/knowledge/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-knowledge:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
+      QDRANT_URL: http://qdrant:6333
+      # Base URL of the core service on the internal Docker network.
+      PLATFORM_URL: http://core:8080
+      # Absolute path inside the container to the Obsidian vault.
+      # Mount your vault directory here (e.g. KNOWLEDGE_HOST_VAULT in .env).
+      VAULT_PATH: ${VAULT_PATH:-/vault}
+    volumes:
+      # By default an empty named volume — nothing is exposed until you opt in.
+      # Set KNOWLEDGE_HOST_VAULT in .env to a host directory (your Obsidian vault).
+      - ${KNOWLEDGE_HOST_VAULT:-knowledge-vault-data}:/vault:ro
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${KNOWLEDGE_PORT:-8084}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.knowledge.rule=Host(`knowledge.localhost`)
+      - traefik.http.routers.knowledge.entrypoints=web
+      - traefik.http.services.knowledge.loadbalancer.server.port=8080
+      - epicurus.metrics.port=8080
+    networks: [epicurus]
+
+# Default vault target: an empty named volume (overridden by KNOWLEDGE_HOST_VAULT).
+volumes:
+  knowledge-vault-data:

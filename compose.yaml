@@ -13,3 +13,4 @@ include:
   - infra/ollama/compose.yaml
   - services/echo/compose.yaml
   - services/core-app/compose.yaml
+  - services/web/compose.yaml

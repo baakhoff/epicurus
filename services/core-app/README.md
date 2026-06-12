@@ -21,8 +21,12 @@ What it serves today:
   - `POST /platform/v1/llm/chat` — a completion for a list of messages. `model` is
     `<provider>/<model>` (e.g. `claude/claude-3-5-sonnet-latest`); a bare name
     (e.g. `llama3.2`) targets local Ollama.
-  - `GET /platform/v1/llm/models` · `POST /platform/v1/llm/pull` — list / fetch local models.
-  - `GET /platform/v1/llm/providers` — providers and whether each one's key is set.
+  - `GET /platform/v1/llm/models` · `POST /platform/v1/llm/pull` — list / fetch local
+    models; `POST /platform/v1/llm/pull/stream` streams pull progress as SSE;
+    `DELETE /platform/v1/llm/models?name=…` removes one.
+  - `GET /platform/v1/llm/providers` — providers and whether each one's key is set;
+    `PUT` / `DELETE /platform/v1/llm/providers/{alias}/key` stores / clears a hosted
+    provider's API key (core → OpenBao; never logged, never returned).
   - `GET` + `PUT /platform/v1/power` — the main-page power toggle (ADR-0005):
     `paused` unloads models and refuses inference (`503`); `idle` resumes.
 - The **agent** (ADR-0001) — a thin tool-calling loop:
@@ -30,6 +34,19 @@ What it serves today:
     LLM, runs any tool calls over MCP, feeds the results back, and loops to an answer
     (`AGENT_MAX_STEPS`, default 4). The core is the **MCP host**; the modules it
     discovers tools from are set by `MCP_MODULE_URLS` (default the echo module).
+  - `POST /platform/v1/agent/chat/stream` — the same turn as **SSE**: `delta`
+    (content tokens), `tool` (a tool call ran), `done` (the final `AgentTurn`),
+    `error`. This is what the web shell's chat speaks.
+  - `GET /platform/v1/agent/sessions` · `GET /platform/v1/agent/sessions/{id}` ·
+    `DELETE /platform/v1/agent/sessions/{id}` — list conversations (last snippet +
+    timestamps), fetch one's messages, or forget one (rows + recall vectors).
+- The **module registry** (ADR-0004/0007) — what the web shell renders:
+  - `GET /platform/v1/modules` — every configured module: its **manifest** (tools,
+    events, declared UI) fetched from the module's `GET /manifest`, plus live health.
+  - `GET` / `PUT /platform/v1/modules/{name}/config` — the module's config values,
+    stored tenant-scoped in OpenBao (`modules/<name>/config`).
+  - `POST /platform/v1/modules/{name}/tools/{tool}` — invoke a manifest-declared UI
+    action (runs the module's MCP tool through the core's MCP host).
 - **Cross-chat memory** — pass a `session_id` to `POST /platform/v1/agent/chat` and the
   turn is grounded in that session's prior messages **plus** semantically recalled
   snippets from earlier conversations (same tenant); the new input and the answer are
@@ -37,7 +54,7 @@ What it serves today:
   from a local model. Memory is best-effort — if the store, vector DB, or embedder is
   down, the turn still answers, just without memory. Omit `session_id` for a stateless turn.
 
-The web UI shell lands with its Phase-1 card (#40).
+The [web shell](../web/) consumes all of this — it is the human face of the platform.
 
 ## Develop
 

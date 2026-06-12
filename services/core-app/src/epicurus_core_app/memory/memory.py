@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.recall import SemanticRecall
-from epicurus_core_app.memory.store import ConversationStore
+from epicurus_core_app.memory.store import ConversationStore, MessageRecord, SessionSummary
 
 _INDEXED_ROLES = {"user", "assistant"}
 
@@ -39,3 +39,17 @@ class Memory:
 
     async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
         return await self._recall.recall(tenant=tenant, query=query, limit=limit)
+
+    async def sessions(self, *, tenant: str) -> list[SessionSummary]:
+        """The tenant's conversations, most recently active first."""
+        return await self._store.sessions(tenant=tenant)
+
+    async def messages(self, *, tenant: str, session_id: str) -> list[MessageRecord]:
+        """A session's full transcript with timestamps."""
+        return await self._store.messages(tenant=tenant, session_id=session_id)
+
+    async def forget(self, *, tenant: str, session_id: str) -> int:
+        """Erase a session everywhere — history rows and recall vectors."""
+        removed = await self._store.delete_session(tenant=tenant, session_id=session_id)
+        await self._recall.forget_session(tenant=tenant, session_id=session_id)
+        return removed

@@ -1,0 +1,55 @@
+# The web shell: static SPA + a same-origin reverse proxy to the core.
+# Rendered by the image entrypoint (envsubst): ${CORE_APP_URL} only.
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # gzip the text assets we serve (woff2/png are already compressed).
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml application/manifest+json;
+
+    location = /healthz {
+        add_header Content-Type text/plain;
+        return 200 'ok';
+    }
+
+    # The core platform API. Buffering OFF end-to-end — SSE (chat tokens,
+    # model-pull progress) must stream, never arrive as one blob.
+    location /platform/ {
+        # Resolve at request time via Docker's DNS so nginx starts (and keeps
+        # serving the UI) even while the core is down or restarting.
+        resolver 127.0.0.11 valid=15s;
+        set $core ${CORE_APP_URL};
+        proxy_pass $core;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    # Hashed build assets are immutable; cache them hard.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # The service worker and entry document must always revalidate.
+    location = /sw.js {
+        add_header Cache-Control "no-cache";
+        try_files $uri =404;
+    }
+
+    # SPA fallback. Every asset is vendored — the CSP proves it: this app
+    # may talk only to its own origin.
+    location / {
+        add_header Cache-Control "no-cache";
+        add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'" always;
+        try_files $uri $uri/ /index.html;
+    }
+}

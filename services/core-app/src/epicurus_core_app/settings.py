@@ -19,8 +19,10 @@ class CoreAppSettings(CoreSettings):
     llm_fallbacks: str = ""
     # Per-model retries on 429 / 5xx (exponential backoff), handled by LiteLLM.
     llm_num_retries: int = 2
-    # Comma-separated module MCP endpoints the agent discovers + calls tools from.
-    mcp_module_urls: str = "http://echo:8080/mcp"
+    # Comma-separated module base URLs. Each module serves its MCP tools at
+    # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
+    # (the registry + web shell read these).
+    module_urls: str = "http://echo:8080"
     # Max tool-calling rounds in one agent turn before it must answer.
     agent_max_steps: int = 4
     # Postgres DSN (async driver) for conversation persistence.
@@ -36,6 +38,11 @@ class CoreAppSettings(CoreSettings):
         return [m.strip() for m in self.llm_fallbacks.split(",") if m.strip()]
 
     @property
+    def module_base_urls(self) -> list[str]:
+        """The module base URLs parsed from ``module_urls``."""
+        return [u.strip().rstrip("/") for u in self.module_urls.split(",") if u.strip()]
+
+    @property
     def module_mcp_urls(self) -> list[str]:
-        """The module MCP endpoints parsed from ``mcp_module_urls``."""
-        return [u.strip() for u in self.mcp_module_urls.split(",") if u.strip()]
+        """Each module's MCP endpoint (``<base>/mcp``)."""
+        return [f"{base}/mcp" for base in self.module_base_urls]

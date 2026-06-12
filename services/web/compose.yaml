@@ -1,0 +1,40 @@
+# Web shell — a per-module compose fragment (ADR-0006), assembled into the
+# top-level stack via the root compose.yaml `include`.
+services:
+  web:
+    build:
+      context: ../..
+      dockerfile: services/web/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-web:latest
+    restart: unless-stopped
+    environment:
+      # Where nginx proxies /platform/ — the core, on the internal network.
+      CORE_APP_URL: http://core-app:8080
+    # Loopback-bound by default; the gateway is the intended front door.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8084}:8080"
+    depends_on:
+      core-app:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    labels:
+      # Routed by the edge gateway (ADR-0008): by name, and as the lowest-
+      # priority catch-all so a phone on the LAN/VPN reaches the UI at
+      # http://<host>:8088/ with no Host alias. Named routers keep priority.
+      - traefik.enable=true
+      - traefik.http.routers.web.rule=Host(`web.localhost`)
+      - traefik.http.routers.web.entrypoints=web
+      - traefik.http.routers.web.service=web
+      - traefik.http.routers.web-catchall.rule=PathPrefix(`/`)
+      - traefik.http.routers.web-catchall.priority=1
+      - traefik.http.routers.web-catchall.entrypoints=web
+      - traefik.http.routers.web-catchall.service=web
+      - traefik.http.services.web.loadbalancer.server.port=8080
+      # Flush streamed responses (SSE) immediately through the gateway.
+      - traefik.http.services.web.loadbalancer.responseforwarding.flushinterval=1ms
+    networks: [epicurus]

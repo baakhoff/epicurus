@@ -11,13 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
-from epicurus_core.manifest import CONTRACT_VERSION, EventSpec, ModuleManifest, ToolSpec
+from epicurus_core.manifest import CONTRACT_VERSION, EventSpec, ModuleManifest, ToolSpec, UiSection
 
-__all__ = ["EpicurusModule"]
+__all__ = ["EpicurusModule", "add_manifest_route"]
 
 Decorator = Callable[[Callable[..., Any]], Callable[..., Any]]
 
@@ -39,11 +40,17 @@ class EpicurusModule:
         description: str = "",
         instructions: str | None = None,
         image: str | None = None,
+        config: list[str] | None = None,
+        secrets: list[str] | None = None,
+        ui: UiSection | None = None,
     ) -> None:
         self._name = name
         self._version = version
         self._description = description
         self._image = image
+        self._config = list(config or [])
+        self._secrets = list(secrets or [])
+        self._ui = ui
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -85,7 +92,10 @@ class EpicurusModule:
         config: list[str] | None = None,
         secrets: list[str] | None = None,
     ) -> ModuleManifest:
-        """Build the manifest from the registered tools and declared events."""
+        """Build the manifest from the registered tools and declared events.
+
+        ``config``/``secrets`` override what was declared at construction.
+        """
         tools = [
             ToolSpec(name=t.name, description=t.description or "", input_schema=t.inputSchema)
             for t in await self._mcp.list_tools()
@@ -99,10 +109,23 @@ class EpicurusModule:
             tools=tools,
             events_emitted=list(self._events_emitted),
             events_consumed=list(self._events_consumed),
-            config=config or [],
-            secrets=secrets or [],
+            config=config if config is not None else self._config,
+            secrets=secrets if secrets is not None else self._secrets,
+            ui=self._ui,
         )
 
     def http_app(self) -> Starlette:
         """ASGI app serving MCP over streamable HTTP (internal Docker network only)."""
         return self._mcp.streamable_http_app()
+
+
+def add_manifest_route(app: FastAPI, module: EpicurusModule) -> None:
+    """Serve the module's manifest at ``GET /manifest``.
+
+    The core's module registry reads this to surface the module — tools, events,
+    and its declarative UI — to the agent and the web shell (ADR-0004 / ADR-0007).
+    """
+
+    @app.get("/manifest", response_model=ModuleManifest)
+    async def manifest() -> ModuleManifest:
+        return await module.manifest()

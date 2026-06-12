@@ -11,8 +11,15 @@ from epicurus_core._version import __version__
 from epicurus_core.config import CoreSettings, Environment, LogLevel
 from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
 from epicurus_core.logging import configure_logging, get_logger
-from epicurus_core.manifest import CONTRACT_VERSION, EventSpec, ModuleManifest, ToolSpec
-from epicurus_core.module import EpicurusModule
+from epicurus_core.manifest import (
+    CONTRACT_VERSION,
+    EventSpec,
+    ModuleManifest,
+    ToolSpec,
+    UiAction,
+    UiSection,
+)
+from epicurus_core.module import EpicurusModule, add_manifest_route
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
 from epicurus_core.secret_store import SecretError, SecretStore
 from epicurus_core.tenancy import (
@@ -46,7 +53,10 @@ __all__ = [
     "SecretStore",
     "TenantError",
     "ToolSpec",
+    "UiAction",
+    "UiSection",
     "__version__",
+    "add_manifest_route",
     "add_ops_routes",
     "configure_logging",
     "create_ops_router",

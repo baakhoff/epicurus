@@ -14,6 +14,7 @@ content, no keys). Retries on 429/5xx use LiteLLM's exponential backoff.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -28,6 +29,7 @@ from epicurus_core_app.llm.models import (
     ChatResult,
     ModelInfo,
     ProviderInfo,
+    StreamEvent,
     UsageEvent,
 )
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
@@ -38,6 +40,10 @@ litellm.drop_params = True
 log = get_logger("epicurus_core_app.llm")
 
 USAGE_SUBJECT = "llm.usage"
+
+
+class UnknownProviderError(LookupError):
+    """Raised when a provider alias does not exist or cannot hold a key."""
 
 
 class LlmGateway:
@@ -191,6 +197,74 @@ class LlmGateway:
             tenant_id=tenant_id,
         )
 
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tenant_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream a completion: ``delta`` events per token, then one ``result`` event.
+
+        Tool-call fragments are assembled across chunks, so the final event's
+        ``result.tool_calls`` is complete — the agent loop streams every round.
+        Uses the first available candidate (no mid-stream fallback).
+        """
+        candidate = next((c for c in self._candidates(model) if self._is_available(c)), None)
+        if candidate is None:
+            raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
+        config = await self._call_config(candidate, tenant_id)
+        start = time.monotonic()
+        response = await litellm.acompletion(
+            messages=[m.model_dump(exclude_none=True) for m in messages],
+            tools=tools,
+            stream=True,
+            num_retries=self._num_retries,
+            **config,
+        )
+        self._power.mark_active()
+        content_parts: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        async for chunk in response:
+            choices = chunk.choices
+            if not choices:
+                continue
+            delta = choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+                yield StreamEvent(delta=delta.content)
+            for fragment in delta.tool_calls or []:
+                index = fragment.index or 0
+                entry = calls.setdefault(
+                    index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                if fragment.id:
+                    entry["id"] = fragment.id
+                function = getattr(fragment, "function", None)
+                if function is None:
+                    continue
+                if function.name:
+                    entry["function"]["name"] = function.name
+                arguments = function.arguments
+                if isinstance(arguments, str):
+                    entry["function"]["arguments"] += arguments
+                elif arguments is not None:  # some providers send whole args as a dict
+                    entry["function"]["arguments"] = arguments
+        result = ChatResult(
+            model=config["model"],
+            content="".join(content_parts),
+            tool_calls=[calls[i] for i in sorted(calls)] or None,
+        )
+        yield StreamEvent(result=result)
+        await self._emit_usage(
+            model=config["model"],
+            prompt_tokens=None,
+            completion_tokens=None,
+            latency_ms=(time.monotonic() - start) * 1000,
+            tenant_id=tenant_id,
+        )
+
     async def _emit_usage(
         self,
         *,
@@ -227,13 +301,49 @@ class LlmGateway:
         data: dict[str, Any] = response.model_dump()
         return [item["embedding"] for item in data["data"]]
 
+    async def set_provider_key(
+        self,
+        alias: str,
+        *,
+        api_key: str,
+        api_base: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        """Store a hosted provider's API key in OpenBao (tenant-scoped).
+
+        The key is held only by the secret store — never logged, never returned.
+        """
+        provider = registry.PROVIDERS.get(alias)
+        if provider is None or provider.secret_path is None:
+            raise UnknownProviderError(f"no hosted provider named {alias!r}")
+        if provider.needs_base_url and not api_base:
+            raise ValueError(f"provider {alias!r} needs an api_base (OpenAI-compatible endpoint)")
+        data: dict[str, Any] = {"api_key": api_key}
+        if api_base:
+            data["api_base"] = api_base
+        await self._secrets.set(provider.secret_path, data, tenant_id or self._default_tenant)
+
+    async def clear_provider_key(self, alias: str, *, tenant_id: str | None = None) -> None:
+        """Remove a hosted provider's stored API key."""
+        provider = registry.PROVIDERS.get(alias)
+        if provider is None or provider.secret_path is None:
+            raise UnknownProviderError(f"no hosted provider named {alias!r}")
+        await self._secrets.delete(provider.secret_path, tenant_id or self._default_tenant)
+
     async def providers(self, tenant_id: str | None = None) -> list[ProviderInfo]:
         """List the providers and whether each one's key is present in OpenBao."""
         tenant = tenant_id or self._default_tenant
         infos: list[ProviderInfo] = []
         for alias, provider in registry.PROVIDERS.items():
             configured = provider.is_local or await self._key_present(provider.secret_path, tenant)
-            infos.append(ProviderInfo(alias=alias, local=provider.is_local, configured=configured))
+            infos.append(
+                ProviderInfo(
+                    alias=alias,
+                    local=provider.is_local,
+                    configured=configured,
+                    needs_base_url=provider.needs_base_url,
+                )
+            )
         return infos
 
     async def _key_present(self, secret_path: str | None, tenant: str) -> bool:
@@ -246,17 +356,49 @@ class LlmGateway:
         return True
 
     async def models(self) -> list[ModelInfo]:
-        """List the models available in the local runtime."""
+        """List the local runtime's models, marking the ones loaded in memory."""
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
             response = await client.get("/api/tags")
             response.raise_for_status()
             payload = response.json()
-        return [ModelInfo(name=m["name"], size=m.get("size")) for m in payload.get("models", [])]
+            loaded: set[str] = set()
+            try:  # /api/ps lists running models; best-effort decoration only
+                ps = await client.get("/api/ps")
+                ps.raise_for_status()
+                loaded = {m["name"] for m in ps.json().get("models", [])}
+            except (httpx.HTTPError, KeyError):
+                log.warning("ollama /api/ps failed; loaded-state unknown")
+        return [
+            ModelInfo(name=m["name"], size=m.get("size"), loaded=m["name"] in loaded)
+            for m in payload.get("models", [])
+        ]
 
     async def pull(self, model: str) -> None:
         """Pull a model into the local runtime (blocks until complete)."""
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=None) as client:
             response = await client.post("/api/pull", json={"model": model, "stream": False})
+            response.raise_for_status()
+
+    async def pull_stream(self, model: str) -> AsyncIterator[dict[str, Any]]:
+        """Pull a model, yielding the runtime's progress objects as they arrive.
+
+        Each item is Ollama's progress shape (``status``, and ``total``/``completed``
+        while a layer downloads) — the model-manager UI renders these directly.
+        """
+        async with (
+            httpx.AsyncClient(base_url=self._ollama_url, timeout=None) as client,
+            client.stream("POST", "/api/pull", json={"model": model, "stream": True}) as response,
+        ):
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line.strip():
+                    item: dict[str, Any] = json.loads(line)
+                    yield item
+
+    async def delete_model(self, model: str) -> None:
+        """Remove a model from the local runtime."""
+        async with httpx.AsyncClient(base_url=self._ollama_url, timeout=30) as client:
+            response = await client.request("DELETE", "/api/delete", json={"model": model})
             response.raise_for_status()
 
     async def unload(self) -> None:

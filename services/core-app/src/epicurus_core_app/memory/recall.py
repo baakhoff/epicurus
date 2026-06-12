@@ -5,7 +5,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from epicurus_core.tenancy import scope_collection
 
@@ -56,3 +64,17 @@ class SemanticRecall:
             collection_name=collection, query=vector, limit=limit
         )
         return [str(point.payload["text"]) for point in result.points if point.payload]
+
+    async def forget_session(self, *, tenant: str, session_id: str) -> None:
+        """Drop every indexed snippet belonging to ``session_id``."""
+        collection = scope_collection(self._base, tenant)
+        if not await self._client.collection_exists(collection):
+            return
+        await self._client.delete(
+            collection_name=collection,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[FieldCondition(key="session_id", match=MatchValue(value=session_id))]
+                )
+            ),
+        )

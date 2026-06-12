@@ -19,6 +19,8 @@ package = false
 
 [tool.uv.workspace]
 members = ["libs/*", "services/*"]
+# services/web is the Node/TypeScript web shell — not a Python package.
+exclude = ["services/web"]
 
 [dependency-groups]
 dev = [

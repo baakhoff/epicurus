@@ -15,7 +15,14 @@ from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI
 
-from epicurus_core import CoreSettings, EventBus, add_ops_routes, configure_logging, get_logger
+from epicurus_core import (
+    CoreSettings,
+    EventBus,
+    add_manifest_route,
+    add_ops_routes,
+    configure_logging,
+    get_logger,
+)
 from epicurus_echo.service import build_module, serve_responder
 
 
@@ -50,6 +57,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="echo", lifespan=lifespan)
     add_ops_routes(app, service_name="echo", version=_service_version())
+    add_manifest_route(app, module)
     app.mount("/mcp", mcp_app)
     return app
 

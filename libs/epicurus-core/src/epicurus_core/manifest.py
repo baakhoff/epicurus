@@ -8,14 +8,14 @@ module by URL.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 CONTRACT_VERSION = "0.1"
 """Version of the module<->core contract this manifest targets."""
 
-__all__ = ["CONTRACT_VERSION", "EventSpec", "ModuleManifest", "ToolSpec"]
+__all__ = ["CONTRACT_VERSION", "EventSpec", "ModuleManifest", "ToolSpec", "UiAction", "UiSection"]
 
 
 class ToolSpec(BaseModel):
@@ -37,6 +37,44 @@ class EventSpec(BaseModel):
     description: str = ""
 
 
+class UiAction(BaseModel):
+    """A button the web shell renders for a module; pressing it invokes an MCP tool.
+
+    The shell builds the input form from the tool's own ``input_schema`` — the same
+    JSON-Schema vocabulary as tool calls, so an action needs no extra schema here.
+    ``intent`` styles the button; a ``danger`` action must set ``confirm`` (the
+    confirmation prompt shown before it runs).
+    """
+
+    tool: str
+    label: str
+    description: str = ""
+    intent: Literal["default", "primary", "danger"] = "default"
+    confirm: str | None = None
+
+
+class UiSection(BaseModel):
+    """The module's declarative UI (ADR-0007 Tier 1).
+
+    The web shell auto-renders this — installing a module surfaces its
+    config/status/actions with **no core-UI rebuild** and **no module JS** in the
+    shell. ``ui_version`` versions this vocabulary independently of the wire
+    contract (additive fields don't bump it; a shell that sees an unknown version
+    falls back to a plain card). ``icon`` names a glyph from the shell's vendored
+    icon set — never an image URL or script. ``config_schema`` is a JSON Schema
+    (object) the shell renders as the module's settings form; values round-trip
+    through the core. ``ui_url`` opts into Tier 2 (a module-served page in a
+    sandboxed iframe) — reserved, not yet rendered by the shell.
+    """
+
+    ui_version: str = "1"
+    icon: str = "puzzle"
+    summary: str = ""
+    config_schema: dict[str, Any] | None = None
+    actions: list[UiAction] = Field(default_factory=list)
+    ui_url: str | None = None
+
+
 class ModuleManifest(BaseModel):
     """The full descriptor a module publishes about itself."""
 
@@ -52,3 +90,5 @@ class ModuleManifest(BaseModel):
     # Names of non-secret config keys and OpenBao secrets the module requires.
     config: list[str] = Field(default_factory=list)
     secrets: list[str] = Field(default_factory=list)
+    # Declarative UI the web shell renders for this module (ADR-0007 Tier 1).
+    ui: UiSection | None = None

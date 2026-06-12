@@ -16,3 +16,7 @@ data
 storage
 volumes
 *.log
+
+# Frontend (services/web) — never ship node_modules or local builds in a context.
+**/node_modules
+**/dist

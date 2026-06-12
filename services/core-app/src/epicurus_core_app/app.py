@@ -32,6 +32,7 @@ from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import ConversationStore
+from epicurus_core_app.modules import ModuleRegistry, create_modules_router
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.settings import CoreAppSettings
 
@@ -53,12 +54,13 @@ def create_app() -> FastAPI:
     log = get_logger(SERVICE_NAME)
     bus = EventBus.from_settings(settings)
     power = PowerController()
+    secrets = SecretStore.from_settings(settings)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
         keep_alive=settings.llm_keep_alive,
         power=power,
-        secrets=SecretStore.from_settings(settings),
+        secrets=secrets,
         default_tenant=settings.default_tenant_id,
         bus=bus,
         fallbacks=settings.fallback_models,
@@ -72,12 +74,19 @@ def create_app() -> FastAPI:
         return await gateway.embed(texts, model=settings.memory_embed_model)
 
     memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
+    mcp_host = McpHost(settings.module_mcp_urls)
     agent = Agent(
         gateway=gateway,
-        mcp=McpHost(settings.module_mcp_urls),
+        mcp=mcp_host,
         memory=memory,
         max_steps=settings.agent_max_steps,
         default_tenant=settings.default_tenant_id,
+    )
+    registry = ModuleRegistry(
+        settings.module_base_urls,
+        mcp=mcp_host,
+        secrets=secrets,
+        tenant=settings.default_tenant_id,
     )
 
     @asynccontextmanager
@@ -100,7 +109,8 @@ def create_app() -> FastAPI:
     app.include_router(create_platform_router(settings))
     app.include_router(create_llm_router(gateway))
     app.include_router(create_power_router(gateway, power))
-    app.include_router(create_agent_router(agent))
+    app.include_router(create_agent_router(agent, memory, settings.default_tenant_id))
+    app.include_router(create_modules_router(registry))
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:

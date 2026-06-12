@@ -7,7 +7,7 @@ proof and the reference a new module is modeled on.
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, Event, EventBus
+from epicurus_core import EpicurusModule, Event, EventBus, UiAction, UiSection
 
 ECHO_SUBJECT = "echo.request"
 
@@ -18,6 +18,27 @@ def build_module() -> EpicurusModule:
         "echo",
         version="0.1.0",
         description="Echoes messages — proves the MCP tool + NATS event contract.",
+        config=["greeting"],
+        ui=UiSection(
+            summary="The contract-proof module: echoes whatever you send it.",
+            config_schema={
+                "type": "object",
+                "properties": {
+                    "greeting": {
+                        "type": "string",
+                        "title": "Greeting",
+                        "description": "Prefix shown by the echo demo.",
+                    }
+                },
+            },
+            actions=[
+                UiAction(
+                    tool="echo",
+                    label="Send an echo",
+                    description="Round-trip a message through the module.",
+                )
+            ],
+        ),
     )
 
     @module.tool()

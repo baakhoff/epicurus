@@ -16,3 +16,6 @@ trim_trailing_whitespace = false
 
 [Makefile]
 indent_style = tab
+
+[*.{ts,tsx,js,jsx,css,html}]
+indent_size = 2

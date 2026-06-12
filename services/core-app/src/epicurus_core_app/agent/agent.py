@@ -4,11 +4,15 @@ A turn: ask the LLM (offering the modules' tools via the gateway), run any tool 
 through MCP, feed the results back, and loop until the model answers or ``max_steps``
 is reached. The agent talks to models only through the gateway and to modules only
 through MCP — never a provider SDK. It inherits the gateway's power-state behavior.
+
+``run`` resolves a turn in one response; ``run_stream`` yields the same turn as it
+happens — content deltas, tool progress, then the final turn — for the web UI.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -16,7 +20,7 @@ from pydantic import BaseModel, Field
 from epicurus_core import get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
-from epicurus_core_app.llm.models import ChatMessage
+from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.memory.memory import Memory
 
 log = get_logger("epicurus_core_app.agent")
@@ -28,6 +32,22 @@ class AgentTurn(BaseModel):
     content: str
     tools_used: list[str] = Field(default_factory=list)
     stopped: str  # "completed" or "max_steps"
+
+
+class AgentEvent(BaseModel):
+    """One event of a streaming agent turn (the SSE protocol's payload).
+
+    ``delta`` carries a content token; ``tool`` reports a tool call's progress
+    (``running`` → ``ok``/``error``); ``done`` carries the final turn; ``error``
+    ends a failed stream.
+    """
+
+    type: str  # "delta" | "tool" | "done" | "error"
+    text: str | None = None
+    tool: str | None = None
+    status: str | None = None
+    turn: AgentTurn | None = None
+    detail: str | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -82,14 +102,84 @@ class Agent:
         tenant = tenant_id or self._default_tenant
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         turn = await self._loop(convo, model=model, tenant_id=tenant_id)
-        if self._memory is not None and session_id:
-            try:
-                await self._memory.remember(
-                    tenant=tenant, session_id=session_id, role="assistant", content=turn.content
-                )
-            except Exception as exc:  # a failed write must not lose the answer
-                log.warning("memory write failed", error=str(exc))
+        await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         return turn
+
+    async def run_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Stream one turn as it happens: deltas, tool progress, then ``done``.
+
+        Memory semantics match :meth:`run`. The turn's content is exactly the text
+        the caller watched stream by. A failure mid-stream ends with an ``error``
+        event rather than an exception (the HTTP response has already started).
+        """
+        tenant = tenant_id or self._default_tenant
+        convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
+        parts: list[str] = []
+        tools_used: list[str] = []
+        stopped = "completed"
+        try:
+            specs, route = await self._mcp.discover()
+            for _ in range(self._max_steps):
+                result: ChatResult | None = None
+                async for event in self._gateway.stream_chat(
+                    convo, model=model, tools=specs or None, tenant_id=tenant_id
+                ):
+                    if event.delta:
+                        parts.append(event.delta)
+                        yield AgentEvent(type="delta", text=event.delta)
+                    if event.result is not None:
+                        result = event.result
+                if result is None or not result.tool_calls:
+                    break
+                convo.append(
+                    ChatMessage(
+                        role="assistant", content=result.content, tool_calls=result.tool_calls
+                    )
+                )
+                for call in result.tool_calls:
+                    name, arguments, call_id = _parse_tool_call(call)
+                    tools_used.append(name)
+                    yield AgentEvent(type="tool", tool=name, status="running")
+                    output = await self._invoke(name, arguments, route)
+                    failed = output.startswith("error:")
+                    yield AgentEvent(type="tool", tool=name, status="error" if failed else "ok")
+                    convo.append(
+                        ChatMessage(role="tool", tool_call_id=call_id, name=name, content=output)
+                    )
+            else:  # steps exhausted — stream one final answer without tools
+                stopped = "max_steps"
+                async for event in self._gateway.stream_chat(
+                    convo, model=model, tenant_id=tenant_id
+                ):
+                    if event.delta:
+                        parts.append(event.delta)
+                        yield AgentEvent(type="delta", text=event.delta)
+        except Exception as exc:  # the response already started — finish with an error event
+            log.warning("streaming turn failed", error=str(exc))
+            yield AgentEvent(type="error", detail=str(exc))
+            return
+        turn = AgentTurn(content="".join(parts), tools_used=tools_used, stopped=stopped)
+        await self._persist_answer(turn, tenant=tenant, session_id=session_id)
+        yield AgentEvent(type="done", turn=turn)
+
+    async def _persist_answer(
+        self, turn: AgentTurn, *, tenant: str, session_id: str | None
+    ) -> None:
+        if self._memory is None or not session_id:
+            return
+        try:
+            await self._memory.remember(
+                tenant=tenant, session_id=session_id, role="assistant", content=turn.content
+            )
+        except Exception as exc:  # a failed write must not lose the answer
+            log.warning("memory write failed", error=str(exc))
 
     async def _assemble(
         self, messages: list[ChatMessage], *, tenant: str, session_id: str | None

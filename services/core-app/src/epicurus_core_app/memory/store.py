@@ -3,10 +3,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, cast
 
-from sqlalchemy import DateTime, String, Text, func, select
+from pydantic import BaseModel
+from sqlalchemy import CursorResult, DateTime, String, Text, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class SessionSummary(BaseModel):
+    """One conversation in the sessions list, newest activity first."""
+
+    id: str
+    title: str
+    message_count: int
+    last_at: datetime
+
+
+class MessageRecord(BaseModel):
+    """A persisted message with its timestamp (the UI's transcript shape)."""
+
+    role: str
+    content: str
+    created_at: datetime
 
 
 class Base(DeclarativeBase):
@@ -57,3 +76,62 @@ class ConversationStore:
                 .order_by(StoredMessage.created_at, StoredMessage.id)
             )
             return [(message.role, message.content) for message in rows]
+
+    async def sessions(self, *, tenant: str) -> list[SessionSummary]:
+        """Summarize the tenant's conversations, most recently active first.
+
+        A session's title is its first stored message (the opening user turn).
+        """
+        async with self._session() as session:
+            aggregate = (
+                select(
+                    StoredMessage.session_id,
+                    func.count().label("message_count"),
+                    func.max(StoredMessage.created_at).label("last_at"),
+                    func.min(StoredMessage.id).label("first_id"),
+                )
+                .where(StoredMessage.tenant == tenant)
+                .group_by(StoredMessage.session_id)
+                .order_by(func.max(StoredMessage.created_at).desc())
+            )
+            rows = (await session.execute(aggregate)).all()
+            titles: dict[int, str] = {}
+            first_ids = [row.first_id for row in rows]
+            if first_ids:
+                firsts = await session.scalars(
+                    select(StoredMessage).where(StoredMessage.id.in_(first_ids))
+                )
+                titles = {message.id: message.content for message in firsts}
+            return [
+                SessionSummary(
+                    id=row.session_id,
+                    title=titles.get(row.first_id, "").strip()[:80],
+                    message_count=row.message_count,
+                    last_at=row.last_at,
+                )
+                for row in rows
+            ]
+
+    async def messages(self, *, tenant: str, session_id: str) -> list[MessageRecord]:
+        """Return a session's full transcript with timestamps, oldest first."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(StoredMessage)
+                .where(StoredMessage.tenant == tenant, StoredMessage.session_id == session_id)
+                .order_by(StoredMessage.created_at, StoredMessage.id)
+            )
+            return [
+                MessageRecord(role=m.role, content=m.content, created_at=m.created_at) for m in rows
+            ]
+
+    async def delete_session(self, *, tenant: str, session_id: str) -> int:
+        """Delete a session's messages; returns how many were removed."""
+        async with self._session() as session:
+            result = await session.execute(
+                delete(StoredMessage).where(
+                    StoredMessage.tenant == tenant, StoredMessage.session_id == session_id
+                )
+            )
+            await session.commit()
+            # DELETE always returns a CursorResult; the ORM types it as plain Result.
+            return cast("CursorResult[Any]", result).rowcount or 0

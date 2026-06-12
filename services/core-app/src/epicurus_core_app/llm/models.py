@@ -34,11 +34,24 @@ class ChatResult(BaseModel):
     completion_tokens: int | None = None
 
 
+class StreamEvent(BaseModel):
+    """One increment of a streaming completion.
+
+    ``delta`` events carry a content token; the final event carries the assembled
+    ``result`` (full content plus any tool calls accumulated from the stream).
+    """
+
+    delta: str | None = None
+    result: ChatResult | None = None
+
+
 class ModelInfo(BaseModel):
     """A model available in the local runtime."""
 
     name: str
     size: int | None = None
+    # Currently held in memory by the runtime (drives the UI's "loaded" hint).
+    loaded: bool = False
 
 
 class ProviderInfo(BaseModel):
@@ -47,6 +60,8 @@ class ProviderInfo(BaseModel):
     alias: str
     local: bool
     configured: bool
+    # The "custom" (any-OpenAI-compatible) provider also needs an endpoint URL.
+    needs_base_url: bool = False
 
 
 class UsageEvent(BaseModel):

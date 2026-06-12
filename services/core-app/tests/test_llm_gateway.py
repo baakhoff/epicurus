@@ -251,6 +251,24 @@ async def test_embed_emits_usage_event(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "api_key" not in data
 
 
+async def test_embed_usage_event_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A module's embed call meters under that module's tenant, not the global default
+    # (ADR-0002: no single-global-tenant code paths, even at one tenant).
+    class _EmbedResp:
+        def model_dump(self) -> dict[str, Any]:
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbedResp:
+        return _EmbedResp()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    bus = _FakeBus()
+    await _gateway(bus=bus).embed(["hi"], tenant_id="tenant-x")
+
+    _subject, _data, tenant = bus.published[0]
+    assert tenant == "tenant-x"
+
+
 async def test_embed_refuses_when_paused() -> None:
     power = PowerController()
     power.pause()

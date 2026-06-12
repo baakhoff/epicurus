@@ -288,7 +288,9 @@ class LlmGateway:
         except Exception:  # usage accounting must never break inference
             log.warning("usage event publish failed", exc_info=True)
 
-    async def embed(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], *, model: str | None = None, tenant_id: str | None = None
+    ) -> list[list[float]]:
         """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``)."""
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
@@ -305,7 +307,7 @@ class LlmGateway:
             prompt_tokens=None,
             completion_tokens=None,
             latency_ms=(time.monotonic() - start) * 1000,
-            tenant_id=None,
+            tenant_id=tenant_id,
         )
         data: dict[str, Any] = response.model_dump()
         return [item["embedding"] for item in data["data"]]

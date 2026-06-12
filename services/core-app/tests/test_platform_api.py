@@ -33,8 +33,10 @@ class _FakeGateway:
         self.embed_calls: list[dict[str, Any]] = []
         self.chat_calls: list[dict[str, Any]] = []
 
-    async def embed(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
-        self.embed_calls.append({"texts": texts, "model": model})
+    async def embed(
+        self, texts: list[str], *, model: str | None = None, tenant_id: str | None = None
+    ) -> list[list[float]]:
+        self.embed_calls.append({"texts": texts, "model": model, "tenant_id": tenant_id})
         return self._embed_result
 
     async def chat(

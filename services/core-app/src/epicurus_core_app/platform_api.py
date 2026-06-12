@@ -87,7 +87,7 @@ def create_platform_router(settings: CoreAppSettings, gateway: LlmGateway) -> AP
         Keys never leave the core; usage is metered via NATS.
         """
         model = request.model or settings.memory_embed_model
-        embeddings = await gateway.embed(request.texts, model=model)
+        embeddings = await gateway.embed(request.texts, model=model, tenant_id=request.tenant_id)
         return EmbedResponse(embeddings=embeddings)
 
     @router.post("/chat", response_model=PlatformChatResponse)

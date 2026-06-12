@@ -14,7 +14,11 @@ services:
     image: searxng/searxng:2026.6.10-de03f4eb1
     restart: unless-stopped
     volumes:
-      - ${SEARXNG_SETTINGS_FILE:-./infra/searxng/settings.yml}:/etc/searxng/settings.yml:ro
+      # This file is included from the root compose, so a relative source resolves
+      # against THIS file's directory (infra/searxng/) — hence ./settings.yml, not
+      # ./infra/searxng/settings.yml (which doubled to infra/searxng/infra/searxng/
+      # and made Docker create an empty dir at the mount, so SearXNG saw no config).
+      - ${SEARXNG_SETTINGS_FILE:-./settings.yml}:/etc/searxng/settings.yml:ro
     healthcheck:
       test:
         - "CMD"

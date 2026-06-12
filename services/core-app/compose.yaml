@@ -11,7 +11,7 @@ services:
       NATS_URL: nats://nats:4222
       OLLAMA_URL: http://ollama:11434
       OPENBAO_URL: http://openbao:8200
-      OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      OPENBAO_TOKEN: ${OPENBAO_TOKEN}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
       QDRANT_URL: http://qdrant:6333
@@ -27,7 +27,7 @@ services:
       ollama:
         condition: service_started
       openbao:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
       qdrant:

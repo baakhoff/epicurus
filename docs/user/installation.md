@@ -27,19 +27,20 @@ task up
 ```
 
 Check status with `docker compose ps`. To run *only* the data-plane backing
-services (Postgres, Valkey, NATS, Qdrant, OpenBao) without any modules:
+services (Postgres, Valkey, NATS, Qdrant, OpenBao, MinIO) without any modules:
 
 ```bash
 docker compose -f infra/compose/docker-compose.yml up -d   # or: task infra-up
 ```
 
-Postgres, Valkey, and OpenBao report a `healthy` status. NATS and Qdrant are
-verified from the host:
+Postgres, Valkey, OpenBao, and MinIO report a `healthy` status. NATS, Qdrant,
+and MinIO are also verified from the host:
 
 ```bash
 curl localhost:8222/healthz        # NATS  -> {"status":"ok"}
 curl localhost:6333/readyz         # Qdrant -> all shards are ready
 curl localhost:8200/v1/sys/health  # OpenBao -> sealed:false (dev mode)
+curl localhost:9000/minio/health/live  # MinIO -> HTTP 200
 curl localhost:8080/health         # echo module -> {"status":"ok","service":"echo",...}
 ```
 
@@ -65,6 +66,7 @@ reverse proxy, auth proxy) in front — see [Configuration](configuration.md).
 | NATS | 4222 (client), 8222 (monitoring) |
 | Qdrant | 6333 (HTTP), 6334 (gRPC) |
 | OpenBao | 8200 |
+| MinIO | 9000 (S3 API), 9001 (console) |
 | Gateway (Traefik) | 8088 (web), 8089 (dashboard) |
 | core-app (runtime) | 8082 |
 | web (UI shell) | 8084 |

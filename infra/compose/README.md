@@ -12,6 +12,8 @@ services and the edge (a gateway and private ingress) are layered on separately.
 | nats | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring |
 | qdrant | `qdrant/qdrant:v1.12.4` | 6333, 6334 | Vector DB (RAG + memory) |
 | openbao | `openbao/openbao:2.2.0` | 8200 | Secrets (dev mode here; real mode later) |
+| minio | `minio/minio:RELEASE.*` | 9000 (S3 API), 9001 (console) | S3-compatible object store for app-managed objects |
+| minio-init | `minio/mc:RELEASE.*` | — | One-shot: seeds the default `epicurus` bucket on first run |
 
 ## Bring up
 
@@ -22,8 +24,9 @@ docker compose -f infra/compose/docker-compose.yml down     # add -v to drop vol
 ```
 
 Verify (host): `curl localhost:8222/healthz` (NATS), `curl localhost:6333/readyz`
-(Qdrant), `curl localhost:8200/v1/sys/health` (OpenBao). Postgres and Valkey have
-in-container healthchecks (`docker compose ps` shows `healthy`).
+(Qdrant), `curl localhost:8200/v1/sys/health` (OpenBao), `curl localhost:9000/minio/health/live`
+(MinIO). Postgres, Valkey, and MinIO have in-container healthchecks (`docker compose ps`
+shows `healthy`). `minio-init` exits 0 once the default bucket exists.
 
 ## Configuration & secrets
 
@@ -37,7 +40,11 @@ Published ports bind to `BIND_ADDRESS` (default `127.0.0.1`): the data plane is
 reachable only from this machine unless the operator opts in. **OpenBao runs in
 dev mode and is in-memory** — restarting its container wipes stored secrets
 (re-seed afterwards); a persistent non-dev configuration lands when OpenBao
-becomes the live credential source (Phase 3).
+becomes the live credential source (Phase 3). **MinIO uses dev credentials
+(`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`)** — these act as the S3 access key
+/ secret key for local dev; Phase 3 replaces them with OpenBao-managed credentials.
+The default bucket (`MINIO_DEFAULT_BUCKET`, defaults to `epicurus`) is created
+automatically by `minio-init` on first run.
 
 ## Layered on top
 

@@ -93,6 +93,8 @@ Registered base paths (set by the core service at runtime):
 | `llm/google` | Google API key |
 | `llm/custom` | Custom provider endpoint + key |
 | `modules/<name>/config` | Per-module config blob |
+| `oauth/clients/<provider>` | Operator-provisioned OAuth client (`client_id`, `client_secret`) |
+| `oauth/tokens/<provider>` | User-granted OAuth tokens (`access_token`, `refresh_token`, `expires_at`, `scope`, `token_type`) |
 
 ## Configuration
 

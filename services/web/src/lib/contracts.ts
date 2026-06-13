@@ -127,3 +127,14 @@ export const PlatformInfo = z.object({
   tenant: z.string(),
 });
 export type PlatformInfo = z.infer<typeof PlatformInfo>;
+
+/* ── OAuth ───────────────────────────────────────────────────────────────── */
+
+export const OAuthConnectResponse = z.object({ auth_url: z.string() });
+
+export const OAuthStatus = z.object({
+  provider: z.string(),
+  connected: z.boolean(),
+  scope: z.string().nullish(),
+});
+export type OAuthStatus = z.infer<typeof OAuthStatus>;

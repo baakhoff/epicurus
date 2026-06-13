@@ -28,6 +28,7 @@
 - [observability](reference/observability.md)
 - [modules & manifest](reference/modules.md)
 - [platform API](reference/platform-api.md)
+- [OAuth 2.0](reference/oauth.md)
 - [platform client](reference/platform-client.md)
 
 **Infrastructure**

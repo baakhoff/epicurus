@@ -34,6 +34,15 @@ class CoreAppSettings(CoreSettings):
     # Ollama embedding model used to vectorize conversation text for recall.
     memory_embed_model: str = "nomic-embed-text"
 
+    # ── OAuth settings ────────────────────────────────────────────────────────
+    # Public base URL of the server used to build the OAuth redirect_uri.
+    # Must exactly match the URI registered with each OAuth provider.
+    # Example: http://localhost:8084 (local web port), https://epicurus.example.com
+    oauth_redirect_base_url: str = "http://localhost:8084"
+    # HMAC key for signing the OAuth ``state`` parameter (CSRF protection).
+    # Change this before first use; rotating it invalidates in-flight connect flows.
+    oauth_state_secret: str = "change-this-before-use"
+
     @property
     def fallback_models(self) -> list[str]:
         """The fallback chain parsed from ``llm_fallbacks``."""

@@ -1,8 +1,9 @@
-"""Incremental vault indexer — walk the Obsidian vault and sync Qdrant.
+"""Incremental markdown-source indexer — walk a directory and sync Qdrant.
 
-Only notes that are new, modified (by content hash), or deleted since the last
-run are touched.  Embeddings are obtained via the core's platform API so the
-module never holds provider credentials (ADR-0010).
+Used for both the operator's Obsidian vault and the bundled platform docs
+(self-documentation, #83).  Only files that are new, modified (by content
+hash), or deleted since the last run are touched.  Embeddings are obtained via
+the core's platform API so the module never holds provider credentials (ADR-0010).
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from qdrant_client.models import (
 
 from epicurus_core import PlatformClient, get_logger, scope_collection
 from epicurus_knowledge.chunker import Chunk, chunk_note
-from epicurus_knowledge.db import NoteIndex
+from epicurus_knowledge.db import DocIndex, NoteIndex
 
 
 class SearchHit(TypedDict):
@@ -54,25 +55,33 @@ def _content_hash(raw: bytes) -> str:
 
 
 class KnowledgeIndexer:
-    """Walks a vault directory and maintains a Qdrant collection incrementally.
+    """Walks a markdown directory and maintains a Qdrant collection incrementally.
+
+    Works for both the operator vault and the bundled platform docs — the
+    caller controls which DB index and Qdrant collection to use via
+    ``note_index`` and ``collection_base``.
 
     Args:
-        note_index: Postgres-backed note hash/mtime tracker.
+        note_index: Postgres-backed file hash/mtime tracker (NoteIndex or DocIndex).
         qdrant: Async Qdrant client.
         platform: Platform API client (embeddings come from the core).
-        vault_path: Root directory of the Obsidian vault.
+        vault_path: Root directory to walk for ``.md`` files.
         tenant: Tenant ID — scopes the Qdrant collection name.
+        collection_base: Base name passed to ``scope_collection``; becomes
+            ``<tenant>__<base>`` in Qdrant.  Defaults to ``"knowledge"`` for
+            the vault; use ``"docs"`` for the platform-docs source.
         chunk_max_chars: Upper-bound on characters per chunk.
     """
 
     def __init__(
         self,
-        note_index: NoteIndex,
+        note_index: NoteIndex | DocIndex,
         qdrant: AsyncQdrantClient,
         platform: PlatformClient,
         *,
         vault_path: Path,
         tenant: str,
+        collection_base: str = "knowledge",
         chunk_max_chars: int = 2000,
     ) -> None:
         self._notes = note_index
@@ -81,7 +90,7 @@ class KnowledgeIndexer:
         self._vault = vault_path
         self._tenant = tenant
         self._max_chars = chunk_max_chars
-        self._collection = scope_collection("knowledge", tenant)
+        self._collection = scope_collection(collection_base, tenant)
         self._ensured = False
 
     async def _ensure_collection(self, dim: int) -> None:

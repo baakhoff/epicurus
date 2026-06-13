@@ -20,7 +20,7 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
-from epicurus_knowledge.db import NoteIndex
+from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.service import MODULE_NAME, build_module
 from epicurus_knowledge.settings import KnowledgeSettings
@@ -41,37 +41,56 @@ def create_app() -> FastAPI:
 
     engine = create_async_engine(settings.database_url)
     note_index = NoteIndex(engine)
+    doc_index = DocIndex(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
     platform = PlatformClient(
         base_url=settings.platform_url,
         tenant_id=settings.default_tenant_id,
     )
-    indexer = KnowledgeIndexer(
+
+    vault_indexer = KnowledgeIndexer(
         note_index,
         qdrant,
         platform,
         vault_path=settings.vault_path,
         tenant=settings.default_tenant_id,
+        collection_base="knowledge",
         chunk_max_chars=settings.chunk_max_chars,
     )
+    docs_indexer = KnowledgeIndexer(
+        doc_index,
+        qdrant,
+        platform,
+        vault_path=settings.docs_path,
+        tenant=settings.default_tenant_id,
+        collection_base="docs",
+        chunk_max_chars=settings.chunk_max_chars,
+    )
+
     bus = EventBus.from_settings(settings)
-    module = build_module(indexer)
+    module = build_module(vault_indexer, docs_indexer)
     mcp_app = module.http_app()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await note_index.init()
+            await doc_index.init()
             await bus.connect()
             log.info(
                 "knowledge service ready",
                 vault=str(settings.vault_path),
+                docs=str(settings.docs_path),
                 tenant=settings.default_tenant_id,
             )
             try:
-                await indexer.run()
+                await vault_indexer.run()
             except Exception as exc:
                 log.warning("initial vault index failed", error=str(exc))
+            try:
+                await docs_indexer.run()
+            except Exception as exc:
+                log.warning("initial docs index failed", error=str(exc))
             try:
                 yield
             finally:
@@ -85,10 +104,15 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
-        """Vault index statistics for the manifest-driven UI status panel."""
+        """Index statistics for the manifest-driven UI status panel."""
         note_count = await note_index.count(tenant=settings.default_tenant_id)
         last_indexed_at = await note_index.last_indexed_at(tenant=settings.default_tenant_id)
-        return {"note_count": note_count, "last_indexed_at": last_indexed_at}
+        doc_count = await doc_index.count(tenant=settings.default_tenant_id)
+        return {
+            "note_count": note_count,
+            "last_indexed_at": last_indexed_at,
+            "doc_count": doc_count,
+        }
 
     app.mount("/mcp", mcp_app)
 

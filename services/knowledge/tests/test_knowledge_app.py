@@ -6,6 +6,7 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("VAULT_PATH", "/tmp")
+os.environ.setdefault("DOCS_PATH", "/tmp")
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("PLATFORM_URL", "http://localhost:8080")
 
@@ -32,3 +33,13 @@ def test_settings_vault_path_from_env() -> None:
 
     s = KnowledgeSettings(service_name="knowledge")
     assert s.vault_path.name == "tmp"
+
+
+def test_settings_docs_path_default() -> None:
+    from epicurus_knowledge.settings import KnowledgeSettings
+
+    s = KnowledgeSettings(service_name="knowledge")
+    # DOCS_PATH was set to /tmp above; verify the field exists and is a Path.
+    from pathlib import Path
+
+    assert isinstance(s.docs_path, Path)

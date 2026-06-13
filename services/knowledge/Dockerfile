@@ -14,6 +14,9 @@ FROM python:3.13-slim-bookworm
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 COPY --from=build /app/.venv /app/.venv
+# Bundle platform docs so the self-documentation source (#83) works without
+# any operator setup. Set DOCS_PATH to a bind-mount path to use live docs.
+COPY docs/ /docs
 RUN useradd --create-home --uid 10001 epicurus
 USER epicurus
 EXPOSE 8080

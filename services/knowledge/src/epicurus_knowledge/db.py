@@ -1,7 +1,12 @@
-"""Note-index schema — tenant-scoped tracking of vault notes in Postgres.
+"""File-index schema — tenant-scoped tracking of markdown sources in Postgres.
 
-Each row records the note's last-seen mtime and sha-256 content hash so the
-indexer can skip unchanged notes on subsequent runs.
+Two tables exist with identical structure:
+
+* ``knowledge_notes`` — the operator's Obsidian vault.
+* ``knowledge_doc_index`` — the bundled platform docs (self-documentation, #83).
+
+Each row records the file's last-seen mtime and sha-256 content hash so the
+indexer can skip unchanged files on subsequent runs.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class NoteRecord:
-    """Projection returned by NoteIndex queries — immutable value object."""
+    """Projection returned by index queries — immutable value object."""
 
     __slots__ = ("chunk_count", "content_hash", "mtime_ns", "note_path")
 
@@ -31,11 +36,14 @@ class NoteRecord:
         self.chunk_count = chunk_count
 
 
-class _Base(DeclarativeBase):
+# ── Vault notes (operator's Obsidian vault) ──────────────────────────────────
+
+
+class _NoteBase(DeclarativeBase):
     pass
 
 
-class _StoredNote(_Base):
+class _StoredNote(_NoteBase):
     """ORM mapping for a single indexed vault note."""
 
     __tablename__ = "knowledge_notes"
@@ -44,12 +52,8 @@ class _StoredNote(_Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant: Mapped[str] = mapped_column(String(63), index=True)
     note_path: Mapped[str] = mapped_column(String(4096))
-    # Modification time in nanoseconds for precise change detection. BigInteger:
-    # nanosecond epochs (~1.8e18) overflow Postgres INTEGER (int32); SQLite hides this.
     mtime_ns: Mapped[int] = mapped_column(BigInteger)
-    # SHA-256 hex digest of the note's raw bytes.
     content_hash: Mapped[str] = mapped_column(String(64))
-    # Number of chunks currently indexed in Qdrant for this note.
     chunk_count: Mapped[int] = mapped_column(Integer)
     indexed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -57,7 +61,7 @@ class _StoredNote(_Base):
 
 
 class NoteIndex:
-    """CRUD helpers for the tenant-scoped note index in Postgres."""
+    """CRUD helpers for the tenant-scoped vault note index in Postgres."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
@@ -66,7 +70,7 @@ class NoteIndex:
     async def init(self) -> None:
         """Create the schema if it does not exist."""
         async with self._engine.begin() as conn:
-            await conn.run_sync(_Base.metadata.create_all)
+            await conn.run_sync(_NoteBase.metadata.create_all)
 
     async def get(self, *, tenant: str, note_path: str) -> NoteRecord | None:
         """Return the existing record for *note_path*, or ``None``."""
@@ -146,5 +150,123 @@ class NoteIndex:
         async with self._session() as session:
             result = await session.scalar(
                 select(func.max(_StoredNote.indexed_at)).where(_StoredNote.tenant == tenant)
+            )
+            return result.isoformat() if result is not None else None
+
+
+# ── Platform docs (self-documentation, #83) ──────────────────────────────────
+
+
+class _DocBase(DeclarativeBase):
+    pass
+
+
+class _StoredDoc(_DocBase):
+    """ORM mapping for a single indexed platform-docs page."""
+
+    __tablename__ = "knowledge_doc_index"
+    __table_args__ = (UniqueConstraint("tenant", "note_path", name="uq_knowledge_doc_tenant_note"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    note_path: Mapped[str] = mapped_column(String(4096))
+    mtime_ns: Mapped[int] = mapped_column(BigInteger)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    chunk_count: Mapped[int] = mapped_column(Integer)
+    indexed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DocIndex:
+    """CRUD helpers for the tenant-scoped platform-docs index in Postgres."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def init(self) -> None:
+        """Create the schema if it does not exist."""
+        async with self._engine.begin() as conn:
+            await conn.run_sync(_DocBase.metadata.create_all)
+
+    async def get(self, *, tenant: str, note_path: str) -> NoteRecord | None:
+        """Return the existing record for *note_path*, or ``None``."""
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredDoc).where(
+                    _StoredDoc.tenant == tenant,
+                    _StoredDoc.note_path == note_path,
+                )
+            )
+            if row is None:
+                return None
+            return NoteRecord(
+                note_path=row.note_path,
+                mtime_ns=row.mtime_ns,
+                content_hash=row.content_hash,
+                chunk_count=row.chunk_count,
+            )
+
+    async def upsert(
+        self,
+        *,
+        tenant: str,
+        note_path: str,
+        mtime_ns: int,
+        content_hash: str,
+        chunk_count: int,
+    ) -> None:
+        """Insert or replace the record for *note_path*."""
+        async with self._session() as session:
+            await session.execute(
+                delete(_StoredDoc).where(
+                    _StoredDoc.tenant == tenant,
+                    _StoredDoc.note_path == note_path,
+                )
+            )
+            session.add(
+                _StoredDoc(
+                    tenant=tenant,
+                    note_path=note_path,
+                    mtime_ns=mtime_ns,
+                    content_hash=content_hash,
+                    chunk_count=chunk_count,
+                )
+            )
+            await session.commit()
+
+    async def delete(self, *, tenant: str, note_path: str) -> None:
+        """Remove the record for *note_path*."""
+        async with self._session() as session:
+            await session.execute(
+                delete(_StoredDoc).where(
+                    _StoredDoc.tenant == tenant,
+                    _StoredDoc.note_path == note_path,
+                )
+            )
+            await session.commit()
+
+    async def list_paths(self, *, tenant: str) -> list[str]:
+        """Return all indexed doc paths for *tenant*."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredDoc.note_path).where(_StoredDoc.tenant == tenant)
+            )
+            return list(rows)
+
+    async def count(self, *, tenant: str) -> int:
+        """Return the number of indexed docs for *tenant*."""
+        async with self._session() as session:
+            result = await session.scalar(
+                select(func.count(_StoredDoc.id)).where(_StoredDoc.tenant == tenant)
+            )
+            return int(result) if result is not None else 0
+
+    async def last_indexed_at(self, *, tenant: str) -> str | None:
+        """Return the ISO-8601 timestamp of the most recent index run for *tenant*, or None."""
+        async with self._session() as session:
+            result = await session.scalar(
+                select(func.max(_StoredDoc.indexed_at)).where(_StoredDoc.tenant == tenant)
             )
             return result.isoformat() if result is not None else None

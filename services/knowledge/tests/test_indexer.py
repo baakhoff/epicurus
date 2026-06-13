@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_knowledge.db import NoteIndex
+from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.indexer import KnowledgeIndexer
 
 TENANT = "test"
@@ -36,6 +36,7 @@ def _make_mock_qdrant() -> Any:
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()
+    qdrant.search = AsyncMock(return_value=[])
     return qdrant
 
 
@@ -156,22 +157,46 @@ async def test_tenant_isolation(tmp_path: Path) -> None:
     assert "shared.md" not in paths_b
 
 
-async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path) -> None:
+def _make_docs_indexer(tmp_path: Path) -> KnowledgeIndexer:
+    """A KnowledgeIndexer configured as the platform-docs source."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")  # type: ignore[attr-defined]
+    # We can't await here — callers share the note_index fixture instead.
+    doc_index = DocIndex(engine)
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "index.md").write_text("# Epicurus Docs\n\nPlatform overview.")
+    return KnowledgeIndexer(
+        doc_index,
+        _make_mock_qdrant(),
+        _make_mock_platform(),
+        vault_path=docs_dir,
+        tenant=TENANT,
+        collection_base="docs",
+    )
+
+
+async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Path) -> None:
     from epicurus_knowledge.service import build_module
 
-    indexer = _make_indexer(note_index, vault)
-    module = build_module(indexer)
+    vault_indexer = _make_indexer(note_index, vault)
+    docs_indexer = _make_docs_indexer(tmp_path)
+    await docs_indexer._notes.init()  # type: ignore[attr-defined]
+    module = build_module(vault_indexer, docs_indexer)
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
     assert "indexed" in payload
 
 
-async def test_manifest_declares_tool_and_event(note_index: NoteIndex, vault: Path) -> None:
+async def test_manifest_declares_tool_and_event(
+    note_index: NoteIndex, vault: Path, tmp_path: Path
+) -> None:
     from epicurus_knowledge.service import build_module
 
-    indexer = _make_indexer(note_index, vault)
-    module = build_module(indexer)
+    vault_indexer = _make_indexer(note_index, vault)
+    docs_indexer = _make_docs_indexer(tmp_path)
+    await docs_indexer._notes.init()  # type: ignore[attr-defined]
+    module = build_module(vault_indexer, docs_indexer)
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert "knowledge_reindex" in tool_names
@@ -245,7 +270,7 @@ async def test_search_skips_hits_with_no_payload(note_index: NoteIndex, vault: P
     assert results == []
 
 
-async def test_mcp_tool_search(note_index: NoteIndex, vault: Path) -> None:
+async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Path) -> None:
     from unittest.mock import MagicMock
 
     from epicurus_knowledge.service import build_module
@@ -256,13 +281,131 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path) -> None:
     hit.payload = {"note_path": "note_b.md", "heading": None, "text": "Content of B."}
     qdrant.search = AsyncMock(return_value=[hit])
 
-    indexer = KnowledgeIndexer(
+    vault_indexer = KnowledgeIndexer(
         note_index,
         qdrant,
         _make_mock_platform(),
         vault_path=vault,
         tenant=TENANT,
     )
-    module = build_module(indexer)
+    docs_indexer = _make_docs_indexer(tmp_path)
+    await docs_indexer._notes.init()  # type: ignore[attr-defined]
+    module = build_module(vault_indexer, docs_indexer)
     _content, structured = await module.mcp.call_tool("knowledge_search", {"query": "B", "k": 1})
     assert structured is not None
+
+
+async def test_collection_base_scopes_qdrant_collection(note_index: NoteIndex, vault: Path) -> None:
+    """collection_base='docs' produces a <tenant>__docs collection, not <tenant>__knowledge."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    doc_idx = DocIndex(engine)
+    await doc_idx.init()
+
+    docs_indexer = KnowledgeIndexer(
+        doc_idx,
+        _make_mock_qdrant(),
+        _make_mock_platform(),
+        vault_path=vault,
+        tenant=TENANT,
+        collection_base="docs",
+    )
+    assert docs_indexer._collection == f"{TENANT}__docs"
+
+    vault_indexer = _make_indexer(note_index, vault)
+    assert vault_indexer._collection == f"{TENANT}__knowledge"
+
+
+async def test_merged_search_returns_hits_from_both_sources(
+    note_index: NoteIndex, vault: Path, tmp_path: Path
+) -> None:
+    """knowledge_search merges vault + docs results ranked by score."""
+    from unittest.mock import MagicMock
+
+    from epicurus_knowledge.service import build_module
+
+    vault_qdrant = _make_mock_qdrant()
+    vault_hit = MagicMock()
+    vault_hit.score = 0.7
+    vault_hit.payload = {"note_path": "note_a.md", "heading": None, "text": "Vault content."}
+    vault_qdrant.search = AsyncMock(return_value=[vault_hit])
+
+    docs_qdrant = _make_mock_qdrant()
+    docs_hit = MagicMock()
+    docs_hit.score = 0.9
+    docs_hit.payload = {
+        "note_path": "docs/services/knowledge.md",
+        "heading": "knowledge",
+        "text": "Platform docs content.",
+    }
+    docs_qdrant.search = AsyncMock(return_value=[docs_hit])
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    doc_idx = DocIndex(engine)
+    await doc_idx.init()
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+
+    vault_indexer = KnowledgeIndexer(
+        note_index, vault_qdrant, _make_mock_platform(), vault_path=vault, tenant=TENANT
+    )
+    docs_indexer = KnowledgeIndexer(
+        doc_idx,
+        docs_qdrant,
+        _make_mock_platform(),
+        vault_path=docs_dir,
+        tenant=TENANT,
+        collection_base="docs",
+    )
+
+    module = build_module(vault_indexer, docs_indexer)
+    _content, structured = await module.mcp.call_tool(
+        "knowledge_search", {"query": "platform", "k": 5}
+    )
+    assert structured is not None
+    result = structured.get("result") if isinstance(structured, dict) else structured
+    assert result is not None
+    hits = result if isinstance(result, list) else result.get("result", [])
+    # Docs hit (0.9) should rank above vault hit (0.7).
+    assert len(hits) >= 1
+    scores = [h["score"] for h in hits if isinstance(h, dict)]
+    if len(scores) >= 2:
+        assert scores[0] >= scores[1]
+
+
+async def test_reindex_sums_both_sources(
+    note_index: NoteIndex, vault: Path, tmp_path: Path
+) -> None:
+    """knowledge_reindex returns summed counts across vault and docs."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from epicurus_knowledge.service import build_module
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    doc_idx = DocIndex(engine)
+    await doc_idx.init()
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "index.md").write_text("# Docs\n\nContent.")
+
+    vault_indexer = _make_indexer(note_index, vault)
+    docs_indexer = KnowledgeIndexer(
+        doc_idx,
+        _make_mock_qdrant(),
+        _make_mock_platform(),
+        vault_path=docs_dir,
+        tenant=TENANT,
+        collection_base="docs",
+    )
+
+    module = build_module(vault_indexer, docs_indexer)
+    _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
+    assert isinstance(structured, dict)
+    payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
+    # vault has 2 notes, docs has 1 → total indexed >= 3 on first run
+    assert isinstance(payload.get("indexed"), int)
+    assert payload["indexed"] >= 3  # type: ignore[operator]

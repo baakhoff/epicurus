@@ -1,8 +1,14 @@
-# knowledge — Obsidian-vault RAG
+# knowledge — Obsidian-vault RAG + platform self-documentation
 
-**`epicurus-knowledge`** is a sidecar module that indexes an **Obsidian** markdown vault
-for retrieval-augmented generation: it chunks notes, embeds them **through the core**, and
-maintains a tenant-scoped Qdrant collection — fully incrementally. Host port **8085**.
+**`epicurus-knowledge`** is a sidecar module that indexes two markdown sources
+for retrieval-augmented generation, fully incrementally:
+
+1. **Operator vault** — an Obsidian markdown vault the operator mounts at `/vault`.
+2. **Platform docs** (self-documentation) — the `docs/` tree bundled into the image
+   at `/docs`; available with **no operator setup** in any deploy.
+
+Chunks are embedded **through the core** (no model key lives here) and stored in
+tenant-scoped Qdrant collections. Host port **8085**.
 
 ## The contract it exposes
 
@@ -10,11 +16,14 @@ maintains a tenant-scoped Qdrant collection — fully incrementally. Host port *
 
 | Tool | Inputs | Returns |
 | --- | --- | --- |
-| `knowledge_search(query, k=5)` | `query`: search phrase; `k`: max results | List of `{note_path, heading, text, score}` ordered by relevance. |
-| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts. |
+| `knowledge_search(query, k=5)` | `query`: search phrase; `k`: max results | List of `{note_path, heading, text, score}` ordered by relevance across **both** vault and docs. |
+| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over both sources. |
 
-The agent calls `knowledge_search` to ground answers in vault content and cite the source
-note. It calls `knowledge_reindex` to refresh the index after notes have changed.
+`knowledge_search` merges results from the vault (`<tenant>__knowledge`) and the
+platform-docs (`<tenant>__docs`) collections, re-ranked by cosine similarity
+score, so the agent sees the most relevant content regardless of source.
+Platform-docs results have a `note_path` prefixed with `docs/`
+(e.g. `docs/services/knowledge.md`) so the agent can cite the source page.
 
 ### Events (NATS)
 
@@ -24,9 +33,9 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 
 | Panel | What it shows / does |
 | --- | --- |
-| **Status** | `note_count` (notes indexed) · `last_indexed_at` (ISO-8601 timestamp). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
+| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `last_indexed_at`. Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
 | **Settings** | Vault path (`VAULT_PATH`) — editable in the shell. |
-| **Actions** | **Re-index vault** — triggers `knowledge_reindex` through the core. |
+| **Actions** | **Re-index** — triggers `knowledge_reindex` (both sources) through the core. |
 
 No module code runs in the shell; all data flows through the core.
 
@@ -37,31 +46,49 @@ No module code runs in the shell; all data flows through the core.
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration). |
-| `GET /status` | Live index stats: `{note_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `GET /status` | Live index stats: `{note_count, doc_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ## How search works
 
 1. The agent calls `knowledge_search(query, k)`.
-2. The module embeds `query` via the core's platform API (`POST /platform/v1/embed`).
-3. It queries the tenant's Qdrant collection for the top-k nearest vectors.
-4. Returns the matching chunks with `note_path` and `heading` so the agent can cite the
-   source note in its reply.
+2. The module concurrently searches `<tenant>__knowledge` (vault) and `<tenant>__docs`
+   (platform docs), each embedding `query` via the core's platform API.
+3. Results from both collections are merged and re-ranked by descending cosine score.
+4. The top-k chunks are returned with `note_path` and `heading` so the agent can cite
+   the source.
 
 ## How indexing works
 
-For each `.md` note under the vault:
+The same incremental logic applies to both sources:
 
-1. **Hash** the file (sha-256) and compare with the DB record — skip unchanged notes.
-2. **Chunk** new/changed notes heading-aware, hard-splitting at paragraph boundaries past
+1. **Hash** the file (sha-256) and compare with the DB record — skip unchanged files.
+2. **Chunk** new/changed files heading-aware, hard-splitting at paragraph boundaries past
    `CHUNK_MAX_CHARS`.
 3. **Embed** each chunk via the core's [`PlatformClient`](../reference/platform-client.md)
    (`POST /platform/v1/embed`) — **no model key lives in this module**.
 4. **Upsert** the vectors into Qdrant (deterministic UUID5 point ids) and record the
-   note's hash/mtime/chunk-count in Postgres.
+   file's hash/mtime/chunk-count in Postgres.
 
-Deleted notes are purged from both stores. The result is an incremental index: editing one
-note re-embeds only that note.
+Deleted files are purged from both stores on the next index run.
+
+## Self-documentation (platform docs source)
+
+The platform docs (`docs/` tree) are **bundled into the container image** via
+`COPY docs/ /docs` in the Dockerfile. On startup the service indexes `/docs`
+into `<tenant>__docs` automatically — no operator configuration required.
+
+To use a live docs tree instead (e.g. during development):
+
+```bash
+# In .env
+DOCS_PATH=/absolute/path/to/epicurus/docs
+# In compose.override.yaml
+services:
+  knowledge:
+    volumes:
+      - ${DOCS_PATH}:/docs:ro
+```
 
 ## Configuration
 
@@ -70,31 +97,41 @@ note re-embeds only that note.
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `VAULT_PATH` | `/vault` | In-container path of the Obsidian vault. |
+| `DOCS_PATH` | `/docs` | In-container path of the platform docs (bundled in image). |
 | `PLATFORM_URL` | `http://core-app:8080` | The core's base URL (for embeddings via the platform API). |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
-| `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Note hash/mtime tracking. |
+| `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | File hash/mtime tracking. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
 
-In the stack, the vault is bound to `/vault` **read-only** via `KNOWLEDGE_HOST_VAULT`,
-which defaults to an **empty named volume** (point it at your vault to index real notes).
+The vault is bound to `/vault` **read-only** via `KNOWLEDGE_HOST_VAULT`, which
+defaults to an **empty named volume** (point it at your vault to index real notes).
+The platform docs at `/docs` are always present — bundled at image build time.
 
 ## Data model
 
-- **Postgres `knowledge_notes`** — the incremental-index ledger: `id`, `tenant`,
+- **Postgres `knowledge_notes`** — vault incremental-index ledger: `id`, `tenant`,
   `note_path`, `mtime_ns` (BigInteger — nanosecond mtimes overflow int32), `content_hash`
   (sha-256), `chunk_count`, `indexed_at`; unique on `(tenant, note_path)`.
-- **Qdrant `<tenant>__knowledge`** — chunk embeddings (cosine), one collection per tenant.
-  Each point payload: `{note_path, chunk_index, heading, text}`.
+- **Postgres `knowledge_doc_index`** — identical structure for platform-docs tracking;
+  separate table so vault and docs paths can't collide.
+- **Qdrant `<tenant>__knowledge`** — vault chunk embeddings (cosine), one collection per tenant.
+- **Qdrant `<tenant>__docs`** — platform-docs chunk embeddings (cosine), one collection per tenant.
+
+Each Qdrant point payload: `{note_path, chunk_index, heading, text}`.
 
 ## Dependencies
 
 core-app (embeddings + status proxy via the platform API) · Qdrant (vectors) · Postgres
-(note tracking) · NATS (the index-completed event) · the mounted vault.
+(file tracking) · NATS (the index-completed event) · the mounted vault · bundled docs.
 
 ## Run & extend
 
 ```bash
+# With your Obsidian vault (docs auto-indexed from the image):
 KNOWLEDGE_HOST_VAULT=/path/to/your/vault docker compose up -d knowledge
+
+# Without a vault (only platform docs are indexed):
+docker compose up -d knowledge
 ```
 
 Package `epicurus_knowledge`:
@@ -102,8 +139,8 @@ Package `epicurus_knowledge`:
 | Module | Responsibility |
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
-| `db.py` | `knowledge_notes` Postgres ledger (`NoteIndex`). |
-| `indexer.py` | Diff + embed + upsert run + semantic search (`KnowledgeIndexer`). |
+| `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`). |
+| `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source). |
 | `service.py` | MCP tools (`knowledge_search`, `knowledge_reindex`) + manifest UI. |
-| `app.py` | Lifespan, `GET /status` endpoint, initial index on startup. |
-| `settings.py` | `KnowledgeSettings`. |
+| `app.py` | Lifespan, `GET /status` endpoint, initial index of both sources on startup. |
+| `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

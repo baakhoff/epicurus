@@ -1,6 +1,6 @@
 """GmailProvider — Gmail API v1 backed by the platform OAuth token.
 
-The provider fetches a valid access token via ``PlatformClient.oauth_token``
+The provider fetches a valid access token via ``PlatformClient.get_oauth_token``
 (which calls ``GET /platform/v1/oauth/google/token`` on the core).  It never
 holds a client secret or refresh token.
 
@@ -46,8 +46,7 @@ class GmailProvider(MailProvider):
     # ── internal helpers ─────────────────────────────────────────────────────
 
     async def _get_token(self) -> str:
-        resp = await self._platform.oauth_token("google")
-        return resp.access_token
+        return await self._platform.get_oauth_token("google")
 
     def _make_client(self, token: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(

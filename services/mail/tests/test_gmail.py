@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from epicurus_core import PlatformClient, PlatformOAuthToken
+from epicurus_core import PlatformClient
 from epicurus_mail.gmail import GmailProvider, _extract_body, _parse_message
 
 
@@ -18,7 +18,7 @@ def _b64(text: str) -> str:
 
 def _make_platform(access_token: str = "tok") -> PlatformClient:
     platform = MagicMock(spec=PlatformClient)
-    platform.oauth_token = AsyncMock(return_value=PlatformOAuthToken(access_token=access_token))
+    platform.get_oauth_token = AsyncMock(return_value=access_token)
     return platform  # type: ignore[return-value]
 
 
@@ -114,7 +114,7 @@ def test_parse_message_multiple_recipients() -> None:
 
 async def test_health_check_returns_false_when_not_connected() -> None:
     platform = MagicMock(spec=PlatformClient)
-    platform.oauth_token = AsyncMock(side_effect=Exception("not connected"))
+    platform.get_oauth_token = AsyncMock(side_effect=Exception("not connected"))
     provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
     assert await provider.health_check() is False
 
@@ -124,7 +124,7 @@ async def test_get_token_uses_platform_client() -> None:
     provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
     token = await provider._get_token()
     assert token == "my_access_token"
-    platform.oauth_token.assert_called_once_with("google")  # type: ignore[attr-defined]
+    platform.get_oauth_token.assert_called_once_with("google")  # type: ignore[attr-defined]
 
 
 async def test_search_fetches_token_and_calls_list() -> None:
@@ -142,7 +142,7 @@ async def test_search_fetches_token_and_calls_list() -> None:
     results = await provider.search("from:alice", max_results=5)
     assert len(results) == 1
     assert results[0].id == "m1"
-    platform.oauth_token.assert_called_once_with("google")  # type: ignore[attr-defined]
+    platform.get_oauth_token.assert_called_once_with("google")  # type: ignore[attr-defined]
 
 
 async def test_read_fetches_token_and_full_message() -> None:

@@ -47,14 +47,6 @@ class PlatformChatResponse(BaseModel):
     completion_tokens: int | None = None
 
 
-class PlatformOAuthToken(BaseModel):
-    """A valid OAuth access token returned by the platform API."""
-
-    access_token: str
-    token_type: str = "Bearer"
-    expires_at: float | None = None
-
-
 class PlatformClient:
     """Typed HTTP client for the module → core platform API (``/platform/v1``).
 
@@ -128,20 +120,23 @@ class PlatformClient:
             resp.raise_for_status()
             return PlatformChatResponse.model_validate(resp.json())
 
-    async def oauth_token(self, provider: str) -> PlatformOAuthToken:
-        """Return a valid (auto-refreshed) OAuth access token for *provider*.
+    async def get_oauth_token(self, provider: str) -> str:
+        """Fetch a valid (auto-refreshed) OAuth access token for *provider*.
 
-        The core holds the refresh token and client secret; the module never
-        sees them.  Raises ``httpx.HTTPStatusError`` (400) if the provider is
-        not connected.
+        The core owns the token vault and refresh logic — the module never sees
+        a client secret or refresh token.  Raises ``httpx.HTTPStatusError``
+        (404 or 400) when the provider is not connected for this tenant.
 
         Args:
-            provider: The OAuth provider name (e.g. ``"google"``).
+            provider: Provider key, e.g. ``"google"``.
+
+        Returns the raw access-token string, ready to use in
+        ``Authorization: Bearer <token>``.
         """
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=10.0) as http:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 f"/platform/v1/oauth/{provider}/token",
                 params={"tenant_id": self._tenant_id},
             )
             resp.raise_for_status()
-            return PlatformOAuthToken.model_validate(resp.json())
+            return str(resp.json()["access_token"])

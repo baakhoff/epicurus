@@ -21,7 +21,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         MODULE_NAME,
         version="0.1.0",
         description=(
-            "Provider-agnostic mail — search, read, and send." " Gmail is the v0.1 provider."
+            "Provider-agnostic mail — search, read, and send. Gmail is the v0.1 provider."
         ),
         ui=UiSection(
             icon="mail",
@@ -37,7 +37,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
                     description="Compose and send a message via the connected mail account.",
                     intent="danger",
                     confirm=(
-                        "Send this message? This will deliver a real email" " and cannot be undone."
+                        "Send this message? This will deliver a real email and cannot be undone."
                     ),
                 ),
             ],

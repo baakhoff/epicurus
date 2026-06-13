@@ -35,6 +35,7 @@ epicurus
 ├─ modules        (sidecars; add one by running one more container)
 │  ├─ storage     file-tree index (list / search / read) + MinIO object store
 │  ├─ knowledge   Obsidian-vault RAG (incremental index + search)
+│  ├─ calendar    provider-neutral calendar (local + Google)
 │  └─ echo        the contract-proof reference module
 ├─ data plane     Postgres · Valkey · NATS · Qdrant · OpenBao · MinIO
 └─ edge & ops     Traefik gateway · Grafana / Loki / Prometheus / Tempo · Ollama

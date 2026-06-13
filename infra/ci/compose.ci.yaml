@@ -1,0 +1,42 @@
+# Smoke / CI override — used by infra/ci/smoke.sh, layered on top of compose.yaml.
+#
+# It does two things so the smoke stack is fully isolated and can run on a fresh
+# CI runner OR alongside a developer's running dev stack with no collisions:
+#   1. Scope the (otherwise hard-named) `epicurus` network to the compose project.
+#   2. Drop every published host port — the smoke harness reaches services over the
+#      internal network via a throwaway curl container, so no host binding is needed.
+#
+# `!reset []` requires Docker Compose v2.24+ (the runner and Docker Desktop both
+# satisfy this); the smoke script asserts the merge resolves before booting.
+
+networks:
+  epicurus:
+    name: ${COMPOSE_PROJECT_NAME:-epicurus-ci}
+
+services:
+  core-app:
+    ports: !reset []
+  echo:
+    ports: !reset []
+  storage:
+    ports: !reset []
+  knowledge:
+    ports: !reset []
+  websearch:
+    ports: !reset []
+  web:
+    ports: !reset []
+  openbao:
+    ports: !reset []
+  postgres:
+    ports: !reset []
+  valkey:
+    ports: !reset []
+  nats:
+    ports: !reset []
+  qdrant:
+    ports: !reset []
+  minio:
+    ports: !reset []
+  ollama:
+    ports: !reset []

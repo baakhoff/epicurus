@@ -51,6 +51,11 @@ tasks:
     cmds:
       - docker compose down {{.CLI_ARGS}}
 
+  smoke:
+    desc: Boot an isolated copy of the stack and assert the integration last mile (mirrors the CI gate)
+    cmds:
+      - sh infra/ci/smoke.sh
+
   infra-up:
     desc: Start only the data-plane stack (Postgres, Valkey, NATS, Qdrant, OpenBao)
     cmds:

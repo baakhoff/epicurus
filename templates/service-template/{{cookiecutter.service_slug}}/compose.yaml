@@ -1,5 +1,7 @@
 # {{ cookiecutter.service_name }} module — a per-module compose fragment (ADR-0006).
-# Add it to the top-level compose.yaml `include:` list to run it in the stack.
+# Wiring it into the stack is a short checklist (root compose `include:` + the core's
+# `module_urls` + a unique port) — see this module's README. The CI runtime-smoke
+# gate boots the stack and fails if the module isn't discoverable, so don't skip it.
 services:
   {{ cookiecutter.service_slug }}:
     build:
@@ -11,6 +13,9 @@ services:
       NATS_URL: nats://nats:4222
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Uncomment if this module calls back into the core for LLM / embeddings via
+      # epicurus_core's PlatformClient (modules never hold model keys — ADR-0010):
+      # PLATFORM_URL: http://core-app:8080
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     ports:

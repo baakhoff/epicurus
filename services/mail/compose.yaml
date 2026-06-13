@@ -13,7 +13,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PLATFORM_URL: http://core-app:8080
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${MAIL_PORT:-8087}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MAIL_PORT:-8090}:8080"
     depends_on:
       core-app:
         condition: service_healthy

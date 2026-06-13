@@ -16,6 +16,7 @@ members = [
     "epicurus-core-app",
     "epicurus-echo",
     "epicurus-knowledge",
+    "epicurus-mail",
     "epicurus-storage",
     "epicurus-websearch",
 ]
@@ -880,6 +881,25 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "qdrant-client", specifier = ">=1.12,<1.13" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+]
+
+[[package]]
+name = "epicurus-mail"
+version = "0.1.0"
+source = { editable = "services/mail" }
+dependencies = [
+    { name = "epicurus-core" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 

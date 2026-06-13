@@ -17,4 +17,5 @@ include:
   - services/storage/compose.yaml
   - services/knowledge/compose.yaml
   - services/websearch/compose.yaml
+  - services/mail/compose.yaml
   - services/web/compose.yaml

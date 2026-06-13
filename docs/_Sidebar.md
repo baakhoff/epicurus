@@ -15,6 +15,7 @@
 - [storage](services/storage.md)
 - [knowledge](services/knowledge.md)
 - [websearch](services/websearch.md)
+- [mail](services/mail.md)
 - [echo](services/echo.md)
 
 **API Reference**

@@ -1,0 +1,43 @@
+# Calendar module — per-module compose fragment (ADR-0006).
+# Add to the top-level compose.yaml `include:` list to enable this module.
+services:
+  calendar:
+    build:
+      context: ../..
+      dockerfile: services/calendar/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-calendar:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
+      PLATFORM_URL: http://core-app:8080
+      # "local" (default) or "google". Local needs no external account; Google
+      # requires the tenant to have connected Google via the OAuth flow.
+      CALENDAR_PROVIDER: ${CALENDAR_PROVIDER:-local}
+      # Google Calendar ID to use (Google provider only). "primary" is the
+      # user's default calendar.
+      CALENDAR_GOOGLE_ID: ${CALENDAR_GOOGLE_ID:-primary}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${CALENDAR_PORT:-8087}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      core-app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.calendar.rule=Host(`calendar.localhost`)
+      - traefik.http.routers.calendar.entrypoints=web
+      - traefik.http.services.calendar.loadbalancer.server.port=8080
+      - epicurus.metrics.port=8080
+    networks: [epicurus]

@@ -17,6 +17,7 @@ members = [
     "epicurus-echo",
     "epicurus-knowledge",
     "epicurus-storage",
+    "epicurus-tasks",
     "epicurus-websearch",
 ]
 
@@ -902,6 +903,29 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "epicurus-core", editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+]
+
+[[package]]
+name = "epicurus-tasks"
+version = "0.1.0"
+source = { editable = "services/tasks" }
+dependencies = [
+    { name = "asyncpg" },
+    { name = "epicurus-core" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.29" },
+    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]

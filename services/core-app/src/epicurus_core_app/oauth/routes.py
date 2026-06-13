@@ -33,14 +33,17 @@ def create_oauth_router(service: OAuthService, *, default_tenant: str) -> APIRou
     async def connect(
         provider: str,
         tenant_id: str = Query(default=default_tenant),
+        scope: str | None = Query(default=None),
     ) -> OAuthConnectResponse:
         """Return the provider consent URL.
 
         The web shell navigates the browser to ``auth_url``; the user grants
         access; the provider calls back to ``GET /platform/v1/oauth/callback``.
+        Pass ``scope`` to request non-default OAuth scopes (e.g. Gmail scopes
+        in addition to the default ``openid email profile``).
         """
         try:
-            return await service.connect(provider, tenant_id)
+            return await service.connect(provider, tenant_id, scope=scope)
         except OAuthError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

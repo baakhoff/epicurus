@@ -1,0 +1,34 @@
+# Mail module — per-module compose fragment (ADR-0006).
+# Add to the top-level compose.yaml `include:` list to enable this module.
+services:
+  mail:
+    build:
+      context: ../..
+      dockerfile: services/mail/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-mail:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PLATFORM_URL: http://core-app:8080
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MAIL_PORT:-8087}:8080"
+    depends_on:
+      core-app:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mail.rule=Host(`mail.localhost`)
+      - traefik.http.routers.mail.entrypoints=web
+      - traefik.http.services.mail.loadbalancer.server.port=8080
+      - epicurus.metrics.port=8080
+    networks: [epicurus]

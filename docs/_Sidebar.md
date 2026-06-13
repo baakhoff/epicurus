@@ -16,6 +16,7 @@
 - [knowledge](services/knowledge.md)
 - [websearch](services/websearch.md)
 - [calendar](services/calendar.md)
+- [mail](services/mail.md)
 - [echo](services/echo.md)
 
 **API Reference**

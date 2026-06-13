@@ -49,6 +49,11 @@ _GOOGLE_DEFAULT_SCOPE = "openid email profile"
 # Tokens will be proactively refreshed this many seconds before they actually expire.
 _REFRESH_BUFFER_SECONDS = 120
 
+# The placeholder shipped as the config default. The signed state token is the entire
+# CSRF / token-injection defense, so the flow must refuse to run while the secret is
+# still this value (or empty) — otherwise anyone could forge a valid state.
+_PLACEHOLDER_STATE_SECRET = b"change-this-before-use"
+
 
 class OAuthError(RuntimeError):
     """Raised when an OAuth operation fails (invalid state, provider error, etc.)."""
@@ -91,6 +96,15 @@ class OAuthService:
         return f"{self._redirect_base}/platform/v1/oauth/callback"
 
     # ── state token (CSRF) ───────────────────────────────────────────────────
+
+    def _require_configured_secret(self) -> None:
+        """Refuse to run the flow with an unset or placeholder state secret — the
+        signed state is the only defense against a forged-state token injection."""
+        if not self._state_secret or self._state_secret == _PLACEHOLDER_STATE_SECRET:
+            raise OAuthError(
+                "OAUTH_STATE_SECRET is unset or still the placeholder default — set it to "
+                "a strong random value (e.g. `openssl rand -hex 32`) before using OAuth"
+            )
 
     def _create_state(self, provider: str, tenant_id: str) -> str:
         """Build a signed, time-limited state token."""
@@ -201,6 +215,7 @@ class OAuthService:
         provider will call back to ``/platform/v1/oauth/callback``.
         """
         self._validate_provider(provider)
+        self._require_configured_secret()
         try:
             creds = await self._secrets.get(self._client_path(provider), tenant_id)
         except SecretError as exc:
@@ -220,6 +235,7 @@ class OAuthService:
 
         Returns ``(provider, tenant_id)`` so the caller can redirect accordingly.
         """
+        self._require_configured_secret()
         provider, tenant_id = self._verify_state(state)
         self._validate_provider(provider)
         try:

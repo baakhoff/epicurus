@@ -57,6 +57,21 @@ def test_state_roundtrip_returns_provider_and_tenant() -> None:
     assert tenant == TEST_TENANT
 
 
+async def test_placeholder_or_empty_state_secret_refuses_to_run() -> None:
+    """The flow must refuse an unset/placeholder state secret — it is the CSRF defense."""
+    store = AsyncMock()
+    for weak in ("change-this-before-use", ""):
+        svc = OAuthService(
+            store,  # type: ignore[arg-type]
+            redirect_base_url=TEST_REDIRECT,
+            state_secret=weak,
+        )
+        with pytest.raises(OAuthError, match="OAUTH_STATE_SECRET"):
+            await svc.connect(PROVIDER_GOOGLE, TEST_TENANT)
+        with pytest.raises(OAuthError, match="OAUTH_STATE_SECRET"):
+            await svc.handle_callback("code", "state")
+
+
 def test_state_tampered_raises_oauth_error() -> None:
     svc, *_ = _service()
     state = svc._create_state(PROVIDER_GOOGLE, TEST_TENANT)

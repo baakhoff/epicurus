@@ -21,7 +21,11 @@ from epicurus_core.manifest import (
 )
 from epicurus_core.module import EpicurusModule, add_manifest_route
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
-from epicurus_core.platform_client import PlatformChatResponse, PlatformClient, PlatformMessage
+from epicurus_core.platform_client import (
+    PlatformChatResponse,
+    PlatformClient,
+    PlatformMessage,
+)
 from epicurus_core.secret_store import SecretError, SecretStore
 from epicurus_core.tenancy import (
     TenantError,

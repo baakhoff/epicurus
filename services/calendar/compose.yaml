@@ -1,23 +1,26 @@
-# Tasks module — per-module compose fragment (ADR-0006).
+# Calendar module — per-module compose fragment (ADR-0006).
 # Add to the top-level compose.yaml `include:` list to enable this module.
 services:
-  tasks:
+  calendar:
     build:
       context: ../..
-      dockerfile: services/tasks/Dockerfile
-    image: ghcr.io/baakhoff/epicurus-tasks:latest
+      dockerfile: services/calendar/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-calendar:latest
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Core service base URL on the internal Docker network.
-      PLATFORM_URL: http://core-app:8080
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
-      # "local" or "google".  Switch without changing any tool code (ADR-0016).
-      TASKS_PROVIDER: ${TASKS_PROVIDER:-local}
+      PLATFORM_URL: http://core-app:8080
+      # "local" (default) or "google". Local needs no external account; Google
+      # requires the tenant to have connected Google via the OAuth flow.
+      CALENDAR_PROVIDER: ${CALENDAR_PROVIDER:-local}
+      # Google Calendar ID to use (Google provider only). "primary" is the
+      # user's default calendar.
+      CALENDAR_GOOGLE_ID: ${CALENDAR_GOOGLE_ID:-primary}
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${TASKS_PORT:-8091}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${CALENDAR_PORT:-8087}:8080"
     depends_on:
       nats:
         condition: service_started
@@ -33,8 +36,8 @@ services:
       start_period: 15s
     labels:
       - traefik.enable=true
-      - traefik.http.routers.tasks.rule=Host(`tasks.localhost`)
-      - traefik.http.routers.tasks.entrypoints=web
-      - traefik.http.services.tasks.loadbalancer.server.port=8080
+      - traefik.http.routers.calendar.rule=Host(`calendar.localhost`)
+      - traefik.http.routers.calendar.entrypoints=web
+      - traefik.http.services.calendar.loadbalancer.server.port=8080
       - epicurus.metrics.port=8080
     networks: [epicurus]

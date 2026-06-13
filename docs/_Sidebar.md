@@ -15,6 +15,8 @@
 - [storage](services/storage.md)
 - [knowledge](services/knowledge.md)
 - [websearch](services/websearch.md)
+- [calendar](services/calendar.md)
+- [mail](services/mail.md)
 - [tasks](services/tasks.md)
 - [echo](services/echo.md)
 

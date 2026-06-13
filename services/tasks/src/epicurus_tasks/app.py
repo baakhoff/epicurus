@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import (
     EventBus,
+    PlatformClient,
     add_manifest_route,
     add_ops_routes,
     configure_logging,
@@ -45,7 +46,10 @@ def create_app() -> FastAPI:
     engine = None
 
     if settings.tasks_provider == "google":
-        provider = GoogleTasksProvider(platform_url=settings.platform_url)
+        platform = PlatformClient(
+            base_url=settings.platform_url, tenant_id=settings.default_tenant_id
+        )
+        provider = GoogleTasksProvider(platform=platform)
         log.info("tasks provider: google")
     else:
         engine = create_async_engine(settings.database_url)

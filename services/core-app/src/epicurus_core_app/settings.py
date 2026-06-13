@@ -24,7 +24,7 @@ class CoreAppSettings(CoreSettings):
     # (the registry + web shell read these).
     module_urls: str = (
         "http://echo:8080,http://storage:8080,http://knowledge:8080,"
-        "http://websearch:8080,http://tasks:8080"
+        "http://websearch:8080,http://calendar:8080,http://mail:8080,http://tasks:8080"
     )
     # Max tool-calling rounds in one agent turn before it must answer.
     agent_max_steps: int = 4

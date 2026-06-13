@@ -1,8 +1,8 @@
 """GoogleTasksProvider — lists and manages tasks via the Google Tasks API.
 
-OAuth tokens are fetched from the core's platform API
-(``GET /platform/v1/oauth/google/token``) — no client secret or refresh
-token ever leaves the core (ADR-0016 / non-negotiable #8).
+OAuth tokens are fetched from the core via ``PlatformClient.get_oauth_token``
+(which calls ``GET /platform/v1/oauth/google/token``) — no client secret or
+refresh token ever leaves the core (ADR-0016 / non-negotiable #8).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from epicurus_core import PlatformClient
 from epicurus_tasks.models import Task
 
 _TASKS_BASE = "https://tasks.googleapis.com/tasks/v1"
@@ -25,29 +26,24 @@ class GoogleTasksProvider:
     """Manages tasks via the Google Tasks REST API.
 
     Args:
-        platform_url: Internal base URL of the core service (e.g.
-            ``http://core-app:8080``). Used to fetch OAuth tokens.
+        platform: A ``PlatformClient`` scoped to this service's tenant; used to
+            fetch the Google OAuth token from the core (it never holds the token).
     """
 
-    def __init__(self, platform_url: str) -> None:
-        self._platform_url = platform_url.rstrip("/")
+    def __init__(self, platform: PlatformClient) -> None:
+        self._platform = platform
 
     def provider_name(self) -> str:
         return "google"
 
-    async def _access_token(self, tenant_id: str) -> str:
-        """Fetch a valid Google access token from the core's OAuth vault."""
-        async with httpx.AsyncClient(base_url=self._platform_url, timeout=10.0) as client:
-            resp = await client.get(
-                "/platform/v1/oauth/google/token",
-                params={"tenant_id": tenant_id},
-            )
-            if resp.status_code == 404 or resp.status_code == 400:
-                raise GoogleTasksError(
-                    "Google account not connected — connect via the Settings screen"
-                )
-            resp.raise_for_status()
-            return str(resp.json()["access_token"])
+    async def _access_token(self) -> str:
+        """Fetch a valid Google access token from the core via PlatformClient."""
+        try:
+            return await self._platform.get_oauth_token("google")
+        except httpx.HTTPStatusError as exc:
+            raise GoogleTasksError(
+                "Google account not connected — connect via the Settings screen"
+            ) from exc
 
     def _auth_headers(self, token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
@@ -73,7 +69,7 @@ class GoogleTasksProvider:
     async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
         """Return incomplete tasks from the specified (or default) Google task list."""
         tasklist = list_id or _DEFAULT_LIST
-        token = await self._access_token(tenant_id)
+        token = await self._access_token()
         async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
             resp = await client.get(
                 f"/lists/{tasklist}/tasks",
@@ -99,7 +95,7 @@ class GoogleTasksProvider:
     ) -> Task:
         """Create a task in the specified (or default) Google task list."""
         tasklist = list_id or _DEFAULT_LIST
-        token = await self._access_token(tenant_id)
+        token = await self._access_token()
         body: dict[str, Any] = {"title": title}
         if notes:
             body["notes"] = notes
@@ -124,7 +120,7 @@ class GoogleTasksProvider:
     ) -> Task:
         """Mark a task complete using a PATCH to the Google Tasks API."""
         tasklist = list_id or _DEFAULT_LIST
-        token = await self._access_token(tenant_id)
+        token = await self._access_token()
         async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
             resp = await client.patch(
                 f"/lists/{tasklist}/tasks/{task_id}",

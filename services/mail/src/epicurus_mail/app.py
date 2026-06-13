@@ -1,0 +1,73 @@
+"""Mail service: ops endpoints + MCP tool surface."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
+from typing import Any
+
+from fastapi import FastAPI
+
+from epicurus_core import (
+    EventBus,
+    PlatformClient,
+    add_manifest_route,
+    add_ops_routes,
+    configure_logging,
+    get_logger,
+)
+from epicurus_mail.gmail import GmailProvider
+from epicurus_mail.service import MODULE_NAME, build_module
+from epicurus_mail.settings import MailSettings
+
+
+def _service_version() -> str:
+    try:
+        return pkg_version("epicurus-mail")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
+def create_app() -> FastAPI:
+    """Build the mail ASGI app."""
+    settings = MailSettings(service_name=MODULE_NAME)
+    configure_logging(settings)
+    log = get_logger(MODULE_NAME)
+
+    platform = PlatformClient(
+        base_url=settings.platform_url,
+        tenant_id=settings.default_tenant_id,
+    )
+    provider = GmailProvider(platform=platform, tenant_id=settings.default_tenant_id)
+    bus = EventBus.from_settings(settings)
+    module = build_module(provider)
+    mcp_app = module.http_app()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        async with module.mcp.session_manager.run():
+            await bus.connect()
+            log.info("mail service ready", tenant=settings.default_tenant_id)
+            try:
+                yield
+            finally:
+                await bus.close()
+
+    app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
+    add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
+    add_manifest_route(app, module)
+
+    @app.get("/status")
+    async def get_status() -> dict[str, Any]:
+        """Gmail reachability status for the manifest-driven UI status panel."""
+        healthy = await provider.health_check()
+        return {"gmail_connected": healthy}
+
+    app.mount("/mcp", mcp_app)
+
+    return app
+
+
+app = create_app()

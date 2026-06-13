@@ -69,7 +69,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["libs", "services", "tests"]
-addopts = "-q"
+# importlib mode: modules across services can share a test filename (e.g. several
+# test_service.py) without colliding — no tests/__init__.py needed or wanted.
+addopts = "-q --import-mode=importlib"
 markers = [
     "integration: requires Docker (spins ephemeral containers via testcontainers)",
 ]

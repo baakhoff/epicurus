@@ -138,3 +138,9 @@ export const OAuthStatus = z.object({
   scope: z.string().nullish(),
 });
 export type OAuthStatus = z.infer<typeof OAuthStatus>;
+
+export const OAuthClientStatus = z.object({
+  provider: z.string(),
+  configured: z.boolean(),
+});
+export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;

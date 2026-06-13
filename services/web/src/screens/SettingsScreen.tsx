@@ -1,6 +1,6 @@
 /** Settings — platform info, theme, connected accounts, and what this thing is. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Link, Moon, Sun, Unlink, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, Link, Moon, Sun, Unlink, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -17,8 +17,77 @@ const OAUTH_PROVIDERS: { id: string; label: string; description: string }[] = [
   },
 ];
 
+function OAuthCredentialsForm({
+  providerId,
+  onSaved,
+}: {
+  providerId: string;
+  onSaved: () => void;
+}) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.oauthSetClient(providerId, clientId.trim(), clientSecret.trim()),
+    onSuccess: onSaved,
+  });
+
+  return (
+    <form
+      className="mt-3 flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (clientId.trim() && clientSecret.trim()) save.mutate();
+      }}
+    >
+      <div>
+        <label className="mb-1 block text-xs text-ink-dim">Client ID</label>
+        <input
+          type="text"
+          autoComplete="off"
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+          placeholder="paste the client ID"
+          className="w-full rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+        />
+      </div>
+      <div>
+        <label className="mb-1 block text-xs text-ink-dim">
+          Client Secret
+          <span className="ml-1 text-ink-faint">(write-only — never shown again)</span>
+        </label>
+        <input
+          type="password"
+          autoComplete="off"
+          value={clientSecret}
+          onChange={(e) => setClientSecret(e.target.value)}
+          placeholder="paste the client secret"
+          className="w-full rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+        />
+      </div>
+      {save.isError && (
+        <p className="text-xs text-danger">{(save.error as Error).message}</p>
+      )}
+      <Button
+        type="submit"
+        variant="primary"
+        busy={save.isPending}
+        disabled={!clientId.trim() || !clientSecret.trim()}
+      >
+        Save credentials
+      </Button>
+    </form>
+  );
+}
+
 function OAuthProviderRow({ providerId }: { providerId: string }) {
   const queryClient = useQueryClient();
+  const [showCredForm, setShowCredForm] = useState(false);
+
+  const clientStatus = useQuery({
+    queryKey: ["oauth-client-status", providerId],
+    queryFn: () => api.oauthClientStatus(providerId),
+  });
+
   const status = useQuery({
     queryKey: ["oauth-status", providerId],
     queryFn: () => api.oauthStatus(providerId),
@@ -37,40 +106,69 @@ function OAuthProviderRow({ providerId }: { providerId: string }) {
       queryClient.invalidateQueries({ queryKey: ["oauth-status", providerId] }),
   });
 
-  if (status.isLoading) return <Spinner />;
+  if (status.isLoading || clientStatus.isLoading) return <Spinner />;
 
   const connected = status.data?.connected ?? false;
+  const credentialsConfigured = clientStatus.data?.configured ?? false;
 
   return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex items-center gap-2.5">
-        <Dot tone={connected ? "ok" : "dim"} />
-        <div>
-          <p className="text-sm text-ink">{connected ? "Connected" : "Not connected"}</p>
-          {connected && status.data?.scope && (
-            <p className="text-xs text-ink-faint">{status.data.scope}</p>
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2.5">
+          <Dot tone={connected ? "ok" : "dim"} />
+          <div>
+            <p className="text-sm text-ink">{connected ? "Connected" : "Not connected"}</p>
+            {connected && status.data?.scope && (
+              <p className="text-xs text-ink-faint">{status.data.scope}</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => setShowCredForm((v) => !v)}
+            className="gap-1.5 text-xs"
+            title={credentialsConfigured ? "Client credentials configured — click to update" : "Add client credentials"}
+          >
+            <KeyRound size={13} />
+            {credentialsConfigured ? "Update credentials" : "Add credentials"}
+          </Button>
+          {connected ? (
+            <Button
+              variant="danger"
+              onClick={() => disconnect.mutate()}
+              disabled={disconnect.isPending}
+            >
+              <Unlink size={13} />
+              Disconnect
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={() => connect.mutate()}
+              disabled={connect.isPending || !credentialsConfigured}
+              title={!credentialsConfigured ? "Add client credentials first" : undefined}
+              className="gap-1.5"
+            >
+              <Link size={13} />
+              {connect.isPending ? "Redirecting…" : "Connect"}
+            </Button>
           )}
         </div>
       </div>
-      {connected ? (
-        <Button
-          variant="danger"
-          onClick={() => disconnect.mutate()}
-          disabled={disconnect.isPending}
-        >
-          <Unlink size={13} />
-          Disconnect
-        </Button>
-      ) : (
-        <Button
-          variant="outline"
-          onClick={() => connect.mutate()}
-          disabled={connect.isPending}
-          className="gap-1.5"
-        >
-          <Link size={13} />
-          {connect.isPending ? "Redirecting…" : "Connect"}
-        </Button>
+      {!credentialsConfigured && !showCredForm && (
+        <p className="text-xs text-ink-dim">
+          Add your Google OAuth client credentials above before connecting.
+        </p>
+      )}
+      {showCredForm && (
+        <OAuthCredentialsForm
+          providerId={providerId}
+          onSaved={() => {
+            setShowCredForm(false);
+            void queryClient.invalidateQueries({ queryKey: ["oauth-client-status", providerId] });
+          }}
+        />
       )}
       {(connect.isError || disconnect.isError) && (
         <p className="text-xs text-danger">

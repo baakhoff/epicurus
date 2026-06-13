@@ -8,6 +8,7 @@ import {
   MessageRecord,
   ModelInfo,
   ModuleSnapshot,
+  OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
   PlatformInfo,
@@ -103,6 +104,13 @@ export const api = {
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
 
+  oauthClientStatus: (provider: string) =>
+    request(OAuthClientStatus, `/platform/v1/oauth/${encodeURIComponent(provider)}/client`),
+  oauthSetClient: (provider: string, clientId: string, clientSecret: string) =>
+    request(z.object({ status: z.string() }), `/platform/v1/oauth/${encodeURIComponent(provider)}/client`, {
+      method: "PUT",
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+    }),
   oauthStatus: (provider: string) =>
     request(OAuthStatus, `/platform/v1/oauth/${encodeURIComponent(provider)}/status`),
   oauthConnect: (provider: string) =>

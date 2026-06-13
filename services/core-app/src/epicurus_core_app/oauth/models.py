@@ -28,3 +28,17 @@ class OAuthTokenResponse(BaseModel):
     access_token: str
     token_type: str
     expires_at: float | None = None
+
+
+class OAuthClientCredentials(BaseModel):
+    """Input model for the PUT /client endpoint — write-only."""
+
+    client_id: str
+    client_secret: str
+
+
+class OAuthClientStatus(BaseModel):
+    """Whether client credentials have been configured for a provider — never returns the secret."""
+
+    provider: str
+    configured: bool

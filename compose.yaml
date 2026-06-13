@@ -19,4 +19,5 @@ include:
   - services/websearch/compose.yaml
   - services/calendar/compose.yaml
   - services/mail/compose.yaml
+  - services/tasks/compose.yaml
   - services/web/compose.yaml

@@ -1,0 +1,89 @@
+"""Tests for LocalTasksProvider backed by an in-memory SQLite database."""
+
+from __future__ import annotations
+
+import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from epicurus_tasks.db import TaskStore
+from epicurus_tasks.local_provider import LocalTasksProvider
+
+TENANT = "test-tenant"
+
+
+@pytest.fixture()
+async def store() -> TaskStore:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    ts = TaskStore(engine)
+    await ts.init()
+    return ts
+
+
+@pytest.fixture()
+def provider(store: TaskStore) -> LocalTasksProvider:
+    return LocalTasksProvider(store)
+
+
+async def test_provider_name(provider: LocalTasksProvider) -> None:
+    assert provider.provider_name() == "local"
+
+
+async def test_list_empty(provider: LocalTasksProvider) -> None:
+    tasks = await provider.list_tasks(TENANT)
+    assert tasks == []
+
+
+async def test_add_and_list(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Buy milk", notes="2 litres", due="2025-12-01")
+    assert task.title == "Buy milk"
+    assert task.notes == "2 litres"
+    assert task.due == "2025-12-01"
+    assert not task.completed
+    assert task.id  # UUID assigned
+
+    tasks = await provider.list_tasks(TENANT)
+    assert len(tasks) == 1
+    assert tasks[0].id == task.id
+
+
+async def test_add_minimal(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Minimal task")
+    assert task.title == "Minimal task"
+    assert task.notes is None
+    assert task.due is None
+
+
+async def test_complete_task(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Finish report")
+    done = await provider.complete_task(TENANT, task.id)
+    assert done.completed
+    assert done.completed_at is not None
+
+    # Completed task should not appear in list (list only shows open tasks).
+    tasks = await provider.list_tasks(TENANT)
+    assert all(t.id != task.id for t in tasks)
+
+
+async def test_complete_unknown_raises(provider: LocalTasksProvider) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        await provider.complete_task(TENANT, "nonexistent-id")
+
+
+async def test_tenant_isolation(provider: LocalTasksProvider) -> None:
+    await provider.add_task("tenant-a", "Task A")
+    await provider.add_task("tenant-b", "Task B")
+
+    a_tasks = await provider.list_tasks("tenant-a")
+    b_tasks = await provider.list_tasks("tenant-b")
+
+    assert len(a_tasks) == 1
+    assert a_tasks[0].title == "Task A"
+    assert len(b_tasks) == 1
+    assert b_tasks[0].title == "Task B"
+
+
+async def test_list_id_ignored(provider: LocalTasksProvider) -> None:
+    """list_id is silently ignored by the local provider — single flat list."""
+    await provider.add_task(TENANT, "Task")
+    tasks = await provider.list_tasks(TENANT, list_id="some-list-id")
+    assert len(tasks) == 1

@@ -1,0 +1,40 @@
+# Tasks module — per-module compose fragment (ADR-0006).
+# Add to the top-level compose.yaml `include:` list to enable this module.
+services:
+  tasks:
+    build:
+      context: ../..
+      dockerfile: services/tasks/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-tasks:latest
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Core service base URL on the internal Docker network.
+      PLATFORM_URL: http://core-app:8080
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
+      # "local" or "google".  Switch without changing any tool code (ADR-0016).
+      TASKS_PROVIDER: ${TASKS_PROVIDER:-local}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${TASKS_PORT:-8091}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      core-app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.tasks.rule=Host(`tasks.localhost`)
+      - traefik.http.routers.tasks.entrypoints=web
+      - traefik.http.services.tasks.loadbalancer.server.port=8080
+      - epicurus.metrics.port=8080
+    networks: [epicurus]

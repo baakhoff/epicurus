@@ -9,7 +9,9 @@
 .pytest_cache
 .ruff_cache
 .workspace
-docs
+# `docs/` is intentionally NOT ignored: the knowledge module bundles it into its
+# image (`COPY docs/ /docs`) for self-documentation (#83). It only lands in the
+# knowledge image — no other service COPYs it from the context.
 site
 backups
 data

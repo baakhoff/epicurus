@@ -8,6 +8,8 @@ import {
   MessageRecord,
   ModelInfo,
   ModuleSnapshot,
+  OAuthConnectResponse,
+  OAuthStatus,
   PlatformInfo,
   PowerStatus,
   ProviderInfo,
@@ -100,4 +102,13 @@ export const api = {
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/status`),
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
+
+  oauthStatus: (provider: string) =>
+    request(OAuthStatus, `/platform/v1/oauth/${encodeURIComponent(provider)}/status`),
+  oauthConnect: (provider: string) =>
+    request(OAuthConnectResponse, `/platform/v1/oauth/${encodeURIComponent(provider)}/connect`),
+  oauthDisconnect: (provider: string) =>
+    request(z.object({ status: z.string() }), `/platform/v1/oauth/${encodeURIComponent(provider)}`, {
+      method: "DELETE",
+    }),
 };

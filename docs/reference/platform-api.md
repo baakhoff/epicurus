@@ -176,3 +176,15 @@ class PlatformChatResponse(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 ```
+
+---
+
+## OAuth token endpoint (module-facing)
+
+Modules that need a Google (or other provider) access token call:
+
+```
+GET /platform/v1/oauth/{provider}/token?tenant_id={tenant}
+```
+
+The core returns a valid, auto-refreshed access token — the module never touches the client secret or refresh flow.  Full reference: [OAuth 2.0](oauth.md).

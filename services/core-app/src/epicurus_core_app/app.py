@@ -33,6 +33,8 @@ from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import ConversationStore
 from epicurus_core_app.modules import ModuleRegistry, create_modules_router
+from epicurus_core_app.oauth.routes import create_oauth_router
+from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.settings import CoreAppSettings
 
@@ -88,6 +90,11 @@ def create_app() -> FastAPI:
         secrets=secrets,
         tenant=settings.default_tenant_id,
     )
+    oauth = OAuthService(
+        secrets,
+        redirect_base_url=settings.oauth_redirect_base_url,
+        state_secret=settings.oauth_state_secret,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -111,6 +118,7 @@ def create_app() -> FastAPI:
     app.include_router(create_power_router(gateway, power))
     app.include_router(create_agent_router(agent, memory, settings.default_tenant_id))
     app.include_router(create_modules_router(registry))
+    app.include_router(create_oauth_router(oauth, default_tenant=settings.default_tenant_id))
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:

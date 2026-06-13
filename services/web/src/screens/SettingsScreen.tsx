@@ -1,21 +1,139 @@
-/** Settings — platform info, theme, and what this thing is. */
-import { useQuery } from "@tanstack/react-query";
-import { Moon, Sun } from "lucide-react";
+/** Settings — platform info, theme, connected accounts, and what this thing is. */
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, Link, Moon, Sun, Unlink, XCircle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { EpsilonMark } from "@/components/Logo";
-import { Button, Card, Spinner } from "@/components/ui";
+import { Button, Card, Dot, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { usePrefs } from "@/stores/prefs";
+
+const OAUTH_PROVIDERS: { id: string; label: string; description: string }[] = [
+  {
+    id: "google",
+    label: "Google",
+    description: "Grants Google modules (Calendar, Gmail, Drive, …) access to your account.",
+  },
+];
+
+function OAuthProviderRow({ providerId }: { providerId: string }) {
+  const queryClient = useQueryClient();
+  const status = useQuery({
+    queryKey: ["oauth-status", providerId],
+    queryFn: () => api.oauthStatus(providerId),
+  });
+
+  const connect = useMutation({
+    mutationFn: () => api.oauthConnect(providerId),
+    onSuccess: (data) => {
+      window.location.href = data.auth_url;
+    },
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => api.oauthDisconnect(providerId),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["oauth-status", providerId] }),
+  });
+
+  if (status.isLoading) return <Spinner />;
+
+  const connected = status.data?.connected ?? false;
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="flex items-center gap-2.5">
+        <Dot tone={connected ? "ok" : "dim"} />
+        <div>
+          <p className="text-sm text-ink">{connected ? "Connected" : "Not connected"}</p>
+          {connected && status.data?.scope && (
+            <p className="text-xs text-ink-faint">{status.data.scope}</p>
+          )}
+        </div>
+      </div>
+      {connected ? (
+        <Button
+          variant="danger"
+          onClick={() => disconnect.mutate()}
+          disabled={disconnect.isPending}
+        >
+          <Unlink size={13} />
+          Disconnect
+        </Button>
+      ) : (
+        <Button
+          variant="outline"
+          onClick={() => connect.mutate()}
+          disabled={connect.isPending}
+          className="gap-1.5"
+        >
+          <Link size={13} />
+          {connect.isPending ? "Redirecting…" : "Connect"}
+        </Button>
+      )}
+      {(connect.isError || disconnect.isError) && (
+        <p className="text-xs text-danger">
+          {((connect.error || disconnect.error) as Error).message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function OAuthNotice({ message, tone }: { message: string; tone: "ok" | "error" }) {
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 rounded-(--radius-field) border px-3 py-2 text-sm",
+        tone === "ok"
+          ? "border-ok/40 bg-ok/5 text-ok"
+          : "border-danger/40 bg-danger/5 text-danger",
+      )}
+    >
+      {tone === "ok" ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
+      {message}
+    </div>
+  );
+}
 
 export function SettingsScreen() {
   const theme = usePrefs((s) => s.theme);
   const setTheme = usePrefs((s) => s.setTheme);
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [oauthNotice, setOauthNotice] = useState<{
+    message: string;
+    tone: "ok" | "error";
+  } | null>(null);
+
+  // Read the oauth_connected / oauth_error query params that the backend sets
+  // after the consent callback, then clear them from the URL.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const connected = params.get("oauth_connected");
+    const error = params.get("oauth_error");
+    if (connected) {
+      setOauthNotice({
+        message: `${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully.`,
+        tone: "ok",
+      });
+      navigate("/settings", { replace: true });
+    } else if (error) {
+      setOauthNotice({ message: "Connection failed or was cancelled.", tone: "error" });
+      navigate("/settings", { replace: true });
+    }
+  }, [location.search, navigate]);
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-2xl flex-col gap-4 px-4 py-5">
         <h1 className="font-serif text-xl text-ink">Settings</h1>
+
+        {oauthNotice && (
+          <OAuthNotice message={oauthNotice.message} tone={oauthNotice.tone} />
+        )}
 
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Appearance</h3>
@@ -34,6 +152,26 @@ export function SettingsScreen() {
               <Sun size={15} />
               Parchment light
             </Button>
+          </div>
+        </Card>
+
+        <Card>
+          <h3 className="mb-3 font-serif text-base text-ink">Connected accounts</h3>
+          <p className="mb-4 text-sm text-ink-dim">
+            Grant the assistant access to external services. Tokens are stored
+            encrypted in the secrets vault — modules never handle credentials
+            directly.
+          </p>
+          <div className="flex flex-col gap-4">
+            {OAUTH_PROVIDERS.map(({ id, label, description }) => (
+              <div key={id}>
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="text-sm font-medium text-ink">{label}</span>
+                </div>
+                <p className="mb-3 text-xs text-ink-dim">{description}</p>
+                <OAuthProviderRow providerId={id} />
+              </div>
+            ))}
           </div>
         </Card>
 

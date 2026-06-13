@@ -103,3 +103,16 @@ jobs:
             docker build -f "$df" -t "epicurus-$svc:ci" .
             echo "::endgroup::"
           done
+
+  # Boots the actual stack (data plane + OpenBao bootstrap + core + modules) and
+  # asserts the integration last mile that the jobs above never exercise: module
+  # discovery, status reachability through core, an MCP tool round-trip, and a
+  # secret surviving a vault restart. See infra/ci/smoke.sh and #98.
+  runtime-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Boot the stack and smoke-test the integration last mile
+        run: sh infra/ci/smoke.sh

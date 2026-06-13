@@ -8,6 +8,10 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # Skip Jinja-templated YAML (cookiecutter renders it) and the smoke
+        # override, which uses Docker Compose custom tags (!reset) that a plain
+        # YAML parser cannot construct.
+        exclude: '^(templates/.*|infra/ci/compose\.ci\.yaml)$'
       - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict

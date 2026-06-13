@@ -130,6 +130,31 @@ print(result.content)
 See [Platform API reference](../reference/platform-api.md) for the full HTTP
 contract and `PlatformChatResponse` type.
 
+## Wire it into the stack
+
+Scaffold the skeleton with the cookiecutter template (it generates the package,
+Dockerfile, compose fragment, and tests):
+
+```bash
+uv run cookiecutter templates/service-template
+```
+
+Then wire the module in. The **runtime smoke gate** (`task smoke`, run in CI as the
+`runtime-smoke` job) boots the stack and fails if a module is present but the agent
+can't discover it — so none of these steps can be silently skipped:
+
+1. **Register the package** in the root `pyproject.toml`: add it to
+   `[tool.mypy] packages` and `[tool.ruff.lint.isort] known-first-party`.
+2. **Include the fragment** in the top-level `compose.yaml` `include:` list — the
+   gate derives the module set from this list, so your module is gated once it's here.
+3. **Register the URL in the core** — add `http://<slug>:8080` to `module_urls` in
+   `services/core-app/src/epicurus_core_app/settings.py`. Skip this and the agent
+   never sees the module; it is the most-forgotten step, and the gate catches it.
+4. **Pick a unique host port** in the fragment — the gate flags duplicates.
+
+See [Testing › Runtime smoke gate](testing.md#runtime-smoke-gate) for what it
+checks and how to run it locally.
+
 ## Conventions
 
 - **Don't call language models directly.** Use `PlatformClient` — it owns the

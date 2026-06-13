@@ -130,6 +130,25 @@ print(result.content)
 See [Platform API reference](../reference/platform-api.md) for the full HTTP
 contract and `PlatformChatResponse` type.
 
+## Fetch connected-account tokens (OAuth)
+
+A module that calls a third-party API on the user's behalf (Google Calendar, Gmail,
+…) **never holds a client secret or refresh token**. The core owns the OAuth connect
+flow and the per-tenant token vault; the module asks for a ready-to-use, auto-refreshed
+access token with one `PlatformClient` call:
+
+```python
+token = await platform.get_oauth_token("google")   # -> str, raises if not connected
+headers = {"Authorization": f"Bearer {token}"}
+```
+
+**Always go through `get_oauth_token`.** Do not call `/platform/v1/oauth/{provider}/token`
+directly, and do not add your own token method to `PlatformClient` — every module shares
+this one contract so the credential boundary stays in the core (ADR-0010, ADR-0016). The
+user connects the account and grants scopes from the web Settings page; provisioning the
+provider's client credentials is an operator step (see
+[Secrets](../infrastructure/secrets.md)).
+
 ## Wire it into the stack
 
 Scaffold the skeleton with the cookiecutter template (it generates the package,
@@ -160,4 +179,6 @@ checks and how to run it locally.
 - **Don't call language models directly.** Use `PlatformClient` — it owns the
   model keys, routing, and usage accounting.
 - **Fetch secrets from OpenBao at runtime**, never from env files or git.
+- **Fetch connected-account tokens via `PlatformClient.get_oauth_token`** — never the
+  OAuth endpoint directly, never a bespoke client method. One contract, owned by the core.
 - **Keep the module stateless**; put state in the data-plane services.

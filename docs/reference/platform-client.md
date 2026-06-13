@@ -45,6 +45,23 @@ from epicurus_core import PlatformMessage
 reply = await client.chat([PlatformMessage(role="user", content="summarise this")])
 ```
 
+### `await client.get_oauth_token(provider) -> str`
+
+Fetch a valid, auto-refreshed OAuth access token for `provider` (e.g. `"google"`) from the
+core's per-tenant token vault (`GET /platform/v1/oauth/{provider}/token`). Returns the raw
+access-token string, ready for `Authorization: Bearer <token>`. The module never sees the
+client secret or refresh token — the core owns the vault and the refresh (ADR-0016). Raises
+`httpx.HTTPStatusError` (404/400) when the provider isn't connected for this tenant.
+
+```python
+token = await client.get_oauth_token("google")
+headers = {"Authorization": f"Bearer {token}"}
+```
+
+This is the **only** way a module should obtain a connected-account token — don't call the
+endpoint directly or add a bespoke client method, so the credential boundary stays single
+and owned by the core.
+
 ## Errors
 
 Both methods raise `httpx.HTTPStatusError` on a non-2xx response — notably **`503`** when

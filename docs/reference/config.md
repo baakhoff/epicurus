@@ -77,6 +77,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_num_ctx` | `LLM_NUM_CTX` | `int \| None` | `None` | Ollama context-window size (`num_ctx`); applied to local models only. |
 | `module_urls` | `MODULE_URLS` | `str` | `http://echo:8080` | Comma-separated module base URLs; each serves MCP at `<base>/mcp` and its manifest at `<base>/manifest`. |
 | `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | Max tool-calling rounds per agent turn. |
+| `attachment_sink_url` | `ATTACHMENT_SINK_URL` | `str` | `http://storage:8080` | Base URL of the module that durably keeps chat uploads (ADR-0025); the upload route best-effort POSTs bytes to `<url>/ingest`. Empty disables the sink (uploads stay core-side only); a failed push never breaks the upload. |
 | `database_url` | `DATABASE_URL` | `str` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for conversation persistence. |
 | `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
 | `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |

@@ -14,14 +14,24 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     func,
+    inspect,
     or_,
     select,
 )
-from sqlalchemy.engine import CursorResult
+from sqlalchemy.engine import Connection, CursorResult
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 FileKind = Literal["file", "dir"]
+
+# Where an entry's bytes live: the read-only filesystem scan ("fs") or the writable
+# MinIO object store ("object", e.g. chat uploads — ADR-0025). Only "fs" rows are
+# purged by a directory rescan; object rows persist until explicitly removed.
+FileSource = Literal["fs", "object"]
+
+# Columns added to storage_files after its first release. On an existing deployment
+# these are added in place at init (the index uses ``create_all``, no migration tool).
+_ADDED_COLUMNS = ("source",)
 
 
 class FileEntry(BaseModel):
@@ -33,6 +43,8 @@ class FileEntry(BaseModel):
     mtime: float
     kind: FileKind
     updated_at: datetime
+    # Backing store for this entry's bytes; "fs" for scanned files, "object" for uploads.
+    source: FileSource = "fs"
 
 
 class _Base(DeclarativeBase):
@@ -55,10 +67,15 @@ class _StoredFile(_Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # "fs" (scanned, read-only) or "object" (MinIO-backed upload). Defaults to "fs"
+    # so existing rows and the scanner need no change; a rescan only purges "fs".
+    # ``server_default`` is raw SQL, hence the quoted literal.
+    source: Mapped[str] = mapped_column(String(16), server_default="'fs'", default="fs")
 
 
 def _row_to_entry(row: _StoredFile) -> FileEntry:
     kind: FileKind = "dir" if row.kind == "dir" else "file"
+    source: FileSource = "object" if row.source == "object" else "fs"
     return FileEntry(
         path=row.path,
         name=row.name,
@@ -66,6 +83,7 @@ def _row_to_entry(row: _StoredFile) -> FileEntry:
         mtime=row.mtime,
         kind=kind,
         updated_at=row.updated_at,
+        source=source,
     )
 
 
@@ -77,19 +95,43 @@ class FileIndex:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Create the schema, then add any columns introduced after first release."""
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
+
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Idempotently add post-v0.2 columns to an existing ``storage_files`` table.
+
+        There is no migration framework (the index uses ``create_all``), so on a
+        deployment that predates a column we add it in place with its default, which
+        backfills existing rows. Compiled per-dialect, so it is portable across the
+        Postgres prod path and the tests' SQLite.
+        """
+        inspector = inspect(sync_conn)
+        existing = {col["name"] for col in inspector.get_columns(_StoredFile.__tablename__)}
+        for name in _ADDED_COLUMNS:
+            if name not in existing:
+                column = _StoredFile.__table__.c[name]
+                type_sql = column.type.compile(dialect=sync_conn.dialect)
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {_StoredFile.__tablename__} "
+                    f"ADD COLUMN {name} {type_sql} NOT NULL DEFAULT 'fs'"
+                )
 
     async def upsert_batch(
         self,
         *,
         tenant: str,
         entries: list[dict[str, object]],
+        source: FileSource = "fs",
     ) -> None:
         """Insert or update a batch of file entries (by path, per tenant).
 
-        Each dict must have keys: path, name, size, mtime, kind.
+        Each dict must have keys: path, name, size, mtime, kind. ``source`` marks where
+        the bytes live — the scanner passes the default ``"fs"``; the upload sink passes
+        ``"object"`` so a rescan's :meth:`purge_stale` leaves the rows alone.
         Uses a dialect-agnostic delete-then-insert approach so it works on
         both Postgres (production) and SQLite (tests).
         """
@@ -112,16 +154,38 @@ class FileIndex:
                         size=int(e["size"]),  # type: ignore[call-overload]
                         mtime=float(e["mtime"]),  # type: ignore[arg-type]
                         kind=str(e["kind"]),
+                        source=source,
                     )
                 )
             await session.commit()
 
+    async def get(self, *, tenant: str, path: str) -> FileEntry | None:
+        """Return the single entry at *path* for *tenant*, or ``None`` if absent.
+
+        Used by the download endpoint to route by ``source`` — an "object" entry is
+        streamed from MinIO, an "fs" entry from the read-only tree.
+        """
+        path = path.replace("\\", "/").rstrip("/")
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredFile).where(
+                    _StoredFile.tenant == tenant,
+                    _StoredFile.path == path,
+                )
+            )
+            return None if row is None else _row_to_entry(row)
+
     async def purge_stale(self, *, tenant: str, seen_paths: set[str]) -> int:
-        """Delete rows whose paths were not visited in the most recent scan."""
+        """Delete stale **filesystem** rows not visited in the most recent scan.
+
+        Scoped to ``source == "fs"`` so MinIO-backed upload rows (which the scanner
+        never visits) survive every rescan.
+        """
         async with self._session() as session:
             result = await session.execute(
                 delete(_StoredFile).where(
                     _StoredFile.tenant == tenant,
+                    _StoredFile.source == "fs",
                     _StoredFile.path.not_in(seen_paths),
                 )
             )

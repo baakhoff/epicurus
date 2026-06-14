@@ -27,6 +27,15 @@ bundled-stack release, **v0.2.0**.
   uses its details. A new provider `get_event` backs all three surfaces for both the local and
   Google backends; the list tool is no longer a module-card action (an envelope can't render as a
   plain-text result, mirroring mail) (closes #138, #140) (`calendar` → 0.4.0).
+- **Chat uploads land in storage (the upload sink)** — a file attached in chat is now
+  durably persisted to the **storage** module's object store and becomes browsable under an
+  **`uploads/`** folder in the Files page (downloadable like any file), in addition to the
+  core-side handle the agent reads. Storage gains a binary object surface
+  (`put_bytes`/`get_object`) and `POST /ingest`, which catalogues each upload with a new
+  `source` marker so a filesystem rescan never purges it; `/download` streams object uploads
+  from MinIO. The core's attachment-upload route best-effort forwards the bytes to the new
+  `attachment_sink_url` — a failed or absent sink never breaks the upload (ADR-0025)
+  (`storage` → 0.3.0, `core-app` → 0.5.0).
 - **Knowledge page (browse + edit, Obsidian-style)** — the knowledge module contributes an
   **`editor`** left-nav page: browse the vault's documents and read/edit them in a
   core-rendered markdown editor (source **and** preview), saving back to the vault. A save
@@ -71,6 +80,14 @@ bundled-stack release, **v0.2.0**.
   hover-card is resolved on demand from the module's declared `GET /resolve/{kind}/{ref_id}`,
   proxied by the core; echo ships a reference resolver (ADR-0019) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Mail hover-cards show unread status** — an agent-referenced email's hover-card now
+  reports whether the message is **unread**: the resolver leads its detail rows with a
+  `Status: Unread` row (read messages omit it). The provider-agnostic `MailMessage` gains an
+  `unread` flag the Gmail provider derives from the `UNREAD` label. The resolver, the
+  `email-reader` panel, and the chip-click target shipped earlier with the mail reader; this
+  completes mail's entity-reference surface. Clicking still opens the read-only reader, so the
+  hover-card carries no `href` (in-app panel navigation, not an outbound URL). The shell needs
+  no change — it renders hover-card detail rows generically (ADR-0019) (`mail` → 0.4.0).
 - **Chat attachments** — the user can attach context to a turn: an uploaded **file** (held
   core-side via `POST /platform/v1/agent/attachments`), another **chat**, or an entity from
   an **enabled, attachable module**. The composer gains an attach affordance with pills; the

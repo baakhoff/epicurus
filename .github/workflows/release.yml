@@ -11,10 +11,42 @@ permissions:
   contents: write
 
 jobs:
+  # Build and push images first so they exist on GHCR before the GH Release
+  # is published. A GH Release without corresponding images is misleading.
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push service images to GHCR
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          for df in services/*/Dockerfile; do
+            svc="$(basename "$(dirname "$df")")"
+            img="ghcr.io/${owner}/epicurus-${svc}"
+            echo "::group::build + push ${svc}"
+            docker build -f "$df" -t "${img}:${version}" -t "${img}:latest" .
+            docker push "${img}:${version}"
+            docker push "${img}:latest"
+            echo "::endgroup::"
+          done
+
   release:
+    needs: images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
@@ -31,30 +63,3 @@ jobs:
             --generate-notes \
             --verify-tag \
             $PRERELEASE
-
-  images:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and push service images to GHCR
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          for df in services/*/Dockerfile; do
-            svc="$(basename "$(dirname "$df")")"
-            img="ghcr.io/${owner}/epicurus-${svc}"
-            docker build -f "$df" -t "${img}:${version}" -t "${img}:latest" .
-            docker push "${img}:${version}"
-            docker push "${img}:latest"
-          done

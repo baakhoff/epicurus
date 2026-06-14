@@ -122,6 +122,15 @@ bundled-stack release, **v0.2.0**.
   wave-2 modules (calendar, mail, tasks) too, so `task smoke` runs alongside a
   developer's dev stack without port collisions (#114).
 
+### Dependencies
+
+- Routine dependency refresh (Dependabot): CI Actions repinned to current SHAs
+  (`checkout` → v6, `setup-uv` → v8, `setup-node` → v6, `gitleaks-action` → v3,
+  `docker/login-action` → v4); Python deps (`uvicorn` ≥0.49, `sqlalchemy` ≥2.0.50,
+  `testcontainers` ≥4.14.2); web deps (`jsdom` → 29, `lucide-react` → 1.x, plus a
+  dev-dependency group). The `eslint` 10, `@vitejs/plugin-react` 6, and one
+  Python-group bump are **deferred pending migration** (tracked in #172).
+
 ## [0.1.0] — 2026-06-12
 
 **Phase 1 — the core runtime.** The platform runs end to end: chat from a phone with

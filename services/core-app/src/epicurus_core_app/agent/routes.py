@@ -8,10 +8,14 @@ from fastapi import APIRouter, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from epicurus_core import get_logger
 from epicurus_core_app.agent.agent import Agent, AgentEvent, AgentTurn
+from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
+
+log = get_logger("epicurus_core_app.agent.routes")
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -40,9 +44,17 @@ def _sse(event: AgentEvent) -> str:
 
 
 def create_agent_router(
-    agent: Agent, memory: Memory, tenant: str, attachments: AttachmentStore
+    agent: Agent,
+    memory: Memory,
+    tenant: str,
+    attachments: AttachmentStore,
+    sink: AttachmentSink | None = None,
 ) -> APIRouter:
-    """The agent turn endpoints plus the conversation (session) surface."""
+    """The agent turn endpoints plus the conversation (session) surface.
+
+    ``sink`` (when configured) durably persists uploads to the storage module; passing
+    ``None`` keeps uploads core-side only (e.g. a build without the storage module).
+    """
     router = APIRouter(prefix="/platform/v1/agent", tags=["agent"])
 
     @router.post("/chat", response_model=AgentTurn)
@@ -76,11 +88,31 @@ def create_agent_router(
 
     @router.post("/attachments", response_model=AttachmentUploaded)
     async def upload_attachment(file: UploadFile) -> AttachmentUploaded:
-        """Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019)."""
+        """Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).
+
+        Keeps the core-side handle (read back to expand the attachment into the turn) and,
+        best-effort, persists the bytes to the storage sink so the upload is durably kept
+        and browsable in the Files page (ADR-0025). A sink failure never fails the upload.
+        """
         content = await file.read()
         title = file.filename or "file"
         kind = file.content_type or "application/octet-stream"
         att_id = await attachments.save(tenant=tenant, kind=kind, title=title, content=content)
+        if sink is not None:
+            try:
+                await sink.persist(
+                    tenant=tenant,
+                    att_id=att_id,
+                    filename=title,
+                    content_type=kind,
+                    data=content,
+                )
+            except Exception as exc:  # durability is best-effort; the upload still stands
+                log.warning(
+                    "attachment sink persist failed; kept core-side only",
+                    att_id=att_id,
+                    error=str(exc),
+                )
         return AttachmentUploaded(att_id=att_id, title=title, kind=kind)
 
     return router

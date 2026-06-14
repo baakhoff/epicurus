@@ -18,6 +18,15 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Chat uploads land in storage (the upload sink)** — a file attached in chat is now
+  durably persisted to the **storage** module's object store and becomes browsable under an
+  **`uploads/`** folder in the Files page (downloadable like any file), in addition to the
+  core-side handle the agent reads. Storage gains a binary object surface
+  (`put_bytes`/`get_object`) and `POST /ingest`, which catalogues each upload with a new
+  `source` marker so a filesystem rescan never purges it; `/download` streams object uploads
+  from MinIO. The core's attachment-upload route best-effort forwards the bytes to the new
+  `attachment_sink_url` — a failed or absent sink never breaks the upload (ADR-0025)
+  (`storage` → 0.3.0, `core-app` → 0.5.0).
 - **Knowledge page (browse + edit, Obsidian-style)** — the knowledge module contributes an
   **`editor`** left-nav page: browse the vault's documents and read/edit them in a
   core-rendered markdown editor (source **and** preview), saving back to the vault. A save

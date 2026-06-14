@@ -11,12 +11,16 @@ Object-store tools (read/write, backed by MinIO):
   storage_object_put  — store a text object under a key
   storage_object_get  — retrieve a stored object by key
 
-The /download HTTP endpoint (binary streaming) lives on the FastAPI layer.
-The /pages/{page_id} HTTP endpoint (browser archetype data) lives on the FastAPI layer.
+The /ingest HTTP endpoint (chat upload sink — ADR-0025) and the /download endpoint
+(binary streaming, filesystem or object-backed) live on the FastAPI layer, as does
+/pages/{page_id} (browser archetype data). ``ingest_object`` and
+``load_object_download`` below are the testable logic those routes wrap.
 """
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -32,6 +36,9 @@ MODULE_NAME = "storage"
 STORAGE_PAGE_ID = "files"
 
 SCAN_COMPLETE_SUBJECT = "storage.scan.completed"
+
+# Virtual top-level folder under which chat uploads are catalogued and stored.
+UPLOADS_PREFIX = "uploads"
 
 
 def _fmt_size(size: int) -> str:
@@ -84,6 +91,87 @@ def build_page_data(
     }
 
 
+# ── Chat upload sink (ADR-0025) ──────────────────────────────────────────────
+
+
+def _safe_name(filename: str) -> str:
+    """Reduce *filename* to a safe basename: no path separators, never empty."""
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return base or "file"
+
+
+def _index_row(path: str, name: str, size: int, kind: str) -> dict[str, object]:
+    """An ``upsert_batch`` entry; uploads carry no filesystem mtime, hence 0.0."""
+    return {"path": path, "name": name, "size": size, "mtime": 0.0, "kind": kind}
+
+
+async def ingest_object(
+    *,
+    index: FileIndex,
+    objects: ObjectStore,
+    tenant: str,
+    att_id: str,
+    filename: str,
+    content_type: str,
+    data: bytes,
+) -> dict[str, Any]:
+    """Persist an uploaded file to the object store and catalogue it (ADR-0025).
+
+    The bytes land in MinIO under ``uploads/<token>-<name>`` — ``token`` is the core
+    attachment id, which guarantees uniqueness so two uploads of the same filename do
+    not collide. A ``source="object"`` index row makes the upload browsable in the
+    Files page (and findable via search), and an ``uploads`` directory row gives it a
+    home at the tree root. Returns ``{key, name, size}``.
+    """
+    name = _safe_name(filename)
+    token = att_id.strip() or uuid.uuid4().hex
+    key = f"{UPLOADS_PREFIX}/{token}-{name}"
+    await objects.put_bytes(
+        tenant=tenant,
+        key=key,
+        data=data,
+        content_type=content_type or "application/octet-stream",
+    )
+    # The "uploads" folder row gives uploads a home at the tree root; the file row is
+    # the upload itself (display name kept separate from the unique storage key).
+    await index.upsert_batch(
+        tenant=tenant,
+        source="object",
+        entries=[
+            _index_row(UPLOADS_PREFIX, UPLOADS_PREFIX, 0, "dir"),
+            _index_row(key, name, len(data), "file"),
+        ],
+    )
+    return {"key": key, "name": name, "size": len(data)}
+
+
+@dataclass(frozen=True)
+class ObjectDownload:
+    """A resolved object-store download: the bytes plus how to present them."""
+
+    name: str
+    data: bytes
+    content_type: str
+
+
+async def load_object_download(
+    *, index: FileIndex, objects: ObjectStore, tenant: str, path: str
+) -> ObjectDownload | None:
+    """Resolve *path* to an object-store download, or ``None`` if it is not one.
+
+    ``None`` means "not a catalogued object" — the caller falls back to the read-only
+    filesystem. Only a ``source="object"`` **file** entry whose bytes are still present
+    in MinIO resolves here.
+    """
+    entry = await index.get(tenant=tenant, path=path)
+    if entry is None or entry.source != "object" or entry.kind != "file":
+        return None
+    stored = await objects.get_object(tenant=tenant, key=path)
+    if stored is None:
+        return None
+    return ObjectDownload(name=entry.name, data=stored.data, content_type=stored.content_type)
+
+
 def build_module(
     index: FileIndex,
     objects: ObjectStore,
@@ -94,10 +182,10 @@ def build_module(
     """Build the storage module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.3.0",
         description=(
             "File-tree index (list, search, read) over the operator's HDD, "
-            "plus app-managed object storage via MinIO."
+            "plus app-managed object storage via MinIO and durable chat-upload ingest."
         ),
         ui=UiSection(
             icon="folder",

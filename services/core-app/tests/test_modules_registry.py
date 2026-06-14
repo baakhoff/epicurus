@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from epicurus_core import ModuleManifest, SecretError, ToolSpec, UiAction, UiSection
+from epicurus_core import ModuleManifest, PageSpec, SecretError, ToolSpec, UiAction, UiSection
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
 
@@ -48,6 +48,14 @@ def _knowledge_manifest() -> ModuleManifest:
         name="knowledge",
         version="0.2.0",
         ui=UiSection(summary="vault RAG", status_url="/status", actions=[]),
+    )
+
+
+def _pages_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="files",
+        version="0.1.0",
+        pages=[PageSpec(id="browse", title="Files", archetype="browser")],
     )
 
 
@@ -153,4 +161,38 @@ async def test_get_status_404_for_unknown_module() -> None:
     registry, _, _ = _registry(manifest=_knowledge_manifest())
     with pytest.raises(HTTPException) as err:
         await registry.get_status("ghost")
+    assert err.value.status_code == 404
+
+
+async def test_get_page_proxies_declared_page() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_pages_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Files", "items": [{"id": "a", "title": "a"}]}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.get_page("files", "browse")
+
+    assert result["items"][0]["id"] == "a"
+    mock_client.get.assert_called_once_with("/pages/browse")
+
+
+async def test_get_page_404_for_undeclared_page() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("files", "ghost")
+    assert err.value.status_code == 404
+
+
+async def test_get_page_404_for_unknown_module() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("ghost", "browse")
     assert err.value.status_code == 404

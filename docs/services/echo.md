@@ -21,11 +21,14 @@ back. This proves the async event path alongside the synchronous tool.
 ### Web UI (manifest)
 
 A summary, a `greeting` config field, and a **Send an echo** action — the minimal example
-of a manifest-driven module UI (ADR-0007).
+of a manifest-driven module UI (ADR-0007). echo also declares an **Echoes** left-nav page
+(`browser` archetype) — the reference for the core-rendered page vocabulary (ADR-0018):
+the module supplies only data, the shell renders it.
 
 ### HTTP
 
-`GET /health` · `GET /metrics` · `GET /manifest` · `/mcp` (the streamable MCP endpoint).
+`GET /health` · `GET /metrics` · `GET /manifest` · `GET /pages/{id}` (page data the core
+proxies — `echoes` here) · `/mcp` (the streamable MCP endpoint).
 
 ## Configuration
 

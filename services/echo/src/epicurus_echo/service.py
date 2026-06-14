@@ -7,16 +7,19 @@ proof and the reference a new module is modeled on.
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, Event, EventBus, UiAction, UiSection
+from typing import Any
+
+from epicurus_core import EpicurusModule, Event, EventBus, PageSpec, UiAction, UiSection
 
 ECHO_SUBJECT = "echo.request"
+ECHO_PAGE_ID = "echoes"
 
 
 def build_module() -> EpicurusModule:
     """Build the echo module and register its tool and declared events."""
     module = EpicurusModule(
         "echo",
-        version="0.1.0",
+        version="0.2.0",
         description="Echoes messages — proves the MCP tool + NATS event contract.",
         config=["greeting"],
         ui=UiSection(
@@ -39,6 +42,17 @@ def build_module() -> EpicurusModule:
                 )
             ],
         ),
+        # A left-nav page proving the ADR-0018 bounded-vocabulary contract: echo
+        # supplies data only, the shell renders it in the core `browser` archetype.
+        pages=[
+            PageSpec(
+                id=ECHO_PAGE_ID,
+                title="Echoes",
+                archetype="browser",
+                icon="message",
+                nav_order=50,
+            )
+        ],
     )
 
     @module.tool()
@@ -48,6 +62,44 @@ def build_module() -> EpicurusModule:
 
     module.consumes(ECHO_SUBJECT, "request/reply: echoes the payload back")
     return module
+
+
+def echo_page() -> dict[str, Any]:
+    """The ``browser`` archetype data for echo's left-nav page (ADR-0018).
+
+    A module supplies data only; the core shell renders it. This is the browser
+    archetype's data shape — a list of items, each with a title, an optional
+    subtitle, and a detail ``body`` shown when the item is selected.
+    """
+    return {
+        "title": "Echoes",
+        "items": [
+            {
+                "id": "hello",
+                "title": "hello",
+                "subtitle": "a friendly echo",
+                "body": "hello — echoed back to you, unchanged.",
+            },
+            {
+                "id": "abundance",
+                "title": "abundance",
+                "subtitle": "the namesake quote",
+                "body": (
+                    "It is not what we have but what we enjoy that constitutes our abundance."
+                ),
+            },
+            {
+                "id": "contract",
+                "title": "contract proof",
+                "subtitle": "why echo exists",
+                "body": (
+                    "echo exercises both halves of the module↔core contract: the "
+                    "agent-facing MCP tool surface and the NATS event path. This "
+                    "page adds the third — a core-rendered module page."
+                ),
+            },
+        ],
+    }
 
 
 async def echo_responder(event: Event) -> bytes:

@@ -105,6 +105,22 @@ export const UiSection = z.object({
 });
 export type UiSection = z.infer<typeof UiSection>;
 
+/* ── module-contributed pages (ADR-0018) ─────────────────────────────────── */
+
+/** The bounded vocabulary of core-rendered left-nav view shapes. */
+export const PageArchetype = z.enum(["browser", "calendar", "editor", "board"]);
+export type PageArchetype = z.infer<typeof PageArchetype>;
+
+export const PageSpec = z.object({
+  id: z.string(),
+  title: z.string(),
+  archetype: PageArchetype,
+  icon: z.string().default("puzzle"),
+  nav_order: z.number().default(100),
+  capability: z.string().nullish(),
+});
+export type PageSpec = z.infer<typeof PageSpec>;
+
 export const ModuleManifest = z.object({
   name: z.string(),
   version: z.string(),
@@ -116,6 +132,7 @@ export const ModuleManifest = z.object({
   config: z.array(z.string()).default([]),
   secrets: z.array(z.string()).default([]),
   ui: UiSection.nullish(),
+  pages: z.array(PageSpec).default([]),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 
@@ -127,6 +144,25 @@ export const ModuleSnapshot = z.object({
   }),
 });
 export type ModuleSnapshot = z.infer<typeof ModuleSnapshot>;
+
+/* ── archetype data shapes (core-rendered; the module supplies data only) ─── */
+
+/** One row in a `browser` page: a list entry plus its detail body. */
+export const BrowserItem = z.object({
+  id: z.string(),
+  title: z.string(),
+  subtitle: z.string().nullish(),
+  body: z.string().nullish(),
+  icon: z.string().nullish(),
+});
+export type BrowserItem = z.infer<typeof BrowserItem>;
+
+/** The `browser` archetype's data contract: a titled list + per-item detail. */
+export const BrowserData = z.object({
+  title: z.string().nullish(),
+  items: z.array(BrowserItem).default([]),
+});
+export type BrowserData = z.infer<typeof BrowserData>;
 
 export const PlatformInfo = z.object({
   contract_version: z.string(),

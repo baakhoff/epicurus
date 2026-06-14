@@ -114,6 +114,13 @@ export const api = {
     ),
   moduleStatus: (name: string) =>
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/status`),
+  // A module page's data, proxied through the core. The shape is the page
+  // archetype's contract (e.g. BrowserData); the screen validates it (ADR-0018).
+  modulePage: (name: string, pageId: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`,
+    ),
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
 

@@ -1,18 +1,34 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
-import { SURFACES } from "@/app/registry";
+import { SURFACES, modulePageNavs } from "@/app/registry";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
 import { Button, cn } from "@/components/ui";
+import { api } from "@/lib/api";
+import { moduleIcon } from "@/lib/icons";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { ChatScreen } from "@/screens/ChatScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
+import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
+
+/** Shared NavLink class logic so core surfaces + module pages render identically. */
+const railLinkClass = ({ isActive }: { isActive: boolean }) =>
+  cn(
+    "flex items-center gap-3 rounded-(--radius-field) px-3 py-2 text-sm transition-colors",
+    isActive ? "bg-accent-dim text-accent-strong" : "text-ink-dim hover:bg-surface-2 hover:text-ink",
+  );
+
+const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
+  cn(
+    "flex min-w-16 flex-1 flex-col items-center gap-0.5 py-2 text-[10px]",
+    isActive ? "text-accent-strong" : "text-ink-faint",
+  );
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -69,6 +85,11 @@ function DownloadTray() {
 }
 
 function Shell() {
+  // Module-contributed pages join the nav at runtime (ADR-0018): the shell renders
+  // them, the modules only declare which archetype + supply data.
+  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
+  const modulePages = modulePageNavs(modules.data ?? []);
+
   return (
     <div className="flex h-dvh flex-col sm:flex-row">
       {/* side rail (wide screens) */}
@@ -78,23 +99,25 @@ function Shell() {
           <Wordmark />
         </div>
         {SURFACES.map(({ path, label, icon: Icon }) => (
-          <NavLink
-            key={path}
-            to={path}
-            end={path === "/"}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-3 rounded-(--radius-field) px-3 py-2 text-sm transition-colors",
-                isActive
-                  ? "bg-accent-dim text-accent-strong"
-                  : "text-ink-dim hover:bg-surface-2 hover:text-ink",
-              )
-            }
-          >
+          <NavLink key={path} to={path} end={path === "/"} className={railLinkClass}>
             <Icon size={17} />
             {label}
           </NavLink>
         ))}
+        {modulePages.length > 0 && (
+          <>
+            <div className="my-2 border-t border-edge" />
+            {modulePages.map(({ path, label, icon }) => {
+              const Icon = moduleIcon(icon);
+              return (
+                <NavLink key={path} to={path} className={railLinkClass}>
+                  <Icon size={17} />
+                  {label}
+                </NavLink>
+              );
+            })}
+          </>
+        )}
         <div className="mt-auto px-2 pb-1">
           <PowerOrb />
         </div>
@@ -117,27 +140,27 @@ function Shell() {
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />
+            <Route path="/m/:moduleName/:pageId" element={<ModulePageScreen />} />
           </Routes>
         </main>
 
         {/* bottom tab bar (phones) */}
-        <nav className="flex border-t border-edge pb-safe sm:hidden">
+        <nav className="flex overflow-x-auto border-t border-edge pb-safe sm:hidden">
           {SURFACES.map(({ path, label, icon: Icon }) => (
-            <NavLink
-              key={path}
-              to={path}
-              end={path === "/"}
-              className={({ isActive }) =>
-                cn(
-                  "flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px]",
-                  isActive ? "text-accent-strong" : "text-ink-faint",
-                )
-              }
-            >
+            <NavLink key={path} to={path} end={path === "/"} className={tabLinkClass}>
               <Icon size={20} />
               {label}
             </NavLink>
           ))}
+          {modulePages.map(({ path, label, icon }) => {
+            const Icon = moduleIcon(icon);
+            return (
+              <NavLink key={path} to={path} className={tabLinkClass}>
+                <Icon size={20} />
+                {label}
+              </NavLink>
+            );
+          })}
         </nav>
       </div>
 

@@ -18,6 +18,13 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Module-contributed pages** — modules can add **left-nav pages, core-rendered from a
+  bounded archetype vocabulary** (`browser` / `calendar` / `editor` / `board`): a module
+  declares a `PageSpec` and serves its data, the shell renders it — **no module markup, JS,
+  or CSS**, and modules can't invent a view type. The `browser` archetype (list + detail)
+  ships first; echo gains a demo **Echoes** page. Page data is proxied through the core
+  (`GET /platform/v1/modules/{name}/pages/{id}`) (ADR-0018) (`epicurus-core` → 0.3.0,
+  `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
 - **Model catalog browser** — replaces "type a name to pull" with a browsable catalog of 24
   curated Ollama models. Search by name, family, or description; filter by tag (General, Code,
   Multilingual, Vision, Embedding, Small); pull any entry with live SSE progress. The

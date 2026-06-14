@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AgentEvent, ModuleSnapshot } from "@/lib/contracts";
+import { AgentEvent, BrowserData, ModuleSnapshot, PageSpec } from "@/lib/contracts";
 
 describe("contracts", () => {
   it("parses every agent stream event shape", () => {
@@ -38,5 +38,37 @@ describe("contracts", () => {
     });
     expect(snapshot.manifest.ui).toBeUndefined();
     expect(snapshot.manifest.tools).toEqual([]);
+    expect(snapshot.manifest.pages).toEqual([]);
+  });
+
+  it("parses a module page spec with archetype defaults (ADR-0018)", () => {
+    const page = PageSpec.parse({ id: "files", title: "Files", archetype: "browser" });
+    expect(page.icon).toBe("puzzle");
+    expect(page.nav_order).toBe(100);
+  });
+
+  it("rejects an unknown page archetype", () => {
+    expect(() => PageSpec.parse({ id: "x", title: "X", archetype: "kanban" })).toThrow();
+  });
+
+  it("parses a manifest carrying module pages", () => {
+    const snapshot = ModuleSnapshot.parse({
+      manifest: {
+        name: "files",
+        version: "0.1.0",
+        pages: [{ id: "browse", title: "Files", archetype: "browser", icon: "folder", nav_order: 5 }],
+      },
+      status: { healthy: true },
+    });
+    expect(snapshot.manifest.pages[0].archetype).toBe("browser");
+    expect(snapshot.manifest.pages[0].nav_order).toBe(5);
+  });
+
+  it("parses the browser archetype data shape", () => {
+    const data = BrowserData.parse({
+      title: "Echoes",
+      items: [{ id: "a", title: "a", subtitle: "s", body: "b" }],
+    });
+    expect(data.items[0].body).toBe("b");
   });
 });

@@ -22,9 +22,21 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
+| **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
 
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
+
+### Module pages (core-rendered archetypes — ADR-0018)
+
+A module declares `pages` in its manifest, each naming a core **archetype** —
+`browser` (tree/list + detail), `calendar`, `editor`, `board`. The shell merges the pages
+of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`) and
+renders each at `/m/:module/:pageId` via a first-party screen for that archetype
+(`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` ships today;
+the others land with their module pages (Phase 3.8). Page data is fetched through the core
+proxy (`GET /platform/v1/modules/{name}/pages/{id}`) — **no module markup, JS, or CSS ever
+runs in the shell**.
 
 ### The chat SSE protocol
 

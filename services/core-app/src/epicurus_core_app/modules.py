@@ -123,6 +123,23 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def get_page(self, name: str, page_id: str) -> dict[str, Any]:
+        """Proxy a module's page-data endpoint to the shell (ADR-0018).
+
+        The page must be declared in the module's ``manifest.pages``; the core then
+        fetches ``GET /pages/{page_id}`` on the module and returns its JSON body —
+        the archetype's data shape, which the shell renders. A module never serves
+        UI markup. Returns 404 if the module is unreachable or declares no such page.
+        """
+        base, manifest = await self._resolve(name)
+        if page_id not in {p.id for p in manifest.pages}:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/pages/{page_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -148,5 +165,9 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/{name}/status")
     async def get_module_status(name: str) -> dict[str, Any]:
         return await registry.get_status(name)
+
+    @router.get("/{name}/pages/{page_id}")
+    async def get_module_page(name: str, page_id: str) -> dict[str, Any]:
+        return await registry.get_page(name, page_id)
 
     return router

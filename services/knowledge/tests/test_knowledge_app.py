@@ -22,6 +22,8 @@ def test_app_exposes_ops_mcp_manifest_and_status_routes() -> None:
     assert "/status" in paths
     assert "/pages/{page_id}" in paths  # editor page list (#130)
     assert "/pages/{page_id}/doc" in paths  # editor doc read/write (#130)
+    assert "/attachments" in paths  # attachment picker (#137)
+    assert "/attachments/{ref_id}" in paths  # attachment resolve (#137)
     assert any(p.startswith("/mcp") for p in paths)
 
 
@@ -33,7 +35,15 @@ async def test_manifest_declares_editor_page() -> None:
     assert [p.id for p in manifest.pages] == ["vault"]
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
-    assert manifest.version == "0.4.0"
+    assert manifest.version == "0.5.0"
+
+
+async def test_manifest_declares_attachable() -> None:
+    from epicurus_knowledge.service import build_module
+
+    module = build_module(_indexer_stub(), _indexer_stub())
+    manifest = await module.manifest()
+    assert manifest.attachable is True  # vault docs can be attached to a chat (#137)
 
 
 def _indexer_stub() -> object:

@@ -32,7 +32,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.5.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
@@ -72,6 +72,8 @@ def build_module(
                 )
             ],
         ),
+        # Vault documents can be attached to a chat turn (#137) — picker + resolve below.
+        attachable=True,
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")

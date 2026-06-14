@@ -8,21 +8,21 @@ module supplies **data only** over three endpoints the core proxies:
 * ``PUT /pages/{page_id}/doc?path=<rel>`` — save a document, then re-index just that
   file so the vault stays agent-retrievable (contrast Notes, which is attach-only).
 
-No markup is served — the shell owns all chrome. ``path`` is vault-relative and
-strictly confined to the vault root (no traversal, ``.md`` only): the editor writes
-real files, so this is the security boundary.
+No markup is served — the shell owns all chrome. ``path`` is vault-relative and strictly
+confined to the vault root by :func:`~epicurus_knowledge.refs.safe_relative` (no
+traversal, ``.md`` only): the editor writes real files, so this is the security boundary.
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from epicurus_core import get_logger
 from epicurus_knowledge.indexer import KnowledgeIndexer
+from epicurus_knowledge.refs import doc_title, iter_md_files, safe_relative
 
 log = get_logger("knowledge.pages")
 
@@ -67,33 +67,6 @@ class EditorSaveResult(BaseModel):
     chunk_count: int = 0
 
 
-def _doc_title(rel: str) -> str:
-    """Display title for a document — its file name without the ``.md`` suffix."""
-    return PurePosixPath(rel).stem
-
-
-def _safe_target(vault: Path, rel: str) -> Path:
-    """Resolve *rel* against the vault, refusing anything that escapes it.
-
-    The editor accepts a user-supplied path and *writes* to it, so this is the trust
-    boundary. Rejects absolute paths, ``..`` traversal, symlink escapes, and any
-    non-``.md`` target; the resolved file must live under the vault root.
-    """
-    cleaned = rel.strip().replace("\\", "/")
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="path is required")
-    candidate = PurePosixPath(cleaned)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        raise HTTPException(status_code=400, detail="path escapes the vault")
-    vault_root = vault.resolve()
-    target = (vault_root / candidate).resolve()
-    if not target.is_relative_to(vault_root):
-        raise HTTPException(status_code=400, detail="path escapes the vault")
-    if target.suffix != ".md":
-        raise HTTPException(status_code=400, detail="only .md documents are editable")
-    return target
-
-
 class VaultPages:
     """Serves the editor page's data from the operator's Obsidian vault."""
 
@@ -103,25 +76,18 @@ class VaultPages:
 
     def list_docs(self) -> EditorData:
         """Every ``.md`` document in the vault, by relative path (sorted)."""
-        docs: list[EditorDoc] = []
-        if self._vault.exists():
-            for dirpath, _dirs, filenames in os.walk(self._vault):
-                base = Path(dirpath)
-                for fname in filenames:
-                    if not fname.endswith(".md"):
-                        continue
-                    rel = (base / fname).relative_to(self._vault).as_posix()
-                    docs.append(EditorDoc(id=rel, title=_doc_title(rel), path=rel))
-        docs.sort(key=lambda d: d.path)
+        docs = [
+            EditorDoc(id=rel, title=doc_title(rel), path=rel) for rel in iter_md_files(self._vault)
+        ]
         return EditorData(docs=docs)
 
     def read_doc(self, rel: str) -> EditorDocContent:
         """One document's content. 404 if it does not exist."""
-        target = _safe_target(self._vault, rel)
+        target = safe_relative(self._vault, rel)
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
         content = target.read_text(encoding="utf-8", errors="replace")
-        return EditorDocContent(path=rel, title=_doc_title(rel), content=content)
+        return EditorDocContent(path=rel, title=doc_title(rel), content=content)
 
     async def write_doc(self, rel: str, content: str) -> EditorSaveResult:
         """Write a document (creating it if new), then re-index just that file.
@@ -130,7 +96,7 @@ class VaultPages:
         round-trip fails (e.g. the core is paused), the save still succeeds with
         ``indexed=False`` so an edit is never lost — the Re-index action can retry.
         """
-        target = _safe_target(self._vault, rel)
+        target = safe_relative(self._vault, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         try:

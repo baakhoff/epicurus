@@ -20,6 +20,7 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
@@ -105,6 +106,9 @@ def create_app() -> FastAPI:
 
     # The editor page (#130): the shell renders it; this module supplies vault docs.
     app.include_router(create_pages_router(VaultPages(settings.vault_path, vault_indexer)))
+
+    # Attachment source (#137): pick a vault doc to attach to a chat turn as context.
+    app.include_router(create_attachments_router(VaultAttachments(settings.vault_path)))
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:

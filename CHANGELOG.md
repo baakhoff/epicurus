@@ -18,6 +18,13 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Attach a knowledge document to the chat** — the knowledge module becomes a
+  **chat-attachment source** (`attachable`): pick a vault document in the composer's attach
+  menu and the agent uses it as explicit context for the turn, beyond default retrieval. The
+  module serves the picker (`GET /attachments`) and resolve (`GET /attachments/{ref_id}`)
+  over its vault; a document is named by an **opaque base64url `source:path` ref** so its
+  path round-trips as a single URL segment. The existing core attach proxy and web attach
+  menu render it unchanged — the module only supplies data (ADR-0019) (`knowledge` → 0.5.0).
 - **Knowledge page (browse + edit, Obsidian-style)** — the knowledge module contributes an
   **`editor`** left-nav page: browse the vault's documents and read/edit them in a
   core-rendered markdown editor (source **and** preview), saving back to the vault. A save

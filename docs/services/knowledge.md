@@ -57,17 +57,34 @@ The vault must be mounted **read-write** for saving to work (see Configuration);
 default empty named volume is writable, and an operator binding their Obsidian vault should
 mount it writable by the container user (uid 10001).
 
+### Attachments (chat-context source, #137)
+
+A vault document can be **attached to a chat turn** as explicit context, beyond default
+retrieval. The module declares `attachable: true` and supplies data only — the core's
+attach menu renders the picker and the agent's `AttachmentExpander` injects the resolved
+text into the turn:
+
+- `GET /attachments` — the picker: every vault document, as `{ref_id, kind, title}`.
+- `GET /attachments/{ref_id}` — the resolve: `{title, path, text}` for one document.
+
+Only the operator's **vault** is attachable; the bundled platform docs reach the agent
+through retrieval, not the picker. A `ref_id` is **opaque** — base64url of the document's
+`source:path` — so it round-trips as a single URL path segment regardless of folder depth
+(see `refs.py`).
+
 ### HTTP
 
 | Endpoint | Description |
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**). |
+| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
 | `GET /pages/{page_id}` | Editor document list `{title, docs:[{id, title, path}]}` (page id `vault`). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
 | `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. |
+| `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
+| `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ## How search works
@@ -166,5 +183,7 @@ Package `epicurus_knowledge`:
 | `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); `index_path` re-indexes a single file for the editor save. |
 | `service.py` | MCP tools (`knowledge_search`, `knowledge_reindex`) + manifest UI + the `editor` page spec. |
 | `pages.py` | The `editor` page surface (#130): document list, read, and save (with vault-path safety + re-index). |
-| `app.py` | Lifespan, `GET /status` endpoint, the `/pages/*` router, initial index of both sources on startup. |
+| `refs.py` | Opaque document refs (base64url `source:path`) + shared `.md` vault path-safety + vault walk. |
+| `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` routers, initial index of both sources on startup. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

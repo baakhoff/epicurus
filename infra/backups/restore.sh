@@ -84,8 +84,10 @@ restore_volume() {
 
 for vol in \
   openbao-data \
-  qdrant-storage \
+  qdrant-data \
   minio-data \
+  knowledge-vault-data \
+  storage-root-data \
   valkey-data
 do
   restore_volume "${vol}"

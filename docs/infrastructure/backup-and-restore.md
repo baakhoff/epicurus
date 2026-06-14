@@ -8,9 +8,11 @@ this runbook covers what is needed to not lose data unattended.
 
 | Data | Storage | Backup method |
 | --- | --- | --- |
-| **Postgres** | `epicurus_postgres-data` volume | `pg_dumpall` → compressed SQL |
+| **Postgres** (conversations, memory, llm prefs, calendar/tasks local data) | `epicurus_postgres-data` volume | `pg_dumpall` → compressed SQL |
 | **OpenBao secrets** | `epicurus_openbao-data` volume | Volume snapshot |
-| **Qdrant vectors** | `epicurus_qdrant-storage` volume | Volume snapshot |
+| **Qdrant vectors** | `epicurus_qdrant-data` volume | Volume snapshot |
+| **Knowledge vault** | `epicurus_knowledge-vault-data` volume | Volume snapshot |
+| **Storage files** | `epicurus_storage-root-data` volume | Volume snapshot |
 | **MinIO objects** | `epicurus_minio-data` volume | Volume snapshot |
 | **Valkey cache** | `epicurus_valkey-data` volume | Volume snapshot (optional) |
 
@@ -56,7 +58,9 @@ The other volumes are snapshotted live — acceptable for single-operator use.
 bash infra/backups/backup.sh /mnt/d/epicurus-backups/
 # → /mnt/d/epicurus-backups/20260614T120000Z/postgres.sql.gz
 # → /mnt/d/epicurus-backups/20260614T120000Z/openbao-data.tar.gz
-# → /mnt/d/epicurus-backups/20260614T120000Z/qdrant-storage.tar.gz
+# → /mnt/d/epicurus-backups/20260614T120000Z/qdrant-data.tar.gz
+# → /mnt/d/epicurus-backups/20260614T120000Z/knowledge-vault-data.tar.gz
+# → /mnt/d/epicurus-backups/20260614T120000Z/storage-root-data.tar.gz
 # → /mnt/d/epicurus-backups/20260614T120000Z/minio-data.tar.gz
 # → ...
 ```

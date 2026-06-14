@@ -38,8 +38,10 @@ log "  → ${DEST}/postgres.sql.gz"
 
 # --------------------------------------------------------------------------
 # 2. Named volumes — tar snapshot using a temporary Alpine container.
-#    Volumes: openbao-data, qdrant-data, minio-data, valkey-data,
-#             knowledge-data, calendar-data, tasks-data
+#    User data: openbao-data (secrets), qdrant-data (vectors), minio-data
+#    (objects), knowledge-vault-data (vault), storage-root-data (files),
+#    valkey-data (cache). calendar/tasks local data lives in Postgres (dumped
+#    above). Observability volumes are excluded — they rebuild from live data.
 # --------------------------------------------------------------------------
 snapshot_volume() {
   local volume="$1"
@@ -55,13 +57,11 @@ snapshot_volume() {
 
 for vol in \
   openbao-data \
-  qdrant-storage \
+  qdrant-data \
   minio-data \
-  valkey-data \
-  loki-data \
-  prometheus-data \
-  grafana-data \
-  tempo-data
+  knowledge-vault-data \
+  storage-root-data \
+  valkey-data
 do
   # Skip volumes that do not exist for this installation.
   if docker volume inspect "${PROJECT}_${vol}" > /dev/null 2>&1; then

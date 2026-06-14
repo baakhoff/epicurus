@@ -30,7 +30,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "aiosqlite>=0.20",
     "httpx>=0.27",
-    "testcontainers[minio]>=4.8",
+    "testcontainers[minio]>=4.14.2",
     "cookiecutter>=2.5",
     "pre-commit>=4.0",
 ]

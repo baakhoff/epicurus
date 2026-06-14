@@ -22,9 +22,50 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
+| **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
+| **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`) programmatically (ADR-0018). |
 
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
+
+### Module pages (core-rendered archetypes — ADR-0018)
+
+A module declares `pages` in its manifest, each naming a core **archetype** —
+`browser` (tree/list + detail), `calendar`, `editor`, `board`. The shell merges the pages
+of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`) and
+renders each at `/m/:module/:pageId` via a first-party screen for that archetype
+(`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` ships today;
+the others land with their module pages (Phase 3.8). Page data is fetched through the core
+proxy (`GET /platform/v1/modules/{name}/pages/{id}`) — **no module markup, JS, or CSS ever
+runs in the shell**.
+
+### Right panel / split-screen (ADR-0018)
+
+A core-owned side panel (`src/components/Panel.tsx`, driven by the `src/stores/panel.ts`
+Zustand store) opened programmatically — `open(view, payload, title)` — e.g. from a chat
+entity-reference click (ADR-0019). It is a **resizable right column** on wide screens and a
+**bottom sheet** on phones, with a back-stack (`back()`) and `close()`. Views are a
+**bounded, core-defined vocabulary** — `entity-detail` (the hover-card envelope in full
+form) and `email-reader` (read-only, used by the 3.8 mail reader). Module-supplied URLs are
+followed only when `http(s)`; the panel never runs module markup.
+
+### Entity references in chat (ADR-0019)
+
+An assistant message carries `entity_refs` — references to module entities. The shell
+renders each as a **chip** (`src/components/EntityRef.tsx`): hover shows a core hover-card
+(enriched on demand from the module's resolver via `GET /platform/v1/modules/{name}/resolve/…`),
+click opens it in the right panel. Refs the assistant links inline (an
+`epicurus://entity/{module}/{kind}/{ref_id}` markdown link) render inline through the
+Markdown `a` slot; any remaining refs appear as a chip row beneath the message.
+
+### Attachments in chat (ADR-0019)
+
+The composer's **attach** affordance (`src/components/AttachMenu.tsx`) lets the user add
+context to a turn: upload a **file** (`POST /platform/v1/agent/attachments`), reference
+**another chat**, or pick an entity from an **enabled, attachable module** (its picker is
+proxied at `GET /platform/v1/modules/{name}/attachments`). Choices appear as pills above
+the input and are sent on the message as `attachments`; the agent expands them into the
+turn's context. Persisted attachments render as pills under the user's message.
 
 ### The chat SSE protocol
 

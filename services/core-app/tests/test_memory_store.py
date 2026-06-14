@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from epicurus_core_app.memory.store import ConversationStore, StoredMessage
+from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, StoredMessage
 
 
 async def _fresh_store() -> tuple[ConversationStore, AsyncEngine]:
@@ -80,3 +80,74 @@ async def test_delete_session_is_tenant_scoped() -> None:
     assert removed == 1
     assert await store.sessions(tenant="t1") == []
     assert [s.id for s in await store.sessions(tenant="t2")] == ["s"]  # other tenant untouched
+
+
+async def test_entity_refs_persist_and_round_trip() -> None:
+    store, _ = await _fresh_store()
+    refs = [{"ref_id": "e1", "module": "calendar", "kind": "event", "title": "Standup"}]
+    await store.append(
+        tenant="t", session_id="s", role="assistant", content="see your standup", entity_refs=refs
+    )
+    messages = await store.messages(tenant="t", session_id="s")
+    assert messages[0].entity_refs[0].ref_id == "e1"
+    assert messages[0].entity_refs[0].title == "Standup"
+
+
+async def test_messages_without_entity_refs_default_to_empty() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s", role="user", content="hi")
+    record = (await store.messages(tenant="t", session_id="s"))[0]
+    assert record.entity_refs == []
+    assert record.attachments == []
+
+
+async def test_attachments_persist_and_round_trip() -> None:
+    store, _ = await _fresh_store()
+    atts = [{"att_id": "a1", "source": "file", "kind": "text/plain", "title": "notes.txt"}]
+    await store.append(
+        tenant="t", session_id="s", role="user", content="see notes", attachments=atts
+    )
+    record = (await store.messages(tenant="t", session_id="s"))[0]
+    assert record.attachments[0].att_id == "a1"
+    assert record.attachments[0].source == "file"
+
+
+async def test_attachment_store_save_and_get_is_tenant_scoped() -> None:
+    _, engine = await _fresh_store()
+    blobs = AttachmentStore(engine)
+    att_id = await blobs.save(tenant="t1", kind="text/plain", title="notes.txt", content=b"hello")
+    row = await blobs.get(tenant="t1", att_id=att_id)
+    assert row is not None
+    assert row.content == b"hello"
+    assert row.title == "notes.txt"
+    assert await blobs.get(tenant="t2", att_id=att_id) is None  # other tenant can't read it
+    assert await blobs.get(tenant="t1", att_id="missing") is None
+
+
+async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
+    # A pre-v0.3 deployment: agent_messages exists without the entity_refs column.
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "CREATE TABLE agent_messages ("
+            "id INTEGER PRIMARY KEY, tenant VARCHAR(63), session_id VARCHAR(128), "
+            "role VARCHAR(16), content TEXT, "
+            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+        )
+    store = ConversationStore(engine)
+    await store.init()  # must add the entity_refs + attachments columns in place, not raise
+    await store.append(
+        tenant="t",
+        session_id="s",
+        role="user",
+        content="hi",
+        entity_refs=[{"ref_id": "e1", "module": "m", "kind": "k", "title": "T"}],
+        attachments=[{"att_id": "a1", "source": "file", "title": "n"}],
+    )
+    record = (await store.messages(tenant="t", session_id="s"))[0]
+    assert record.entity_refs[0].ref_id == "e1"
+    assert record.attachments[0].att_id == "a1"

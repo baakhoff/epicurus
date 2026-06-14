@@ -11,3 +11,15 @@ def test_app_exposes_ops_and_mcp_routes() -> None:
     assert "/health" in paths
     assert "/metrics" in paths
     assert any(p.startswith("/mcp") for p in paths)
+
+
+def test_app_serves_the_declared_page_route() -> None:
+    app = create_app()
+    paths = [getattr(route, "path", "") for route in app.routes]
+    assert "/pages/{page_id}" in paths
+
+
+def test_app_serves_the_resolver_route() -> None:
+    app = create_app()
+    paths = [getattr(route, "path", "") for route in app.routes]
+    assert "/resolve/{kind}/{ref_id}" in paths

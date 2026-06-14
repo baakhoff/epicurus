@@ -15,7 +15,25 @@ from pydantic import BaseModel, Field, model_validator
 CONTRACT_VERSION = "0.1"
 """Version of the module<->core contract this manifest targets."""
 
-__all__ = ["CONTRACT_VERSION", "EventSpec", "ModuleManifest", "ToolSpec", "UiAction", "UiSection"]
+__all__ = [
+    "CONTRACT_VERSION",
+    "EventSpec",
+    "ModuleManifest",
+    "PageArchetype",
+    "PageSpec",
+    "ToolSpec",
+    "UiAction",
+    "UiSection",
+]
+
+PageArchetype = Literal["browser", "calendar", "editor", "board"]
+"""The bounded set of left-nav view shapes the shell can render (ADR-0018).
+
+Core-owned and core-rendered: ``browser`` (tree/list + detail), ``calendar``,
+``editor`` (Obsidian-like doc), ``board`` (lists/cards). A module names one of these
+and supplies data; it never ships markup, and it cannot invent a new shape — the
+vocabulary extends only in core.
+"""
 
 
 class ToolSpec(BaseModel):
@@ -87,6 +105,30 @@ class UiSection(BaseModel):
     ui_url: str | None = None
 
 
+class PageSpec(BaseModel):
+    """A left-nav page a module contributes — core-rendered from a bounded vocabulary (ADR-0018).
+
+    The module supplies **data only** and names which core archetype presents it;
+    the shell owns all chrome and styling. The shell fetches the page's data from
+    the module through the core proxy at ``GET /platform/v1/modules/{module}/pages/{id}``
+    (the module serves it at ``GET /pages/{id}`` in the archetype's data shape) — the
+    shell never calls a module directly.
+
+    ``id`` is unique within the module and forms the page's data path and nav route;
+    ``icon`` names a glyph from the shell's vendored set (never an image URL or
+    script); ``nav_order`` sorts the entry in the left nav (lower is higher);
+    ``capability`` is an optional gate the shell may check before showing the page
+    (reserved — e.g. a connected account — not yet enforced).
+    """
+
+    id: str
+    title: str
+    archetype: PageArchetype
+    icon: str = "puzzle"
+    nav_order: int = 100
+    capability: str | None = None
+
+
 class ModuleManifest(BaseModel):
     """The full descriptor a module publishes about itself."""
 
@@ -104,3 +146,11 @@ class ModuleManifest(BaseModel):
     secrets: list[str] = Field(default_factory=list)
     # Declarative UI the web shell renders for this module (ADR-0007 Tier 1).
     ui: UiSection | None = None
+    # Left-nav pages, core-rendered from the bounded archetype vocabulary (ADR-0018).
+    pages: list[PageSpec] = Field(default_factory=list)
+    # The module serves a hover-card resolver at ``GET /resolve/{kind}/{ref_id}`` for the
+    # entities it references in chat (ADR-0019); the core proxies it.
+    resolver: bool = False
+    # The module is a chat-attachment source: it serves a picker (``GET /attachments``) and
+    # a resolve (``GET /attachments/{ref_id}``) so its entities can be attached (ADR-0019).
+    attachable: bool = False

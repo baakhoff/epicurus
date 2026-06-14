@@ -10,11 +10,19 @@ from __future__ import annotations
 from epicurus_core._version import __version__
 from epicurus_core.config import CoreSettings, Environment, LogLevel
 from epicurus_core.contracts import (
+    Attachment,
+    AttachmentSource,
     ChatMessage,
     ChatResult,
+    EntityRef,
+    HoverCard,
+    HoverCardDetail,
+    HoverCardLink,
     PlatformChatResponse,
     PlatformMessage,
     Role,
+    ToolEnvelope,
+    tool_envelope,
 )
 from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
 from epicurus_core.logging import configure_logging, get_logger
@@ -22,6 +30,8 @@ from epicurus_core.manifest import (
     CONTRACT_VERSION,
     EventSpec,
     ModuleManifest,
+    PageArchetype,
+    PageSpec,
     ToolSpec,
     UiAction,
     UiSection,
@@ -45,9 +55,12 @@ from epicurus_core.tenancy import (
 
 __all__ = [
     "CONTRACT_VERSION",
+    "Attachment",
+    "AttachmentSource",
     "ChatMessage",
     "ChatResult",
     "CoreSettings",
+    "EntityRef",
     "Environment",
     "EpicurusModule",
     "Event",
@@ -55,8 +68,13 @@ __all__ = [
     "EventHandler",
     "EventSpec",
     "HealthResponse",
+    "HoverCard",
+    "HoverCardDetail",
+    "HoverCardLink",
     "LogLevel",
     "ModuleManifest",
+    "PageArchetype",
+    "PageSpec",
     "Payload",
     "PlatformChatResponse",
     "PlatformClient",
@@ -66,6 +84,7 @@ __all__ = [
     "SecretError",
     "SecretStore",
     "TenantError",
+    "ToolEnvelope",
     "ToolSpec",
     "UiAction",
     "UiSection",
@@ -83,5 +102,6 @@ __all__ = [
     "scope_secret_path",
     "scope_subject",
     "set_current_tenant",
+    "tool_envelope",
     "validate_tenant_id",
 ]

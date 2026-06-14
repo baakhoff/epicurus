@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import ConversationStore, MessageRecord, SessionSummary
@@ -19,12 +21,31 @@ class Memory:
     async def init(self) -> None:
         await self._store.init()
 
-    async def remember(self, *, tenant: str, session_id: str, role: str, content: str) -> None:
-        """Persist a message and index user/assistant turns for recall."""
+    async def remember(
+        self,
+        *,
+        tenant: str,
+        session_id: str,
+        role: str,
+        content: str,
+        entity_refs: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Persist a message and index user/assistant turns for recall.
+
+        ``entity_refs`` (assistant-emitted) and ``attachments`` (user-supplied) are stored
+        alongside the message so the transcript can render them again (ADR-0019); neither
+        is indexed for recall.
+        """
         if not content:
             return
         point_id = await self._store.append(
-            tenant=tenant, session_id=session_id, role=role, content=content
+            tenant=tenant,
+            session_id=session_id,
+            role=role,
+            content=content,
+            entity_refs=entity_refs,
+            attachments=attachments,
         )
         if role in _INDEXED_ROLES:
             await self._recall.index(

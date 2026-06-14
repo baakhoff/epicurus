@@ -123,6 +123,69 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def get_page(self, name: str, page_id: str) -> dict[str, Any]:
+        """Proxy a module's page-data endpoint to the shell (ADR-0018).
+
+        The page must be declared in the module's ``manifest.pages``; the core then
+        fetches ``GET /pages/{page_id}`` on the module and returns its JSON body —
+        the archetype's data shape, which the shell renders. A module never serves
+        UI markup. Returns 404 if the module is unreachable or declares no such page.
+        """
+        base, manifest = await self._resolve(name)
+        if page_id not in {p.id for p in manifest.pages}:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/pages/{page_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
+    async def resolve_entity(self, name: str, kind: str, ref_id: str) -> dict[str, Any]:
+        """Proxy a module's hover-card resolver to the shell (ADR-0019).
+
+        The module's manifest must set ``resolver`` true; the core then fetches
+        ``GET /resolve/{kind}/{ref_id}`` on the module and returns the hover-card
+        envelope. 404 if the module is unreachable or declares no resolver.
+        """
+        base, manifest = await self._resolve(name)
+        if not manifest.resolver:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no resolver")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/resolve/{kind}/{ref_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
+    async def list_attachments(self, name: str) -> list[dict[str, Any]]:
+        """Proxy a module's attachment picker (ADR-0019): ``GET /attachments``.
+
+        The manifest must set ``attachable`` true; returns the module's attachable items
+        (each ``{ref_id, kind, title}``). 404 if unreachable or not attachable.
+        """
+        base, manifest = await self._resolve(name)
+        if not manifest.attachable:
+            raise HTTPException(status_code=404, detail=f"module {name!r} is not attachable")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get("/attachments")
+            resp.raise_for_status()
+            items: list[dict[str, Any]] = resp.json()
+            return items
+
+    async def resolve_attachment(self, name: str, ref_id: str) -> dict[str, Any]:
+        """Proxy a module's attachment resolve (ADR-0019): ``GET /attachments/{ref_id}``.
+
+        Returns the entity's content/excerpt for the agent to inject into the turn. 404 if
+        the module is unreachable or not attachable.
+        """
+        base, manifest = await self._resolve(name)
+        if not manifest.attachable:
+            raise HTTPException(status_code=404, detail=f"module {name!r} is not attachable")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/attachments/{ref_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -148,5 +211,17 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/{name}/status")
     async def get_module_status(name: str) -> dict[str, Any]:
         return await registry.get_status(name)
+
+    @router.get("/{name}/pages/{page_id}")
+    async def get_module_page(name: str, page_id: str) -> dict[str, Any]:
+        return await registry.get_page(name, page_id)
+
+    @router.get("/{name}/resolve/{kind}/{ref_id}")
+    async def resolve_entity(name: str, kind: str, ref_id: str) -> dict[str, Any]:
+        return await registry.resolve_entity(name, kind, ref_id)
+
+    @router.get("/{name}/attachments")
+    async def list_attachments(name: str) -> list[dict[str, Any]]:
+        return await registry.list_attachments(name)
 
     return router

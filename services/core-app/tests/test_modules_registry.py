@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from epicurus_core import ModuleManifest, SecretError, ToolSpec, UiAction, UiSection
+from epicurus_core import ModuleManifest, PageSpec, SecretError, ToolSpec, UiAction, UiSection
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
 
@@ -49,6 +49,22 @@ def _knowledge_manifest() -> ModuleManifest:
         version="0.2.0",
         ui=UiSection(summary="vault RAG", status_url="/status", actions=[]),
     )
+
+
+def _pages_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="files",
+        version="0.1.0",
+        pages=[PageSpec(id="browse", title="Files", archetype="browser")],
+    )
+
+
+def _resolver_manifest() -> ModuleManifest:
+    return ModuleManifest(name="calendar", version="0.1.0", resolver=True)
+
+
+def _attachable_manifest() -> ModuleManifest:
+    return ModuleManifest(name="notes", version="0.1.0", attachable=True)
 
 
 class _StubRegistry(ModuleRegistry):
@@ -153,4 +169,126 @@ async def test_get_status_404_for_unknown_module() -> None:
     registry, _, _ = _registry(manifest=_knowledge_manifest())
     with pytest.raises(HTTPException) as err:
         await registry.get_status("ghost")
+    assert err.value.status_code == 404
+
+
+async def test_get_page_proxies_declared_page() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_pages_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Files", "items": [{"id": "a", "title": "a"}]}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.get_page("files", "browse")
+
+    assert result["items"][0]["id"] == "a"
+    mock_client.get.assert_called_once_with("/pages/browse")
+
+
+async def test_get_page_404_for_undeclared_page() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("files", "ghost")
+    assert err.value.status_code == 404
+
+
+async def test_get_page_404_for_unknown_module() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("ghost", "browse")
+    assert err.value.status_code == 404
+
+
+async def test_resolve_entity_proxies_module_resolver() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Standup", "description": "9am", "details": []}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.resolve_entity("calendar", "event", "e1")
+
+    assert result["title"] == "Standup"
+    mock_client.get.assert_called_once_with("/resolve/event/e1")
+
+
+async def test_resolve_entity_404_when_no_resolver() -> None:
+    registry, _, _ = _registry()  # echo manifest declares no resolver
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_entity("echo", "event", "e1")
+    assert err.value.status_code == 404
+
+
+async def test_resolve_entity_404_for_unknown_module() -> None:
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_entity("ghost", "event", "e1")
+    assert err.value.status_code == 404
+
+
+async def test_list_attachments_proxies_picker() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_attachable_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = [{"ref_id": "n1", "kind": "note", "title": "Groceries"}]
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.list_attachments("notes")
+
+    assert result[0]["ref_id"] == "n1"
+    mock_client.get.assert_called_once_with("/attachments")
+
+
+async def test_list_attachments_404_when_not_attachable() -> None:
+    registry, _, _ = _registry()  # echo is not an attachment source
+    with pytest.raises(HTTPException) as err:
+        await registry.list_attachments("echo")
+    assert err.value.status_code == 404
+
+
+async def test_resolve_attachment_proxies_module() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_attachable_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Groceries", "excerpt": "milk, eggs"}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.resolve_attachment("notes", "n1")
+
+    assert result["excerpt"] == "milk, eggs"
+    mock_client.get.assert_called_once_with("/attachments/n1")
+
+
+async def test_resolve_attachment_404_when_not_attachable() -> None:
+    registry, _, _ = _registry()
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_attachment("echo", "n1")
     assert err.value.status_code == 404

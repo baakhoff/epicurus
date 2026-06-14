@@ -18,6 +18,31 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Module-contributed pages** — modules can add **left-nav pages, core-rendered from a
+  bounded archetype vocabulary** (`browser` / `calendar` / `editor` / `board`): a module
+  declares a `PageSpec` and serves its data, the shell renders it — **no module markup, JS,
+  or CSS**, and modules can't invent a view type. The `browser` archetype (list + detail)
+  ships first; echo gains a demo **Echoes** page. Page data is proxied through the core
+  (`GET /platform/v1/modules/{name}/pages/{id}`) (ADR-0018) (`epicurus-core` → 0.3.0,
+  `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Right-panel / split-screen host** — a core-owned side panel: a resizable right column
+  on wide screens, a bottom sheet on phones, opened programmatically with a back-stack. It
+  renders a **bounded, core-defined** set of views (`entity-detail`, `email-reader`) — the
+  substrate the chat entity-reference click and the 3.8 mail reader build on (ADR-0018)
+  (`web` → 0.5.0).
+- **Chat entity references** — the assistant can mention a module entity (event / task /
+  email / doc) as an **interactive chip**: hover → a core hover-card, click → opens in the
+  right panel. A tool emits refs by returning a `ToolEnvelope`; the agent lifts them onto the
+  turn and persists them on the message (a chat-schema migration adds `entity_refs`). The
+  hover-card is resolved on demand from the module's declared `GET /resolve/{kind}/{ref_id}`,
+  proxied by the core; echo ships a reference resolver (ADR-0019) (`epicurus-core` → 0.3.0,
+  `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Chat attachments** — the user can attach context to a turn: an uploaded **file** (held
+  core-side via `POST /platform/v1/agent/attachments`), another **chat**, or an entity from
+  an **enabled, attachable module**. The composer gains an attach affordance with pills; the
+  agent expands each attachment into the turn's context. A chat-schema migration adds
+  `attachments`; a module opts in as a source with `attachable` + a picker / resolve
+  (ADR-0019) (`epicurus-core` → 0.3.0, `core-app` → 0.3.0, `web` → 0.5.0).
 - **Model catalog browser** — replaces "type a name to pull" with a browsable catalog of 24
   curated Ollama models. Search by name, family, or description; filter by tag (General, Code,
   Multilingual, Vision, Embedding, Small); pull any entry with live SSE progress. The

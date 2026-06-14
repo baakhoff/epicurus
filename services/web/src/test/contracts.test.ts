@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { AgentEvent, ModuleSnapshot } from "@/lib/contracts";
+import {
+  AgentEvent,
+  AgentTurn,
+  Attachment,
+  BrowserData,
+  MessageRecord,
+  ModuleSnapshot,
+  PageSpec,
+} from "@/lib/contracts";
 
 describe("contracts", () => {
   it("parses every agent stream event shape", () => {
@@ -38,5 +46,83 @@ describe("contracts", () => {
     });
     expect(snapshot.manifest.ui).toBeUndefined();
     expect(snapshot.manifest.tools).toEqual([]);
+    expect(snapshot.manifest.pages).toEqual([]);
+  });
+
+  it("parses a module page spec with archetype defaults (ADR-0018)", () => {
+    const page = PageSpec.parse({ id: "files", title: "Files", archetype: "browser" });
+    expect(page.icon).toBe("puzzle");
+    expect(page.nav_order).toBe(100);
+  });
+
+  it("rejects an unknown page archetype", () => {
+    expect(() => PageSpec.parse({ id: "x", title: "X", archetype: "kanban" })).toThrow();
+  });
+
+  it("parses a manifest carrying module pages", () => {
+    const snapshot = ModuleSnapshot.parse({
+      manifest: {
+        name: "files",
+        version: "0.1.0",
+        pages: [{ id: "browse", title: "Files", archetype: "browser", icon: "folder", nav_order: 5 }],
+      },
+      status: { healthy: true },
+    });
+    expect(snapshot.manifest.pages[0].archetype).toBe("browser");
+    expect(snapshot.manifest.pages[0].nav_order).toBe(5);
+  });
+
+  it("parses the browser archetype data shape", () => {
+    const data = BrowserData.parse({
+      title: "Echoes",
+      items: [{ id: "a", title: "a", subtitle: "s", body: "b" }],
+    });
+    expect(data.items[0].body).toBe("b");
+  });
+
+  it("parses entity references on a message and a turn (ADR-0019)", () => {
+    const rec = MessageRecord.parse({
+      role: "assistant",
+      content: "see your standup",
+      created_at: "2026-06-14T09:00:00Z",
+      entity_refs: [{ ref_id: "e1", module: "calendar", kind: "event", title: "Standup" }],
+    });
+    expect(rec.entity_refs[0].title).toBe("Standup");
+
+    const turn = AgentTurn.parse({
+      content: "ok",
+      tools_used: [],
+      stopped: "completed",
+      entity_refs: [{ ref_id: "e1", module: "m", kind: "k", title: "T" }],
+    });
+    expect(turn.entity_refs[0].ref_id).toBe("e1");
+  });
+
+  it("defaults message entity_refs + attachments to empty (older transcripts stay valid)", () => {
+    const rec = MessageRecord.parse({
+      role: "user",
+      content: "hi",
+      created_at: "2026-06-14T09:00:00Z",
+    });
+    expect(rec.entity_refs).toEqual([]);
+    expect(rec.attachments).toEqual([]);
+  });
+
+  it("parses message attachments (ADR-0019)", () => {
+    const rec = MessageRecord.parse({
+      role: "user",
+      content: "summarize these",
+      created_at: "2026-06-14T09:00:00Z",
+      attachments: [
+        { att_id: "a1", source: "file", kind: "text/plain", title: "notes.txt" },
+        { att_id: "a2", source: "chat", ref_id: "s9", title: "earlier chat" },
+      ],
+    });
+    expect(rec.attachments[0].source).toBe("file");
+    expect(rec.attachments[1].ref_id).toBe("s9");
+  });
+
+  it("rejects an unknown attachment source", () => {
+    expect(() => Attachment.parse({ att_id: "a1", source: "magic" })).toThrow();
   });
 });

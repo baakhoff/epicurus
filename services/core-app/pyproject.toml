@@ -1,11 +1,13 @@
 [project]
 name = "epicurus-core-app"
-version = "0.2.0"
+version = "0.3.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
     "epicurus-core",
     "fastapi>=0.115",
+    # FastAPI needs python-multipart for UploadFile (the chat attachment upload, ADR-0019).
+    "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30",
     "litellm>=1.50",
     "httpx>=0.27",

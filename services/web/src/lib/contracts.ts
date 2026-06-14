@@ -39,10 +39,49 @@ export const SessionSummary = z.object({
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
 
+/** A reference to a module entity the assistant mentions (ADR-0019). */
+export const EntityRef = z.object({
+  ref_id: z.string(),
+  module: z.string(),
+  kind: z.string(),
+  title: z.string(),
+  summary: z.string().nullish(),
+});
+export type EntityRef = z.infer<typeof EntityRef>;
+
+/** Context the user attached to a message (ADR-0019). */
+export const Attachment = z.object({
+  att_id: z.string(),
+  source: z.enum(["module", "file", "chat"]),
+  kind: z.string().default(""),
+  ref_id: z.string().nullish(),
+  title: z.string().default(""),
+  module: z.string().nullish(),
+});
+export type Attachment = z.infer<typeof Attachment>;
+
+/** The handle returned when a file is uploaded for attachment. */
+export const AttachmentUploaded = z.object({
+  att_id: z.string(),
+  title: z.string(),
+  kind: z.string(),
+});
+export type AttachmentUploaded = z.infer<typeof AttachmentUploaded>;
+
+/** One item a module's attachment picker offers. */
+export const ModuleAttachmentItem = z.object({
+  ref_id: z.string(),
+  kind: z.string().default(""),
+  title: z.string().default(""),
+});
+export type ModuleAttachmentItem = z.infer<typeof ModuleAttachmentItem>;
+
 export const MessageRecord = z.object({
   role: z.string(),
   content: z.string(),
   created_at: z.coerce.date(),
+  entity_refs: z.array(EntityRef).default([]),
+  attachments: z.array(Attachment).default([]),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
@@ -50,6 +89,7 @@ export const AgentTurn = z.object({
   content: z.string(),
   tools_used: z.array(z.string()),
   stopped: z.string(),
+  entity_refs: z.array(EntityRef).default([]),
 });
 export type AgentTurn = z.infer<typeof AgentTurn>;
 
@@ -105,6 +145,22 @@ export const UiSection = z.object({
 });
 export type UiSection = z.infer<typeof UiSection>;
 
+/* ── module-contributed pages (ADR-0018) ─────────────────────────────────── */
+
+/** The bounded vocabulary of core-rendered left-nav view shapes. */
+export const PageArchetype = z.enum(["browser", "calendar", "editor", "board"]);
+export type PageArchetype = z.infer<typeof PageArchetype>;
+
+export const PageSpec = z.object({
+  id: z.string(),
+  title: z.string(),
+  archetype: PageArchetype,
+  icon: z.string().default("puzzle"),
+  nav_order: z.number().default(100),
+  capability: z.string().nullish(),
+});
+export type PageSpec = z.infer<typeof PageSpec>;
+
 export const ModuleManifest = z.object({
   name: z.string(),
   version: z.string(),
@@ -116,6 +172,9 @@ export const ModuleManifest = z.object({
   config: z.array(z.string()).default([]),
   secrets: z.array(z.string()).default([]),
   ui: UiSection.nullish(),
+  pages: z.array(PageSpec).default([]),
+  resolver: z.boolean().default(false),
+  attachable: z.boolean().default(false),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 
@@ -127,6 +186,57 @@ export const ModuleSnapshot = z.object({
   }),
 });
 export type ModuleSnapshot = z.infer<typeof ModuleSnapshot>;
+
+/* ── archetype data shapes (core-rendered; the module supplies data only) ─── */
+
+/** One row in a `browser` page: a list entry plus its detail body. */
+export const BrowserItem = z.object({
+  id: z.string(),
+  title: z.string(),
+  subtitle: z.string().nullish(),
+  body: z.string().nullish(),
+  icon: z.string().nullish(),
+});
+export type BrowserItem = z.infer<typeof BrowserItem>;
+
+/** The `browser` archetype's data contract: a titled list + per-item detail. */
+export const BrowserData = z.object({
+  title: z.string().nullish(),
+  items: z.array(BrowserItem).default([]),
+});
+export type BrowserData = z.infer<typeof BrowserData>;
+
+/* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
+
+/** One label/value row of a hover-card / entity-detail panel. */
+export const HoverCardDetail = z.object({ label: z.string(), value: z.string() });
+export type HoverCardDetail = z.infer<typeof HoverCardDetail>;
+
+/** An outbound link a hover-card may carry (e.g. to a future GitHub-issue module). */
+export const HoverCardLink = z.object({ label: z.string(), url: z.string() });
+export type HoverCardLink = z.infer<typeof HoverCardLink>;
+
+/**
+ * The uniform hover-card / entity-detail envelope every module entity resolves to
+ * (ADR-0019). Rendered both as the inline hover-card and, in full, as the panel's
+ * `entity-detail` view — one shape, core-owned.
+ */
+export const HoverCard = z.object({
+  title: z.string(),
+  description: z.string().default(""),
+  details: z.array(HoverCardDetail).default([]),
+  href: HoverCardLink.nullish(),
+});
+export type HoverCard = z.infer<typeof HoverCard>;
+
+/** A read-only email shown in the panel's `email-reader` view (used by 3.8 mail). */
+export const EmailMessage = z.object({
+  subject: z.string().default("(no subject)"),
+  from: z.string().nullish(),
+  date: z.string().nullish(),
+  body: z.string().default(""),
+});
+export type EmailMessage = z.infer<typeof EmailMessage>;
 
 export const PlatformInfo = z.object({
   contract_version: z.string(),

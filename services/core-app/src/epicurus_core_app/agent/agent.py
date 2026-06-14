@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from epicurus_core import get_logger
+from epicurus_core import Attachment, EntityRef, ToolEnvelope, get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
@@ -32,6 +32,54 @@ class AgentTurn(BaseModel):
     content: str
     tools_used: list[str] = Field(default_factory=list)
     stopped: str  # "completed" or "max_steps"
+    # Module entities the turn referenced, lifted from tool outputs (ADR-0019).
+    entity_refs: list[EntityRef] = Field(default_factory=list)
+
+
+def _extract_entities(output: str) -> tuple[str, list[EntityRef]]:
+    """Split a tool's output into (text for the model, entity references).
+
+    A tool may return a JSON :class:`ToolEnvelope` (``{text, entity_refs}``); if so the
+    text is fed back to the model and the refs are lifted onto the turn. Anything else —
+    plain text, an ``error:`` string, or unrelated JSON — is returned unchanged with no
+    refs, so existing tools keep working.
+    """
+    try:
+        data = json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return output, []
+    if not (
+        isinstance(data, dict)
+        and isinstance(data.get("text"), str)
+        and isinstance(data.get("entity_refs"), list)
+    ):
+        return output, []
+    try:
+        envelope = ToolEnvelope.model_validate(data)
+    except ValidationError:
+        return output, []
+    return envelope.text, envelope.entity_refs
+
+
+class _RefCollector:
+    """Accumulates entity references across a turn's tool calls, de-duplicated."""
+
+    def __init__(self) -> None:
+        self.refs: list[EntityRef] = []
+        self._seen: set[tuple[str, str, str]] = set()
+
+    def add(self, refs: list[EntityRef]) -> None:
+        for ref in refs:
+            key = (ref.module, ref.kind, ref.ref_id)
+            if key not in self._seen:
+                self._seen.add(key)
+                self.refs.append(ref)
+
+
+class AttachmentExpander(Protocol):
+    """Resolves a turn's attachments into a text block the agent injects (ADR-0019)."""
+
+    async def expand(self, attachments: list[Attachment], *, tenant: str) -> str: ...
 
 
 class AgentEvent(BaseModel):
@@ -78,12 +126,14 @@ class Agent:
         memory: Memory | None = None,
         max_steps: int = 4,
         default_tenant: str = "local",
+        attachments: AttachmentExpander | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
         self._memory = memory
         self._max_steps = max_steps
         self._default_tenant = default_tenant
+        self._attachments = attachments
 
     async def run(
         self,
@@ -100,6 +150,7 @@ class Agent:
         new user input and the answer are persisted for future turns.
         """
         tenant = tenant_id or self._default_tenant
+        messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         turn = await self._loop(convo, model=model, tenant_id=tenant_id)
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
@@ -120,9 +171,11 @@ class Agent:
         event rather than an exception (the HTTP response has already started).
         """
         tenant = tenant_id or self._default_tenant
+        messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         parts: list[str] = []
         tools_used: list[str] = []
+        refs = _RefCollector()
         stopped = "completed"
         try:
             specs, route = await self._mcp.discover()
@@ -148,10 +201,12 @@ class Agent:
                     tools_used.append(name)
                     yield AgentEvent(type="tool", tool=name, status="running")
                     output = await self._invoke(name, arguments, route)
-                    failed = output.startswith("error:")
+                    text, found = _extract_entities(output)
+                    refs.add(found)
+                    failed = text.startswith("error:")
                     yield AgentEvent(type="tool", tool=name, status="error" if failed else "ok")
                     convo.append(
-                        ChatMessage(role="tool", tool_call_id=call_id, name=name, content=output)
+                        ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                     )
             else:  # steps exhausted — stream one final answer without tools
                 stopped = "max_steps"
@@ -165,7 +220,9 @@ class Agent:
             log.warning("streaming turn failed", error=str(exc))
             yield AgentEvent(type="error", detail=str(exc))
             return
-        turn = AgentTurn(content="".join(parts), tools_used=tools_used, stopped=stopped)
+        turn = AgentTurn(
+            content="".join(parts), tools_used=tools_used, stopped=stopped, entity_refs=refs.refs
+        )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         yield AgentEvent(type="done", turn=turn)
 
@@ -176,10 +233,38 @@ class Agent:
             return
         try:
             await self._memory.remember(
-                tenant=tenant, session_id=session_id, role="assistant", content=turn.content
+                tenant=tenant,
+                session_id=session_id,
+                role="assistant",
+                content=turn.content,
+                entity_refs=[ref.model_dump() for ref in turn.entity_refs],
             )
         except Exception as exc:  # a failed write must not lose the answer
             log.warning("memory write failed", error=str(exc))
+
+    async def _expand_attachments(
+        self, messages: list[ChatMessage], *, tenant: str
+    ) -> list[ChatMessage]:
+        """Resolve any attachments on the user's message into a leading system message.
+
+        Best-effort (ADR-0019): an expander failure or empty result leaves the turn
+        untouched. The attachments themselves stay on the user message (persisted +
+        stripped before any provider call); only their resolved content is injected here.
+        """
+        if self._attachments is None:
+            return messages
+        attached = [a for m in messages if m.role == "user" for a in (m.attachments or [])]
+        if not attached:
+            return messages
+        try:
+            context = await self._attachments.expand(attached, tenant=tenant)
+        except Exception as exc:  # attachments are an enhancement, never a hard dependency
+            log.warning("attachment expansion failed; proceeding without it", error=str(exc))
+            return messages
+        if not context:
+            return messages
+        preamble = ChatMessage(role="system", content=f"Attached context:\n{context}")
+        return [preamble, *messages]
 
     async def _assemble(
         self, messages: list[ChatMessage], *, tenant: str, session_id: str | None
@@ -211,7 +296,15 @@ class Agent:
             for message in messages:
                 if message.role == "user" and message.content:
                     await self._memory.remember(
-                        tenant=tenant, session_id=session_id, role="user", content=message.content
+                        tenant=tenant,
+                        session_id=session_id,
+                        role="user",
+                        content=message.content,
+                        attachments=(
+                            [a.model_dump() for a in message.attachments]
+                            if message.attachments
+                            else None
+                        ),
                     )
             return convo
         except Exception as exc:  # memory is an enhancement, never a hard dependency
@@ -225,12 +318,18 @@ class Agent:
         specs, route = await self._mcp.discover()
         convo = list(messages)
         tools_used: list[str] = []
+        refs = _RefCollector()
         for _ in range(self._max_steps):
             result = await self._gateway.chat(
                 convo, model=model, tools=specs or None, tenant_id=tenant_id
             )
             if not result.tool_calls:
-                return AgentTurn(content=result.content, tools_used=tools_used, stopped="completed")
+                return AgentTurn(
+                    content=result.content,
+                    tools_used=tools_used,
+                    stopped="completed",
+                    entity_refs=refs.refs,
+                )
             convo.append(
                 ChatMessage(role="assistant", content=result.content, tool_calls=result.tool_calls)
             )
@@ -238,11 +337,15 @@ class Agent:
                 name, arguments, call_id = _parse_tool_call(call)
                 tools_used.append(name)
                 output = await self._invoke(name, arguments, route)
+                text, found = _extract_entities(output)
+                refs.add(found)
                 convo.append(
-                    ChatMessage(role="tool", tool_call_id=call_id, name=name, content=output)
+                    ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                 )
         final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
-        return AgentTurn(content=final.content, tools_used=tools_used, stopped="max_steps")
+        return AgentTurn(
+            content=final.content, tools_used=tools_used, stopped="max_steps", entity_refs=refs.refs
+        )
 
     async def _invoke(self, name: str, arguments: dict[str, Any], route: dict[str, str]) -> str:
         url = route.get(name)

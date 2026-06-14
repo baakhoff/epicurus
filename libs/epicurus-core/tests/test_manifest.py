@@ -9,6 +9,7 @@ from epicurus_core.manifest import (
     CONTRACT_VERSION,
     EventSpec,
     ModuleManifest,
+    PageSpec,
     ToolSpec,
     UiAction,
     UiSection,
@@ -80,3 +81,48 @@ def test_manifest_with_ui_roundtrips() -> None:
     assert restored.ui is not None
     assert restored.ui.actions[0].tool == "greet"
     assert restored.ui.config_schema is not None
+
+
+def test_page_spec_defaults() -> None:
+    page = PageSpec(id="files", title="Files", archetype="browser")
+    assert page.icon == "puzzle"
+    assert page.nav_order == 100
+    assert page.capability is None
+
+
+def test_page_spec_rejects_unknown_archetype() -> None:
+    with pytest.raises(ValidationError):
+        PageSpec(id="x", title="X", archetype="kanban")  # type: ignore[arg-type]
+
+
+def test_manifest_defaults_to_no_pages() -> None:
+    assert ModuleManifest(name="m", version="1.0").pages == []
+
+
+def test_manifest_resolver_and_attachable_default_false() -> None:
+    m = ModuleManifest(name="m", version="1.0")
+    assert m.resolver is False
+    assert m.attachable is False
+
+
+def test_manifest_resolver_and_attachable_roundtrip() -> None:
+    m = ModuleManifest(name="m", version="1.0", resolver=True, attachable=True)
+    restored = ModuleManifest.model_validate(m.model_dump())
+    assert restored.resolver is True
+    assert restored.attachable is True
+
+
+def test_manifest_with_pages_roundtrips() -> None:
+    m = ModuleManifest(
+        name="files",
+        version="1.0.0",
+        pages=[
+            PageSpec(id="browse", title="Files", archetype="browser", icon="folder", nav_order=10),
+            PageSpec(id="board", title="Board", archetype="board"),
+        ],
+    )
+    restored = ModuleManifest.model_validate(m.model_dump())
+    assert restored == m
+    assert [p.id for p in restored.pages] == ["browse", "board"]
+    assert restored.pages[0].archetype == "browser"
+    assert restored.pages[0].nav_order == 10

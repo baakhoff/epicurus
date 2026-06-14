@@ -17,9 +17,16 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { AttachButton, AttachmentPill } from "@/components/AttachMenu";
+import {
+  EntityRefChip,
+  EntityRefsContext,
+  inlinedRefIds,
+  refsById,
+} from "@/components/EntityRef";
 import { Markdown } from "@/components/Markdown";
 import {
   Badge,
@@ -33,6 +40,7 @@ import {
   cn,
 } from "@/components/ui";
 import { api } from "@/lib/api";
+import type { Attachment, EntityRef } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
 import { useChat, type ChatSegment } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
@@ -92,23 +100,46 @@ function LiveTurn() {
 function AssistantBlock({
   segments,
   streaming,
+  entityRefs = [],
 }: {
   segments: ChatSegment[];
   streaming: boolean;
+  entityRefs?: EntityRef[];
 }) {
+  const refsMap = useMemo(() => refsById(entityRefs), [entityRefs]);
+  const text = useMemo(
+    () => segments.map((s) => (s.kind === "text" ? s.text : "")).join("\n"),
+    [segments],
+  );
+  // Refs not already linked inline get a chip row beneath the message, so every
+  // referenced entity surfaces exactly once (ADR-0019).
+  const rowRefs = useMemo(() => {
+    const inlined = inlinedRefIds(text);
+    return entityRefs.filter((ref) => !inlined.has(ref.ref_id));
+  }, [entityRefs, text]);
+
   return (
     <div className="flex gap-3">
       <div className="mt-1.5 font-serif text-[15px] leading-none text-accent select-none">ε</div>
       <div className="min-w-0 flex-1">
-        {segments.map((segment, i) =>
-          segment.kind === "text" ? (
-            <Markdown key={i}>{segment.text}</Markdown>
-          ) : (
-            <ToolChip key={i} segment={segment} />
-          ),
-        )}
+        <EntityRefsContext.Provider value={refsMap}>
+          {segments.map((segment, i) =>
+            segment.kind === "text" ? (
+              <Markdown key={i}>{segment.text}</Markdown>
+            ) : (
+              <ToolChip key={i} segment={segment} />
+            ),
+          )}
+        </EntityRefsContext.Provider>
         {streaming && (
           <span className="ep-caret ml-0.5 inline-block h-4 w-2 translate-y-0.5 rounded-[2px] bg-accent" />
+        )}
+        {rowRefs.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {rowRefs.map((ref) => (
+              <EntityRefChip key={ref.ref_id} entref={ref} />
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -359,6 +390,7 @@ export function ChatScreen() {
   const chat = useChat();
   const model = usePrefs((s) => s.model);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -395,12 +427,19 @@ export function ChatScreen() {
   const send = () => {
     const text = draft.trim();
     if (!text || chat.streaming) return;
+    const sent = attachments;
     setDraft("");
+    setAttachments([]);
     pinnedRef.current = true;
-    void chat.send(text, model, async () => {
-      await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    });
+    void chat.send(
+      text,
+      model,
+      async () => {
+        await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      },
+      sent,
+    );
   };
 
   // While a turn streams, history already contains the just-sent user message —
@@ -444,16 +483,24 @@ export function ChatScreen() {
           )}
           {messages.map((message, i) =>
             message.role === "user" ? (
-              <div key={i} className="flex justify-end">
+              <div key={i} className="flex flex-col items-end gap-1">
                 <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
                   {message.content}
                 </div>
+                {message.attachments.length > 0 && (
+                  <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+                    {message.attachments.map((a) => (
+                      <AttachmentPill key={a.att_id} attachment={a} />
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <AssistantBlock
                 key={i}
                 segments={[{ kind: "text", text: message.content }]}
                 streaming={false}
+                entityRefs={message.entity_refs}
               />
             ),
           )}
@@ -489,7 +536,21 @@ export function ChatScreen() {
 
       {/* composer */}
       <div className="border-t border-edge px-4 py-3 pb-safe">
+        {attachments.length > 0 && (
+          <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
+            {attachments.map((a) => (
+              <AttachmentPill
+                key={a.att_id}
+                attachment={a}
+                onRemove={() =>
+                  setAttachments((prev) => prev.filter((x) => x.att_id !== a.att_id))
+                }
+              />
+            ))}
+          </div>
+        )}
         <div className="mx-auto flex max-w-2xl items-end gap-2">
+          <AttachButton onAttach={(a) => setAttachments((prev) => [...prev, a])} />
           <TextArea
             rows={1}
             value={draft}

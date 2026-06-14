@@ -16,7 +16,14 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
-from epicurus_core.manifest import CONTRACT_VERSION, EventSpec, ModuleManifest, ToolSpec, UiSection
+from epicurus_core.manifest import (
+    CONTRACT_VERSION,
+    EventSpec,
+    ModuleManifest,
+    PageSpec,
+    ToolSpec,
+    UiSection,
+)
 
 __all__ = ["EpicurusModule", "add_manifest_route"]
 
@@ -43,6 +50,9 @@ class EpicurusModule:
         config: list[str] | None = None,
         secrets: list[str] | None = None,
         ui: UiSection | None = None,
+        pages: list[PageSpec] | None = None,
+        resolver: bool = False,
+        attachable: bool = False,
     ) -> None:
         self._name = name
         self._version = version
@@ -51,6 +61,9 @@ class EpicurusModule:
         self._config = list(config or [])
         self._secrets = list(secrets or [])
         self._ui = ui
+        self._pages = list(pages or [])
+        self._resolver = resolver
+        self._attachable = attachable
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -112,6 +125,9 @@ class EpicurusModule:
             config=config if config is not None else self._config,
             secrets=secrets if secrets is not None else self._secrets,
             ui=self._ui,
+            pages=list(self._pages),
+            resolver=self._resolver,
+            attachable=self._attachable,
         )
 
     def http_app(self) -> Starlette:

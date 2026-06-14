@@ -5,70 +5,14 @@
  * here with no UI rebuild. No module code ever runs in this shell.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Bell,
-  Blocks,
-  Bot,
-  BookOpen,
-  Calendar,
-  ChevronDown,
-  ChevronRight,
-  Cloud,
-  Database,
-  FileText,
-  FolderOpen,
-  Globe,
-  Home,
-  Image,
-  KeyRound,
-  Mail,
-  MessageSquare,
-  Music,
-  Play,
-  Plus,
-  Puzzle,
-  Rss,
-  Search,
-  Zap,
-  type LucideIcon,
-} from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus } from "lucide-react";
 import { Fragment, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Card, Confirm, Dot, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
+import { moduleIcon } from "@/lib/icons";
 import type { ModuleSnapshot, ToolSpec, UiAction } from "@/lib/contracts";
-
-/**
- * The vendored icon set manifests may name (ADR-0007: a glyph name, never an
- * image URL or script). Unknown names fall back to the puzzle piece.
- */
-const MODULE_ICONS: Record<string, LucideIcon> = {
-  bell: Bell,
-  blocks: Blocks,
-  bot: Bot,
-  book: BookOpen,
-  calendar: Calendar,
-  cloud: Cloud,
-  database: Database,
-  file: FileText,
-  folder: FolderOpen,
-  globe: Globe,
-  home: Home,
-  image: Image,
-  key: KeyRound,
-  mail: Mail,
-  message: MessageSquare,
-  music: Music,
-  puzzle: Puzzle,
-  rss: Rss,
-  search: Search,
-  zap: Zap,
-};
-
-function moduleIcon(name: string): LucideIcon {
-  return MODULE_ICONS[name] ?? Puzzle;
-}
 
 function ActionRow({ module, action }: { module: string; action: UiAction; }) {
   const [open, setOpen] = useState(false);

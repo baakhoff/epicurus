@@ -4,6 +4,8 @@ import { Check, Copy } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { SmartLink } from "@/components/EntityRef";
+
 const LANG_RE = /language-(\w+)/;
 
 function CodeBlock({ lang, text }: { lang: string | undefined; text: string }) {
@@ -64,7 +66,7 @@ export function Markdown({ children }: { children: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         skipHtml
-        components={{ pre: preRenderer }}
+        components={{ pre: preRenderer, a: SmartLink }}
       >
         {closeFence(children)}
       </ReactMarkdown>

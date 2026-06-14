@@ -200,6 +200,25 @@ async def test_get_page_proxies_declared_page() -> None:
     mock_client.get.assert_called_once_with("/pages/browse", params={})
 
 
+async def test_get_page_forwards_params() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_pages_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Files", "items": []}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await registry.get_page("files", "browse", params={"path": "docs", "q": ""})
+
+    mock_client.get.assert_called_once_with("/pages/browse", params={"path": "docs", "q": ""})
+
+
 async def test_get_page_404_for_undeclared_page() -> None:
     registry, _, _ = _registry(manifest=_pages_manifest())
     with pytest.raises(HTTPException) as err:

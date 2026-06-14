@@ -122,6 +122,7 @@ export const api = {
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/status`),
   // A module page's data, proxied through the core. The shape is the page
   // archetype's contract (e.g. BrowserData); the screen validates it (ADR-0018).
+  // Extra params (e.g. path, q for the storage browser) are forwarded as-is.
   modulePage: (name: string, pageId: string, params?: Record<string, string>) => {
     const query = params && Object.keys(params).length ? `?${new URLSearchParams(params)}` : "";
     return request(

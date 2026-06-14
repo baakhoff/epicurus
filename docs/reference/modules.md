@@ -143,18 +143,33 @@ archetype; `browser`, `calendar`, `editor`, and `board` are all implemented toda
 the archetype's data shape; the core proxies it at
 **`GET /platform/v1/modules/{name}/pages/{id}`** (validated against the manifest's
 declared pages — 404 otherwise), so the shell never calls a module directly. Query params
-are **forwarded verbatim** to the module, so a parameterized archetype reads its window
-from the same path — e.g. the `calendar` passes `?start=…&end=…`. The `browser`
-archetype's data shape is:
+are **forwarded verbatim** to the module, so a parameterized archetype reads from the same
+path — e.g. the `calendar` passes `?start=…&end=…`, and the file `browser` passes `?path=`
+and `?q=`. The `browser` archetype's data shape is:
 
 ```jsonc
 {
   "title": "Echoes",              // optional page heading
+  "path": "",                     // optional: current directory path (browser navigation)
+  "search_enabled": true,         // optional: when true the shell shows a search input
   "items": [
-    { "id": "hello", "title": "hello", "subtitle": "…", "body": "…" }
+    {
+      "id": "hello",
+      "title": "hello",
+      "subtitle": "a friendly echo",
+      "body": "…",               // optional: shown in the detail pane
+      "icon": "file",             // optional: glyph name
+      "nav_path": "docs",         // optional: set on directories to enable drill-in
+      "href": "/platform/v1/modules/storage/download?path=…"  // optional: download URL for files
+    }
   ]
 }
 ```
+
+**Download proxy.** The core also serves `GET /platform/v1/modules/{name}/download?path=…`
+which proxies to the module's `GET /download?path=…`. This lets the browser download files
+through the core without talking to a module directly — the `href` field in a `BrowserItem`
+points here.
 
 The `board` archetype's data shape is **columns of cards**, plus declarative
 **actions** — board-level and per-card — that mutate through the contract. An action

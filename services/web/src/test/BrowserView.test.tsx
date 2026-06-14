@@ -39,6 +39,6 @@ describe("BrowserView", () => {
     mockModulePage.mockResolvedValue({ items: [] });
     render(<BrowserView module="files" pageId="browse" />, { wrapper });
     await screen.findByText(/nothing here yet/i);
-    expect(mockModulePage).toHaveBeenCalledWith("files", "browse");
+    expect(mockModulePage).toHaveBeenCalledWith("files", "browse", undefined);
   });
 });

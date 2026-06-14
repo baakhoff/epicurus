@@ -21,7 +21,7 @@ from epicurus_core import (
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.scanner import scan
-from epicurus_storage.service import MODULE_NAME, build_module
+from epicurus_storage.service import MODULE_NAME, STORAGE_PAGE_ID, build_module, build_page_data
 from epicurus_storage.settings import StorageSettings
 
 
@@ -80,6 +80,8 @@ def create_app() -> FastAPI:
     app.mount("/mcp", mcp_app)
 
     _root = settings.storage_root
+    _tenant = settings.default_tenant_id
+    _download_base = f"/platform/v1/modules/{MODULE_NAME}/download"
 
     @app.get("/download")
     async def download(
@@ -106,6 +108,28 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="path is not a file")
 
         return FileResponse(str(resolved), filename=resolved.name)
+
+    @app.get("/pages/{page_id}")
+    async def page(
+        page_id: str,
+        path: str = Query(default="", description="Directory path to browse (empty = root)"),
+        q: str = Query(default="", description="Search query; if set, overrides path browsing"),
+    ) -> dict[str, object]:
+        """Serve the Files browser page data (ADR-0018); the core proxies this.
+
+        Returns a ``BrowserData``-shaped payload: ``{title, path, search_enabled, items}``.
+        Each item carries ``nav_path`` (for directories) or ``href`` (for files) so the
+        shell can navigate and download without talking to the module directly.
+        """
+        if page_id != STORAGE_PAGE_ID:
+            raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+
+        if q.strip():
+            entries = await index.search(tenant=_tenant, query=q.strip(), limit=200)
+        else:
+            entries = await index.browse(tenant=_tenant, path=path)
+
+        return build_page_data(entries, path=path, query=q.strip(), download_base=_download_base)
 
     return app
 

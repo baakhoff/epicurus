@@ -62,6 +62,14 @@ bundled-stack release, **v0.2.0**.
   hover-card is resolved on demand from the module's declared `GET /resolve/{kind}/{ref_id}`,
   proxied by the core; echo ships a reference resolver (ADR-0019) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Mail hover-cards show unread status** — an agent-referenced email's hover-card now
+  reports whether the message is **unread**: the resolver leads its detail rows with a
+  `Status: Unread` row (read messages omit it). The provider-agnostic `MailMessage` gains an
+  `unread` flag the Gmail provider derives from the `UNREAD` label. The resolver, the
+  `email-reader` panel, and the chip-click target shipped earlier with the mail reader; this
+  completes mail's entity-reference surface. Clicking still opens the read-only reader, so the
+  hover-card carries no `href` (in-app panel navigation, not an outbound URL). The shell needs
+  no change — it renders hover-card detail rows generically (ADR-0019) (`mail` → 0.4.0).
 - **Chat attachments** — the user can attach context to a turn: an uploaded **file** (held
   core-side via `POST /platform/v1/agent/attachments`), another **chat**, or an entity from
   an **enabled, attachable module**. The composer gains an attach affordance with pills; the

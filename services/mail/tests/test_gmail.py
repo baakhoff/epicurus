@@ -28,6 +28,7 @@ def _gmail_msg(
     sender: str = "alice@example.com",
     to: str = "bob@example.com",
     body_text: str | None = None,
+    label_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     headers = [
         {"name": "Subject", "value": subject},
@@ -43,7 +44,15 @@ def _gmail_msg(
         }
     else:
         payload = {"headers": headers, "mimeType": "multipart/alternative", "parts": []}
-    return {"id": msg_id, "threadId": "t1", "snippet": "Snippet…", "payload": payload}
+    message: dict[str, Any] = {
+        "id": msg_id,
+        "threadId": "t1",
+        "snippet": "Snippet…",
+        "payload": payload,
+    }
+    if label_ids is not None:
+        message["labelIds"] = label_ids
+    return message
 
 
 # ── _extract_body ────────────────────────────────────────────────────────────
@@ -107,6 +116,25 @@ def test_parse_message_multiple_recipients() -> None:
     data = _gmail_msg(to="alice@example.com, bob@example.com, carol@example.com")
     msg = _parse_message(data, full=False)
     assert msg.to == ["alice@example.com", "bob@example.com", "carol@example.com"]
+
+
+def test_parse_message_unread_from_label() -> None:
+    data = _gmail_msg(label_ids=["INBOX", "UNREAD"])
+    msg = _parse_message(data, full=False)
+    assert msg.unread is True
+
+
+def test_parse_message_read_without_unread_label() -> None:
+    data = _gmail_msg(label_ids=["INBOX"])
+    msg = _parse_message(data, full=False)
+    assert msg.unread is False
+
+
+def test_parse_message_unread_defaults_false_without_labels() -> None:
+    # A response with no labelIds is treated as read (no UNREAD flag present).
+    data = _gmail_msg()
+    msg = _parse_message(data, full=False)
+    assert msg.unread is False
 
 
 # ── GmailProvider (httpx patched via provider internals) ─────────────────────

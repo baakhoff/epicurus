@@ -913,7 +913,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-mail"
-version = "0.2.0"
+version = "0.4.0"
 source = { editable = "services/mail" }
 dependencies = [
     { name = "epicurus-core" },

@@ -18,6 +18,15 @@ message in the right-panel `email-reader` view (ADR-0018), read-only.  The modul
 now declares `resolver: true` and serves `GET /resolve/message/{ref_id}` (hover-card)
 and `GET /messages/{ref_id}` (full email for the panel).
 
+**v0.4.0** (Phase 3.8): the hover-card resolver now reports the message's **unread**
+status.  When a referenced message is unread, the `HoverCard` leads its detail rows
+with `Status: Unread`; read messages omit the row rather than render a redundant
+"Read".  The provider-agnostic `MailMessage` gains an `unread` flag the Gmail
+provider derives from the `UNREAD` label.  The chip's click still opens the
+read-only `email-reader` panel directly, so the resolver carries no `href` (there is
+no outbound URL — the reader is in-app panel navigation).  Mail skips a 0.3.0
+"attach" step because it is read-only, jumping 0.2.0 → 0.4.0.
+
 ---
 
 ## Contract
@@ -48,7 +57,7 @@ proxies them to the web shell (the shell never calls the module directly).
 
 | Method | Path | Shape | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date. |
+| `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date, and unread status (a `Status: Unread` row, only when unread). No `href` — the chip's click opens the reader. |
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body. |
 | `GET` | `/status` | `{"gmail_connected": bool}` | Liveness; proxied by the core. |
 
@@ -62,11 +71,16 @@ GET /platform/v1/modules/mail/status                     → status JSON
 
 #### `HoverCard` shape (from resolver)
 
+The `Status: Unread` row leads the details and is present **only when the message is
+unread**; a read message omits it. There is no `href` — clicking the chip opens the
+read-only `email-reader` panel directly (in-app navigation, not an outbound URL).
+
 ```json
 {
   "title": "Invoice from Acme",
   "description": "Please find attached…",
   "details": [
+    { "label": "Status", "value": "Unread" },
     { "label": "From",  "value": "acme@example.com" },
     { "label": "To",    "value": "me@example.com" },
     { "label": "Date",  "value": "Mon, 1 Jan 2024 10:00:00 +0000" }

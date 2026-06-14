@@ -186,6 +186,20 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def read_message(self, name: str, ref_id: str) -> dict[str, Any]:
+        """Proxy a module's full-message endpoint to the panel (ADR-0019).
+
+        Fetches ``GET /messages/{ref_id}`` on the module and returns the
+        EmailMessage envelope — subject, from, date, and body — consumed by the
+        right-panel ``email-reader`` view. 404 if the module is unreachable.
+        """
+        base, _ = await self._resolve(name)
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/messages/{ref_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -223,5 +237,9 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/{name}/attachments")
     async def list_attachments(name: str) -> list[dict[str, Any]]:
         return await registry.list_attachments(name)
+
+    @router.get("/{name}/messages/{ref_id}")
+    async def read_module_message(name: str, ref_id: str) -> dict[str, Any]:
+        return await registry.read_message(name, ref_id)
 
     return router

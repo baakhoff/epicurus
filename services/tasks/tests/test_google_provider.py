@@ -147,6 +147,42 @@ async def test_not_connected_raises() -> None:
         await provider.list_tasks(TENANT)
 
 
+async def test_update_task(provider: GoogleTasksProvider) -> None:
+    """Edit PATCHes only the supplied fields; due is sent as RFC 3339 midnight."""
+    updated = {
+        "id": "goog-task-1",
+        "title": "Updated title",
+        "notes": "new notes",
+        "due": "2025-12-25T00:00:00.000Z",
+        "status": "needsAction",
+    }
+    client = _tasks_client(updated)
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        task = await provider.update_task(
+            TENANT, "goog-task-1", title="Updated title", notes="new notes", due="2025-12-25"
+        )
+
+    assert task.title == "Updated title"
+    assert task.due == "2025-12-25"
+    client.patch.assert_awaited_once()
+    assert client.patch.call_args.kwargs["json"] == {
+        "title": "Updated title",
+        "notes": "new notes",
+        "due": "2025-12-25T00:00:00.000Z",
+    }
+
+
+async def test_update_task_noop_reads_current(provider: GoogleTasksProvider) -> None:
+    """With no fields to change, update GETs the task instead of PATCHing."""
+    client = _tasks_client(_GOOGLE_TASK)
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        task = await provider.update_task(TENANT, "goog-task-1")
+
+    assert task.id == "goog-task-1"
+    client.get.assert_awaited_once()
+    client.patch.assert_not_awaited()
+
+
 async def test_due_date_stripped_to_date(provider: GoogleTasksProvider) -> None:
     """RFC 3339 due timestamp should be stripped to ISO date (YYYY-MM-DD)."""
     task_data = {

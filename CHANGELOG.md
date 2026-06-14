@@ -25,6 +25,13 @@ bundled-stack release, **v0.2.0**.
   ships first; echo gains a demo **Echoes** page. Page data is proxied through the core
   (`GET /platform/v1/modules/{name}/pages/{id}`) (ADR-0018) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Tasks page — the first `board`** — the tasks module gains a **Tasks** left-nav page: a
+  core-rendered `board` of open tasks grouped by due date (Overdue / Today / Upcoming / No
+  date) where the user **completes, edits, and adds** tasks. The `board` archetype is new in
+  the shell; a board's cards and toolbar carry declarative **actions** that invoke the
+  module's MCP tools through the core (one-tap, a confirm dialog, or a SchemaForm prefilled
+  from the tool's `input_schema`), so a core-rendered view mutates with **no module markup**.
+  Editing is backed by a new `tasks_update` tool (ADR-0018) (`tasks` → 0.2.0, `web` → 0.6.0).
 - **Right-panel / split-screen host** — a core-owned side panel: a resizable right column
   on wide screens, a bottom sheet on phones, opened programmatically with a back-stack. It
   renders a **bounded, core-defined** set of views (`entity-detail`, `email-reader`) — the

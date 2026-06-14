@@ -206,6 +206,68 @@ export const BrowserData = z.object({
 });
 export type BrowserData = z.infer<typeof BrowserData>;
 
+/** A small status pill on a board card (e.g. a due date), reusing the Badge tones. */
+export const BoardBadge = z.object({
+  label: z.string(),
+  tone: z.enum(["dim", "accent", "ok", "warn", "danger"]).default("dim"),
+});
+export type BoardBadge = z.infer<typeof BoardBadge>;
+
+/**
+ * A button a `board` surfaces — board-level or per-card. Pressing it invokes the
+ * module's MCP `tool` through the core, so a core-rendered board mutates with no
+ * module markup. `args` are fixed values merged into every call; `form` opens a
+ * SchemaForm (built from the tool's input_schema, limited to `fields`, prefilled
+ * with `form_values`) before invoking; `confirm` gates a one-tap action behind a
+ * dialog. A `danger` action must carry a `confirm` prompt (mirrors UiAction).
+ */
+export const BoardAction = z
+  .object({
+    tool: z.string(),
+    label: z.string(),
+    intent: z.enum(["default", "primary", "danger"]).default("default"),
+    icon: z.string().nullish(),
+    args: z.record(z.string(), z.unknown()).default({}),
+    form: z.boolean().default(false),
+    fields: z.array(z.string()).nullish(),
+    form_values: z.record(z.string(), z.unknown()).default({}),
+    confirm: z.string().nullish(),
+  })
+  .superRefine((action, ctx) => {
+    if (action.intent === "danger" && !action.confirm) {
+      ctx.addIssue({ code: "custom", message: "a danger action must set a confirm prompt" });
+    }
+  });
+export type BoardAction = z.infer<typeof BoardAction>;
+
+/** One card on a `board`: a titled item with optional meta and tool-backed actions. */
+export const BoardCard = z.object({
+  id: z.string(),
+  title: z.string(),
+  subtitle: z.string().nullish(),
+  body: z.string().nullish(),
+  badges: z.array(BoardBadge).default([]),
+  done: z.boolean().default(false),
+  actions: z.array(BoardAction).default([]),
+});
+export type BoardCard = z.infer<typeof BoardCard>;
+
+/** One column of a `board`. */
+export const BoardColumn = z.object({
+  id: z.string(),
+  title: z.string(),
+  cards: z.array(BoardCard).default([]),
+});
+export type BoardColumn = z.infer<typeof BoardColumn>;
+
+/** The `board` archetype's data contract: columns of cards + board-level actions. */
+export const BoardData = z.object({
+  title: z.string().nullish(),
+  columns: z.array(BoardColumn).default([]),
+  actions: z.array(BoardAction).default([]),
+});
+export type BoardData = z.infer<typeof BoardData>;
+
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 
 /** One label/value row of a hover-card / entity-detail panel. */

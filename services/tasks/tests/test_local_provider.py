@@ -87,3 +87,31 @@ async def test_list_id_ignored(provider: LocalTasksProvider) -> None:
     await provider.add_task(TENANT, "Task")
     tasks = await provider.list_tasks(TENANT, list_id="some-list-id")
     assert len(tasks) == 1
+
+
+async def test_update_task(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Old title", notes="old", due="2025-01-01")
+    updated = await provider.update_task(TENANT, task.id, title="New title", due="2025-02-02")
+    assert updated.title == "New title"
+    assert updated.due == "2025-02-02"
+    assert updated.notes == "old"  # not passed → unchanged
+
+
+async def test_update_task_partial(provider: LocalTasksProvider) -> None:
+    """Only the supplied field changes; the others are left intact."""
+    task = await provider.add_task(TENANT, "Keep title")
+    updated = await provider.update_task(TENANT, task.id, notes="added notes")
+    assert updated.title == "Keep title"
+    assert updated.notes == "added notes"
+
+
+async def test_update_task_noop_returns_current(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Unchanged", notes="n")
+    same = await provider.update_task(TENANT, task.id)
+    assert same.title == "Unchanged"
+    assert same.notes == "n"
+
+
+async def test_update_unknown_raises(provider: LocalTasksProvider) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        await provider.update_task(TENANT, "nonexistent-id", title="x")

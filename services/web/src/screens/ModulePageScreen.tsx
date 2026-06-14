@@ -7,6 +7,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
+import { BoardView } from "@/components/archetypes/BoardView";
 import { BrowserView } from "@/components/archetypes/BrowserView";
 import { EmptyState, Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -56,6 +57,8 @@ export function ModulePageScreen() {
       <div className="min-h-0 flex-1">
         {page.archetype === "browser" ? (
           <BrowserView module={moduleName} pageId={pageId} />
+        ) : page.archetype === "board" ? (
+          <BoardView module={moduleName} pageId={pageId} />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <ComingSoon archetype={page.archetype} />

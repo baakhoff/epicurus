@@ -137,7 +137,8 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
 `browser` (tree/list + detail), `calendar`, `editor` (Obsidian-like doc),
 `board` (lists/cards). The shell ships one first-party screen per archetype;
-`browser` is implemented today, the rest land with their module pages (Phase 3.8).
+`browser` and `board` are implemented today, `calendar` and `editor` land with
+their module pages (Phase 3.8).
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
@@ -150,6 +151,45 @@ declared pages — 404 otherwise), so the shell never calls a module directly. T
   "title": "Echoes",              // optional page heading
   "items": [
     { "id": "hello", "title": "hello", "subtitle": "…", "body": "…" }
+  ]
+}
+```
+
+The `board` archetype's data shape is **columns of cards**, plus declarative
+**actions** — board-level and per-card — that mutate through the contract. An action
+names one of the module's **MCP tools**, which the shell invokes via the core
+(`POST /platform/v1/modules/{name}/tools/{tool}`, validated against the manifest), so a
+core-rendered board edits without any module markup. `args` are fixed values merged into
+every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_schema`
+(narrowed to `fields`, prefilled with `form_values`) before invoking; `confirm` gates a
+one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
+After a successful call the shell refetches the page.
+
+```jsonc
+{
+  "title": "Tasks",                                  // optional page heading
+  "columns": [
+    {
+      "id": "today", "title": "Today",
+      "cards": [
+        {
+          "id": "t1", "title": "Buy milk", "subtitle": "2 litres",
+          "badges": [{ "label": "2026-06-14", "tone": "accent" }],
+          "done": false,
+          "actions": [
+            { "tool": "tasks_complete", "label": "Complete", "icon": "check",
+              "args": { "task_id": "t1" } },
+            { "tool": "tasks_update", "label": "Edit", "icon": "pencil", "form": true,
+              "fields": ["title", "notes", "due"], "args": { "task_id": "t1" },
+              "form_values": { "title": "Buy milk", "notes": "2 litres", "due": "" } }
+          ]
+        }
+      ]
+    }
+  ],
+  "actions": [
+    { "tool": "tasks_add", "label": "Add task", "intent": "primary", "icon": "plus",
+      "form": true, "fields": ["title", "notes", "due"] }
   ]
 }
 ```

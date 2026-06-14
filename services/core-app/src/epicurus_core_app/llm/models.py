@@ -44,6 +44,8 @@ class ModelInfo(BaseModel):
     size: int | None = None
     # Currently held in memory by the runtime (drives the UI's "loaded" hint).
     loaded: bool = False
+    # Hidden from chat pickers; still visible in the model manager so it can be toggled back.
+    hidden: bool = False
 
 
 class ProviderInfo(BaseModel):

@@ -1,10 +1,10 @@
 /**
  * Models — the model manager. Local models (pull with live progress, delete,
- * loaded state) and hosted providers (key entry → core → OpenBao; the key
- * never comes back).
+ * loaded state, hide from pickers, set as global default) and hosted providers
+ * (key entry → core → OpenBao; the key never comes back).
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, KeyRound, Trash2 } from "lucide-react";
+import { Download, Eye, EyeOff, KeyRound, Star, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -105,12 +105,30 @@ function PullBox() {
 function LocalModels() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const prefModel = usePrefs((s) => s.model);
   const setModel = usePrefs((s) => s.setModel);
   const [confirming, setConfirming] = useState<string | null>(null);
+
+  const globalDefault = llmPrefs.data?.global_default ?? null;
+
   const remove = useMutation({
     mutationFn: api.deleteModel,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["models"] }),
+  });
+
+  const toggleHidden = useMutation({
+    mutationFn: ({ name, hidden }: { name: string; hidden: boolean }) =>
+      api.setModelHidden(name, hidden),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+      void queryClient.invalidateQueries({ queryKey: ["llmPrefs"] });
+    },
+  });
+
+  const setDefault = useMutation({
+    mutationFn: (model: string | null) => api.setGlobalDefault(model),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
   });
 
   return (
@@ -129,7 +147,10 @@ function LocalModels() {
         {models.data?.map((model) => (
           <div
             key={model.name}
-            className="group flex items-center gap-3 rounded-(--radius-field) px-2 py-2 hover:bg-surface-2"
+            className={cn(
+              "group flex items-center gap-3 rounded-(--radius-field) px-2 py-2 hover:bg-surface-2",
+              model.hidden && "opacity-60",
+            )}
           >
             <button
               className="flex min-w-0 flex-1 items-center gap-2 text-left"
@@ -138,9 +159,30 @@ function LocalModels() {
             >
               <span className="truncate text-sm text-ink">{model.name}</span>
               {model.loaded && <Badge tone="ok">loaded</Badge>}
+              {globalDefault === model.name && <Badge tone="accent">default</Badge>}
               {prefModel === model.name && <Badge tone="accent">chatting</Badge>}
+              {model.hidden && <Badge tone="dim">hidden</Badge>}
             </button>
             <span className="text-xs text-ink-faint">{formatBytes(model.size)}</span>
+            <button
+              aria-label={globalDefault === model.name ? "Clear global default" : `Set ${model.name} as global default`}
+              onClick={() => setDefault.mutate(globalDefault === model.name ? null : model.name)}
+              className={cn(
+                "rounded p-1.5 transition-opacity",
+                globalDefault === model.name
+                  ? "text-accent opacity-100"
+                  : "text-ink-faint opacity-0 hover:text-accent group-hover:opacity-100",
+              )}
+            >
+              <Star size={15} fill={globalDefault === model.name ? "currentColor" : "none"} />
+            </button>
+            <button
+              aria-label={model.hidden ? `Show ${model.name} in pickers` : `Hide ${model.name} from pickers`}
+              onClick={() => toggleHidden.mutate({ name: model.name, hidden: !model.hidden })}
+              className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+            >
+              {model.hidden ? <Eye size={15} /> : <EyeOff size={15} />}
+            </button>
             <button
               aria-label={`Delete ${model.name}`}
               onClick={() => setConfirming(model.name)}

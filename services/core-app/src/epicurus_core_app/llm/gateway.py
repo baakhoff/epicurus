@@ -33,6 +33,7 @@ from epicurus_core_app.llm.models import (
     UsageEvent,
 )
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 
 litellm.telemetry = False
 litellm.drop_params = True
@@ -64,6 +65,7 @@ class LlmGateway:
         temperature: float | None = None,
         top_p: float | None = None,
         num_ctx: int | None = None,
+        prefs: LlmPrefsStore | None = None,
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
@@ -77,10 +79,19 @@ class LlmGateway:
         self._temperature = temperature
         self._top_p = top_p
         self._num_ctx = num_ctx
+        self._prefs = prefs
 
-    def _candidates(self, model: str | None) -> list[str]:
+    async def effective_default(self, tenant_id: str | None = None) -> str:
+        """The active default model: the stored pref if set, else the env default."""
+        if self._prefs is not None:
+            stored = await self._prefs.get_default(tenant_id or self._default_tenant)
+            if stored:
+                return stored
+        return self._default_model
+
+    def _candidates(self, model: str) -> list[str]:
         """The chosen model followed by the configured fallback chain (deduped)."""
-        ordered = [model or self._default_model]
+        ordered = [model]
         for fallback in self._fallbacks:
             if fallback not in ordered:
                 ordered.append(fallback)
@@ -168,8 +179,9 @@ class LlmGateway:
         tenant_id: str | None = None,
     ) -> ChatResult:
         """Return a completion, walking the fallback chain on failure."""
+        resolved = model or await self.effective_default(tenant_id)
         last_error: Exception | None = None
-        for candidate in self._candidates(model):
+        for candidate in self._candidates(resolved):
             if not self._is_available(candidate):
                 continue
             try:
@@ -189,7 +201,8 @@ class LlmGateway:
         tenant_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Yield content deltas from the first available candidate."""
-        candidate = next((c for c in self._candidates(model) if self._is_available(c)), None)
+        resolved = model or await self.effective_default(tenant_id)
+        candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
         config = await self._call_config(candidate, tenant_id)
@@ -227,7 +240,8 @@ class LlmGateway:
         ``result.tool_calls`` is complete — the agent loop streams every round.
         Uses the first available candidate (no mid-stream fallback).
         """
-        candidate = next((c for c in self._candidates(model) if self._is_available(c)), None)
+        resolved = model or await self.effective_default(tenant_id)
+        candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
         config = await self._call_config(candidate, tenant_id)
@@ -310,7 +324,8 @@ class LlmGateway:
         """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``)."""
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
-        embed_model = f"ollama/{model or self._default_model}"
+        resolved = model or await self.effective_default(tenant_id)
+        embed_model = f"ollama/{resolved}"
         start = time.monotonic()
         response = await litellm.aembedding(
             model=embed_model,
@@ -382,8 +397,8 @@ class LlmGateway:
             return False
         return True
 
-    async def models(self) -> list[ModelInfo]:
-        """List the local runtime's models, marking the ones loaded in memory."""
+    async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
+        """List the local runtime's models, marking the ones loaded in memory or hidden."""
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
             response = await client.get("/api/tags")
             response.raise_for_status()
@@ -395,8 +410,16 @@ class LlmGateway:
                 loaded = {m["name"] for m in ps.json().get("models", [])}
             except (httpx.HTTPError, KeyError):
                 log.warning("ollama /api/ps failed; loaded-state unknown")
+        hidden: set[str] = set()
+        if self._prefs is not None:
+            hidden = set(await self._prefs.get_hidden(tenant_id or self._default_tenant))
         return [
-            ModelInfo(name=m["name"], size=m.get("size"), loaded=m["name"] in loaded)
+            ModelInfo(
+                name=m["name"],
+                size=m.get("size"),
+                loaded=m["name"] in loaded,
+                hidden=m["name"] in hidden,
+            )
             for m in payload.get("models", [])
         ]
 

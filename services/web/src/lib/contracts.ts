@@ -13,8 +13,15 @@ export const ModelInfo = z.object({
   name: z.string(),
   size: z.number().nullish(),
   loaded: z.boolean().default(false),
+  hidden: z.boolean().default(false),
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
+
+export const LlmPrefs = z.object({
+  global_default: z.string().nullable(),
+  hidden: z.array(z.string()),
+});
+export type LlmPrefs = z.infer<typeof LlmPrefs>;
 
 export const ProviderInfo = z.object({
   alias: z.string(),

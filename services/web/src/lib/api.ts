@@ -5,6 +5,7 @@
 import { z } from "zod";
 
 import {
+  LlmPrefs,
   MessageRecord,
   ModelInfo,
   ModuleSnapshot,
@@ -64,6 +65,18 @@ export const api = {
   deleteModel: (name: string) =>
     request(z.object({ status: z.string() }), `/platform/v1/llm/models?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
+    }),
+
+  llmPrefs: () => request(LlmPrefs, "/platform/v1/llm/prefs"),
+  setGlobalDefault: (model: string | null) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/default", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  setModelHidden: (name: string, hidden: boolean) =>
+    request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
+      method: "PUT",
+      body: JSON.stringify({ name, hidden }),
     }),
 
   providers: () => request(z.array(ProviderInfo), "/platform/v1/llm/providers"),

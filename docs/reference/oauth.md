@@ -5,7 +5,7 @@ the user's behalf. All OAuth machinery — the consent flow, token exchange,
 refresh, and vault storage — lives in the core. Modules never touch client
 secrets, refresh tokens, or the OAuth flow directly; they call
 `GET /platform/v1/oauth/{provider}/token` and receive a valid access token
-(ADR-0016).
+(ADR-0020).
 
 ---
 

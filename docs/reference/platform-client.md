@@ -50,7 +50,7 @@ reply = await client.chat([PlatformMessage(role="user", content="summarise this"
 Fetch a valid, auto-refreshed OAuth access token for `provider` (e.g. `"google"`) from the
 core's per-tenant token vault (`GET /platform/v1/oauth/{provider}/token`). Returns the raw
 access-token string, ready for `Authorization: Bearer <token>`. The module never sees the
-client secret or refresh token — the core owns the vault and the refresh (ADR-0016). Raises
+client secret or refresh token — the core owns the vault and the refresh (ADR-0020). Raises
 `httpx.HTTPStatusError` (404/400) when the provider isn't connected for this tenant.
 
 ```python

@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EditorView } from "@/components/archetypes/EditorView";
@@ -23,7 +24,11 @@ vi.mock("@/components/Markdown", () => ({
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{children}</MemoryRouter>
+    </QueryClientProvider>
+  );
 }
 
 beforeEach(() => {
@@ -83,5 +88,22 @@ describe("EditorView", () => {
     mockModulePage.mockResolvedValue({ docs: [] });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     expect(await screen.findByText(/empty vault/i)).toBeInTheDocument();
+  });
+
+  it("deep-links to the document named by the ?doc= param", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "# Deep" });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/knowledge/vault?doc=a.md"]}>
+          <EditorView module="knowledge" pageId="vault" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    // Opens the document with no click — the deep link selected it.
+    const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("# Deep");
+    expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
   });
 });

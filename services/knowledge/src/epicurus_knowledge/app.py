@@ -20,9 +20,11 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
+from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
 from epicurus_knowledge.service import MODULE_NAME, build_module
 from epicurus_knowledge.settings import KnowledgeSettings
 
@@ -105,6 +107,22 @@ def create_app() -> FastAPI:
 
     # The editor page (#130): the shell renders it; this module supplies vault docs.
     app.include_router(create_pages_router(VaultPages(settings.vault_path, vault_indexer)))
+
+    # Attachment source (#137): pick a vault doc to attach to a chat turn as context.
+    app.include_router(create_attachments_router(VaultAttachments(settings.vault_path)))
+
+    # Hover-card resolver (#143): a cited vault note or platform doc → a HoverCard.
+    app.include_router(
+        create_resolver_router(
+            KnowledgeResolver(
+                vault_path=settings.vault_path,
+                docs_path=settings.docs_path,
+                note_index=note_index,
+                doc_index=doc_index,
+                tenant=settings.default_tenant_id,
+            )
+        )
+    )
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:

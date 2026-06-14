@@ -8,6 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AtSign } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
+import { CardLink } from "@/components/CardLink";
 import { api } from "@/lib/api";
 import type { EntityRef, HoverCard } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
@@ -50,6 +51,11 @@ function HoverCardBody({ data, loading }: { data: HoverCard; loading: boolean })
               <span className="truncate text-ink">{detail.value}</span>
             </span>
           ))}
+        </span>
+      )}
+      {data.href && (
+        <span className="mt-2 block">
+          <CardLink href={data.href} className="text-xs text-accent-strong hover:underline" />
         </span>
       )}
       {loading && <span className="mt-1 block text-[11px] text-ink-faint">resolving…</span>}

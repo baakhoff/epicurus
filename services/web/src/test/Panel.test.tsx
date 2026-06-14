@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { PanelHost } from "@/components/Panel";
@@ -46,6 +47,26 @@ describe("PanelHost", () => {
       ),
     );
     expect(screen.queryByRole("link", { name: "danger" })).toBeNull();
+  });
+
+  it("renders an in-app entity-detail link as a same-tab router navigation", () => {
+    render(
+      <MemoryRouter>
+        <PanelHost />
+      </MemoryRouter>,
+    );
+    act(() =>
+      usePanel
+        .getState()
+        .open(
+          "entity-detail",
+          { ...DETAIL, href: { label: "Open in Knowledge", url: "/m/knowledge/vault?doc=a.md" } },
+          "Doc",
+        ),
+    );
+    const links = screen.getAllByRole("link", { name: /Open in Knowledge/ });
+    expect(links[0]).toHaveAttribute("href", "/m/knowledge/vault?doc=a.md");
+    expect(links[0]).not.toHaveAttribute("target");
   });
 
   it("renders the email-reader view", () => {

@@ -9,9 +9,23 @@ Registers two tools the agent can call:
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
+from epicurus_core import (
+    EntityRef,
+    EpicurusModule,
+    PageSpec,
+    UiAction,
+    UiSection,
+    tool_envelope,
+)
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.pages import VAULT_PAGE_ID
+from epicurus_knowledge.refs import (
+    KNOWLEDGE_KIND,
+    SOURCE_DOC,
+    SOURCE_NOTE,
+    doc_title,
+    encode_ref,
+)
 
 MODULE_NAME = "knowledge"
 
@@ -32,7 +46,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.6.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
@@ -72,34 +86,63 @@ def build_module(
                 )
             ],
         ),
+        # Vault documents can be attached to a chat turn (#137) — picker + resolve below.
+        attachable=True,
+        # Cited documents resolve to a hover-card (#143) — see resolver.py.
+        resolver=True,
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")
 
     @module.tool()
-    async def knowledge_search(query: str, k: int = 5) -> list[SearchHit]:
+    async def knowledge_search(query: str, k: int = 5) -> str:
         """Search the knowledge base for content relevant to *query*.
 
-        Searches both the operator's Obsidian vault (``<tenant>__knowledge``)
-        and the bundled platform docs (``<tenant>__docs``).  Results from both
-        sources are merged and re-ranked by cosine similarity score, returning
-        the top *k* across both collections.
+        Searches both the operator's Obsidian vault (``<tenant>__knowledge``) and the
+        bundled platform docs (``<tenant>__docs``), merging and re-ranking by cosine
+        similarity to return the top *k* chunks across both sources.
 
-        The ``note_path`` field in results from the platform docs is prefixed
-        with ``docs/`` (e.g. ``docs/services/knowledge.md``) so the agent can
-        distinguish them from vault notes.
+        Returns the matching chunks as readable text (so you can quote or reason over
+        them) plus one entity-reference chip per cited document: hovering a chip shows a
+        hover-card (path, tags, last-indexed) and clicking a vault note opens it in the
+        Knowledge page. Platform-docs citations are shown with a ``docs/`` path prefix so
+        you can tell them apart from vault notes.
 
         Args:
             query: Natural-language question or search phrase.
             k: Maximum number of chunks to return (default 5).
-
-        Returns a list of ``{note_path, heading, text, score}`` dicts ordered by
-        descending relevance.  Returns an empty list when neither source has been
-        indexed yet.
         """
         vault_hits, docs_hits = await _search_both(vault_indexer, docs_indexer, query, k)
-        merged = sorted(vault_hits + docs_hits, key=lambda h: h["score"], reverse=True)
-        return merged[:k]
+        tagged = [(SOURCE_NOTE, hit) for hit in vault_hits]
+        tagged += [(SOURCE_DOC, hit) for hit in docs_hits]
+        tagged.sort(key=lambda pair: pair[1]["score"], reverse=True)
+        top = tagged[:k]
+        if not top:
+            return tool_envelope("No matching content found.", [])
+
+        lines = [f"Found {len(top)} relevant chunk(s):", ""]
+        refs: list[EntityRef] = []
+        seen: set[str] = set()
+        for n, (source, hit) in enumerate(top, start=1):
+            path = hit["note_path"]
+            display = f"docs/{path}" if source == SOURCE_DOC else path
+            heading = hit["heading"]
+            lines.append(f"{n}. {display}" + (f" — {heading}" if heading else ""))
+            lines.append(hit["text"])
+            lines.append("")
+            ref_id = encode_ref(source, path)
+            if ref_id not in seen:  # one chip per distinct document, not per chunk
+                seen.add(ref_id)
+                refs.append(
+                    EntityRef(
+                        ref_id=ref_id,
+                        module=MODULE_NAME,
+                        kind=KNOWLEDGE_KIND,
+                        title=heading or doc_title(path),
+                        summary=_snippet(hit["text"]),
+                    )
+                )
+        return tool_envelope("\n".join(lines).rstrip(), refs)
 
     @module.tool()
     async def knowledge_reindex() -> dict[str, int]:
@@ -121,6 +164,12 @@ def build_module(
         }
 
     return module
+
+
+def _snippet(text: str, limit: int = 120) -> str:
+    """A short, single-line preview of a chunk for an entity-reference chip."""
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[:limit].rstrip() + "…"
 
 
 async def _search_both(

@@ -357,7 +357,8 @@ async def test_merged_search_returns_hits_from_both_sources(
     docs_hit = MagicMock()
     docs_hit.score = 0.9
     docs_hit.payload = {
-        "note_path": "docs/services/knowledge.md",
+        # docs-relative path (no docs/ prefix) — knowledge_search adds the prefix for display.
+        "note_path": "services/knowledge.md",
         "heading": "knowledge",
         "text": "Platform docs content.",
     }
@@ -384,18 +385,17 @@ async def test_merged_search_returns_hits_from_both_sources(
     )
 
     module = build_module(vault_indexer, docs_indexer)
-    _content, structured = await module.mcp.call_tool(
-        "knowledge_search", {"query": "platform", "k": 5}
-    )
-    assert structured is not None
-    result = structured.get("result") if isinstance(structured, dict) else structured
-    assert result is not None
-    hits = result if isinstance(result, list) else result.get("result", [])
-    # Docs hit (0.9) should rank above vault hit (0.7).
-    assert len(hits) >= 1
-    scores = [h["score"] for h in hits if isinstance(h, dict)]
-    if len(scores) >= 2:
-        assert scores[0] >= scores[1]
+    from epicurus_core.contracts import ToolEnvelope
+
+    content, _ = await module.mcp.call_tool("knowledge_search", {"query": "platform", "k": 5})
+    env = ToolEnvelope.model_validate_json(content[0].text)  # type: ignore[attr-defined]
+    # Both chunks' text reaches the model.
+    assert "Vault content." in env.text
+    assert "Platform docs content." in env.text
+    # Docs hit (0.9) ranks above vault hit (0.7): first in the text and as the first chip.
+    assert env.text.index("Platform docs content.") < env.text.index("Vault content.")
+    assert "docs/services/knowledge.md" in env.text  # docs path is prefixed for the agent
+    assert env.entity_refs[0].title == "knowledge"  # the docs hit's heading, ranked first
 
 
 async def test_reindex_sums_both_sources(

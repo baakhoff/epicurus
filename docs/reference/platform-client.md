@@ -34,10 +34,12 @@ vectors = await client.embed(["text to index", "another"])
 
 ### `await client.chat(messages, *, model=None, tools=None) -> PlatformChatResponse`
 
-A chat completion via the core (`POST /platform/v1/chat`). The module supplies only
-messages (`PlatformMessage`); the core picks the model, applies fallbacks, and meters
-usage. `PlatformChatResponse` carries `model`, `content`, optional `tool_calls`, and token
-counts.
+A chat completion via the core (`POST /platform/v1/chat`) — the single module-facing chat
+path (ADR-0021). The module supplies only messages (`PlatformMessage`); the core picks the
+model, applies fallbacks, and meters usage. `PlatformChatResponse` carries `model`,
+`content`, optional `tool_calls`, and token counts. `PlatformMessage` and
+`PlatformChatResponse` are backward-compatible aliases of the shared `ChatMessage` /
+`ChatResult` contract exported from `epicurus_core`.
 
 ```python
 from epicurus_core import PlatformMessage

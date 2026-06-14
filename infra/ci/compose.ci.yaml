@@ -24,6 +24,12 @@ services:
     ports: !reset []
   websearch:
     ports: !reset []
+  calendar:
+    ports: !reset []
+  mail:
+    ports: !reset []
+  tasks:
+    ports: !reset []
   web:
     ports: !reset []
   openbao:

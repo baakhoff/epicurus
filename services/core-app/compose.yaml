@@ -10,6 +10,15 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       OLLAMA_URL: http://ollama:11434
+      # ── LLM gateway tuning (all optional; blank/unset = provider default) ──
+      # Set any of these and restart — no code edit needed (issue #114).
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-llama3.2}
+      LLM_KEEP_ALIVE: ${LLM_KEEP_ALIVE:-5m}
+      LLM_FALLBACKS: ${LLM_FALLBACKS:-}
+      LLM_NUM_RETRIES: ${LLM_NUM_RETRIES:-2}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-}
+      LLM_TOP_P: ${LLM_TOP_P:-}
+      LLM_NUM_CTX: ${LLM_NUM_CTX:-}
       OPENBAO_URL: http://openbao:8200
       OPENBAO_TOKEN: ${OPENBAO_TOKEN}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}

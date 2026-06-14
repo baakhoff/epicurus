@@ -14,6 +14,34 @@ images to GHCR.
 
 Phase 2 (knowledge & storage) is in progress.
 
+### Added
+
+- **Shared chat contract** — `ChatMessage` and `ChatResult` are now exported from
+  `epicurus_core` as the single source of truth for the chat shapes the gateway,
+  platform API, and `PlatformClient` all use (#114).
+- **LLM tuning via env** — `LLM_TEMPERATURE`, `LLM_TOP_P`, and `LLM_NUM_CTX`
+  (alongside the existing `LLM_KEEP_ALIVE`) flow through compose → settings →
+  gateway, so tuning needs no code edit (#114).
+
+### Changed
+
+- **One module-facing chat path.** `POST /platform/v1/chat` is now the single
+  module → core chat endpoint and returns the shared `ChatResult`. `PlatformMessage`
+  and `PlatformChatResponse` are kept as backward-compatible aliases of
+  `ChatMessage` / `ChatResult` (#114). `epicurus-core` and `core-app` → **0.2.0**.
+
+### Removed
+
+- **`POST /platform/v1/llm/chat`** — folded into `POST /platform/v1/chat`, a strict
+  superset (it also accepts `tools` and `tenant_id`). `PlatformClient` already used
+  `/chat`, so live module code is unaffected (#114).
+
+### Fixed
+
+- **Smoke gate isolation** — `infra/ci/compose.ci.yaml` now resets host ports for the
+  wave-2 modules (calendar, mail, tasks) too, so `task smoke` runs alongside a
+  developer's dev stack without port collisions, as its header promises (#114).
+
 ## [0.1.0] — 2026-06-12
 
 **Phase 1 — the core runtime.** The platform runs end to end: chat from a phone with

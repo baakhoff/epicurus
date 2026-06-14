@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from epicurus_core import CONTRACT_VERSION, __version__
 from epicurus_core_app.llm.gateway import LlmGateway
-from epicurus_core_app.llm.models import ChatMessage
+from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.settings import CoreAppSettings
 
 
@@ -51,20 +51,10 @@ class EmbedResponse(BaseModel):
 class PlatformChatRequest(BaseModel):
     """Request body for ``POST /platform/v1/chat``."""
 
-    messages: list[dict[str, Any]]
+    messages: list[ChatMessage]
     model: str | None = None
     tools: list[dict[str, Any]] | None = None
     tenant_id: str | None = None
-
-
-class PlatformChatResponse(BaseModel):
-    """Chat completion result."""
-
-    model: str
-    content: str
-    tool_calls: list[dict[str, Any]] | None = None
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
 
 
 def create_platform_router(settings: CoreAppSettings, gateway: LlmGateway) -> APIRouter:
@@ -90,26 +80,20 @@ def create_platform_router(settings: CoreAppSettings, gateway: LlmGateway) -> AP
         embeddings = await gateway.embed(request.texts, model=model, tenant_id=request.tenant_id)
         return EmbedResponse(embeddings=embeddings)
 
-    @router.post("/chat", response_model=PlatformChatResponse)
-    async def chat(request: PlatformChatRequest) -> PlatformChatResponse:
+    @router.post("/chat", response_model=ChatResult)
+    async def chat(request: PlatformChatRequest) -> ChatResult:
         """Chat completion via the core's LLM gateway.
 
-        The core owns model selection, fallback, key management, and usage
-        accounting — the module provides only messages and optional overrides.
+        The single module-facing chat path (ADR-0021): the core owns model
+        selection, fallback, key management, and usage accounting — the module
+        provides only messages and optional overrides. Returns the shared
+        ``ChatResult``.
         """
-        messages = [ChatMessage.model_validate(m) for m in request.messages]
-        result = await gateway.chat(
-            messages,
+        return await gateway.chat(
+            request.messages,
             model=request.model,
             tools=request.tools,
             tenant_id=request.tenant_id,
-        )
-        return PlatformChatResponse(
-            model=result.model,
-            content=result.content,
-            tool_calls=result.tool_calls,
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
         )
 
     return router

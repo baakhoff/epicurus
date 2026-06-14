@@ -24,27 +24,14 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
 
+# The chat shapes are the shared contract (ADR-0021). ``PlatformMessage`` and
+# ``PlatformChatResponse`` are backward-compatible aliases of ``ChatMessage`` /
+# ``ChatResult`` — re-exported here so existing
+# ``from epicurus_core.platform_client import PlatformChatResponse`` keeps resolving.
+from epicurus_core.contracts import PlatformChatResponse, PlatformMessage
 
-class PlatformMessage(BaseModel):
-    """One message in a platform API chat exchange."""
-
-    role: str
-    content: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
-    tool_call_id: str | None = None
-    name: str | None = None
-
-
-class PlatformChatResponse(BaseModel):
-    """Chat completion returned by the platform API."""
-
-    model: str
-    content: str
-    tool_calls: list[dict[str, Any]] | None = None
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
+__all__ = ["PlatformChatResponse", "PlatformClient", "PlatformMessage"]
 
 
 class PlatformClient:

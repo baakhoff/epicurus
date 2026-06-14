@@ -61,6 +61,9 @@ class LlmGateway:
         bus: EventBus,
         fallbacks: list[str],
         num_retries: int = 2,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        num_ctx: int | None = None,
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
@@ -71,6 +74,9 @@ class LlmGateway:
         self._bus = bus
         self._fallbacks = list(fallbacks)
         self._num_retries = num_retries
+        self._temperature = temperature
+        self._top_p = top_p
+        self._num_ctx = num_ctx
 
     def _candidates(self, model: str | None) -> list[str]:
         """The chosen model followed by the configured fallback chain (deduped)."""
@@ -89,22 +95,32 @@ class LlmGateway:
         return not (self._power.paused and provider.is_local)
 
     async def _call_config(self, model: str, tenant_id: str | None) -> dict[str, Any]:
-        """The LiteLLM call kwargs (model, endpoint, key) for ``model``.
+        """The LiteLLM call kwargs (model, endpoint, key, tuning) for ``model``.
 
         For hosted providers the API key is fetched from OpenBao at call time and is
-        never logged.
+        never logged. Tuning knobs (temperature/top_p, plus local-only num_ctx and
+        keep_alive) come from settings, so they need no code edit to change.
         """
         litellm_model, provider = registry.resolve(model)
         config: dict[str, Any] = {"model": litellm_model}
         if provider.is_local:
             config["api_base"] = self._ollama_url
             config["keep_alive"] = self._keep_alive
+            # num_ctx is an Ollama runtime option — local models only.
+            if self._num_ctx is not None:
+                config["num_ctx"] = self._num_ctx
         if provider.secret_path is not None:
             tenant = tenant_id or self._default_tenant
             secret = await self._secrets.get(provider.secret_path, tenant)
             config["api_key"] = secret["api_key"]
             if provider.needs_base_url:
                 config["api_base"] = secret["api_base"]
+        # Sampling knobs apply to every provider; LiteLLM (drop_params=True) drops
+        # any that a given provider does not support.
+        if self._temperature is not None:
+            config["temperature"] = self._temperature
+        if self._top_p is not None:
+            config["top_p"] = self._top_p
         return config
 
     async def _complete(

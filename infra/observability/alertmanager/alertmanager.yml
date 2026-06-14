@@ -1,0 +1,36 @@
+global:
+  resolve_timeout: 5m
+
+# Route all alerts to the default receiver. Silencing, grouping, and repeat
+# intervals are set conservatively for a single-operator deployment.
+route:
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: default
+
+receivers:
+  # The default receiver discards alerts. Replace or extend this with a real
+  # notification channel once the stack is operational.
+  #
+  # Example — webhook (ntfy, Slack, Teams, Pushover…):
+  #   - name: default
+  #     webhook_configs:
+  #       - url: 'https://ntfy.sh/epicurus-alerts'
+  #         send_resolved: true
+  #
+  # Example — email (requires SMTP config in global above):
+  #   - name: default
+  #     email_configs:
+  #       - to: 'operator@example.com'
+  #         from: 'alertmanager@example.com'
+  #         smarthost: 'smtp.example.com:587'
+  #         auth_username: 'alertmanager@example.com'
+  #         auth_password: 'secret'
+  #         send_resolved: true
+  #
+  # Reload Alertmanager after editing: docker compose kill -s SIGHUP alertmanager
+  - name: default
+
+inhibit_rules: []

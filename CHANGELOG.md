@@ -52,6 +52,10 @@ bundled-stack release, **v0.2.0**.
 - **Runtime smoke gate** — CI boots the whole stack on every PR and asserts the
   integration last mile (image tags, mounts, module discovery, one MCP round-trip),
   catching breakage that lint and `compose config` miss (ADR-0015).
+- **Always-on deployment** — start-on-boot runbook for Windows (Docker Desktop
+  launch-on-login), Prometheus alert rules (service down, OpenBao sealed, disk > 85%),
+  Alertmanager for notification routing, and a minimal backup posture: volume snapshot
+  script (`infra/backups/backup.sh`) with a verified restore procedure (#115).
 
 ### Changed
 

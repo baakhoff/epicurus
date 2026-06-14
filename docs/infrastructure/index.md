@@ -32,8 +32,11 @@ auth proxy) in front (ADR-0008). Host ports **8088** (web entrypoint) and **8089
 ## Observability
 
 **Grafana / Loki / Prometheus / Tempo** with an **Alloy** collector (OTel) give logs,
-metrics, and traces for every container. Open Grafana at `http://localhost:3000`. Details:
-[`infra/observability/README.md`](../../infra/observability/README.md).
+metrics, and traces for every container. Open Grafana at `http://localhost:3000`.
+Alert rules for service health, OpenBao sealed, and disk usage are pre-configured and
+evaluated by Prometheus; Alertmanager routes notifications (edit
+`infra/observability/alertmanager/alertmanager.yml` to add a receiver).
+Details: [`infra/observability/README.md`](../../infra/observability/README.md).
 
 ## Ollama (local LLM runtime)
 
@@ -52,3 +55,10 @@ docker compose -f infra/compose/docker-compose.yml up -d    # data plane only
 ```
 
 See the [Architecture](../developer/architecture.md) guide for how the pieces fit.
+
+## Operations
+
+- [Startup and recovery](startup-and-recovery.md) — configure Docker Desktop
+  launch-on-login (Windows) and recovery procedures for common failure modes.
+- [Backup and restore](backup-and-restore.md) — snapshot volumes, store the
+  unseal key off-box, and run a verified restore.

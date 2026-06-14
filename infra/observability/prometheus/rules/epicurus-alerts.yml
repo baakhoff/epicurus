@@ -1,0 +1,62 @@
+groups:
+  - name: epicurus.services
+    interval: 30s
+    rules:
+      # Alert when any epicurus service stops being scraped by Prometheus.
+      # up == 0 means Prometheus tried to scrape /metrics and failed (container
+      # down, unhealthy, or not yet started). 2-minute grace lets containers restart.
+      - alert: ServiceDown
+        expr: up{job="epicurus-services"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is down"
+          description: >
+            Service {{ $labels.service }} (container {{ $labels.container }}) has
+            not responded to Prometheus scrapes for 2 minutes.
+          runbook_url: https://github.com/baakhoff/epicurus/blob/main/docs/infrastructure/startup-and-recovery.md
+
+  - name: epicurus.openbao
+    interval: 30s
+    rules:
+      # Alert when OpenBao's /v1/sys/health returns anything other than HTTP 200.
+      # 200 = active + unsealed; 503 = sealed; 501 = not initialised.
+      # The blackbox-exporter probes this endpoint; probe_success == 0 means it
+      # did not receive an expected status code.
+      - alert: OpenBaoSealed
+        expr: probe_success{job="blackbox-openbao"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenBao is sealed or unreachable"
+          description: >
+            The OpenBao health probe returned a non-200 status or timed out.
+            The vault is likely sealed — no secrets can be read until it is unsealed.
+            Check the openbao-unseal sidecar and run the runbook.
+          runbook_url: https://github.com/baakhoff/epicurus/blob/main/docs/infrastructure/startup-and-recovery.md#openbao-sealed
+
+  - name: epicurus.disk
+    interval: 60s
+    rules:
+      # Alert when the root filesystem (where Docker stores volumes in the WSL2 VM)
+      # is more than 85% full. tmpfs, devtmpfs, and overlay mounts are excluded.
+      - alert: DiskSpaceHigh
+        expr: >
+          (
+            node_filesystem_size_bytes{job="node-exporter", fstype!~"tmpfs|devtmpfs|overlay|squashfs"}
+            - node_filesystem_avail_bytes{job="node-exporter", fstype!~"tmpfs|devtmpfs|overlay|squashfs"}
+          )
+          / node_filesystem_size_bytes{job="node-exporter", fstype!~"tmpfs|devtmpfs|overlay|squashfs"}
+          > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage above 85% on {{ $labels.mountpoint }}"
+          description: >
+            Filesystem {{ $labels.mountpoint }} ({{ $labels.device }}) is
+            {{ printf "%.0f" (mul $value 100) }}% full. Docker volume data lives
+            in the WSL2 VM filesystem; free space to prevent write failures.
+          runbook_url: https://github.com/baakhoff/epicurus/blob/main/docs/infrastructure/backup-and-restore.md#disk-space

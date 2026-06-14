@@ -3,14 +3,30 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    uid: prometheus-epicurus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
+
   - name: Loki
     type: loki
+    uid: loki-epicurus
     access: proxy
     url: http://loki:3100
+
   - name: Tempo
     type: tempo
+    uid: tempo-epicurus
     access: proxy
     url: http://tempo:3200
+
+  # Alertmanager datasource — shows active alerts and lets Grafana render
+  # the Alerting overview page from Prometheus-managed rules.
+  - name: Alertmanager
+    type: alertmanager
+    uid: alertmanager-epicurus
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      handleGrafanaManagedAlerts: false
+      implementation: prometheus

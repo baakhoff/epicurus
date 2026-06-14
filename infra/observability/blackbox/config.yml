@@ -1,0 +1,15 @@
+modules:
+  # Probes an HTTP endpoint and expects HTTP 200. Used to check that
+  # OpenBao is active (unsealed): the /v1/sys/health endpoint returns
+  # 200 when active, 503 when sealed, 501 when not initialised.
+  http_200:
+    prober: http
+    timeout: 5s
+    http:
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+      valid_status_codes: [200]
+      method: GET
+      no_follow_redirects: false
+      fail_if_ssl: false
+      fail_if_not_ssl: false
+      preferred_ip_protocol: ip4

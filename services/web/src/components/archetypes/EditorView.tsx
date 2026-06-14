@@ -18,6 +18,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, FileText, Plus } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
 import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/components/ui";
@@ -52,6 +53,14 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [draft, setDraft] = useState("");
   const [baseline, setBaseline] = useState("");
+
+  // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's
+  // "Open in Knowledge" link, #143). Re-applies if the param changes while mounted.
+  const [searchParams] = useSearchParams();
+  const docParam = searchParams.get("doc");
+  useEffect(() => {
+    if (docParam) setSelectedPath(docParam);
+  }, [docParam]);
 
   const list = useQuery({
     queryKey: ["module-page", module, pageId],

@@ -280,7 +280,10 @@ Declare `attachable=True` and serve two endpoints (the core proxies both):
 
 The user can also attach an uploaded **file** (held core-side, `POST /platform/v1/agent/attachments`)
 or another **chat** (by session id) — those need no module. The agent expands every
-attachment into context at turn time.
+attachment into context at turn time. An uploaded file is **additionally** persisted to
+the storage module's object store (the upload sink, ADR-0025) so it is kept durably and
+becomes browsable in the Files page — best-effort, so a down storage never fails the
+upload. See [storage](../services/storage.md#the-chat-upload-sink-adr-0025).
 
 ### `CONTRACT_VERSION`
 `"0.1"` — the module↔core contract version this release targets.

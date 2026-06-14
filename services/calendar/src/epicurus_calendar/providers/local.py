@@ -34,6 +34,9 @@ class LocalCalendarProvider(CalendarProvider):
             end=time_range.end,
         )
 
+    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+        return await self._store.get_event(tenant=tenant_id, event_id=event_id)
+
     async def create_event(
         self,
         *,

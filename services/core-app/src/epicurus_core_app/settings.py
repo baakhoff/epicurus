@@ -45,6 +45,11 @@ class CoreAppSettings(CoreSettings):
     )
     # Max tool-calling rounds in one agent turn before it must answer.
     agent_max_steps: int = 4
+    # Base URL of the module that durably keeps chat uploads (ADR-0025). The attachment
+    # upload route best-effort POSTs each uploaded file's bytes to <url>/ingest so it
+    # becomes browsable in the Files page. Empty disables the sink (e.g. an OSS build
+    # without the storage module); a failed push never breaks the upload.
+    attachment_sink_url: str = "http://storage:8080"
     # Postgres DSN (async driver) for conversation persistence.
     database_url: str = "postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus"
     # Qdrant endpoint for semantic recall.

@@ -28,6 +28,40 @@ bundled-stack release, **v0.2.0**.
   "New note" control creates documents through the existing save path, opt-in per page via
   `EditorData.can_create` (knowledge keeps authoring in Obsidian) (ADR-0018 / ADR-0022 /
   ADR-0026) (new `notes` → 0.1.0, `web` → 0.7.0).
+- **Cited knowledge documents get a hover-card** — when the agent cites a vault note or a
+  platform-docs page (a `knowledge_search` result), it now renders in chat as an
+  **entity-reference chip**: `knowledge_search` returns a `ToolEnvelope` and the module
+  serves the resolver (`GET /resolve/knowledge/{ref_id}`). Hovering shows the core hover-card
+  (path, tags, last-indexed); clicking a vault note **opens it in the Knowledge page** via a
+  deep link the `editor` archetype reads (`?doc=`). The web learns to render an **in-app**
+  hover-card link as a same-tab router navigation (the shared `CardLink`, used by the panel
+  and the inline card). `knowledge_search`'s long-documented `docs/` prefix for platform-docs
+  citations is now actually applied (ADR-0019) (`knowledge` → 0.6.0, `web` → 0.7.0).
+- **Attach a knowledge document to the chat** — the knowledge module becomes a
+  **chat-attachment source** (`attachable`): pick a vault document in the composer's attach
+  menu and the agent uses it as explicit context for the turn, beyond default retrieval. The
+  module serves the picker (`GET /attachments`) and resolve (`GET /attachments/{ref_id}`)
+  over its vault; a document is named by an **opaque base64url `source:path` ref** so its
+  path round-trips as a single URL segment. The existing core attach proxy and web attach
+  menu render it unchanged — the module only supplies data (ADR-0019) (`knowledge` → 0.5.0).
+- **Calendar — events as chat chips, hover-cards & attachments** — `calendar_list_events` now
+  returns its events as **entity-reference chips** (ADR-0019): hover a chip for the event's **core
+  hover-card** (when / location / calendar) and click to open it in the right-panel
+  `entity-detail` view. The module declares `resolver` and serves `GET /resolve/event/{id}`, and
+  becomes a **chat-attachment source** (`attachable`) — the composer can attach an upcoming event
+  (`GET /attachments` picker + `GET /attachments/{id}` resolve → `{title, excerpt}`) so the agent
+  uses its details. A new provider `get_event` backs all three surfaces for both the local and
+  Google backends; the list tool is no longer a module-card action (an envelope can't render as a
+  plain-text result, mirroring mail) (closes #138, #140) (`calendar` → 0.4.0).
+- **Chat uploads land in storage (the upload sink)** — a file attached in chat is now
+  durably persisted to the **storage** module's object store and becomes browsable under an
+  **`uploads/`** folder in the Files page (downloadable like any file), in addition to the
+  core-side handle the agent reads. Storage gains a binary object surface
+  (`put_bytes`/`get_object`) and `POST /ingest`, which catalogues each upload with a new
+  `source` marker so a filesystem rescan never purges it; `/download` streams object uploads
+  from MinIO. The core's attachment-upload route best-effort forwards the bytes to the new
+  `attachment_sink_url` — a failed or absent sink never breaks the upload (ADR-0025)
+  (`storage` → 0.3.0, `core-app` → 0.5.0).
 - **Knowledge page (browse + edit, Obsidian-style)** — the knowledge module contributes an
   **`editor`** left-nav page: browse the vault's documents and read/edit them in a
   core-rendered markdown editor (source **and** preview), saving back to the vault. A save
@@ -72,6 +106,14 @@ bundled-stack release, **v0.2.0**.
   hover-card is resolved on demand from the module's declared `GET /resolve/{kind}/{ref_id}`,
   proxied by the core; echo ships a reference resolver (ADR-0019) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Mail hover-cards show unread status** — an agent-referenced email's hover-card now
+  reports whether the message is **unread**: the resolver leads its detail rows with a
+  `Status: Unread` row (read messages omit it). The provider-agnostic `MailMessage` gains an
+  `unread` flag the Gmail provider derives from the `UNREAD` label. The resolver, the
+  `email-reader` panel, and the chip-click target shipped earlier with the mail reader; this
+  completes mail's entity-reference surface. Clicking still opens the read-only reader, so the
+  hover-card carries no `href` (in-app panel navigation, not an outbound URL). The shell needs
+  no change — it renders hover-card detail rows generically (ADR-0019) (`mail` → 0.4.0).
 - **Chat attachments** — the user can attach context to a turn: an uploaded **file** (held
   core-side via `POST /platform/v1/agent/attachments`), another **chat**, or an entity from
   an **enabled, attachable module**. The composer gains an attach affordance with pills; the

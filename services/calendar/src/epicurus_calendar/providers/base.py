@@ -28,6 +28,14 @@ class CalendarProvider(ABC):
         """Return all events that overlap *time_range* for *tenant_id*."""
 
     @abstractmethod
+    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+        """Return the single event with *event_id* for *tenant_id*, or ``None``.
+
+        Backs the entity-ref hover-card resolver and the chat-attachment resolve
+        (ADR-0019): both need to fetch one referenced event by its id.
+        """
+
+    @abstractmethod
     async def create_event(
         self,
         *,

@@ -23,6 +23,21 @@ def _sample() -> MailMessage:
     )
 
 
+def _client_with_message(message: MailMessage) -> TestClient:
+    """A TestClient whose provider returns *message* from ``read`` (mocked bus)."""
+    provider = AsyncMock(spec=MailProvider)
+    provider.read = AsyncMock(return_value=message)
+    provider.health_check = AsyncMock(return_value=True)
+    with (
+        patch("epicurus_mail.app.GmailProvider", return_value=provider),
+        patch("epicurus_mail.app.EventBus.from_settings", return_value=AsyncMock()),
+    ):
+        from epicurus_mail.app import create_app
+
+        app = create_app()
+    return TestClient(app, raise_server_exceptions=True)
+
+
 @pytest.fixture()
 def client() -> TestClient:
     """TestClient with a mocked provider and a disabled event bus."""
@@ -58,6 +73,19 @@ class TestResolveMessage:
         resp = client.get("/resolve/message/msg1")
         body = resp.json()
         assert "href" not in body or body.get("href") is None
+
+    def test_leads_with_unread_status_when_unread(self) -> None:
+        msg = _sample()
+        msg.unread = True
+        local_client = _client_with_message(msg)
+        body = local_client.get("/resolve/message/msg1").json()
+        # The unread flag leads the detail rows so it is immediately visible.
+        assert body["details"][0] == {"label": "Status", "value": "Unread"}
+
+    def test_omits_status_row_when_read(self, client: TestClient) -> None:
+        # The default fixture sample is read (unread defaults False) → no Status row.
+        body = client.get("/resolve/message/msg1").json()
+        assert "Status" not in {d["label"] for d in body["details"]}
 
     def test_missing_message_returns_404(self, client: TestClient) -> None:
         with patch("epicurus_mail.app.GmailProvider") as mock_cls:

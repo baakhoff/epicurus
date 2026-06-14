@@ -178,6 +178,31 @@ class KnowledgeIndexer:
             )
         return results
 
+    async def index_path(self, rel: str) -> int:
+        """Re-index a single file by its vault-relative path; returns the chunk count.
+
+        The editor save path (#130) writes a document and then re-embeds just that
+        file rather than walking the whole vault. Any prior vectors for the path are
+        deleted first so a shrunk document leaves no stale chunks behind. The DB
+        ledger is updated so the next full ``run`` treats the file as unchanged.
+        """
+        fpath = self._vault / rel
+        raw = fpath.read_bytes()
+        content_hash = _content_hash(raw)
+        if await self._notes.get(tenant=self._tenant, note_path=rel) is not None:
+            await self._delete_note_vectors(rel)
+        content = raw.decode("utf-8", errors="replace")
+        chunk_count = await self._index_note(rel, content)
+        await self._notes.upsert(
+            tenant=self._tenant,
+            note_path=rel,
+            mtime_ns=fpath.stat().st_mtime_ns,
+            content_hash=content_hash,
+            chunk_count=chunk_count,
+        )
+        log.debug("re-indexed single note", path=rel, chunks=chunk_count)
+        return chunk_count
+
     async def run(self) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.
 

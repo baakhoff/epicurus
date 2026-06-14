@@ -46,6 +46,12 @@ class ToolResult(BaseModel):
     result: str
 
 
+class DocSave(BaseModel):
+    """The body of an editor-document save: the full new content (ADR-0018)."""
+
+    content: str
+
+
 class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
@@ -145,6 +151,53 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def _resolve_editor_page(self, name: str, page_id: str) -> str:
+        """The base URL of *name*, asserting it declares an ``editor`` page ``page_id``.
+
+        Only the ``editor`` archetype owns per-document read/write — a ``browser`` (or
+        any other) page has no docs, so the doc paths 404 for it. Raises 404 if the
+        module is unreachable, has no such page, or the page isn't an editor.
+        """
+        base, manifest = await self._resolve(name)
+        page = next((p for p in manifest.pages if p.id == page_id), None)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        if page.archetype != "editor":
+            raise HTTPException(status_code=404, detail=f"page {page_id!r} is not an editor")
+        return base
+
+    async def get_page_doc(self, name: str, page_id: str, path: str) -> dict[str, Any]:
+        """Proxy a single editor document's content to the shell (ADR-0018).
+
+        The shell fetches ``GET /pages/{page_id}/doc?path=<path>`` on the module and
+        returns its ``{path, title, content}`` body. ``path`` is module-relative; the
+        module is responsible for confining it (no traversal out of its store).
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/pages/{page_id}/doc", params={"path": path})
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
+    async def save_page_doc(
+        self, name: str, page_id: str, path: str, content: str
+    ) -> dict[str, Any]:
+        """Proxy an editor document save to the module (ADR-0018).
+
+        ``PUT /pages/{page_id}/doc?path=<path>`` with ``{content}``; the module writes
+        the document and (for knowledge) re-indexes it. The write timeout is generous
+        because saving may trigger an embed round-trip back through the core.
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=60) as client:
+            resp = await client.put(
+                f"/pages/{page_id}/doc", params={"path": path}, json={"content": content}
+            )
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
     async def resolve_entity(self, name: str, kind: str, ref_id: str) -> dict[str, Any]:
         """Proxy a module's hover-card resolver to the shell (ADR-0019).
 
@@ -235,6 +288,16 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def get_module_page(name: str, page_id: str, request: Request) -> dict[str, Any]:
         # Forward query params (e.g. a calendar's start/end window) to the module page.
         return await registry.get_page(name, page_id, params=dict(request.query_params))
+
+    @router.get("/{name}/pages/{page_id}/doc")
+    async def get_module_page_doc(name: str, page_id: str, path: str) -> dict[str, Any]:
+        return await registry.get_page_doc(name, page_id, path)
+
+    @router.put("/{name}/pages/{page_id}/doc")
+    async def save_module_page_doc(
+        name: str, page_id: str, path: str, body: DocSave
+    ) -> dict[str, Any]:
+        return await registry.save_page_doc(name, page_id, path, body.content)
 
     @router.get("/{name}/resolve/{kind}/{ref_id}")
     async def resolve_entity(name: str, kind: str, ref_id: str) -> dict[str, Any]:

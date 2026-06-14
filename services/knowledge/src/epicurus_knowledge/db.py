@@ -153,6 +153,17 @@ class NoteIndex:
             )
             return result.isoformat() if result is not None else None
 
+    async def indexed_at(self, *, tenant: str, note_path: str) -> str | None:
+        """Return the ISO-8601 timestamp *note_path* was last indexed, or None if unknown."""
+        async with self._session() as session:
+            result = await session.scalar(
+                select(_StoredNote.indexed_at).where(
+                    _StoredNote.tenant == tenant,
+                    _StoredNote.note_path == note_path,
+                )
+            )
+            return result.isoformat() if result is not None else None
+
 
 # ── Platform docs (self-documentation, #83) ──────────────────────────────────
 
@@ -268,5 +279,16 @@ class DocIndex:
         async with self._session() as session:
             result = await session.scalar(
                 select(func.max(_StoredDoc.indexed_at)).where(_StoredDoc.tenant == tenant)
+            )
+            return result.isoformat() if result is not None else None
+
+    async def indexed_at(self, *, tenant: str, note_path: str) -> str | None:
+        """Return the ISO-8601 timestamp *note_path* was last indexed, or None if unknown."""
+        async with self._session() as session:
+            result = await session.scalar(
+                select(_StoredDoc.indexed_at).where(
+                    _StoredDoc.tenant == tenant,
+                    _StoredDoc.note_path == note_path,
+                )
             )
             return result.isoformat() if result is not None else None

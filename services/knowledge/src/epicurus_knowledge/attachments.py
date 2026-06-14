@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from epicurus_knowledge.refs import (
+    KNOWLEDGE_KIND,
     SOURCE_NOTE,
     decode_ref,
     doc_title,
@@ -28,9 +29,6 @@ from epicurus_knowledge.refs import (
     iter_md_files,
     safe_relative,
 )
-
-# Every knowledge entity carries this kind in its reference (ADR-0019).
-KNOWLEDGE_KIND = "knowledge"
 
 
 class AttachmentItem(BaseModel):

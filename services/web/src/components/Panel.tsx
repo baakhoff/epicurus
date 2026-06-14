@@ -7,14 +7,10 @@
 import { ChevronLeft, X } from "lucide-react";
 import { Fragment, useCallback, useRef, useState, type PointerEvent } from "react";
 
+import { CardLink } from "@/components/CardLink";
 import { Sheet } from "@/components/ui";
 import { EmailMessage, HoverCard } from "@/lib/contracts";
 import { usePanel, usePanelCurrent, usePanelDepth, type PanelEntry } from "@/stores/panel";
-
-/** Only follow http(s) links from module-supplied data — never `javascript:` etc. */
-function isSafeHref(url: string): boolean {
-  return /^https?:\/\//i.test(url);
-}
 
 /* ── views (core-defined vocabulary) ─────────────────────────────────────── */
 
@@ -36,15 +32,11 @@ function EntityDetailView({ payload }: { payload: unknown }) {
           ))}
         </dl>
       )}
-      {data.href && isSafeHref(data.href.url) && (
-        <a
-          href={data.href.url}
-          target="_blank"
-          rel="noreferrer noopener"
+      {data.href && (
+        <CardLink
+          href={data.href}
           className="mt-4 inline-flex items-center gap-1 text-sm text-accent-strong hover:underline"
-        >
-          {data.href.label} ↗
-        </a>
+        />
       )}
     </div>
   );

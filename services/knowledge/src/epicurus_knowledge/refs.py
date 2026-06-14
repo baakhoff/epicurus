@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from fastapi import HTTPException
 
 __all__ = [
+    "KNOWLEDGE_KIND",
     "SOURCE_DOC",
     "SOURCE_NOTE",
     "decode_ref",
@@ -31,6 +32,10 @@ __all__ = [
     "iter_md_files",
     "safe_relative",
 ]
+
+# Every knowledge entity — a chat attachment (#137) or a cited reference (#143) —
+# carries this single ``kind`` (ADR-0019); the source lives inside the opaque ref_id.
+KNOWLEDGE_KIND = "knowledge"
 
 # A reference points at one of two markdown sources the module indexes.
 SOURCE_NOTE = "note"  # the operator's Obsidian vault (editable in the Knowledge page)

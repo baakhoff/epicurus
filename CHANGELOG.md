@@ -18,6 +18,15 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Cited knowledge documents get a hover-card** — when the agent cites a vault note or a
+  platform-docs page (a `knowledge_search` result), it now renders in chat as an
+  **entity-reference chip**: `knowledge_search` returns a `ToolEnvelope` and the module
+  serves the resolver (`GET /resolve/knowledge/{ref_id}`). Hovering shows the core hover-card
+  (path, tags, last-indexed); clicking a vault note **opens it in the Knowledge page** via a
+  deep link the `editor` archetype reads (`?doc=`). The web learns to render an **in-app**
+  hover-card link as a same-tab router navigation (the shared `CardLink`, used by the panel
+  and the inline card). `knowledge_search`'s long-documented `docs/` prefix for platform-docs
+  citations is now actually applied (ADR-0019) (`knowledge` → 0.6.0, `web` → 0.7.0).
 - **Attach a knowledge document to the chat** — the knowledge module becomes a
   **chat-attachment source** (`attachable`): pick a vault document in the composer's attach
   menu and the agent uses it as explicit context for the turn, beyond default retrieval. The

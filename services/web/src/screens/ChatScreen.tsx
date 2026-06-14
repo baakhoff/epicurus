@@ -180,8 +180,12 @@ function ModelPicker() {
   const [custom, setCustom] = useState("");
   const models = useQuery({ queryKey: ["models"], queryFn: api.models, enabled: open });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
 
   const hosted = providers.data?.filter((p) => !p.local && p.configured) ?? [];
+  const visibleModels = models.data?.filter((m) => !m.hidden) ?? [];
+  const globalDefault = llmPrefs.data?.global_default;
+  const defaultLabel = globalDefault ? `core default (${globalDefault})` : "core default";
 
   return (
     <>
@@ -197,8 +201,8 @@ function ModelPicker() {
           <div>
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Local</p>
             <div className="flex flex-col gap-1">
-              <PickRow label="core default" active={model === null} onPick={() => { setModel(null); setOpen(false); }} />
-              {models.data?.map((m) => (
+              <PickRow label={defaultLabel} active={model === null} onPick={() => { setModel(null); setOpen(false); }} />
+              {visibleModels.map((m) => (
                 <PickRow
                   key={m.name}
                   label={m.name}

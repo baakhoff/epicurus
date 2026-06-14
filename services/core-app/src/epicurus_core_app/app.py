@@ -28,6 +28,7 @@ from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
@@ -57,6 +58,10 @@ def create_app() -> FastAPI:
     bus = EventBus.from_settings(settings)
     power = PowerController()
     secrets = SecretStore.from_settings(settings)
+    engine = create_async_engine(settings.database_url)
+    qdrant = AsyncQdrantClient(url=settings.qdrant_url)
+
+    prefs = LlmPrefsStore(engine)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
@@ -70,10 +75,8 @@ def create_app() -> FastAPI:
         temperature=settings.llm_temperature,
         top_p=settings.llm_top_p,
         num_ctx=settings.llm_num_ctx,
+        prefs=prefs,
     )
-
-    engine = create_async_engine(settings.database_url)
-    qdrant = AsyncQdrantClient(url=settings.qdrant_url)
 
     async def embed(texts: list[str]) -> list[list[float]]:
         return await gateway.embed(texts, model=settings.memory_embed_model)
@@ -103,6 +106,10 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await bus.connect()
         try:
+            await prefs.init()
+        except Exception as exc:
+            log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
+        try:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades
             log.error("memory init failed; cross-chat memory disabled", error=str(exc))
@@ -117,7 +124,9 @@ def create_app() -> FastAPI:
     app = FastAPI(title="epicurus core", lifespan=lifespan)
     add_ops_routes(app, service_name=SERVICE_NAME, version=_service_version())
     app.include_router(create_platform_router(settings, gateway))
-    app.include_router(create_llm_router(gateway))
+    app.include_router(
+        create_llm_router(gateway, prefs=prefs, default_tenant=settings.default_tenant_id)
+    )
     app.include_router(create_power_router(gateway, power))
     app.include_router(create_agent_router(agent, memory, settings.default_tenant_id))
     app.include_router(create_modules_router(registry))

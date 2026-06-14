@@ -6,12 +6,15 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
 from epicurus_core import SecretError
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 
 
 class _FakeSecrets:
@@ -36,6 +39,17 @@ class _FakeBus:
         self.published.append((subject, data, tenant_id))
 
 
+async def _fresh_prefs() -> LlmPrefsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    prefs = LlmPrefsStore(engine)
+    await prefs.init()
+    return prefs
+
+
 def _gateway(
     power: PowerController | None = None,
     secrets: Any = None,
@@ -44,6 +58,7 @@ def _gateway(
     temperature: float | None = None,
     top_p: float | None = None,
     num_ctx: int | None = None,
+    prefs: LlmPrefsStore | None = None,
 ) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
@@ -58,6 +73,7 @@ def _gateway(
         temperature=temperature,
         top_p=top_p,
         num_ctx=num_ctx,
+        prefs=prefs,
     )
 
 
@@ -458,3 +474,85 @@ async def test_no_tuning_keys_when_unset(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "temperature" not in captured
     assert "top_p" not in captured
     assert "num_ctx" not in captured
+
+
+# ── LLM prefs: hidden list + global default (#124) ───────────────────────────
+
+
+async def test_models_marks_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _HttpResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"models": [{"name": "llama3.2", "size": 10}, {"name": "phi3:mini", "size": 5}]}
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def get(self, path: str) -> _HttpResponse:
+            return _HttpResponse()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", _Client)
+    prefs = await _fresh_prefs()
+    await prefs.set_hidden("local", ["phi3:mini"])
+    models = await _gateway(prefs=prefs).models()
+    by_name = {m.name: m for m in models}
+    assert not by_name["llama3.2"].hidden
+    assert by_name["phi3:mini"].hidden
+
+
+async def test_effective_default_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    # No stored default — env default ("llama3.2") must be used.
+    await _gateway(prefs=prefs).chat([ChatMessage(role="user", content="hi")])
+    assert captured["model"] == "ollama_chat/llama3.2"
+
+
+async def test_stored_global_default_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/qwen2.5:7b", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_default("local", "qwen2.5:7b")
+    await _gateway(prefs=prefs).chat([ChatMessage(role="user", content="hi")])
+    assert captured["model"] == "ollama_chat/qwen2.5:7b"
+
+
+async def test_explicit_model_ignores_stored_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/mistral", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_default("local", "qwen2.5:7b")
+    # An explicit model in the request must win over the stored default.
+    await _gateway(prefs=prefs).chat([ChatMessage(role="user", content="hi")], model="mistral")
+    assert captured["model"] == "ollama_chat/mistral"

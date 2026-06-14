@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.models import ModelInfo, PowerState, ProviderInfo
 from epicurus_core_app.llm.power import PowerController
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -38,8 +39,32 @@ class PowerStatus(BaseModel):
     state: PowerState
 
 
-def create_llm_router(gateway: LlmGateway) -> APIRouter:
-    """Gateway management routes — model catalog, providers, pulls.
+class LlmPrefsResponse(BaseModel):
+    """Current persisted LLM preferences for the tenant."""
+
+    global_default: str | None
+    hidden: list[str]
+
+
+class SetDefaultRequest(BaseModel):
+    """Body for PUT /llm/prefs/default."""
+
+    model: str | None
+
+
+class SetHiddenRequest(BaseModel):
+    """Body for PUT /llm/prefs/hidden — toggle one model's hidden state."""
+
+    name: str
+    hidden: bool
+
+
+def create_llm_router(
+    gateway: LlmGateway,
+    prefs: LlmPrefsStore | None = None,
+    default_tenant: str = "local",
+) -> APIRouter:
+    """Gateway management routes — model catalog, providers, pulls, and prefs.
 
     Chat completions go through the single module-facing path
     ``POST /platform/v1/chat`` (ADR-0021); the gateway no longer exposes its own
@@ -102,6 +127,41 @@ def create_llm_router(gateway: LlmGateway) -> APIRouter:
                 yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
 
         return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+    # ── LLM preferences (hide + global default) ──────────────────────────────
+
+    @router.get("/prefs", response_model=LlmPrefsResponse)
+    async def get_prefs() -> LlmPrefsResponse:
+        """Return the tenant's stored global default and hidden-model list."""
+        if prefs is None:
+            return LlmPrefsResponse(global_default=None, hidden=[])
+        stored_default = await prefs.get_default(default_tenant)
+        hidden = await prefs.get_hidden(default_tenant)
+        return LlmPrefsResponse(global_default=stored_default, hidden=hidden)
+
+    @router.put("/prefs/default")
+    async def set_default(request: SetDefaultRequest) -> dict[str, str | None]:
+        """Set or clear the global default model for this tenant."""
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        await prefs.set_default(default_tenant, request.model)
+        return {"status": "ok", "model": request.model}
+
+    @router.put("/prefs/hidden")
+    async def set_hidden(request: SetHiddenRequest) -> dict[str, object]:
+        """Toggle one model's hidden state; returns the updated hidden list."""
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        current = await prefs.get_hidden(default_tenant)
+        updated: list[str]
+        if request.hidden and request.name not in current:
+            updated = [*current, request.name]
+        elif not request.hidden:
+            updated = [m for m in current if m != request.name]
+        else:
+            updated = current
+        await prefs.set_hidden(default_tenant, updated)
+        return {"status": "ok", "hidden": updated}
 
     return router
 

@@ -6,6 +6,9 @@ import { z } from "zod";
 
 import {
   AttachmentUploaded,
+  EditorDocContent,
+  EditorSaveResult,
+  EmailMessage,
   HoverCard,
   LlmPrefs,
   MessageRecord,
@@ -121,10 +124,25 @@ export const api = {
   // archetype's contract (e.g. BrowserData); the screen validates it (ADR-0018).
   // Extra params (e.g. path, q for the storage browser) are forwarded as-is.
   modulePage: (name: string, pageId: string, params?: Record<string, string>) => {
-    const base = `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`;
-    const search = params && Object.keys(params).length > 0 ? "?" + new URLSearchParams(params).toString() : "";
-    return request(z.record(z.string(), z.unknown()), base + search);
+    const query = params && Object.keys(params).length ? `?${new URLSearchParams(params)}` : "";
+    return request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}${query}`,
+    );
   },
+  // One `editor` document's content, proxied through the core (ADR-0018).
+  modulePageDoc: (name: string, pageId: string, path: string) =>
+    request(
+      EditorDocContent,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
+    ),
+  // Save an `editor` document; the module writes it and (for knowledge) re-indexes it.
+  saveModulePageDoc: (name: string, pageId: string, path: string, content: string) =>
+    request(
+      EditorSaveResult,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(
@@ -136,6 +154,12 @@ export const api = {
     request(
       z.array(ModuleAttachmentItem),
       `/platform/v1/modules/${encodeURIComponent(name)}/attachments`,
+    ),
+  // Full email message for the right-panel email-reader view (ADR-0019).
+  readMailMessage: (module: string, refId: string) =>
+    request(
+      EmailMessage,
+      `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
     ),
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).

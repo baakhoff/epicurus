@@ -10,6 +10,7 @@ the shell never talks to a module directly.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -44,6 +45,12 @@ class ToolInvocation(BaseModel):
 
 class ToolResult(BaseModel):
     result: str
+
+
+class DocSave(BaseModel):
+    """The body of an editor-document save: the full new content (ADR-0018)."""
+
+    content: str
 
 
 class ModuleRegistry:
@@ -125,13 +132,15 @@ class ModuleRegistry:
             return data
 
     async def get_page(
-        self, name: str, page_id: str, params: dict[str, str] | None = None
+        self, name: str, page_id: str, *, params: Mapping[str, str] | None = None
     ) -> dict[str, Any]:
         """Proxy a module's page-data endpoint to the shell (ADR-0018).
 
         The page must be declared in the module's ``manifest.pages``; the core then
-        fetches ``GET /pages/{page_id}`` on the module and returns its JSON body —
-        the archetype's data shape, which the shell renders. A module never serves
+        fetches ``GET /pages/{page_id}`` on the module and returns its JSON body — the
+        archetype's data shape, which the shell renders. Query ``params`` are forwarded
+        verbatim, so a parameterized archetype (e.g. a ``calendar`` reading its
+        ``start``/``end`` window) reads from the same proxied path. A module never serves
         UI markup. Returns 404 if the module is unreachable or declares no such page.
         Query params (e.g. ``path``, ``q``) are forwarded to the module as-is.
         """
@@ -139,7 +148,54 @@ class ModuleRegistry:
         if page_id not in {p.id for p in manifest.pages}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
         async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/pages/{page_id}", params=params if params else None)
+            resp = await client.get(f"/pages/{page_id}", params=dict(params or {}))
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
+    async def _resolve_editor_page(self, name: str, page_id: str) -> str:
+        """The base URL of *name*, asserting it declares an ``editor`` page ``page_id``.
+
+        Only the ``editor`` archetype owns per-document read/write — a ``browser`` (or
+        any other) page has no docs, so the doc paths 404 for it. Raises 404 if the
+        module is unreachable, has no such page, or the page isn't an editor.
+        """
+        base, manifest = await self._resolve(name)
+        page = next((p for p in manifest.pages if p.id == page_id), None)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        if page.archetype != "editor":
+            raise HTTPException(status_code=404, detail=f"page {page_id!r} is not an editor")
+        return base
+
+    async def get_page_doc(self, name: str, page_id: str, path: str) -> dict[str, Any]:
+        """Proxy a single editor document's content to the shell (ADR-0018).
+
+        The shell fetches ``GET /pages/{page_id}/doc?path=<path>`` on the module and
+        returns its ``{path, title, content}`` body. ``path`` is module-relative; the
+        module is responsible for confining it (no traversal out of its store).
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/pages/{page_id}/doc", params={"path": path})
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
+    async def save_page_doc(
+        self, name: str, page_id: str, path: str, content: str
+    ) -> dict[str, Any]:
+        """Proxy an editor document save to the module (ADR-0018).
+
+        ``PUT /pages/{page_id}/doc?path=<path>`` with ``{content}``; the module writes
+        the document and (for knowledge) re-indexes it. The write timeout is generous
+        because saving may trigger an embed round-trip back through the core.
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=60) as client:
+            resp = await client.put(
+                f"/pages/{page_id}/doc", params={"path": path}, json={"content": content}
+            )
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
             return data
@@ -202,6 +258,20 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def read_message(self, name: str, ref_id: str) -> dict[str, Any]:
+        """Proxy a module's full-message endpoint to the panel (ADR-0019).
+
+        Fetches ``GET /messages/{ref_id}`` on the module and returns the
+        EmailMessage envelope — subject, from, date, and body — consumed by the
+        right-panel ``email-reader`` view. 404 if the module is unreachable.
+        """
+        base, _ = await self._resolve(name)
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/messages/{ref_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -230,11 +300,21 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
 
     @router.get("/{name}/pages/{page_id}")
     async def get_module_page(request: Request, name: str, page_id: str) -> dict[str, Any]:
-        # Forward all query params to the module so parameterised pages (e.g.
-        # the storage file browser's ?path= / ?q=) work without the core
-        # needing to know about each module's page-specific params.
+        # Forward all query params to the module so parameterised pages (e.g. a
+        # calendar's start/end window, or the storage file browser's ?path= / ?q=)
+        # work without the core needing to know each module's page-specific params.
         params = dict(request.query_params)
         return await registry.get_page(name, page_id, params=params or None)
+
+    @router.get("/{name}/pages/{page_id}/doc")
+    async def get_module_page_doc(name: str, page_id: str, path: str) -> dict[str, Any]:
+        return await registry.get_page_doc(name, page_id, path)
+
+    @router.put("/{name}/pages/{page_id}/doc")
+    async def save_module_page_doc(
+        name: str, page_id: str, path: str, body: DocSave
+    ) -> dict[str, Any]:
+        return await registry.save_page_doc(name, page_id, path, body.content)
 
     @router.get("/{name}/download")
     async def download_module_file(name: str, path: str = Query(...)) -> StreamingResponse:
@@ -262,5 +342,9 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/{name}/attachments")
     async def list_attachments(name: str) -> list[dict[str, Any]]:
         return await registry.list_attachments(name)
+
+    @router.get("/{name}/messages/{ref_id}")
+    async def read_module_message(name: str, ref_id: str) -> dict[str, Any]:
+        return await registry.read_message(name, ref_id)
 
     return router

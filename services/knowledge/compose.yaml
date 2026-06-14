@@ -22,7 +22,9 @@ services:
     volumes:
       # By default an empty named volume — nothing is exposed until you opt in.
       # Set KNOWLEDGE_HOST_VAULT in .env to a host directory (your Obsidian vault).
-      - ${KNOWLEDGE_HOST_VAULT:-knowledge-vault-data}:/vault:ro
+      # Read-write so the Knowledge editor page (#130) can save edits back to the
+      # vault; mount a host directory the container user (uid 10001) can write.
+      - ${KNOWLEDGE_HOST_VAULT:-knowledge-vault-data}:/vault
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${KNOWLEDGE_PORT:-8085}:8080"
     depends_on:

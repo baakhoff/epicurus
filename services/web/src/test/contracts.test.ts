@@ -4,7 +4,9 @@ import {
   AgentEvent,
   AgentTurn,
   Attachment,
+  BoardData,
   BrowserData,
+  CalendarData,
   MessageRecord,
   ModuleSnapshot,
   PageSpec,
@@ -80,6 +82,55 @@ describe("contracts", () => {
     expect(data.items[0].body).toBe("b");
   });
 
+  it("parses the board archetype data shape with tool-backed actions (ADR-0018)", () => {
+    const data = BoardData.parse({
+      title: "Tasks",
+      columns: [
+        {
+          id: "today",
+          title: "Today",
+          cards: [
+            {
+              id: "t1",
+              title: "Buy milk",
+              subtitle: "2 litres",
+              badges: [{ label: "2026-06-14", tone: "accent" }],
+              actions: [{ tool: "tasks_complete", label: "Complete", args: { task_id: "t1" } }],
+            },
+          ],
+        },
+      ],
+      actions: [{ tool: "tasks_add", label: "Add task", intent: "primary", form: true }],
+    });
+    expect(data.columns[0].cards[0].actions[0].tool).toBe("tasks_complete");
+    expect(data.columns[0].cards[0].actions[0].args).toEqual({ task_id: "t1" });
+    expect(data.actions[0].intent).toBe("primary");
+    // unspecified knobs take their defaults
+    expect(data.columns[0].cards[0].done).toBe(false);
+    expect(data.actions[0].args).toEqual({});
+  });
+
+  it("defaults a board badge tone to dim", () => {
+    const data = BoardData.parse({
+      columns: [{ id: "c", title: "C", cards: [{ id: "x", title: "x", badges: [{ label: "due" }] }] }],
+    });
+    expect(data.columns[0].cards[0].badges[0].tone).toBe("dim");
+  });
+
+  it("rejects a danger board action without a confirm prompt (mirrors UiAction)", () => {
+    expect(() =>
+      BoardData.parse({ columns: [], actions: [{ tool: "rm", label: "Delete", intent: "danger" }] }),
+    ).toThrow();
+  });
+
+  it("accepts a danger board action that carries a confirm prompt", () => {
+    const data = BoardData.parse({
+      columns: [],
+      actions: [{ tool: "rm", label: "Delete", intent: "danger", confirm: "Delete it?" }],
+    });
+    expect(data.actions[0].confirm).toBe("Delete it?");
+  });
+
   it("parses entity references on a message and a turn (ADR-0019)", () => {
     const rec = MessageRecord.parse({
       role: "assistant",
@@ -124,5 +175,28 @@ describe("contracts", () => {
 
   it("rejects an unknown attachment source", () => {
     expect(() => Attachment.parse({ att_id: "a1", source: "magic" })).toThrow();
+  });
+
+  it("parses the calendar archetype data, coercing timestamps to Date (ADR-0018)", () => {
+    const data = CalendarData.parse({
+      provider: "local",
+      range: { start: "2026-06-01T00:00:00Z", end: "2026-07-01T00:00:00Z" },
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00Z",
+          end: "2026-06-15T09:30:00Z",
+          location: "Room 4",
+        },
+      ],
+    });
+    expect(data.events[0].start instanceof Date).toBe(true);
+    expect(data.events[0].title).toBe("Standup");
+    expect(data.range?.start instanceof Date).toBe(true);
+  });
+
+  it("defaults calendar events to empty (a quiet calendar stays valid)", () => {
+    expect(CalendarData.parse({}).events).toEqual([]);
   });
 });

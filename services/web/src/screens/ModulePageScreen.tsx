@@ -7,7 +7,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
+import { BoardView } from "@/components/archetypes/BoardView";
 import { BrowserView } from "@/components/archetypes/BrowserView";
+import { CalendarView } from "@/components/archetypes/CalendarView";
+import { EditorView } from "@/components/archetypes/EditorView";
 import { EmptyState, Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { PageArchetype } from "@/lib/contracts";
@@ -56,6 +59,12 @@ export function ModulePageScreen() {
       <div className="min-h-0 flex-1">
         {page.archetype === "browser" ? (
           <BrowserView module={moduleName} pageId={pageId} />
+        ) : page.archetype === "calendar" ? (
+          <CalendarView module={moduleName} pageId={pageId} />
+        ) : page.archetype === "editor" ? (
+          <EditorView module={moduleName} pageId={pageId} />
+        ) : page.archetype === "board" ? (
+          <BoardView module={moduleName} pageId={pageId} />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <ComingSoon archetype={page.archetype} />

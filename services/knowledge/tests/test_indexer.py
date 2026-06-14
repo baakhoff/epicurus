@@ -114,6 +114,28 @@ async def test_deleted_note_is_removed(note_index: NoteIndex, vault: Path) -> No
     assert "note_b.md" not in remaining
 
 
+async def test_index_path_indexes_a_single_file(note_index: NoteIndex, vault: Path) -> None:
+    indexer = _make_indexer(note_index, vault)
+    (vault / "note_c.md").write_text("# Note C\n\nFresh content.")
+    chunks = await indexer.index_path("note_c.md")
+    assert chunks >= 1
+    rec = await note_index.get(tenant=TENANT, note_path="note_c.md")
+    assert rec is not None
+    assert rec.chunk_count == chunks
+
+
+async def test_index_path_replaces_old_vectors_on_reindex(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()  # note_a is now tracked
+    qdrant = indexer._qdrant  # type: ignore[attr-defined]
+    qdrant.delete.reset_mock()
+    (vault / "note_a.md").write_text("# Note A\n\nEdited via the editor page.")
+    await indexer.index_path("note_a.md")
+    qdrant.delete.assert_awaited()  # stale chunks purged before the re-upsert
+
+
 async def test_non_markdown_files_are_ignored(note_index: NoteIndex, vault: Path) -> None:
     (vault / "image.png").write_bytes(b"\x89PNG")
     (vault / "config.yaml").write_text("key: value")

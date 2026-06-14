@@ -135,3 +135,50 @@ class GoogleTasksProvider:
                 raise GoogleTasksError(f"task {task_id!r} not found in list {tasklist!r}")
             resp.raise_for_status()
             return self._parse_task(resp.json())
+
+    async def update_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        title: str | None = None,
+        notes: str | None = None,
+        due: str | None = None,
+        list_id: str | None = None,
+    ) -> Task:
+        """Edit a task's title/notes/due via a PATCH to the Google Tasks API.
+
+        Only the supplied fields are sent. With nothing to change it GETs and
+        returns the current task, so the call is always a clean read-or-edit.
+        """
+        tasklist = list_id or _DEFAULT_LIST
+        token = await self._access_token()
+        body: dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if notes is not None:
+            body["notes"] = notes
+        if due:
+            # Google Tasks expects RFC 3339 UTC midnight for due dates.
+            body["due"] = f"{due[:10]}T00:00:00.000Z"
+
+        async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
+            if body:
+                resp = await client.patch(
+                    f"/lists/{tasklist}/tasks/{task_id}",
+                    headers=self._auth_headers(token),
+                    json=body,
+                )
+            else:
+                resp = await client.get(
+                    f"/lists/{tasklist}/tasks/{task_id}",
+                    headers=self._auth_headers(token),
+                )
+            if resp.status_code == 401:
+                raise GoogleTasksError(
+                    "Google token is invalid or revoked — reconnect via Settings"
+                )
+            if resp.status_code == 404:
+                raise GoogleTasksError(f"task {task_id!r} not found in list {tasklist!r}")
+            resp.raise_for_status()
+            return self._parse_task(resp.json())

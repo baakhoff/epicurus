@@ -119,6 +119,49 @@ class TaskStore:
             await session.commit()
         return _row_to_task(row)
 
+    async def update_task(
+        self,
+        *,
+        tenant_id: str,
+        task_id: str,
+        title: str | None = None,
+        notes: str | None = None,
+        due: str | None = None,
+    ) -> Task:
+        """Patch a task's editable fields and return it.
+
+        Only the fields passed (non-``None``) are changed; the rest keep their
+        current value. With nothing to change it is a clean no-op that still
+        returns the current task. Raises :exc:`KeyError` if the task does not
+        exist for this tenant.
+        """
+        values: dict[str, str | None] = {}
+        if title is not None:
+            values["title"] = title
+        if notes is not None:
+            values["notes"] = notes
+        if due is not None:
+            values["due"] = due
+
+        if not values:
+            current = await self.get_task(tenant_id=tenant_id, task_id=task_id)
+            if current is None:
+                raise KeyError(f"task {task_id!r} not found for tenant {tenant_id!r}")
+            return current
+
+        async with self._session() as session:
+            result = await session.execute(
+                update(_StoredTask)
+                .where(_StoredTask.tenant_id == tenant_id, _StoredTask.id == task_id)
+                .values(**values)
+                .returning(_StoredTask)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise KeyError(f"task {task_id!r} not found for tenant {tenant_id!r}")
+            await session.commit()
+        return _row_to_task(row)
+
     async def get_task(self, *, tenant_id: str, task_id: str) -> Task | None:
         """Return a single task, or ``None`` if it doesn't exist."""
         async with self._session() as session:

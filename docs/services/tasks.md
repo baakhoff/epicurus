@@ -10,7 +10,11 @@ which provider is active. **v0.1 ships two providers:**
   fetched from the core's OAuth vault; no credential lives in this module.
 
 Post-v0.1: add Todoist, Microsoft To Do, or any other provider without reshaping the
-tool surface. Host port **8087**.
+tool surface. Host port **8091**.
+
+**v0.2.0** adds a **Tasks** left-nav page — a core-rendered `board` of open tasks grouped
+by due date, where the user completes, edits, and adds tasks — and the `tasks_update` tool
+that backs editing (ADR-0018). The module supplies data only; the shell renders it.
 
 ## The contract it exposes
 
@@ -21,9 +25,11 @@ tool surface. Host port **8087**.
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | List of open `Task` objects for the tenant. |
 | `tasks_add(title, notes?, due?, list_id?)` | `title`: required; `notes`/`due`/`list_id`: optional | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
+| `tasks_update(task_id, title?, notes?, due?, list_id?)` | `task_id`: provider task ID; only the fields passed change, the rest are left intact | The updated `Task`. |
 
-All three tools are **provider-agnostic** — `list_id` maps to `@default` (Google)
-or is silently ignored (local). The `Task` domain model is:
+All four tools are **provider-agnostic** — `list_id` maps to `@default` (Google)
+or is silently ignored (local). `tasks_update` edits content (title/notes/due);
+`tasks_complete` flips the done flag — distinct operations. The `Task` domain model is:
 
 ```python
 class Task(BaseModel):
@@ -43,6 +49,7 @@ class Task(BaseModel):
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, UI declaration). |
 | `GET /status` | Active provider name: `{"provider": "local" \| "google"}`. |
+| `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). 404 for an unknown id. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ### Web UI (manifest, ADR-0007 Tier 1)
@@ -51,6 +58,23 @@ class Task(BaseModel):
 | --- | --- |
 | **Status** | Active provider name (polled from `GET /status`). |
 | **Actions** | **List tasks** — calls `tasks_list` through the core. |
+| **Tasks page** | A left-nav `board` page (see below). |
+
+### The Tasks page — `board` archetype (ADR-0018)
+
+The module declares one page — `{id: "board", title: "Tasks", archetype: "board"}` — and
+serves its data at `GET /pages/board`. The core renders it; the module ships **no markup**.
+
+- **Columns** group the tenant's **open** tasks by due date: **Overdue**, **Today**,
+  **Upcoming**, **No date** (empty columns are dropped). Completing a task removes it from
+  the board, mirroring the provider's open-tasks semantics. Bucketing is a pure function,
+  `build_tasks_board(tasks, today=…)`, so it is unit-tested without a clock — ISO date
+  strings compare lexicographically, so no parsing is needed.
+- **Mutations are declarative actions** that name an MCP tool; the shell invokes it through
+  the core (validated against the manifest) and refetches. Each card offers **Complete**
+  (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card);
+  the board offers **Add task** (`tasks_add`, a form). The board never carries credentials
+  or business logic — it is data plus tool references.
 
 ## Provider detail
 
@@ -134,7 +158,7 @@ Package `epicurus_tasks`:
 | `providers.py` | `TasksProvider` Protocol — the swappable back-end seam. |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store. |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API. |
-| `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers for the local store. |
-| `service.py` | MCP tools (`tasks_list`, `tasks_add`, `tasks_complete`) + manifest UI. |
-| `app.py` | Lifespan, provider selection, `GET /status`, app factory. |
+| `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
+| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder). |
+| `app.py` | Lifespan, provider selection, `GET /status`, `GET /pages/{id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `tasks_provider`, `platform_url`, `database_url`). |

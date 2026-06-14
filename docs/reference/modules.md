@@ -135,16 +135,17 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 | `capability` | `str \| None` | `None` | reserved gate the shell may check before showing the page (e.g. a connected account) — not yet enforced |
 
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
-`browser` (tree/list + detail), `calendar`, `editor` (Obsidian-like doc),
-`board` (lists/cards). The shell ships one first-party screen per archetype;
-`browser` is implemented today, the rest land with their module pages (Phase 3.8).
+`browser` (tree/list + detail), `calendar` (month / week / agenda), `editor`
+(Obsidian-like doc), `board` (lists/cards). The shell ships one first-party screen per
+archetype; `browser`, `calendar`, `editor`, and `board` are all implemented today.
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
 **`GET /platform/v1/modules/{name}/pages/{id}`** (validated against the manifest's
-declared pages — 404 otherwise), so the shell never calls a module directly. All query
-params from the shell request are forwarded to the module as-is (e.g. `?path=` and `?q=`
-for the file-browser). The `browser` archetype's data shape is:
+declared pages — 404 otherwise), so the shell never calls a module directly. Query params
+are **forwarded verbatim** to the module, so a parameterized archetype reads from the same
+path — e.g. the `calendar` passes `?start=…&end=…`, and the file `browser` passes `?path=`
+and `?q=`. The `browser` archetype's data shape is:
 
 ```jsonc
 {
@@ -169,6 +170,84 @@ for the file-browser). The `browser` archetype's data shape is:
 which proxies to the module's `GET /download?path=…`. This lets the browser download files
 through the core without talking to a module directly — the `href` field in a `BrowserItem`
 points here.
+
+The `board` archetype's data shape is **columns of cards**, plus declarative
+**actions** — board-level and per-card — that mutate through the contract. An action
+names one of the module's **MCP tools**, which the shell invokes via the core
+(`POST /platform/v1/modules/{name}/tools/{tool}`, validated against the manifest), so a
+core-rendered board edits without any module markup. `args` are fixed values merged into
+every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_schema`
+(narrowed to `fields`, prefilled with `form_values`) before invoking; `confirm` gates a
+one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
+After a successful call the shell refetches the page.
+
+```jsonc
+{
+  "title": "Tasks",                                  // optional page heading
+  "columns": [
+    {
+      "id": "today", "title": "Today",
+      "cards": [
+        {
+          "id": "t1", "title": "Buy milk", "subtitle": "2 litres",
+          "badges": [{ "label": "2026-06-14", "tone": "accent" }],
+          "done": false,
+          "actions": [
+            { "tool": "tasks_complete", "label": "Complete", "icon": "check",
+              "args": { "task_id": "t1" } },
+            { "tool": "tasks_update", "label": "Edit", "icon": "pencil", "form": true,
+              "fields": ["title", "notes", "due"], "args": { "task_id": "t1" },
+              "form_values": { "title": "Buy milk", "notes": "2 litres", "due": "" } }
+          ]
+        }
+      ]
+    }
+  ],
+  "actions": [
+    { "tool": "tasks_add", "label": "Add task", "intent": "primary", "icon": "plus",
+      "form": true, "fields": ["title", "notes", "due"] }
+  ]
+}
+```
+
+**The `editor` archetype (Obsidian-like docs).** Its `GET /pages/{id}` returns a
+document *list* (content is fetched lazily per document), and it owns two extra,
+**editor-only** doc endpoints the core proxies (a non-`editor` page 404s on them):
+
+```jsonc
+// GET /pages/{id}  →  the browsable document list
+{ "title": "Knowledge", "docs": [ { "id": "a.md", "title": "a", "path": "a.md" } ] }
+// GET /pages/{id}/doc?path=<rel>  →  one document's content
+{ "path": "a.md", "title": "a", "content": "# A\n…" }
+// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save
+{ "path": "a.md", "indexed": true, "chunk_count": 3 }
+```
+
+Proxied at `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`. `path` is
+module-relative and the module **must** confine it to its own store (reject `..`,
+absolute paths, and non-document files) — the editor writes real files, so this is the
+trust boundary. The shared core editor component (knowledge's vault page is the first
+user, #130) provides the list + markdown source/preview + save; a module supplies only
+the data above. The first knowledge implementation re-indexes a saved document so it
+stays agent-retrievable.
+
+The `calendar` archetype's data shape is a window of events (the shell renders the month /
+week / agenda views and re-fetches as the user navigates):
+
+```jsonc
+{
+  "title": "Calendar",
+  "provider": "local",                              // active provider
+  "range": { "start": "2026-06-01T00:00:00+00:00",  // the window actually returned
+             "end":   "2026-07-01T00:00:00+00:00" },
+  "events": [
+    { "id": "e1", "title": "Standup",
+      "start": "2026-06-15T09:00:00+00:00",
+      "end":   "2026-06-15T09:30:00+00:00",
+      "location": "Room 4", "description": "…", "provider": "local" }
+  ]
+}
+```
 
 ### Entity references & the resolver (ADR-0019)
 

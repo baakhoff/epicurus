@@ -21,7 +21,7 @@ from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
-from epicurus_calendar.service import build_module
+from epicurus_calendar.service import CALENDAR_PAGE_ID, build_module, calendar_page
 
 
 def _dt(hour: int) -> datetime:
@@ -254,3 +254,115 @@ async def test_manifest_declares_tools_and_ui() -> None:
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     assert manifest.ui.icon == "calendar"
+
+
+# ── calendar_page (the `calendar` archetype data, ADR-0018) ───────────────────
+
+
+async def test_calendar_page_shape_when_empty(local_provider: LocalCalendarProvider) -> None:
+    data = await calendar_page(local_provider, tenant_id="t1")
+    assert data["title"] == "Calendar"
+    assert data["provider"] == "local"
+    assert data["events"] == []
+    assert set(data["range"]) == {"start", "end"}
+
+
+async def test_calendar_page_lists_only_events_in_window(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    near = datetime(2026, 6, 15, 9, 0, tzinfo=UTC)
+    await local_provider.create_event(
+        tenant_id="t1", title="Standup", start=near, end=near + timedelta(minutes=30)
+    )
+    far = near + timedelta(days=40)
+    await local_provider.create_event(
+        tenant_id="t1", title="Far away", start=far, end=far + timedelta(hours=1)
+    )
+    data = await calendar_page(
+        local_provider,
+        tenant_id="t1",
+        start="2026-06-01T00:00:00+00:00",
+        end="2026-07-01T00:00:00+00:00",
+    )
+    assert [e["title"] for e in data["events"]] == ["Standup"]
+
+
+async def test_calendar_page_defaults_to_current_month(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    now = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    in_june = datetime(2026, 6, 20, 10, 0, tzinfo=UTC)
+    await local_provider.create_event(
+        tenant_id="t1", title="This month", start=in_june, end=in_june + timedelta(hours=1)
+    )
+    data = await calendar_page(local_provider, tenant_id="t1", now=now)
+    assert data["range"]["start"].startswith("2026-06-01")
+    assert data["range"]["end"].startswith("2026-07-01")
+    assert [e["title"] for e in data["events"]] == ["This month"]
+
+
+async def test_calendar_page_default_window_rolls_over_december(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    now = datetime(2026, 12, 10, 12, 0, tzinfo=UTC)
+    data = await calendar_page(local_provider, tenant_id="t1", now=now)
+    assert data["range"]["start"].startswith("2026-12-01")
+    assert data["range"]["end"].startswith("2027-01-01")
+
+
+async def test_calendar_page_rejects_unparseable_dates(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    with pytest.raises(ValueError):
+        await calendar_page(
+            local_provider, tenant_id="t1", start="nonsense", end="2026-07-01T00:00:00+00:00"
+        )
+
+
+async def test_calendar_page_rejects_inverted_range(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    with pytest.raises(ValueError):
+        await calendar_page(
+            local_provider,
+            tenant_id="t1",
+            start="2026-07-01T00:00:00+00:00",
+            end="2026-06-01T00:00:00+00:00",
+        )
+
+
+async def test_calendar_page_clamps_an_overwide_window(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    data = await calendar_page(
+        local_provider,
+        tenant_id="t1",
+        start="2026-01-01T00:00:00+00:00",
+        end="2027-01-01T00:00:00+00:00",
+    )
+    span = datetime.fromisoformat(data["range"]["end"]) - datetime.fromisoformat(
+        data["range"]["start"]
+    )
+    assert span <= timedelta(days=92)
+
+
+async def test_calendar_page_reads_naive_iso_as_utc(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # A timestamp with no offset is read as UTC, not rejected.
+    data = await calendar_page(
+        local_provider, tenant_id="t1", start="2026-06-01T00:00:00", end="2026-06-30T00:00:00"
+    )
+    assert data["range"]["start"].startswith("2026-06-01T00:00:00+00:00")
+
+
+async def test_manifest_declares_calendar_page(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    assert manifest.version == "0.2.0"
+    pages = {p.id: p for p in manifest.pages}
+    assert CALENDAR_PAGE_ID in pages
+    assert pages[CALENDAR_PAGE_ID].archetype == "calendar"
+    assert pages[CALENDAR_PAGE_ID].icon == "calendar"

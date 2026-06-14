@@ -10,11 +10,12 @@ the shell never talks to a module directly.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from epicurus_core import ModuleManifest, SecretError, SecretStore, get_logger
@@ -123,19 +124,23 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
-    async def get_page(self, name: str, page_id: str) -> dict[str, Any]:
+    async def get_page(
+        self, name: str, page_id: str, *, params: Mapping[str, str] | None = None
+    ) -> dict[str, Any]:
         """Proxy a module's page-data endpoint to the shell (ADR-0018).
 
         The page must be declared in the module's ``manifest.pages``; the core then
-        fetches ``GET /pages/{page_id}`` on the module and returns its JSON body —
-        the archetype's data shape, which the shell renders. A module never serves
+        fetches ``GET /pages/{page_id}`` on the module and returns its JSON body — the
+        archetype's data shape, which the shell renders. Query ``params`` are forwarded
+        verbatim, so a parameterized archetype (e.g. a ``calendar`` reading its
+        ``start``/``end`` window) reads from the same proxied path. A module never serves
         UI markup. Returns 404 if the module is unreachable or declares no such page.
         """
         base, manifest = await self._resolve(name)
         if page_id not in {p.id for p in manifest.pages}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
         async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/pages/{page_id}")
+            resp = await client.get(f"/pages/{page_id}", params=dict(params or {}))
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
             return data
@@ -213,8 +218,9 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         return await registry.get_status(name)
 
     @router.get("/{name}/pages/{page_id}")
-    async def get_module_page(name: str, page_id: str) -> dict[str, Any]:
-        return await registry.get_page(name, page_id)
+    async def get_module_page(name: str, page_id: str, request: Request) -> dict[str, Any]:
+        # Forward query params (e.g. a calendar's start/end window) to the module page.
+        return await registry.get_page(name, page_id, params=dict(request.query_params))
 
     @router.get("/{name}/resolve/{kind}/{ref_id}")
     async def resolve_entity(name: str, kind: str, ref_id: str) -> dict[str, Any]:

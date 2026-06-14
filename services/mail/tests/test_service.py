@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+from epicurus_core.contracts import ToolEnvelope
 from epicurus_mail.provider import MailMessage, MailProvider
 from epicurus_mail.service import build_module
 
@@ -29,15 +30,45 @@ def _sample() -> MailMessage:
     )
 
 
-async def test_mail_search_returns_results() -> None:
+def _parse_envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
+    """Extract the ToolEnvelope from the first TextContent item in a call_tool result."""
+    text = content[0].text  # type: ignore[attr-defined]
+    return ToolEnvelope.model_validate_json(text)
+
+
+async def test_mail_search_returns_entity_refs() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    _content, structured = await module.mcp.call_tool("mail_search", {"query": "from:alice"})
-    assert structured is not None
-    result = structured.get("result") or structured
-    assert isinstance(result, list)
-    assert len(result) == 1
-    assert result[0]["subject"] == "Hello"
+    content, _ = await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == 1
+    ref = envelope.entity_refs[0]
+    assert ref.ref_id == "msg1"
+    assert ref.module == "mail"
+    assert ref.kind == "message"
+    assert ref.title == "Hello"
+    assert ref.summary == "Hey there"
+
+
+async def test_mail_search_text_summary_mentions_count() -> None:
+    provider = _make_provider(_sample())
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    envelope = _parse_envelope(content)
+    assert "1" in envelope.text
+    assert "Hello" in envelope.text
+
+
+async def test_mail_search_empty_returns_no_refs() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.search = AsyncMock(return_value=[])
+    provider.read = AsyncMock(return_value=_sample())
+    provider.send = AsyncMock(return_value="x")
+    module = build_module(provider)  # type: ignore[arg-type]
+    content, _ = await module.mcp.call_tool("mail_search", {"query": "nothing"})
+    envelope = _parse_envelope(content)
+    assert envelope.entity_refs == []
+    assert "No messages" in envelope.text
 
 
 async def test_mail_search_caps_at_50() -> None:
@@ -54,26 +85,25 @@ async def test_mail_search_clamps_min_to_1() -> None:
     provider.search.assert_called_once_with("x", 1)  # type: ignore[attr-defined]
 
 
-async def test_mail_read_returns_message() -> None:
+async def test_mail_read_returns_formatted_message() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    _content, structured = await module.mcp.call_tool("mail_read", {"message_id": "msg1"})
-    assert structured is not None
-    result = structured.get("result") or structured
-    assert result["id"] == "msg1"
-    assert result["body"] == "Full body text"
+    content, _ = await module.mcp.call_tool("mail_read", {"message_id": "msg1"})
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "Subject: Hello" in text
+    assert "From: alice@example.com" in text
+    assert "Full body text" in text
     provider.read.assert_called_once_with("msg1")  # type: ignore[attr-defined]
 
 
 async def test_mail_send_returns_sent_id() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    _content, structured = await module.mcp.call_tool(
+    content, _ = await module.mcp.call_tool(
         "mail_send", {"to": "bob@example.com", "subject": "Hi", "body": "Hello!"}
     )
-    assert structured is not None
-    result = structured.get("result") or structured
-    assert "sent:" in str(result)
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "sent:" in str(text)
     provider.send.assert_called_once_with(  # type: ignore[attr-defined]
         to="bob@example.com", subject="Hi", body="Hello!"
     )
@@ -113,3 +143,17 @@ async def test_manifest_emits_mail_sent_event() -> None:
     manifest = await module.manifest()
     subjects = {e.subject for e in manifest.events_emitted}
     assert "mail.sent" in subjects
+
+
+async def test_manifest_declares_resolver() -> None:
+    provider = _make_provider()
+    module = build_module(provider)
+    manifest = await module.manifest()
+    assert manifest.resolver is True
+
+
+async def test_manifest_version_is_0_2_0() -> None:
+    provider = _make_provider()
+    module = build_module(provider)
+    manifest = await module.manifest()
+    assert manifest.version == "0.2.0"

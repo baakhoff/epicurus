@@ -19,6 +19,10 @@ backend.  Adding a new provider (CalDAV, Microsoft Exchange, …) requires
 implementing the `CalendarProvider` ABC; the tools and wire format stay
 unchanged (ADR-0016).
 
+Since **v0.2** the module also contributes a core-rendered **Calendar page** (month /
+week / agenda) via the `calendar` archetype — it supplies the events, the shell draws the
+views (see *Calendar page* under Contract, below).
+
 ## Contract
 
 ### MCP tools
@@ -46,6 +50,35 @@ environment requires no tool call changes.
 }
 ```
 
+### Calendar page (`calendar` archetype — ADR-0018)
+
+The module contributes a **Calendar** left-nav page. It supplies *data only* — a window of
+events — and names the core `calendar` archetype, which renders the month / week / agenda
+views; the module ships no markup. The page is served at `GET /pages/calendar` and proxied
+by the core at `GET /platform/v1/modules/calendar/pages/calendar`.
+
+`start` and `end` (ISO-8601) bound the window the shell is viewing; the core forwards them
+to the module. When absent, the page falls back to the current month. An over-wide window
+is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
+
+```jsonc
+{
+  "title": "Calendar",
+  "provider": "local",
+  "range": { "start": "2026-06-01T00:00:00+00:00",
+             "end":   "2026-07-01T00:00:00+00:00" },
+  "events": [
+    { "id": "e1", "title": "Standup",
+      "start": "2026-06-15T09:00:00+00:00",
+      "end":   "2026-06-15T09:30:00+00:00",
+      "location": "Room 4", "description": "Daily sync", "provider": "local" }
+  ]
+}
+```
+
+Read-first in v0.2 (view + navigate); creating and editing events from the page is a later
+bump — the `calendar_*` MCP tools remain the agent's write path.
+
 ### REST endpoints
 
 | Method | Path | Description |
@@ -54,6 +87,7 @@ environment requires no tool call changes.
 | `GET` | `/metrics` | Prometheus metrics (standard ops surface). |
 | `GET` | `/manifest` | Module manifest (tools, events, UI descriptor). |
 | `GET` | `/status` | Live status: active provider, availability, event count (local only). |
+| `GET` | `/pages/{page_id}` | Calendar archetype page data (ADR-0018). Accepts `start`/`end` (ISO-8601) query params bounding the window; defaults to the current month. The core proxies this — the shell never calls it directly. |
 | `POST /GET …` | `/mcp` | MCP SSE endpoint used by the core agent host. |
 
 ### NATS events

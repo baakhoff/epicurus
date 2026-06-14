@@ -8,6 +8,7 @@ import {
   AttachmentUploaded,
   EditorDocContent,
   EditorSaveResult,
+  EmailMessage,
   HoverCard,
   LlmPrefs,
   MessageRecord,
@@ -121,11 +122,13 @@ export const api = {
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/status`),
   // A module page's data, proxied through the core. The shape is the page
   // archetype's contract (e.g. BrowserData); the screen validates it (ADR-0018).
-  modulePage: (name: string, pageId: string) =>
-    request(
+  modulePage: (name: string, pageId: string, params?: Record<string, string>) => {
+    const query = params && Object.keys(params).length ? `?${new URLSearchParams(params)}` : "";
+    return request(
       z.record(z.string(), z.unknown()),
-      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`,
-    ),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}${query}`,
+    );
+  },
   // One `editor` document's content, proxied through the core (ADR-0018).
   modulePageDoc: (name: string, pageId: string, path: string) =>
     request(
@@ -150,6 +153,12 @@ export const api = {
     request(
       z.array(ModuleAttachmentItem),
       `/platform/v1/modules/${encodeURIComponent(name)}/attachments`,
+    ),
+  // Full email message for the right-panel email-reader view (ADR-0019).
+  readMailMessage: (module: string, refId: string) =>
+    request(
+      EmailMessage,
+      `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
     ),
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).

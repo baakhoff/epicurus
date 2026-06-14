@@ -34,10 +34,11 @@ A module declares `pages` in its manifest, each naming a core **archetype** —
 `browser` (tree/list + detail), `calendar`, `editor`, `board`. The shell merges the pages
 of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`) and
 renders each at `/m/:module/:pageId` via a first-party screen for that archetype
-(`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` ships today;
-the others land with their module pages (Phase 3.8). Page data is fetched through the core
-proxy (`GET /platform/v1/modules/{name}/pages/{id}`) — **no module markup, JS, or CSS ever
-runs in the shell**.
+(`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` (list +
+detail) and `calendar` (month / week / agenda) ship today; `editor` and `board` land with
+their module pages. Page data is fetched through the core proxy
+(`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
+calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
 
 ### Right panel / split-screen (ADR-0018)
 

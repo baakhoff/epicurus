@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from epicurus_core import (
     EventBus,
@@ -64,6 +64,48 @@ def create_app() -> FastAPI:
         """Gmail reachability status for the manifest-driven UI status panel."""
         healthy = await provider.health_check()
         return {"gmail_connected": healthy}
+
+    @app.get("/resolve/message/{ref_id}")
+    async def resolve_message(ref_id: str) -> dict[str, Any]:
+        """Hover-card resolver for a mail message entity (ADR-0019).
+
+        Returns a compact HoverCard envelope — subject, snippet, sender, and date
+        — for display in the inline hover-card. The full message body is served
+        by ``GET /messages/{ref_id}`` for the panel's email-reader view.
+        """
+        try:
+            message = await provider.read(ref_id)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"message {ref_id!r} not found") from exc
+        details: list[dict[str, str]] = [{"label": "From", "value": message.sender}]
+        if message.to:
+            details.append({"label": "To", "value": ", ".join(message.to)})
+        if message.date:
+            details.append({"label": "Date", "value": message.date})
+        return {
+            "title": message.subject or "(no subject)",
+            "description": message.snippet,
+            "details": details,
+        }
+
+    @app.get("/messages/{ref_id}")
+    async def get_message(ref_id: str) -> dict[str, Any]:
+        """Full email message for the panel's email-reader view (ADR-0019).
+
+        Returns an EmailMessage envelope — subject, from, date, and the decoded
+        plain-text body — consumed by the right-panel ``email-reader`` view when a
+        user clicks a mail entity chip.
+        """
+        try:
+            message = await provider.read(ref_id)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"message {ref_id!r} not found") from exc
+        return {
+            "subject": message.subject or "(no subject)",
+            "from": message.sender,
+            "date": message.date,
+            "body": message.body or "",
+        }
 
     app.mount("/mcp", mcp_app)
 

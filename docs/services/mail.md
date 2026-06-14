@@ -12,6 +12,12 @@ vault — the module never holds a client secret or refresh token (see
 [OAuth reference](../reference/oauth.md)).  Future providers (IMAP/SMTP,
 Microsoft) will implement the same interface without changing the tools.
 
+**v0.2.0** (Phase 3.8): `mail_search` results now surface as entity-reference chips
+in the chat UI (ADR-0019).  Hover shows a compact preview; clicking opens the full
+message in the right-panel `email-reader` view (ADR-0018), read-only.  The module
+now declares `resolver: true` and serves `GET /resolve/message/{ref_id}` (hover-card)
+and `GET /messages/{ref_id}` (full email for the panel).
+
 ---
 
 ## Contract
@@ -22,26 +28,60 @@ All three tools operate on the active `MailProvider` for the tenant.
 
 | Tool | Inputs | Output | Notes |
 | --- | --- | --- | --- |
-| `mail_search` | `query: str`, `max_results: int = 10` | `list[MailMessage]` | Metadata only (no body). Uses Gmail query syntax. Max 50. |
-| `mail_read` | `message_id: str` | `MailMessage` | Full message including decoded plain-text body. |
+| `mail_search` | `query: str`, `max_results: int = 10` | `ToolEnvelope` (text + entity refs) | Returns entity-ref chips; no body. Gmail query syntax. Max 50. |
+| `mail_read` | `message_id: str` | `str` (formatted text) | Subject, sender, date, and decoded plain-text body for the agent to reason on. |
 | `mail_send` | `to: str`, `subject: str`, `body: str` | `str` | **Danger action** — sends a real message. Returns `"sent:<id>"`. |
+
+`mail_search` returns a `ToolEnvelope` (ADR-0019): the `text` field is a human-readable
+summary; `entity_refs` carries one `EntityRef` per message (`module="mail"`,
+`kind="message"`) so the UI renders interactive chips — no body content is
+transferred to the model context.
 
 `mail_send` is declared a **danger action** (ADR-0007): the web shell renders a
 confirmation prompt before invoking it and the tool docstring requires explicit
 user confirmation before it is called.
 
-#### `MailMessage` shape
+### HTTP endpoints (internal)
+
+The module serves these HTTP endpoints on the internal Docker network; the core
+proxies them to the web shell (the shell never calls the module directly).
+
+| Method | Path | Shape | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date. |
+| `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body. |
+| `GET` | `/status` | `{"gmail_connected": bool}` | Liveness; proxied by the core. |
+
+The core exposes these via:
+
+```
+GET /platform/v1/modules/mail/resolve/message/{ref_id}   → HoverCard
+GET /platform/v1/modules/mail/messages/{ref_id}          → EmailMessage
+GET /platform/v1/modules/mail/status                     → status JSON
+```
+
+#### `HoverCard` shape (from resolver)
 
 ```json
 {
-  "id": "msg_id",
-  "thread_id": "thread_id",
-  "subject": "Subject line",
-  "sender": "alice@example.com",
-  "to": ["bob@example.com"],
+  "title": "Invoice from Acme",
+  "description": "Please find attached…",
+  "details": [
+    { "label": "From",  "value": "acme@example.com" },
+    { "label": "To",    "value": "me@example.com" },
+    { "label": "Date",  "value": "Mon, 1 Jan 2024 10:00:00 +0000" }
+  ]
+}
+```
+
+#### `EmailMessage` shape (from `/messages/{ref_id}`)
+
+```json
+{
+  "subject": "Invoice from Acme",
+  "from": "acme@example.com",
   "date": "Mon, 1 Jan 2024 10:00:00 +0000",
-  "snippet": "Short preview…",
-  "body": "Full plain-text body (null from mail_search, present from mail_read)"
+  "body": "Dear customer,\n\nPlease find the invoice attached.\n\nRegards"
 }
 ```
 
@@ -52,18 +92,6 @@ user confirmation before it is called.
 | `mail.sent` | emitted | `{}` | After `mail_send` succeeds |
 
 Subjects are tenant-scoped at runtime: `<tenant_id>.mail.sent`.
-
-### Status endpoint
-
-`GET /status` — proxied by the core at
-`GET /platform/v1/modules/mail/status`.
-
-```json
-{ "gmail_connected": true }
-```
-
-Returns `false` when the Google account is not connected or the token is
-invalid.
 
 ---
 
@@ -149,5 +177,5 @@ uv run uvicorn epicurus_mail.app:app --reload --port 8087
 ```
 
 The service will fail health-checks for Gmail tools until a Google account is
-connected, but the HTTP surface (`/health`, `/manifest`, `/status`) works
-immediately.
+connected, but the HTTP surface (`/health`, `/manifest`, `/status`, `/resolve/…`,
+`/messages/…`) works immediately.

@@ -206,6 +206,27 @@ export const BrowserData = z.object({
 });
 export type BrowserData = z.infer<typeof BrowserData>;
 
+/** One event in a `calendar` page (provider-neutral; ADR-0018). */
+export const CalendarEvent = z.object({
+  id: z.string(),
+  title: z.string().default("(untitled)"),
+  start: z.coerce.date(),
+  end: z.coerce.date(),
+  location: z.string().nullish(),
+  description: z.string().nullish(),
+  provider: z.string().nullish(),
+});
+export type CalendarEvent = z.infer<typeof CalendarEvent>;
+
+/** The `calendar` archetype's data: events within the requested `[start, end)` window. */
+export const CalendarData = z.object({
+  title: z.string().nullish(),
+  provider: z.string().nullish(),
+  range: z.object({ start: z.coerce.date(), end: z.coerce.date() }).nullish(),
+  events: z.array(CalendarEvent).default([]),
+});
+export type CalendarData = z.infer<typeof CalendarData>;
+
 /** One document in an `editor` page's list (content fetched lazily on open). */
 export const EditorDoc = z.object({
   id: z.string(),

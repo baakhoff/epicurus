@@ -65,6 +65,17 @@ class LocalEventStore:
             )
             return [_row_to_event(row) for row in rows]
 
+    async def get_event(self, *, tenant: str, event_id: str) -> Event | None:
+        """Return the single event with *event_id* for *tenant*, or ``None``."""
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.event_id == event_id,
+                )
+            )
+            return _row_to_event(row) if row is not None else None
+
     async def create_event(
         self,
         *,

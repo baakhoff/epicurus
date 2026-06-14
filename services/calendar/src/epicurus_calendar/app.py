@@ -12,13 +12,20 @@ from fastapi import FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
+from epicurus_calendar.models import Event
 from epicurus_calendar.providers.google import GoogleCalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
 from epicurus_calendar.service import (
     CALENDAR_PAGE_ID,
+    EVENT_KIND,
     MODULE_NAME,
+    EventNotFound,
     build_module,
+    calendar_attachments,
     calendar_page,
+    event_attachment,
+    event_hover_card,
+    fetch_event,
 )
 from epicurus_calendar.settings import CalendarSettings
 from epicurus_core import (
@@ -85,6 +92,13 @@ def create_app() -> FastAPI:
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
 
+    async def _require_event(ref_id: str) -> Event:
+        """Fetch a referenced event, translating a miss into a 404 for the proxy."""
+        try:
+            return await fetch_event(provider, tenant_id=settings.default_tenant_id, ref_id=ref_id)
+        except EventNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"event {ref_id!r} not found") from exc
+
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
         """Live status for the manifest-driven UI status panel."""
@@ -118,6 +132,28 @@ def create_app() -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/resolve/{kind}/{ref_id}")
+    async def resolve_entity(kind: str, ref_id: str) -> dict[str, Any]:
+        """Resolve a referenced event to a core hover-card (ADR-0019); core-proxied.
+
+        Calendar only references events; an unknown *kind* is a 404. Returns the
+        uniform HoverCard envelope the shell renders inline and in the entity-detail
+        panel — start/end, location, and the calendar (provider) name.
+        """
+        if kind != EVENT_KIND:
+            raise HTTPException(status_code=404, detail=f"unknown entity kind {kind!r}")
+        return event_hover_card(await _require_event(ref_id))
+
+    @app.get("/attachments")
+    async def list_attachments() -> list[dict[str, str]]:
+        """Chat-attachment picker (ADR-0019): upcoming events the composer can attach."""
+        return await calendar_attachments(provider, tenant_id=settings.default_tenant_id)
+
+    @app.get("/attachments/{ref_id}")
+    async def get_attachment(ref_id: str) -> dict[str, str]:
+        """Resolve an attached event to the text the agent injects (ADR-0019)."""
+        return event_attachment(await _require_event(ref_id))
 
     app.mount("/mcp", mcp_app)
 

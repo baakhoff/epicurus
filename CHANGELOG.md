@@ -18,6 +18,15 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Calendar — events as chat chips, hover-cards & attachments** — `calendar_list_events` now
+  returns its events as **entity-reference chips** (ADR-0019): hover a chip for the event's **core
+  hover-card** (when / location / calendar) and click to open it in the right-panel
+  `entity-detail` view. The module declares `resolver` and serves `GET /resolve/event/{id}`, and
+  becomes a **chat-attachment source** (`attachable`) — the composer can attach an upcoming event
+  (`GET /attachments` picker + `GET /attachments/{id}` resolve → `{title, excerpt}`) so the agent
+  uses its details. A new provider `get_event` backs all three surfaces for both the local and
+  Google backends; the list tool is no longer a module-card action (an envelope can't render as a
+  plain-text result, mirroring mail) (closes #138, #140) (`calendar` → 0.4.0).
 - **Chat uploads land in storage (the upload sink)** — a file attached in chat is now
   durably persisted to the **storage** module's object store and becomes browsable under an
   **`uploads/`** folder in the Files page (downloadable like any file), in addition to the

@@ -43,8 +43,36 @@ uv run mypy
 uv run pytest
 ```
 
-CI additionally runs a secret scan (gitleaks), validates the compose file, and
-boots the whole stack (see below).
+CI additionally runs a secret scan (gitleaks), validates the compose file,
+lints the observability config (see below), and boots the whole stack (see below).
+
+## Observability lint gate
+
+The `runtime-smoke` gate boots the data plane and core, but not the observability
+stack — so a broken Prometheus rule or invalid Alertmanager config passes CI and
+only fails on `docker compose up`. The **observability-lint** CI job closes that
+gap: it runs `promtool check config` and `promtool check rules` against
+`infra/observability/prometheus/`, and `amtool check-config` against
+`infra/observability/alertmanager/`, using the same image tags pinned in compose.
+
+To run it locally (requires Docker):
+
+```bash
+docker run --rm \
+  -v "$(pwd)/infra/observability/prometheus:/prometheus:ro" \
+  prom/prometheus:v3.1.0 \
+  promtool check config /prometheus/prometheus.yml
+
+docker run --rm \
+  -v "$(pwd)/infra/observability/prometheus/rules:/rules:ro" \
+  prom/prometheus:v3.1.0 \
+  promtool check rules /rules/epicurus-alerts.yml
+
+docker run --rm \
+  -v "$(pwd)/infra/observability/alertmanager:/alertmanager:ro" \
+  prom/alertmanager:v0.27.0 \
+  amtool check-config /alertmanager/alertmanager.yml
+```
 
 ## Runtime smoke gate
 

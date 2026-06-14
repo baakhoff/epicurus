@@ -49,6 +49,15 @@ entity-reference click (ADR-0019). It is a **resizable right column** on wide sc
 form) and `email-reader` (read-only, used by the 3.8 mail reader). Module-supplied URLs are
 followed only when `http(s)`; the panel never runs module markup.
 
+### Entity references in chat (ADR-0019)
+
+An assistant message carries `entity_refs` — references to module entities. The shell
+renders each as a **chip** (`src/components/EntityRef.tsx`): hover shows a core hover-card
+(enriched on demand from the module's resolver via `GET /platform/v1/modules/{name}/resolve/…`),
+click opens it in the right panel. Refs the assistant links inline (an
+`epicurus://entity/{module}/{kind}/{ref_id}` markdown link) render inline through the
+Markdown `a` slot; any remaining refs appear as a chip row beneath the message.
+
 ### The chat SSE protocol
 
 `POST /platform/v1/agent/chat/stream` returns Server-Sent Events: `delta` (content

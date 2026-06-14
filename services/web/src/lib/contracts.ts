@@ -39,10 +39,21 @@ export const SessionSummary = z.object({
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
 
+/** A reference to a module entity the assistant mentions (ADR-0019). */
+export const EntityRef = z.object({
+  ref_id: z.string(),
+  module: z.string(),
+  kind: z.string(),
+  title: z.string(),
+  summary: z.string().nullish(),
+});
+export type EntityRef = z.infer<typeof EntityRef>;
+
 export const MessageRecord = z.object({
   role: z.string(),
   content: z.string(),
   created_at: z.coerce.date(),
+  entity_refs: z.array(EntityRef).default([]),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
@@ -50,6 +61,7 @@ export const AgentTurn = z.object({
   content: z.string(),
   tools_used: z.array(z.string()),
   stopped: z.string(),
+  entity_refs: z.array(EntityRef).default([]),
 });
 export type AgentTurn = z.infer<typeof AgentTurn>;
 

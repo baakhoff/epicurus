@@ -140,6 +140,22 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def resolve_entity(self, name: str, kind: str, ref_id: str) -> dict[str, Any]:
+        """Proxy a module's hover-card resolver to the shell (ADR-0019).
+
+        The module's manifest must set ``resolver`` true; the core then fetches
+        ``GET /resolve/{kind}/{ref_id}`` on the module and returns the hover-card
+        envelope. 404 if the module is unreachable or declares no resolver.
+        """
+        base, manifest = await self._resolve(name)
+        if not manifest.resolver:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no resolver")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(f"/resolve/{kind}/{ref_id}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -169,5 +185,9 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/{name}/pages/{page_id}")
     async def get_module_page(name: str, page_id: str) -> dict[str, Any]:
         return await registry.get_page(name, page_id)
+
+    @router.get("/{name}/resolve/{kind}/{ref_id}")
+    async def resolve_entity(name: str, kind: str, ref_id: str) -> dict[str, Any]:
+        return await registry.resolve_entity(name, kind, ref_id)
 
     return router

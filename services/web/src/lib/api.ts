@@ -5,6 +5,7 @@
 import { z } from "zod";
 
 import {
+  HoverCard,
   LlmPrefs,
   MessageRecord,
   ModelInfo,
@@ -120,6 +121,12 @@ export const api = {
     request(
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`,
+    ),
+  // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
+  resolveEntity: (name: string, kind: string, refId: string) =>
+    request(
+      HoverCard,
+      `/platform/v1/modules/${encodeURIComponent(name)}/resolve/${encodeURIComponent(kind)}/${encodeURIComponent(refId)}`,
     ),
 
   info: () => request(PlatformInfo, "/platform/v1/info"),

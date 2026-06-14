@@ -9,7 +9,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from epicurus_core import EpicurusModule, Event, EventBus, PageSpec, UiAction, UiSection
+from epicurus_core import (
+    EpicurusModule,
+    Event,
+    EventBus,
+    HoverCard,
+    HoverCardDetail,
+    PageSpec,
+    UiAction,
+    UiSection,
+)
 
 ECHO_SUBJECT = "echo.request"
 ECHO_PAGE_ID = "echoes"
@@ -53,6 +62,9 @@ def build_module() -> EpicurusModule:
                 nav_order=50,
             )
         ],
+        # Serves GET /resolve/{kind}/{ref_id} so a referenced echo entity gets a
+        # hover-card (ADR-0019) — the reference for the resolver contract.
+        resolver=True,
     )
 
     @module.tool()
@@ -100,6 +112,22 @@ def echo_page() -> dict[str, Any]:
             },
         ],
     }
+
+
+def echo_hover_card(kind: str, ref_id: str) -> dict[str, Any]:
+    """Resolve an echo entity reference to a hover-card envelope (ADR-0019).
+
+    The reference implementation of the resolver contract: a module returns the
+    uniform :class:`HoverCard` shape and the core proxies it to the shell.
+    """
+    return HoverCard(
+        title=ref_id,
+        description=f"An echoed {kind}.",
+        details=[
+            HoverCardDetail(label="kind", value=kind),
+            HoverCardDetail(label="id", value=ref_id),
+        ],
+    ).model_dump()
 
 
 async def echo_responder(event: Event) -> bytes:

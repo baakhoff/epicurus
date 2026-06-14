@@ -144,7 +144,7 @@ class LlmGateway:
         config = await self._call_config(model, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
-            messages=[m.model_dump(exclude_none=True) for m in messages],
+            messages=[m.provider_dump() for m in messages],
             tools=tools,
             num_retries=self._num_retries,
             **config,
@@ -208,7 +208,7 @@ class LlmGateway:
         config = await self._call_config(candidate, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
-            messages=[m.model_dump(exclude_none=True) for m in messages],
+            messages=[m.provider_dump() for m in messages],
             stream=True,
             num_retries=self._num_retries,
             **config,
@@ -247,7 +247,7 @@ class LlmGateway:
         config = await self._call_config(candidate, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
-            messages=[m.model_dump(exclude_none=True) for m in messages],
+            messages=[m.provider_dump() for m in messages],
             tools=tools,
             stream=True,
             num_retries=self._num_retries,

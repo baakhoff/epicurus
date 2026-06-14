@@ -80,3 +80,46 @@ async def test_delete_session_is_tenant_scoped() -> None:
     assert removed == 1
     assert await store.sessions(tenant="t1") == []
     assert [s.id for s in await store.sessions(tenant="t2")] == ["s"]  # other tenant untouched
+
+
+async def test_entity_refs_persist_and_round_trip() -> None:
+    store, _ = await _fresh_store()
+    refs = [{"ref_id": "e1", "module": "calendar", "kind": "event", "title": "Standup"}]
+    await store.append(
+        tenant="t", session_id="s", role="assistant", content="see your standup", entity_refs=refs
+    )
+    messages = await store.messages(tenant="t", session_id="s")
+    assert messages[0].entity_refs[0].ref_id == "e1"
+    assert messages[0].entity_refs[0].title == "Standup"
+
+
+async def test_messages_without_entity_refs_default_to_empty() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s", role="user", content="hi")
+    assert (await store.messages(tenant="t", session_id="s"))[0].entity_refs == []
+
+
+async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
+    # A pre-v0.3 deployment: agent_messages exists without the entity_refs column.
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "CREATE TABLE agent_messages ("
+            "id INTEGER PRIMARY KEY, tenant VARCHAR(63), session_id VARCHAR(128), "
+            "role VARCHAR(16), content TEXT, "
+            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+        )
+    store = ConversationStore(engine)
+    await store.init()  # must add the column in place, not raise
+    await store.append(
+        tenant="t",
+        session_id="s",
+        role="assistant",
+        content="hi",
+        entity_refs=[{"ref_id": "e1", "module": "m", "kind": "k", "title": "T"}],
+    )
+    assert (await store.messages(tenant="t", session_id="s"))[0].entity_refs[0].ref_id == "e1"

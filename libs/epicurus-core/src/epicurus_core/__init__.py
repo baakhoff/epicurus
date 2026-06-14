@@ -12,9 +12,15 @@ from epicurus_core.config import CoreSettings, Environment, LogLevel
 from epicurus_core.contracts import (
     ChatMessage,
     ChatResult,
+    EntityRef,
+    HoverCard,
+    HoverCardDetail,
+    HoverCardLink,
     PlatformChatResponse,
     PlatformMessage,
     Role,
+    ToolEnvelope,
+    tool_envelope,
 )
 from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
 from epicurus_core.logging import configure_logging, get_logger
@@ -50,6 +56,7 @@ __all__ = [
     "ChatMessage",
     "ChatResult",
     "CoreSettings",
+    "EntityRef",
     "Environment",
     "EpicurusModule",
     "Event",
@@ -57,6 +64,9 @@ __all__ = [
     "EventHandler",
     "EventSpec",
     "HealthResponse",
+    "HoverCard",
+    "HoverCardDetail",
+    "HoverCardLink",
     "LogLevel",
     "ModuleManifest",
     "PageArchetype",
@@ -70,6 +80,7 @@ __all__ = [
     "SecretError",
     "SecretStore",
     "TenantError",
+    "ToolEnvelope",
     "ToolSpec",
     "UiAction",
     "UiSection",
@@ -87,5 +98,6 @@ __all__ = [
     "scope_secret_path",
     "scope_subject",
     "set_current_tenant",
+    "tool_envelope",
     "validate_tenant_id",
 ]

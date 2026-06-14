@@ -24,7 +24,13 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
-from epicurus_echo.service import ECHO_PAGE_ID, build_module, echo_page, serve_responder
+from epicurus_echo.service import (
+    ECHO_PAGE_ID,
+    build_module,
+    echo_hover_card,
+    echo_page,
+    serve_responder,
+)
 
 
 def _service_version() -> str:
@@ -66,6 +72,11 @@ def create_app() -> FastAPI:
         if page_id != ECHO_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
         return echo_page()
+
+    @app.get("/resolve/{kind}/{ref_id}")
+    async def resolve(kind: str, ref_id: str) -> dict[str, Any]:
+        """Resolve an entity reference to a hover-card (ADR-0019); the core proxies this."""
+        return echo_hover_card(kind, ref_id)
 
     app.mount("/mcp", mcp_app)
     return app

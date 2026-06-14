@@ -5,10 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, cast
 
-from pydantic import BaseModel
-from sqlalchemy import CursorResult, DateTime, String, Text, delete, func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import JSON, CursorResult, DateTime, String, Text, delete, func, inspect, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from epicurus_core import EntityRef
+
+# JSON columns added to agent_messages after the table's first release (v0.2). On an
+# existing deployment these are added in place at init (the store has no migration
+# framework — see ``ConversationStore._ensure_columns``).
+_ADDED_JSON_COLUMNS = ("entity_refs",)
 
 
 class SessionSummary(BaseModel):
@@ -26,6 +34,8 @@ class MessageRecord(BaseModel):
     role: str
     content: str
     created_at: datetime
+    # Entities the assistant referenced this turn (ADR-0019) — rendered as chips.
+    entity_refs: list[EntityRef] = Field(default_factory=list)
 
 
 class Base(DeclarativeBase):
@@ -43,6 +53,8 @@ class StoredMessage(Base):
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Assistant-emitted entity references for this message (ADR-0019); null for old rows.
+    entity_refs: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
 
 
 class ConversationStore:
@@ -53,15 +65,46 @@ class ConversationStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Create the schema, then add any columns introduced after first release."""
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
 
-    async def append(self, *, tenant: str, session_id: str, role: str, content: str) -> int:
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Idempotently add post-v0.2 JSON columns to an existing table.
+
+        There is no migration framework (the store uses ``create_all``), so on a
+        deployment that predates these columns we add them in place. The column type is
+        compiled per-dialect (``JSON`` on Postgres, TEXT-backed on SQLite), so this is
+        portable across prod and the tests' SQLite.
+        """
+        inspector = inspect(sync_conn)
+        existing = {col["name"] for col in inspector.get_columns(StoredMessage.__tablename__)}
+        for name in _ADDED_JSON_COLUMNS:
+            if name not in existing:
+                type_sql = StoredMessage.__table__.c[name].type.compile(dialect=sync_conn.dialect)
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {StoredMessage.__tablename__} ADD COLUMN {name} {type_sql}"
+                )
+
+    async def append(
+        self,
+        *,
+        tenant: str,
+        session_id: str,
+        role: str,
+        content: str,
+        entity_refs: list[dict[str, Any]] | None = None,
+    ) -> int:
         """Persist a message; returns its id (used as the recall point id)."""
         async with self._session() as session:
             message = StoredMessage(
-                tenant=tenant, session_id=session_id, role=role, content=content
+                tenant=tenant,
+                session_id=session_id,
+                role=role,
+                content=content,
+                entity_refs=entity_refs,
             )
             session.add(message)
             await session.commit()
@@ -121,7 +164,13 @@ class ConversationStore:
                 .order_by(StoredMessage.created_at, StoredMessage.id)
             )
             return [
-                MessageRecord(role=m.role, content=m.content, created_at=m.created_at) for m in rows
+                MessageRecord(
+                    role=m.role,
+                    content=m.content,
+                    created_at=m.created_at,
+                    entity_refs=[EntityRef.model_validate(r) for r in (m.entity_refs or [])],
+                )
+                for m in rows
             ]
 
     async def delete_session(self, *, tenant: str, session_id: str) -> int:

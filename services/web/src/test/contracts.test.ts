@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { AgentEvent, BrowserData, ModuleSnapshot, PageSpec } from "@/lib/contracts";
+import {
+  AgentEvent,
+  AgentTurn,
+  BrowserData,
+  MessageRecord,
+  ModuleSnapshot,
+  PageSpec,
+} from "@/lib/contracts";
 
 describe("contracts", () => {
   it("parses every agent stream event shape", () => {
@@ -70,5 +77,32 @@ describe("contracts", () => {
       items: [{ id: "a", title: "a", subtitle: "s", body: "b" }],
     });
     expect(data.items[0].body).toBe("b");
+  });
+
+  it("parses entity references on a message and a turn (ADR-0019)", () => {
+    const rec = MessageRecord.parse({
+      role: "assistant",
+      content: "see your standup",
+      created_at: "2026-06-14T09:00:00Z",
+      entity_refs: [{ ref_id: "e1", module: "calendar", kind: "event", title: "Standup" }],
+    });
+    expect(rec.entity_refs[0].title).toBe("Standup");
+
+    const turn = AgentTurn.parse({
+      content: "ok",
+      tools_used: [],
+      stopped: "completed",
+      entity_refs: [{ ref_id: "e1", module: "m", kind: "k", title: "T" }],
+    });
+    expect(turn.entity_refs[0].ref_id).toBe("e1");
+  });
+
+  it("defaults message entity_refs to empty (older transcripts stay valid)", () => {
+    const rec = MessageRecord.parse({
+      role: "user",
+      content: "hi",
+      created_at: "2026-06-14T09:00:00Z",
+    });
+    expect(rec.entity_refs).toEqual([]);
   });
 });

@@ -78,6 +78,7 @@ app = module.http_app()
 | `secrets` | `list[str]` | `[]` | required secret names |
 | `ui` | `UiSection \| None` | `None` | declarative web-shell UI (ADR-0007 Tier 1) |
 | `pages` | `list[PageSpec]` | `[]` | left-nav pages, core-rendered from a bounded vocabulary (ADR-0018) |
+| `resolver` | `bool` | `False` | module serves `GET /resolve/{kind}/{ref_id}` for hover-cards (ADR-0019) |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -151,6 +152,25 @@ declared pages — 404 otherwise), so the shell never calls a module directly. T
   ]
 }
 ```
+
+### Entity references & the resolver (ADR-0019)
+
+The assistant can mention a module entity (an event, task, email, doc…) as an
+**interactive reference** — a chip that shows a hover-card and opens in the right panel.
+
+- **A tool emits references** by returning a JSON `ToolEnvelope` instead of a bare
+  string — use `epicurus_core.tool_envelope(text, [EntityRef(...)])`. The agent feeds
+  `text` back to the model and lifts the refs onto the turn (persisted on the message).
+  Tools that return plain strings are unaffected.
+- **`EntityRef`** = `ref_id` · `module` · `kind` · `title` · `summary?` — enough to
+  render the chip immediately.
+- **The hover-card** is fetched on demand from the module's **resolver**: declare
+  `resolver=True` and serve `GET /resolve/{kind}/{ref_id}` returning a **`HoverCard`**
+  (`title` · `description` · `details: [{label, value}]` · `href?: {label, url}`). The
+  core proxies it at `GET /platform/v1/modules/{name}/resolve/{kind}/{ref_id}`.
+
+This is the uniform, core-owned shape for every entity (it also backs the panel's
+`entity-detail` view); modules supply data only, never markup.
 
 ### `CONTRACT_VERSION`
 `"0.1"` — the module↔core contract version this release targets.

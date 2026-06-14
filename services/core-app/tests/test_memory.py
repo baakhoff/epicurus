@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from epicurus_core_app.memory.memory import Memory
 
 
@@ -9,9 +11,19 @@ class _FakeStore:
     def __init__(self) -> None:
         self.rows: list[tuple[str, str, str, str]] = []  # tenant, session, role, content
         self._next_id = 0
+        self.last_refs: list[dict[str, Any]] | None = None
 
-    async def append(self, *, tenant: str, session_id: str, role: str, content: str) -> int:
+    async def append(
+        self,
+        *,
+        tenant: str,
+        session_id: str,
+        role: str,
+        content: str,
+        entity_refs: list[dict[str, Any]] | None = None,
+    ) -> int:
         self.rows.append((tenant, session_id, role, content))
+        self.last_refs = entity_refs
         self._next_id += 1
         return self._next_id
 
@@ -77,3 +89,13 @@ async def test_recall_is_tenant_scoped() -> None:
     await memory.remember(tenant="t2", session_id="s1", role="user", content="beta")
     assert await memory.recall(tenant="t1", query="x") == ["alpha"]
     assert await memory.recall(tenant="t2", query="x") == ["beta"]
+
+
+async def test_remember_passes_entity_refs_to_the_store() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    refs = [{"ref_id": "e1", "module": "calendar", "kind": "event", "title": "Standup"}]
+    await memory.remember(
+        tenant="t", session_id="s", role="assistant", content="see standup", entity_refs=refs
+    )
+    assert store.last_refs == refs

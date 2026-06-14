@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+import json
+
 import epicurus_core
-from epicurus_core import ChatMessage, ChatResult, PlatformChatResponse, PlatformMessage
+from epicurus_core import (
+    ChatMessage,
+    ChatResult,
+    EntityRef,
+    HoverCard,
+    PlatformChatResponse,
+    PlatformMessage,
+    ToolEnvelope,
+    tool_envelope,
+)
 
 
 def test_chat_types_are_exported() -> None:
@@ -34,6 +45,41 @@ def test_platform_client_reexports_the_aliases() -> None:
 def test_chat_message_round_trips() -> None:
     msg = ChatMessage(role="user", content="hi")
     assert msg.model_dump(exclude_none=True) == {"role": "user", "content": "hi"}
+
+
+def test_entity_ref_types_are_exported() -> None:
+    assert {"EntityRef", "HoverCard", "ToolEnvelope", "tool_envelope"} <= set(epicurus_core.__all__)
+
+
+def test_provider_dump_strips_ui_only_fields() -> None:
+    # entity_refs is UI metadata (ADR-0019) — it must never reach a provider call.
+    ref = EntityRef(ref_id="e1", module="calendar", kind="event", title="Standup")
+    msg = ChatMessage(role="assistant", content="see your standup", entity_refs=[ref])
+    dumped = msg.provider_dump()
+    assert "entity_refs" not in dumped
+    assert dumped == {"role": "assistant", "content": "see your standup"}
+
+
+def test_chat_message_defaults_to_no_entity_refs() -> None:
+    # Optional so it drops out of the default (provider-bound) serialization.
+    assert ChatMessage(role="user", content="hi").entity_refs is None
+
+
+def test_tool_envelope_round_trips() -> None:
+    ref = EntityRef(ref_id="e1", module="calendar", kind="event", title="Standup", summary="9am")
+    serialized = tool_envelope("Created your event.", [ref])
+    data = json.loads(serialized)
+    assert data["text"] == "Created your event."
+    restored = ToolEnvelope.model_validate(data)
+    assert restored.entity_refs[0].ref_id == "e1"
+    assert restored.entity_refs[0].summary == "9am"
+
+
+def test_hover_card_defaults() -> None:
+    card = HoverCard(title="Standup")
+    assert card.description == ""
+    assert card.details == []
+    assert card.href is None
 
 
 def test_chat_result_round_trips() -> None:

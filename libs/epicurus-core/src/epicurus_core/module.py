@@ -51,6 +51,7 @@ class EpicurusModule:
         secrets: list[str] | None = None,
         ui: UiSection | None = None,
         pages: list[PageSpec] | None = None,
+        resolver: bool = False,
     ) -> None:
         self._name = name
         self._version = version
@@ -60,6 +61,7 @@ class EpicurusModule:
         self._secrets = list(secrets or [])
         self._ui = ui
         self._pages = list(pages or [])
+        self._resolver = resolver
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -122,6 +124,7 @@ class EpicurusModule:
             secrets=secrets if secrets is not None else self._secrets,
             ui=self._ui,
             pages=list(self._pages),
+            resolver=self._resolver,
         )
 
     def http_app(self) -> Starlette:

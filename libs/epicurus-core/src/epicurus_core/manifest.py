@@ -148,3 +148,6 @@ class ModuleManifest(BaseModel):
     ui: UiSection | None = None
     # Left-nav pages, core-rendered from the bounded archetype vocabulary (ADR-0018).
     pages: list[PageSpec] = Field(default_factory=list)
+    # The module serves a hover-card resolver at ``GET /resolve/{kind}/{ref_id}`` for the
+    # entities it references in chat (ADR-0019); the core proxies it.
+    resolver: bool = False

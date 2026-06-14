@@ -30,6 +30,13 @@ bundled-stack release, **v0.2.0**.
   renders a **bounded, core-defined** set of views (`entity-detail`, `email-reader`) — the
   substrate the chat entity-reference click and the 3.8 mail reader build on (ADR-0018)
   (`web` → 0.5.0).
+- **Chat entity references** — the assistant can mention a module entity (event / task /
+  email / doc) as an **interactive chip**: hover → a core hover-card, click → opens in the
+  right panel. A tool emits refs by returning a `ToolEnvelope`; the agent lifts them onto the
+  turn and persists them on the message (a chat-schema migration adds `entity_refs`). The
+  hover-card is resolved on demand from the module's declared `GET /resolve/{kind}/{ref_id}`,
+  proxied by the core; echo ships a reference resolver (ADR-0019) (`epicurus-core` → 0.3.0,
+  `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
 - **Model catalog browser** — replaces "type a name to pull" with a browsable catalog of 24
   curated Ollama models. Search by name, family, or description; filter by tag (General, Code,
   Multilingual, Vision, Embedding, Small); pull any entry with live SSE progress. The

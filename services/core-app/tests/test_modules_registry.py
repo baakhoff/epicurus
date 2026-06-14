@@ -59,6 +59,10 @@ def _pages_manifest() -> ModuleManifest:
     )
 
 
+def _resolver_manifest() -> ModuleManifest:
+    return ModuleManifest(name="calendar", version="0.1.0", resolver=True)
+
+
 class _StubRegistry(ModuleRegistry):
     """Registry with the network probe replaced by a canned snapshot."""
 
@@ -195,4 +199,38 @@ async def test_get_page_404_for_unknown_module() -> None:
     registry, _, _ = _registry(manifest=_pages_manifest())
     with pytest.raises(HTTPException) as err:
         await registry.get_page("ghost", "browse")
+    assert err.value.status_code == 404
+
+
+async def test_resolve_entity_proxies_module_resolver() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Standup", "description": "9am", "details": []}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.resolve_entity("calendar", "event", "e1")
+
+    assert result["title"] == "Standup"
+    mock_client.get.assert_called_once_with("/resolve/event/e1")
+
+
+async def test_resolve_entity_404_when_no_resolver() -> None:
+    registry, _, _ = _registry()  # echo manifest declares no resolver
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_entity("echo", "event", "e1")
+    assert err.value.status_code == 404
+
+
+async def test_resolve_entity_404_for_unknown_module() -> None:
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_entity("ghost", "event", "e1")
     assert err.value.status_code == 404

@@ -25,10 +25,16 @@ of a manifest-driven module UI (ADR-0007). echo also declares an **Echoes** left
 (`browser` archetype) — the reference for the core-rendered page vocabulary (ADR-0018):
 the module supplies only data, the shell renders it.
 
+### Resolver (manifest)
+
+echo declares `resolver=True` and serves `GET /resolve/{kind}/{ref_id}`, returning the
+uniform hover-card envelope (ADR-0019) — the reference for resolving a chat entity reference.
+
 ### HTTP
 
 `GET /health` · `GET /metrics` · `GET /manifest` · `GET /pages/{id}` (page data the core
-proxies — `echoes` here) · `/mcp` (the streamable MCP endpoint).
+proxies — `echoes` here) · `GET /resolve/{kind}/{ref_id}` (hover-card resolver) · `/mcp`
+(the streamable MCP endpoint).
 
 ## Configuration
 

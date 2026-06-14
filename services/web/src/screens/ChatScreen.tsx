@@ -17,9 +17,15 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
+import {
+  EntityRefChip,
+  EntityRefsContext,
+  inlinedRefIds,
+  refsById,
+} from "@/components/EntityRef";
 import { Markdown } from "@/components/Markdown";
 import {
   Badge,
@@ -33,6 +39,7 @@ import {
   cn,
 } from "@/components/ui";
 import { api } from "@/lib/api";
+import type { EntityRef } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
 import { useChat, type ChatSegment } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
@@ -92,23 +99,46 @@ function LiveTurn() {
 function AssistantBlock({
   segments,
   streaming,
+  entityRefs = [],
 }: {
   segments: ChatSegment[];
   streaming: boolean;
+  entityRefs?: EntityRef[];
 }) {
+  const refsMap = useMemo(() => refsById(entityRefs), [entityRefs]);
+  const text = useMemo(
+    () => segments.map((s) => (s.kind === "text" ? s.text : "")).join("\n"),
+    [segments],
+  );
+  // Refs not already linked inline get a chip row beneath the message, so every
+  // referenced entity surfaces exactly once (ADR-0019).
+  const rowRefs = useMemo(() => {
+    const inlined = inlinedRefIds(text);
+    return entityRefs.filter((ref) => !inlined.has(ref.ref_id));
+  }, [entityRefs, text]);
+
   return (
     <div className="flex gap-3">
       <div className="mt-1.5 font-serif text-[15px] leading-none text-accent select-none">ε</div>
       <div className="min-w-0 flex-1">
-        {segments.map((segment, i) =>
-          segment.kind === "text" ? (
-            <Markdown key={i}>{segment.text}</Markdown>
-          ) : (
-            <ToolChip key={i} segment={segment} />
-          ),
-        )}
+        <EntityRefsContext.Provider value={refsMap}>
+          {segments.map((segment, i) =>
+            segment.kind === "text" ? (
+              <Markdown key={i}>{segment.text}</Markdown>
+            ) : (
+              <ToolChip key={i} segment={segment} />
+            ),
+          )}
+        </EntityRefsContext.Provider>
         {streaming && (
           <span className="ep-caret ml-0.5 inline-block h-4 w-2 translate-y-0.5 rounded-[2px] bg-accent" />
+        )}
+        {rowRefs.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {rowRefs.map((ref) => (
+              <EntityRefChip key={ref.ref_id} entref={ref} />
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -454,6 +484,7 @@ export function ChatScreen() {
                 key={i}
                 segments={[{ kind: "text", text: message.content }]}
                 streaming={false}
+                entityRefs={message.entity_refs}
               />
             ),
           )}

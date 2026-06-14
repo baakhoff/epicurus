@@ -52,6 +52,7 @@ class EpicurusModule:
         ui: UiSection | None = None,
         pages: list[PageSpec] | None = None,
         resolver: bool = False,
+        attachable: bool = False,
     ) -> None:
         self._name = name
         self._version = version
@@ -62,6 +63,7 @@ class EpicurusModule:
         self._ui = ui
         self._pages = list(pages or [])
         self._resolver = resolver
+        self._attachable = attachable
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -125,6 +127,7 @@ class EpicurusModule:
             ui=self._ui,
             pages=list(self._pages),
             resolver=self._resolver,
+            attachable=self._attachable,
         )
 
     def http_app(self) -> Starlette:

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AgentEvent,
   AgentTurn,
+  Attachment,
   BrowserData,
   MessageRecord,
   ModuleSnapshot,
@@ -97,12 +98,31 @@ describe("contracts", () => {
     expect(turn.entity_refs[0].ref_id).toBe("e1");
   });
 
-  it("defaults message entity_refs to empty (older transcripts stay valid)", () => {
+  it("defaults message entity_refs + attachments to empty (older transcripts stay valid)", () => {
     const rec = MessageRecord.parse({
       role: "user",
       content: "hi",
       created_at: "2026-06-14T09:00:00Z",
     });
     expect(rec.entity_refs).toEqual([]);
+    expect(rec.attachments).toEqual([]);
+  });
+
+  it("parses message attachments (ADR-0019)", () => {
+    const rec = MessageRecord.parse({
+      role: "user",
+      content: "summarize these",
+      created_at: "2026-06-14T09:00:00Z",
+      attachments: [
+        { att_id: "a1", source: "file", kind: "text/plain", title: "notes.txt" },
+        { att_id: "a2", source: "chat", ref_id: "s9", title: "earlier chat" },
+      ],
+    });
+    expect(rec.attachments[0].source).toBe("file");
+    expect(rec.attachments[1].ref_id).toBe("s9");
+  });
+
+  it("rejects an unknown attachment source", () => {
+    expect(() => Attachment.parse({ att_id: "a1", source: "magic" })).toThrow();
   });
 });

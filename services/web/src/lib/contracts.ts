@@ -49,11 +49,39 @@ export const EntityRef = z.object({
 });
 export type EntityRef = z.infer<typeof EntityRef>;
 
+/** Context the user attached to a message (ADR-0019). */
+export const Attachment = z.object({
+  att_id: z.string(),
+  source: z.enum(["module", "file", "chat"]),
+  kind: z.string().default(""),
+  ref_id: z.string().nullish(),
+  title: z.string().default(""),
+  module: z.string().nullish(),
+});
+export type Attachment = z.infer<typeof Attachment>;
+
+/** The handle returned when a file is uploaded for attachment. */
+export const AttachmentUploaded = z.object({
+  att_id: z.string(),
+  title: z.string(),
+  kind: z.string(),
+});
+export type AttachmentUploaded = z.infer<typeof AttachmentUploaded>;
+
+/** One item a module's attachment picker offers. */
+export const ModuleAttachmentItem = z.object({
+  ref_id: z.string(),
+  kind: z.string().default(""),
+  title: z.string().default(""),
+});
+export type ModuleAttachmentItem = z.infer<typeof ModuleAttachmentItem>;
+
 export const MessageRecord = z.object({
   role: z.string(),
   content: z.string(),
   created_at: z.coerce.date(),
   entity_refs: z.array(EntityRef).default([]),
+  attachments: z.array(Attachment).default([]),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
@@ -145,6 +173,8 @@ export const ModuleManifest = z.object({
   secrets: z.array(z.string()).default([]),
   ui: UiSection.nullish(),
   pages: z.array(PageSpec).default([]),
+  resolver: z.boolean().default(false),
+  attachable: z.boolean().default(false),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 

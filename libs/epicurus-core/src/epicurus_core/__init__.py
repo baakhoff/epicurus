@@ -10,6 +10,8 @@ from __future__ import annotations
 from epicurus_core._version import __version__
 from epicurus_core.config import CoreSettings, Environment, LogLevel
 from epicurus_core.contracts import (
+    Attachment,
+    AttachmentSource,
     ChatMessage,
     ChatResult,
     EntityRef,
@@ -53,6 +55,8 @@ from epicurus_core.tenancy import (
 
 __all__ = [
     "CONTRACT_VERSION",
+    "Attachment",
+    "AttachmentSource",
     "ChatMessage",
     "ChatResult",
     "CoreSettings",

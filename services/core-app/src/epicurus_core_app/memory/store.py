@@ -2,21 +2,33 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any, cast
 
 from pydantic import BaseModel, Field
-from sqlalchemy import JSON, CursorResult, DateTime, String, Text, delete, func, inspect, select
+from sqlalchemy import (
+    JSON,
+    CursorResult,
+    DateTime,
+    LargeBinary,
+    String,
+    Text,
+    delete,
+    func,
+    inspect,
+    select,
+)
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from epicurus_core import EntityRef
+from epicurus_core import Attachment, EntityRef
 
 # JSON columns added to agent_messages after the table's first release (v0.2). On an
 # existing deployment these are added in place at init (the store has no migration
 # framework — see ``ConversationStore._ensure_columns``).
-_ADDED_JSON_COLUMNS = ("entity_refs",)
+_ADDED_JSON_COLUMNS = ("entity_refs", "attachments")
 
 
 class SessionSummary(BaseModel):
@@ -36,6 +48,8 @@ class MessageRecord(BaseModel):
     created_at: datetime
     # Entities the assistant referenced this turn (ADR-0019) — rendered as chips.
     entity_refs: list[EntityRef] = Field(default_factory=list)
+    # Context the user attached to this message (ADR-0019) — rendered as pills.
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class Base(DeclarativeBase):
@@ -55,6 +69,25 @@ class StoredMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Assistant-emitted entity references for this message (ADR-0019); null for old rows.
     entity_refs: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    # User-supplied attachments for this message (ADR-0019); null for old rows.
+    attachments: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+
+
+class StoredAttachment(Base):
+    """An uploaded file's bytes, held core-side under ``att_id`` (ADR-0019).
+
+    The agent reads these to expand a ``file`` attachment into turn context. In Phase 3.8
+    the storage module also persists uploads (#135); this is the core-side handle.
+    """
+
+    __tablename__ = "agent_attachments"
+
+    att_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    kind: Mapped[str] = mapped_column(String(128))
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ConversationStore:
@@ -96,6 +129,7 @@ class ConversationStore:
         role: str,
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> int:
         """Persist a message; returns its id (used as the recall point id)."""
         async with self._session() as session:
@@ -105,6 +139,7 @@ class ConversationStore:
                 role=role,
                 content=content,
                 entity_refs=entity_refs,
+                attachments=attachments,
             )
             session.add(message)
             await session.commit()
@@ -169,6 +204,7 @@ class ConversationStore:
                     content=m.content,
                     created_at=m.created_at,
                     entity_refs=[EntityRef.model_validate(r) for r in (m.entity_refs or [])],
+                    attachments=[Attachment.model_validate(a) for a in (m.attachments or [])],
                 )
                 for m in rows
             ]
@@ -184,3 +220,33 @@ class ConversationStore:
             await session.commit()
             # DELETE always returns a CursorResult; the ORM types it as plain Result.
             return cast("CursorResult[Any]", result).rowcount or 0
+
+
+class AttachmentStore:
+    """Core-side storage for uploaded attachment bytes, tenant-scoped (ADR-0019).
+
+    Shares ``Base`` with :class:`ConversationStore`, so its table is created by
+    ``ConversationStore.init`` (``create_all``). The agent reads these to expand a
+    ``file`` attachment into the turn's context.
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def save(self, *, tenant: str, kind: str, title: str, content: bytes) -> str:
+        """Persist an uploaded file; returns the new ``att_id``."""
+        att_id = uuid.uuid4().hex
+        async with self._session() as session:
+            session.add(
+                StoredAttachment(
+                    att_id=att_id, tenant=tenant, kind=kind, title=title, content=content
+                )
+            )
+            await session.commit()
+        return att_id
+
+    async def get(self, *, tenant: str, att_id: str) -> StoredAttachment | None:
+        """Fetch a stored attachment by id, scoped to the tenant (None if absent)."""
+        async with self._session() as session:
+            row = await session.get(StoredAttachment, att_id)
+            return row if row is not None and row.tenant == tenant else None

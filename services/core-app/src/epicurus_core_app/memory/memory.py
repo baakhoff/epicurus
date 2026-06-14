@@ -29,11 +29,13 @@ class Memory:
         role: str,
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         """Persist a message and index user/assistant turns for recall.
 
-        ``entity_refs`` (assistant-emitted, ADR-0019) is stored alongside the message so
-        the transcript can render the chips again; it is not indexed for recall.
+        ``entity_refs`` (assistant-emitted) and ``attachments`` (user-supplied) are stored
+        alongside the message so the transcript can render them again (ADR-0019); neither
+        is indexed for recall.
         """
         if not content:
             return
@@ -43,6 +45,7 @@ class Memory:
             role=role,
             content=content,
             entity_refs=entity_refs,
+            attachments=attachments,
         )
         if role in _INDEXED_ROLES:
             await self._recall.index(

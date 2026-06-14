@@ -37,6 +37,12 @@ bundled-stack release, **v0.2.0**.
   hover-card is resolved on demand from the module's declared `GET /resolve/{kind}/{ref_id}`,
   proxied by the core; echo ships a reference resolver (ADR-0019) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Chat attachments** — the user can attach context to a turn: an uploaded **file** (held
+  core-side via `POST /platform/v1/agent/attachments`), another **chat**, or an entity from
+  an **enabled, attachable module**. The composer gains an attach affordance with pills; the
+  agent expands each attachment into the turn's context. A chat-schema migration adds
+  `attachments`; a module opts in as a source with `attachable` + a picker / resolve
+  (ADR-0019) (`epicurus-core` → 0.3.0, `core-app` → 0.3.0, `web` → 0.5.0).
 - **Model catalog browser** — replaces "type a name to pull" with a browsable catalog of 24
   curated Ollama models. Search by name, family, or description; filter by tag (General, Code,
   Multilingual, Vision, Embedding, Small); pull any entry with live SSE progress. The

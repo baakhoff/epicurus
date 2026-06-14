@@ -6,6 +6,7 @@ import json
 
 import epicurus_core
 from epicurus_core import (
+    Attachment,
     ChatMessage,
     ChatResult,
     EntityRef,
@@ -52,12 +53,23 @@ def test_entity_ref_types_are_exported() -> None:
 
 
 def test_provider_dump_strips_ui_only_fields() -> None:
-    # entity_refs is UI metadata (ADR-0019) — it must never reach a provider call.
+    # entity_refs + attachments are UI/agent metadata (ADR-0019) — never sent to a provider.
     ref = EntityRef(ref_id="e1", module="calendar", kind="event", title="Standup")
-    msg = ChatMessage(role="assistant", content="see your standup", entity_refs=[ref])
+    att = Attachment(att_id="a1", source="file", title="notes.txt")
+    msg = ChatMessage(
+        role="user", content="summarize my standup", entity_refs=[ref], attachments=[att]
+    )
     dumped = msg.provider_dump()
     assert "entity_refs" not in dumped
-    assert dumped == {"role": "assistant", "content": "see your standup"}
+    assert "attachments" not in dumped
+    assert dumped == {"role": "user", "content": "summarize my standup"}
+
+
+def test_attachment_is_exported_and_defaults() -> None:
+    assert "Attachment" in epicurus_core.__all__
+    att = Attachment(att_id="a1", source="chat", ref_id="s1", title="earlier chat")
+    assert att.kind == ""
+    assert att.module is None
 
 
 def test_chat_message_defaults_to_no_entity_refs() -> None:

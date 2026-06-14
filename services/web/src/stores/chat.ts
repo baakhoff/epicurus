@@ -5,7 +5,7 @@
  */
 import { create } from "zustand";
 
-import { AgentEvent } from "@/lib/contracts";
+import { AgentEvent, type Attachment } from "@/lib/contracts";
 import { sse } from "@/lib/sse";
 
 export interface ToolRun {
@@ -33,7 +33,12 @@ interface ChatState {
   openSession: (id: string) => void;
   /** `onDone` must complete the server-history refetch — the live turn is
    *  cleared right after it resolves, so the transcript never doubles. */
-  send: (text: string, model: string | null, onDone: () => Promise<void>) => Promise<void>;
+  send: (
+    text: string,
+    model: string | null,
+    onDone: () => Promise<void>,
+    attachments?: Attachment[],
+  ) => Promise<void>;
   stop: () => void;
   clearError: () => void;
 }
@@ -77,7 +82,7 @@ export const useChat = create<ChatState>()((set, get) => ({
     });
   },
 
-  send: async (text, model, onDone) => {
+  send: async (text, model, onDone, attachments) => {
     if (get().streaming) return;
     const abort = new AbortController();
     set({
@@ -116,7 +121,13 @@ export const useChat = create<ChatState>()((set, get) => ({
     let completed = false;
     try {
       const body = {
-        messages: [{ role: "user", content: text }],
+        messages: [
+          {
+            role: "user",
+            content: text,
+            attachments: attachments && attachments.length > 0 ? attachments : undefined,
+          },
+        ],
         model: model ?? undefined,
         session_id: get().sessionId,
       };

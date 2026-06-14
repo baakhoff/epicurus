@@ -79,6 +79,7 @@ app = module.http_app()
 | `ui` | `UiSection \| None` | `None` | declarative web-shell UI (ADR-0007 Tier 1) |
 | `pages` | `list[PageSpec]` | `[]` | left-nav pages, core-rendered from a bounded vocabulary (ADR-0018) |
 | `resolver` | `bool` | `False` | module serves `GET /resolve/{kind}/{ref_id}` for hover-cards (ADR-0019) |
+| `attachable` | `bool` | `False` | module is a chat-attachment source: serves a picker + resolve (ADR-0019) |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -171,6 +172,20 @@ The assistant can mention a module entity (an event, task, email, doc…) as an
 
 This is the uniform, core-owned shape for every entity (it also backs the panel's
 `entity-detail` view); modules supply data only, never markup.
+
+### Attachment sources (ADR-0019)
+
+A module can be a **chat-attachment source** so its entities can be attached to a turn.
+Declare `attachable=True` and serve two endpoints (the core proxies both):
+
+- **Picker** — `GET /attachments` → a list of `{ref_id, kind, title}` the composer lists
+  (proxied at `GET /platform/v1/modules/{name}/attachments`).
+- **Resolve** — `GET /attachments/{ref_id}` → `{title, excerpt}` (or `text`); the agent
+  injects the excerpt into the turn's context.
+
+The user can also attach an uploaded **file** (held core-side, `POST /platform/v1/agent/attachments`)
+or another **chat** (by session id) — those need no module. The agent expands every
+attachment into context at turn time.
 
 ### `CONTRACT_VERSION`
 `"0.1"` — the module↔core contract version this release targets.

@@ -5,10 +5,12 @@
 import { z } from "zod";
 
 import {
+  AttachmentUploaded,
   HoverCard,
   LlmPrefs,
   MessageRecord,
   ModelInfo,
+  ModuleAttachmentItem,
   ModuleSnapshot,
   OAuthClientStatus,
   OAuthConnectResponse,
@@ -128,6 +130,30 @@ export const api = {
       HoverCard,
       `/platform/v1/modules/${encodeURIComponent(name)}/resolve/${encodeURIComponent(kind)}/${encodeURIComponent(refId)}`,
     ),
+  // A module's attachment picker — the entities it offers to attach (ADR-0019).
+  moduleAttachments: (name: string) =>
+    request(
+      z.array(ModuleAttachmentItem),
+      `/platform/v1/modules/${encodeURIComponent(name)}/attachments`,
+    ),
+
+  // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).
+  // Multipart, so it bypasses the JSON `request` helper.
+  uploadAttachment: async (file: File): Promise<AttachmentUploaded> => {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch("/platform/v1/agent/attachments", { method: "POST", body: form });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(response.status, detail);
+    }
+    return AttachmentUploaded.parse(await response.json());
+  },
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
 

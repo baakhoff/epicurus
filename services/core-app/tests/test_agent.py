@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from epicurus_core import EntityRef, tool_envelope
+from epicurus_core import Attachment, EntityRef, tool_envelope
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 
@@ -127,6 +127,7 @@ class _FakeMemory:
         self._fail = fail
         self.remembered: list[tuple[str, str]] = []  # (role, content)
         self.remembered_refs: list[dict[str, Any]] = []  # refs of the last remember()
+        self.remembered_attachments: list[dict[str, Any]] = []  # attachments of the last remember()
 
     async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
         if self._fail:
@@ -146,11 +147,13 @@ class _FakeMemory:
         role: str,
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         if self._fail:
             raise RuntimeError("db down")
         self.remembered.append((role, content))
         self.remembered_refs = entity_refs or []
+        self.remembered_attachments = attachments or []
 
 
 async def test_agent_uses_memory_when_session_given() -> None:
@@ -271,3 +274,60 @@ async def test_agent_persists_entity_refs_with_the_answer() -> None:
         [ChatMessage(role="user", content="go")], session_id="s1"
     )
     assert memory.remembered_refs == [_ref().model_dump()]
+
+
+# ── attachments expanded into context (ADR-0019) ─────────────────────────────────
+
+
+class _FakeExpander:
+    def __init__(self, text: str = "the attached notes") -> None:
+        self._text = text
+        self.calls: list[list[Attachment]] = []
+
+    async def expand(self, attachments: list[Attachment], *, tenant: str) -> str:
+        self.calls.append(attachments)
+        return self._text
+
+
+async def test_agent_injects_attachment_context() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    expander = _FakeExpander("CONTENTS OF notes.txt")
+    msg = ChatMessage(
+        role="user",
+        content="summarize",
+        attachments=[Attachment(att_id="a1", source="file", title="notes.txt")],
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run([msg])
+
+    assert turn.content == "answer"
+    assert expander.calls and expander.calls[0][0].att_id == "a1"
+    # the expanded text reached the model as a leading system message
+    assert any(
+        m.role == "system" and "CONTENTS OF notes.txt" in (m.content or "") for m in gw.calls[0]
+    )
+
+
+async def test_agent_without_attachments_skips_expansion() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="ok")])
+    expander = _FakeExpander()
+    await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run(
+        [ChatMessage(role="user", content="hi")]
+    )
+    assert expander.calls == []
+
+
+async def test_agent_attachment_failure_degrades_to_plain_turn() -> None:
+    class _BoomExpander:
+        async def expand(self, attachments: list[Attachment], *, tenant: str) -> str:
+            raise RuntimeError("storage down")
+
+    gw = _FakeGateway([ChatResult(model="m", content="still works")])
+    msg = ChatMessage(
+        role="user",
+        content="summarize",
+        attachments=[Attachment(att_id="a1", source="file", title="notes.txt")],
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=_BoomExpander()).run([msg])
+    assert turn.content == "still works"
+    # no system context was injected — the model just saw the user message
+    assert [m.content for m in gw.calls[0]] == ["summarize"]

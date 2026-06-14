@@ -86,6 +86,28 @@ def tool_envelope(text: str, entity_refs: list[EntityRef] | None = None) -> str:
     return ToolEnvelope(text=text, entity_refs=entity_refs or []).model_dump_json()
 
 
+AttachmentSource = Literal["module", "file", "chat"]
+
+
+class Attachment(BaseModel):
+    """A piece of context the user attaches to a message (ADR-0019).
+
+    ``source`` says where it comes from: an uploaded ``file`` (its bytes held core-side
+    under ``att_id``), another ``chat`` (``ref_id`` = that session id), or a ``module``
+    entity (``module`` + ``ref_id``, resolved through the module's attachment surface).
+    The agent expands attachments into the turn's context; like ``entity_refs`` they are
+    UI/agent metadata and never reach a provider as a message field.
+    """
+
+    att_id: str
+    source: AttachmentSource
+    kind: str = ""
+    ref_id: str | None = None
+    title: str = ""
+    # The owning module, for ``source == "module"`` attachments (routing the resolve).
+    module: str | None = None
+
+
 class ChatMessage(BaseModel):
     """One message in a chat exchange.
 
@@ -100,12 +122,13 @@ class ChatMessage(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     name: str | None = None
-    # UI-only (ADR-0019); optional so it drops out of the default provider payload.
+    # UI/agent-only (ADR-0019); optional so they drop out of the default provider payload.
     entity_refs: list[EntityRef] | None = None
+    attachments: list[Attachment] | None = None
 
     def provider_dump(self) -> dict[str, Any]:
-        """Serialize for an LLM provider call — UI-only fields removed (ADR-0019)."""
-        return self.model_dump(exclude_none=True, exclude={"entity_refs"})
+        """Serialize for an LLM provider call — UI/agent-only fields removed (ADR-0019)."""
+        return self.model_dump(exclude_none=True, exclude={"entity_refs", "attachments"})
 
 
 class ChatResult(BaseModel):

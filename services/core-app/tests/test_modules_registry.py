@@ -63,6 +63,10 @@ def _resolver_manifest() -> ModuleManifest:
     return ModuleManifest(name="calendar", version="0.1.0", resolver=True)
 
 
+def _attachable_manifest() -> ModuleManifest:
+    return ModuleManifest(name="notes", version="0.1.0", attachable=True)
+
+
 class _StubRegistry(ModuleRegistry):
     """Registry with the network probe replaced by a canned snapshot."""
 
@@ -233,4 +237,58 @@ async def test_resolve_entity_404_for_unknown_module() -> None:
     registry, _, _ = _registry(manifest=_resolver_manifest())
     with pytest.raises(HTTPException) as err:
         await registry.resolve_entity("ghost", "event", "e1")
+    assert err.value.status_code == 404
+
+
+async def test_list_attachments_proxies_picker() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_attachable_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = [{"ref_id": "n1", "kind": "note", "title": "Groceries"}]
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.list_attachments("notes")
+
+    assert result[0]["ref_id"] == "n1"
+    mock_client.get.assert_called_once_with("/attachments")
+
+
+async def test_list_attachments_404_when_not_attachable() -> None:
+    registry, _, _ = _registry()  # echo is not an attachment source
+    with pytest.raises(HTTPException) as err:
+        await registry.list_attachments("echo")
+    assert err.value.status_code == 404
+
+
+async def test_resolve_attachment_proxies_module() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_attachable_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"title": "Groceries", "excerpt": "milk, eggs"}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.resolve_attachment("notes", "n1")
+
+    assert result["excerpt"] == "milk, eggs"
+    mock_client.get.assert_called_once_with("/attachments/n1")
+
+
+async def test_resolve_attachment_404_when_not_attachable() -> None:
+    registry, _, _ = _registry()
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_attachment("echo", "n1")
     assert err.value.status_code == 404

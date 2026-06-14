@@ -20,6 +20,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { AttachButton, AttachmentPill } from "@/components/AttachMenu";
 import {
   EntityRefChip,
   EntityRefsContext,
@@ -39,7 +40,7 @@ import {
   cn,
 } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { EntityRef } from "@/lib/contracts";
+import type { Attachment, EntityRef } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
 import { useChat, type ChatSegment } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
@@ -389,6 +390,7 @@ export function ChatScreen() {
   const chat = useChat();
   const model = usePrefs((s) => s.model);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -425,12 +427,19 @@ export function ChatScreen() {
   const send = () => {
     const text = draft.trim();
     if (!text || chat.streaming) return;
+    const sent = attachments;
     setDraft("");
+    setAttachments([]);
     pinnedRef.current = true;
-    void chat.send(text, model, async () => {
-      await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    });
+    void chat.send(
+      text,
+      model,
+      async () => {
+        await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      },
+      sent,
+    );
   };
 
   // While a turn streams, history already contains the just-sent user message —
@@ -474,10 +483,17 @@ export function ChatScreen() {
           )}
           {messages.map((message, i) =>
             message.role === "user" ? (
-              <div key={i} className="flex justify-end">
+              <div key={i} className="flex flex-col items-end gap-1">
                 <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
                   {message.content}
                 </div>
+                {message.attachments.length > 0 && (
+                  <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+                    {message.attachments.map((a) => (
+                      <AttachmentPill key={a.att_id} attachment={a} />
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <AssistantBlock
@@ -520,7 +536,21 @@ export function ChatScreen() {
 
       {/* composer */}
       <div className="border-t border-edge px-4 py-3 pb-safe">
+        {attachments.length > 0 && (
+          <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
+            {attachments.map((a) => (
+              <AttachmentPill
+                key={a.att_id}
+                attachment={a}
+                onRemove={() =>
+                  setAttachments((prev) => prev.filter((x) => x.att_id !== a.att_id))
+                }
+              />
+            ))}
+          </div>
+        )}
         <div className="mx-auto flex max-w-2xl items-end gap-2">
+          <AttachButton onAttach={(a) => setAttachments((prev) => [...prev, a])} />
           <TextArea
             rows={1}
             value={draft}

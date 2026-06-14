@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
 from epicurus_core_app.agent.agent import Agent
+from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.llm.gateway import LlmGateway
@@ -32,7 +33,7 @@ from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
-from epicurus_core_app.memory.store import ConversationStore
+from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
 from epicurus_core_app.modules import ModuleRegistry, create_modules_router
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
@@ -82,19 +83,21 @@ def create_app() -> FastAPI:
         return await gateway.embed(texts, model=settings.memory_embed_model)
 
     memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
+    attachment_store = AttachmentStore(engine)
     mcp_host = McpHost(settings.module_mcp_urls)
+    registry = ModuleRegistry(
+        settings.module_base_urls,
+        mcp=mcp_host,
+        secrets=secrets,
+        tenant=settings.default_tenant_id,
+    )
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
         memory=memory,
         max_steps=settings.agent_max_steps,
         default_tenant=settings.default_tenant_id,
-    )
-    registry = ModuleRegistry(
-        settings.module_base_urls,
-        mcp=mcp_host,
-        secrets=secrets,
-        tenant=settings.default_tenant_id,
+        attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
     )
     oauth = OAuthService(
         secrets,
@@ -128,7 +131,9 @@ def create_app() -> FastAPI:
         create_llm_router(gateway, prefs=prefs, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
-    app.include_router(create_agent_router(agent, memory, settings.default_tenant_id))
+    app.include_router(
+        create_agent_router(agent, memory, settings.default_tenant_id, attachment_store)
+    )
     app.include_router(create_modules_router(registry))
     app.include_router(create_oauth_router(oauth, default_tenant=settings.default_tenant_id))
 

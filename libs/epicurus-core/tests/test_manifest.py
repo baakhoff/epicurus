@@ -99,6 +99,19 @@ def test_manifest_defaults_to_no_pages() -> None:
     assert ModuleManifest(name="m", version="1.0").pages == []
 
 
+def test_manifest_resolver_and_attachable_default_false() -> None:
+    m = ModuleManifest(name="m", version="1.0")
+    assert m.resolver is False
+    assert m.attachable is False
+
+
+def test_manifest_resolver_and_attachable_roundtrip() -> None:
+    m = ModuleManifest(name="m", version="1.0", resolver=True, attachable=True)
+    restored = ModuleManifest.model_validate(m.model_dump())
+    assert restored.resolver is True
+    assert restored.attachable is True
+
+
 def test_manifest_with_pages_roundtrips() -> None:
     m = ModuleManifest(
         name="files",

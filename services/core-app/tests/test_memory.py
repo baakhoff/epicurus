@@ -12,6 +12,7 @@ class _FakeStore:
         self.rows: list[tuple[str, str, str, str]] = []  # tenant, session, role, content
         self._next_id = 0
         self.last_refs: list[dict[str, Any]] | None = None
+        self.last_attachments: list[dict[str, Any]] | None = None
 
     async def append(
         self,
@@ -21,9 +22,11 @@ class _FakeStore:
         role: str,
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> int:
         self.rows.append((tenant, session_id, role, content))
         self.last_refs = entity_refs
+        self.last_attachments = attachments
         self._next_id += 1
         return self._next_id
 
@@ -99,3 +102,13 @@ async def test_remember_passes_entity_refs_to_the_store() -> None:
         tenant="t", session_id="s", role="assistant", content="see standup", entity_refs=refs
     )
     assert store.last_refs == refs
+
+
+async def test_remember_passes_attachments_to_the_store() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    atts = [{"att_id": "a1", "source": "file", "title": "notes.txt"}]
+    await memory.remember(
+        tenant="t", session_id="s", role="user", content="see notes", attachments=atts
+    )
+    assert store.last_attachments == atts

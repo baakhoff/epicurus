@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter
+from fastapi import APIRouter, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from epicurus_core_app.agent.agent import Agent, AgentEvent, AgentTurn
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory
-from epicurus_core_app.memory.store import MessageRecord, SessionSummary
+from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -27,11 +27,21 @@ class AgentRequest(BaseModel):
     session_id: str | None = None
 
 
+class AttachmentUploaded(BaseModel):
+    """The handle the composer keeps for an uploaded file (ADR-0019)."""
+
+    att_id: str
+    title: str
+    kind: str
+
+
 def _sse(event: AgentEvent) -> str:
     return f"event: {event.type}\ndata: {event.model_dump_json(exclude_none=True)}\n\n"
 
 
-def create_agent_router(agent: Agent, memory: Memory, tenant: str) -> APIRouter:
+def create_agent_router(
+    agent: Agent, memory: Memory, tenant: str, attachments: AttachmentStore
+) -> APIRouter:
     """The agent turn endpoints plus the conversation (session) surface."""
     router = APIRouter(prefix="/platform/v1/agent", tags=["agent"])
 
@@ -63,5 +73,14 @@ def create_agent_router(agent: Agent, memory: Memory, tenant: str) -> APIRouter:
     async def delete_session(session_id: str) -> dict[str, int]:
         removed = await memory.forget(tenant=tenant, session_id=session_id)
         return {"deleted": removed}
+
+    @router.post("/attachments", response_model=AttachmentUploaded)
+    async def upload_attachment(file: UploadFile) -> AttachmentUploaded:
+        """Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019)."""
+        content = await file.read()
+        title = file.filename or "file"
+        kind = file.content_type or "application/octet-stream"
+        att_id = await attachments.save(tenant=tenant, kind=kind, title=title, content=content)
+        return AttachmentUploaded(att_id=att_id, title=title, kind=kind)
 
     return router

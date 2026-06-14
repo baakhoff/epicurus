@@ -151,3 +151,6 @@ class ModuleManifest(BaseModel):
     # The module serves a hover-card resolver at ``GET /resolve/{kind}/{ref_id}`` for the
     # entities it references in chat (ADR-0019); the core proxies it.
     resolver: bool = False
+    # The module is a chat-attachment source: it serves a picker (``GET /attachments``) and
+    # a resolve (``GET /attachments/{ref_id}``) so its entities can be attached (ADR-0019).
+    attachable: bool = False

@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from epicurus_core import EntityRef, ToolEnvelope, get_logger
+from epicurus_core import Attachment, EntityRef, ToolEnvelope, get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
@@ -76,6 +76,12 @@ class _RefCollector:
                 self.refs.append(ref)
 
 
+class AttachmentExpander(Protocol):
+    """Resolves a turn's attachments into a text block the agent injects (ADR-0019)."""
+
+    async def expand(self, attachments: list[Attachment], *, tenant: str) -> str: ...
+
+
 class AgentEvent(BaseModel):
     """One event of a streaming agent turn (the SSE protocol's payload).
 
@@ -120,12 +126,14 @@ class Agent:
         memory: Memory | None = None,
         max_steps: int = 4,
         default_tenant: str = "local",
+        attachments: AttachmentExpander | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
         self._memory = memory
         self._max_steps = max_steps
         self._default_tenant = default_tenant
+        self._attachments = attachments
 
     async def run(
         self,
@@ -142,6 +150,7 @@ class Agent:
         new user input and the answer are persisted for future turns.
         """
         tenant = tenant_id or self._default_tenant
+        messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         turn = await self._loop(convo, model=model, tenant_id=tenant_id)
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
@@ -162,6 +171,7 @@ class Agent:
         event rather than an exception (the HTTP response has already started).
         """
         tenant = tenant_id or self._default_tenant
+        messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         parts: list[str] = []
         tools_used: list[str] = []
@@ -232,6 +242,30 @@ class Agent:
         except Exception as exc:  # a failed write must not lose the answer
             log.warning("memory write failed", error=str(exc))
 
+    async def _expand_attachments(
+        self, messages: list[ChatMessage], *, tenant: str
+    ) -> list[ChatMessage]:
+        """Resolve any attachments on the user's message into a leading system message.
+
+        Best-effort (ADR-0019): an expander failure or empty result leaves the turn
+        untouched. The attachments themselves stay on the user message (persisted +
+        stripped before any provider call); only their resolved content is injected here.
+        """
+        if self._attachments is None:
+            return messages
+        attached = [a for m in messages if m.role == "user" for a in (m.attachments or [])]
+        if not attached:
+            return messages
+        try:
+            context = await self._attachments.expand(attached, tenant=tenant)
+        except Exception as exc:  # attachments are an enhancement, never a hard dependency
+            log.warning("attachment expansion failed; proceeding without it", error=str(exc))
+            return messages
+        if not context:
+            return messages
+        preamble = ChatMessage(role="system", content=f"Attached context:\n{context}")
+        return [preamble, *messages]
+
     async def _assemble(
         self, messages: list[ChatMessage], *, tenant: str, session_id: str | None
     ) -> list[ChatMessage]:
@@ -262,7 +296,15 @@ class Agent:
             for message in messages:
                 if message.role == "user" and message.content:
                     await self._memory.remember(
-                        tenant=tenant, session_id=session_id, role="user", content=message.content
+                        tenant=tenant,
+                        session_id=session_id,
+                        role="user",
+                        content=message.content,
+                        attachments=(
+                            [a.model_dump() for a in message.attachments]
+                            if message.attachments
+                            else None
+                        ),
                     )
             return convo
         except Exception as exc:  # memory is an enhancement, never a hard dependency

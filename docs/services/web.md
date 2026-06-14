@@ -58,6 +58,15 @@ click opens it in the right panel. Refs the assistant links inline (an
 `epicurus://entity/{module}/{kind}/{ref_id}` markdown link) render inline through the
 Markdown `a` slot; any remaining refs appear as a chip row beneath the message.
 
+### Attachments in chat (ADR-0019)
+
+The composer's **attach** affordance (`src/components/AttachMenu.tsx`) lets the user add
+context to a turn: upload a **file** (`POST /platform/v1/agent/attachments`), reference
+**another chat**, or pick an entity from an **enabled, attachable module** (its picker is
+proxied at `GET /platform/v1/modules/{name}/attachments`). Choices appear as pills above
+the input and are sent on the message as `attachments`; the agent expands them into the
+turn's context. Persisted attachments render as pills under the user's message.
+
 ### The chat SSE protocol
 
 `POST /platform/v1/agent/chat/stream` returns Server-Sent Events: `delta` (content

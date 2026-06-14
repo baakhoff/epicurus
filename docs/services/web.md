@@ -35,10 +35,17 @@ A module declares `pages` in its manifest, each naming a core **archetype** —
 of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`) and
 renders each at `/m/:module/:pageId` via a first-party screen for that archetype
 (`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` (list +
-detail) and `calendar` (month / week / agenda) ship today; `editor` and `board` land with
-their module pages. Page data is fetched through the core proxy
+detail), `calendar` (month / week / agenda), `editor` (Obsidian-like doc), and `board`
+(columns of cards) all ship today. Page data is fetched through the core proxy
 (`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
 calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
+
+Unlike `browser`, a `board` **mutates**: its cards and board carry declarative *actions*,
+each naming one of the module's MCP tools. The shell invokes the tool through the core
+(`invokeModuleTool`, validated against the manifest) — a one-tap call, a `confirm` dialog,
+or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the page. The
+tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
+one path, so no module ever ships its own buttons or forms.
 
 ### Right panel / split-screen (ADR-0018)
 

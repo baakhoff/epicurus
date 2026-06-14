@@ -26,9 +26,14 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
+    assert manifest.version == "0.2.0"
     assert manifest.contract_version == CONTRACT_VERSION
     tool_names = {t.name for t in manifest.tools}
-    assert tool_names == {"tasks_list", "tasks_add", "tasks_complete"}
+    assert tool_names == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
+    # The Tasks left-nav page is declared as a core `board` archetype (ADR-0018).
+    pages = {p.id: p for p in manifest.pages}
+    assert pages["board"].archetype == "board"
+    assert pages["board"].title == "Tasks"
 
 
 async def test_tasks_list_empty(module_fixture: object) -> None:
@@ -74,3 +79,26 @@ async def test_complete_nonexistent_raises(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="not found"):
         await mod.mcp.call_tool("tasks_complete", {"task_id": "bad-id"})  # type: ignore[attr-defined]
+
+
+async def test_tasks_update(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Draft", "notes": "rough"}
+    )
+    task_id = task["id"]
+
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task_id, "title": "Final", "due": "2026-01-01"}
+    )
+    assert updated["title"] == "Final"
+    assert updated["due"] == "2026-01-01"
+    assert updated["notes"] == "rough"  # untouched field is preserved
+
+
+async def test_update_nonexistent_raises(module_fixture: object) -> None:
+    mod = module_fixture
+    with pytest.raises(Exception, match="not found"):
+        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_update", {"task_id": "bad-id", "title": "x"}
+        )

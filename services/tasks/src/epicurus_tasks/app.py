@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import (
@@ -20,10 +21,15 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_tasks.db import TaskStore
-from epicurus_tasks.google_provider import GoogleTasksProvider
+from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.providers import TasksProvider
-from epicurus_tasks.service import MODULE_NAME, build_module
+from epicurus_tasks.service import (
+    MODULE_NAME,
+    TASKS_PAGE_ID,
+    build_module,
+    build_tasks_board,
+)
 from epicurus_tasks.settings import TasksSettings
 
 
@@ -89,6 +95,23 @@ def create_app() -> FastAPI:
         return {
             "provider": provider.provider_name(),
         }
+
+    @app.get("/pages/{page_id}")
+    async def page(page_id: str) -> dict[str, Any]:
+        """Serve the Tasks page's `board` data (ADR-0018); the core proxies this.
+
+        Open tasks are grouped into due-date columns by ``build_tasks_board``. A
+        provider failure (e.g. Google not connected) becomes a 502 carrying the
+        reason, so the shell can show it instead of a blank board.
+        """
+        if page_id != TASKS_PAGE_ID:
+            raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+        try:
+            tasks = await provider.list_tasks(settings.default_tenant_id)
+        except (GoogleTasksError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        today = datetime.now(UTC).date().isoformat()
+        return build_tasks_board(tasks, today=today)
 
     app.mount("/mcp", mcp_app)
     return app

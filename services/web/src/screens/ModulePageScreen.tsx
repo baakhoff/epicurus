@@ -7,6 +7,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
+import { BoardView } from "@/components/archetypes/BoardView";
 import { BrowserView } from "@/components/archetypes/BrowserView";
 import { CalendarView } from "@/components/archetypes/CalendarView";
 import { EditorView } from "@/components/archetypes/EditorView";
@@ -62,6 +63,8 @@ export function ModulePageScreen() {
           <CalendarView module={moduleName} pageId={pageId} />
         ) : page.archetype === "editor" ? (
           <EditorView module={moduleName} pageId={pageId} />
+        ) : page.archetype === "board" ? (
+          <BoardView module={moduleName} pageId={pageId} />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <ComingSoon archetype={page.archetype} />

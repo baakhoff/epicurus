@@ -61,3 +61,29 @@ class TasksProvider(Protocol):
             list_id: List containing the task; ``None`` means the default list.
         """
         ...
+
+    async def update_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        title: str | None = None,
+        notes: str | None = None,
+        due: str | None = None,
+        list_id: str | None = None,
+    ) -> Task:
+        """Edit a task's content and return the updated task.
+
+        Only the fields passed (non-``None``) are changed; omitted fields keep
+        their current value. Distinct from :meth:`complete_task`, which flips the
+        done flag — this edits title/notes/due.
+
+        Args:
+            tenant_id: Tenant scope.
+            task_id: Provider-specific task identifier.
+            title: New title; ``None`` leaves it unchanged.
+            notes: New notes; ``None`` leaves them unchanged.
+            due: New ISO date string, e.g. ``"2025-01-15"``; ``None`` leaves it unchanged.
+            list_id: List containing the task; ``None`` means the default list.
+        """
+        ...

@@ -13,7 +13,7 @@ runtime); each later tag is cut when a meaningful set of changes has shipped.
 
 A release is a pushed git tag. The `Release` workflow publishes a GitHub Release
 with notes generated from the merged pull requests, and pushes every service image
-to GHCR:
+to GHCR — both a versioned tag (`:<semver>`) and the mutable `:latest` alias:
 
 ```bash
 git tag v0.2.0
@@ -25,6 +25,23 @@ git push origin v0.2.0
 - Release notes are grouped by `type:*` label (Features, Fixes, Documentation,
   Maintenance), so good labels and Conventional Commit messages produce good
   notes.
+
+## Deploying a specific release
+
+All service compose fragments use `${EPICURUS_VERSION:-latest}` for the image
+tag. Set `EPICURUS_VERSION` in `.env` (see `.env.example`) to the semver you are
+deploying — without the leading `v`:
+
+```env
+EPICURUS_VERSION=0.2.0
+```
+
+Omitting the variable (the default) resolves to `:latest`, which is fine for
+local development where you always want the freshest build. For staging and
+production, always set it — this ensures every `docker compose up` pulls the same
+immutable image that was verified in CI, satisfying the immutable-image principle
+in `DEPLOYMENT.md` (same image through staging → prod, no surprise updates from a
+bad push to `:latest`).
 
 ## Changelog
 

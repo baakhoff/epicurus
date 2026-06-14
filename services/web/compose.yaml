@@ -5,7 +5,7 @@ services:
     build:
       context: ../..
       dockerfile: services/web/Dockerfile
-    image: ghcr.io/baakhoff/epicurus-web:latest
+    image: ghcr.io/baakhoff/epicurus-web:${EPICURUS_VERSION:-latest}
     restart: unless-stopped
     environment:
       # Where nginx proxies /platform/ — the core, on the internal network.

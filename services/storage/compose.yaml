@@ -5,7 +5,7 @@ services:
     build:
       context: ../..
       dockerfile: services/storage/Dockerfile
-    image: ghcr.io/baakhoff/epicurus-storage:latest
+    image: ghcr.io/baakhoff/epicurus-storage:${EPICURUS_VERSION:-latest}
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222

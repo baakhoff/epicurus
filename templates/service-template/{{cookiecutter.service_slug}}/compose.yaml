@@ -7,7 +7,7 @@ services:
     build:
       context: ../..
       dockerfile: services/{{ cookiecutter.service_slug }}/Dockerfile
-    image: {{ cookiecutter.image }}:latest
+    image: {{ cookiecutter.image }}:${EPICURUS_VERSION:-latest}
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222

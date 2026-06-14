@@ -18,6 +18,9 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Code-block copy button** — a one-click copy button with a language label appears on
+  every fenced code block in assistant messages. Streaming partial fences are
+  pre-closed so they render as code rather than raw text mid-stream (`web` → 0.3.0).
 - **Knowledge module** — Obsidian-vault RAG: incremental ingestion into Qdrant and a
   `knowledge_search` retrieval tool for the agent. epicurus also indexes its own
   `docs/` tree by default, so the assistant can answer questions about the platform

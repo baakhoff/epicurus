@@ -11,27 +11,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PRERELEASE=""
-          case "${{ github.ref_name }}" in
-            *-*) PRERELEASE="--prerelease" ;;
-          esac
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            --verify-tag \
-            $PRERELEASE
-
+  # Build and push images first so they exist on GHCR before the GH Release
+  # is published. A GH Release without corresponding images is misleading.
   images:
     runs-on: ubuntu-latest
     permissions:
@@ -54,7 +35,31 @@ jobs:
           for df in services/*/Dockerfile; do
             svc="$(basename "$(dirname "$df")")"
             img="ghcr.io/${owner}/epicurus-${svc}"
+            echo "::group::build + push ${svc}"
             docker build -f "$df" -t "${img}:${version}" -t "${img}:latest" .
             docker push "${img}:${version}"
             docker push "${img}:latest"
+            echo "::endgroup::"
           done
+
+  release:
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE=""
+          case "${{ github.ref_name }}" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag \
+            $PRERELEASE

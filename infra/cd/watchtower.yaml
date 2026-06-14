@@ -1,0 +1,35 @@
+# Optional Watchtower compose fragment — automatic :latest image tracking.
+#
+# Use this if you want the box to converge to the newest release automatically
+# rather than running reconcile.sh on a schedule.  It polls GHCR every 5 minutes
+# and restarts any container whose image digest has changed.
+#
+# Usage (run from the repo root):
+#
+#   docker compose -f compose.yaml -f infra/cd/watchtower.yaml up -d watchtower
+#
+# GHCR credentials — images on a private repo require a PAT with read:packages.
+# Add these to your .env at the repo root:
+#
+#   GHCR_USERNAME=<your-github-username>
+#   GHCR_TOKEN=<ghp_...read:packages PAT>
+#
+# See docs/infrastructure/auto-deploy.md for the full setup guide.
+#
+# NOTE: Watchtower updates every running container.  If this box runs containers
+# unrelated to epicurus, pin EPICURUS_VERSION in .env and use reconcile.sh
+# instead (it only pulls the compose-declared images).
+
+name: epicurus
+
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"   # check every 5 minutes
+      WATCHTOWER_CLEANUP: "true"        # remove old image layers after update
+      REPO_USER: ${GHCR_USERNAME}
+      REPO_PASS: ${GHCR_TOKEN}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

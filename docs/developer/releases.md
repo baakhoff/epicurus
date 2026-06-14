@@ -43,6 +43,13 @@ immutable image that was verified in CI, satisfying the immutable-image principl
 in `DEPLOYMENT.md` (same image through staging → prod, no surprise updates from a
 bad push to `:latest`).
 
+## Automatic deployment to the operator's box
+
+Once a tag is pushed the box reconciles itself — no manual `docker compose pull`
+needed.  Two mechanisms are available (scheduled script or Watchtower); the full
+walkthrough, GHCR authentication, and rollback procedure are in
+**[Auto-deploy (CD)](../infrastructure/auto-deploy.md)**.
+
 ## Changelog
 
 Notable changes are recorded in

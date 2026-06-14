@@ -38,6 +38,7 @@
 **Infrastructure**
 
 - [Overview](infrastructure/index.md)
+- [Auto-deploy (CD)](infrastructure/auto-deploy.md)
 - [Secrets (OpenBao)](infrastructure/secrets.md)
 - [Startup and recovery](infrastructure/startup-and-recovery.md)
 - [Backup and restore](infrastructure/backup-and-restore.md)

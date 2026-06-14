@@ -119,11 +119,12 @@ export const api = {
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/status`),
   // A module page's data, proxied through the core. The shape is the page
   // archetype's contract (e.g. BrowserData); the screen validates it (ADR-0018).
-  modulePage: (name: string, pageId: string) =>
-    request(
-      z.record(z.string(), z.unknown()),
-      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`,
-    ),
+  // Extra params (e.g. path, q for the storage browser) are forwarded as-is.
+  modulePage: (name: string, pageId: string, params?: Record<string, string>) => {
+    const base = `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`;
+    const search = params && Object.keys(params).length > 0 ? "?" + new URLSearchParams(params).toString() : "";
+    return request(z.record(z.string(), z.unknown()), base + search);
+  },
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(

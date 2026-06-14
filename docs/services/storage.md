@@ -1,11 +1,15 @@
 # storage — file-tree index + object store
 
-**`epicurus-storage`** is a sidecar module that gives the agent access to a file tree on
-disk — a **read-only index** it can list, search, and read — plus **app-managed object
-storage** in MinIO for objects the platform itself creates. Host port **8083**.
+**`epicurus-storage`** v0.2.0 is a sidecar module that gives the agent access to a file
+tree on disk — a **read-only index** it can list, search, and read — plus **app-managed
+object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
 The read-only tree covers the operator's existing files (e.g. an HDD); the object store
 covers generated files, exports, and attachments.
+
+v0.2.0 adds a **Files** left-nav page (the `browser` archetype, ADR-0018): browse the
+indexed tree by directory, search by name, and download files — all core-rendered from
+data the module supplies; no module markup runs in the shell.
 
 ## The contract it exposes
 
@@ -25,7 +29,8 @@ covers generated files, exports, and attachments.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /download?path=…` | Stream a file (binary-safe). Path-traversal attempts → **HTTP 400**. |
+| `GET /pages/files?path=…&q=…` | `BrowserData`-shaped payload for the Files left-nav page (ADR-0018). `path` browses a directory (empty = root); `q` runs a search. Proxied by the core at `GET /platform/v1/modules/storage/pages/files`. |
+| `GET /download?path=…` | Stream a file (binary-safe). Path-traversal attempts → **HTTP 400**. Proxied by the core at `GET /platform/v1/modules/storage/download`. |
 | `GET /health` · `GET /metrics` · `GET /manifest` | Ops + the module manifest. |
 
 > **Path safety.** Both `storage_read` and `/download` resolve `(root / path)` and require
@@ -40,6 +45,20 @@ Emits **`<tenant>.storage.scan.completed`** after each full directory scan.
 
 Folder icon; a config form for the storage root; **Show status** and **Re-scan now**
 actions — auto-rendered by the shell (ADR-0007).
+
+### Left-nav page (ADR-0018)
+
+The **Files** page (`archetype: browser`, `nav_order: 10`) appears in the left nav when
+the storage module is reachable. It renders a two-pane tree/list + detail view:
+
+- **List pane**: directories (with breadcrumb navigation) and files; search input when
+  `search_enabled` is true.
+- **Detail pane**: file name, size, and a **Download** button that fetches the file
+  through the core proxy (`/platform/v1/modules/storage/download?path=…`).
+- **Navigation**: clicking a directory drills in (the list refetches with `?path=…`);
+  breadcrumbs let you navigate back up.
+
+The module supplies data only; the shell (`BrowserView`) owns all chrome and styling.
 
 ## Configuration
 
@@ -77,4 +96,4 @@ STORAGE_HOST_ROOT=/path/to/your/files docker compose up -d storage
 
 Package `epicurus_storage`: `scanner.py` (walk + incremental upsert), `db.py`
 (`storage_files` + queries), `object_store.py` (MinIO via aioboto3), `service.py` (the MCP
-tools + manifest UI), `app.py` (lifespan + `/download`).
+tools + manifest UI + `build_page_data`), `app.py` (lifespan + `/download` + `/pages/files`).

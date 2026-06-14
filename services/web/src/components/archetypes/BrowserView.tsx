@@ -3,22 +3,59 @@
  * The module supplies only data (a list of items with detail bodies) through the
  * core page proxy; this screen renders it in ε style. No module markup runs here.
  *
+ * Extensions over the base contract:
+ *  - `search_enabled` → renders a search input; query param `q` is forwarded.
+ *  - `path` → current directory path; breadcrumbs let the user navigate up.
+ *  - `nav_path` on an item → clicking drills into that directory (sets path param).
+ *  - `href` on an item → a download link is shown in the detail pane.
+ *
  * Responsive: two panes side-by-side on wide screens; on phones the list fills the
  * view and selecting an item slides to its detail (with a back affordance).
  */
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useState } from "react";
+import { ChevronLeft, ChevronRight, Download, Folder, Search, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { EmptyState, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
-import { BrowserData } from "@/lib/contracts";
+import { BrowserData, type BrowserItem } from "@/lib/contracts";
+
+/** Breadcrumb segment for directory navigation. */
+interface Crumb {
+  label: string;
+  path: string;
+}
+
+function crumbs(path: string): Crumb[] {
+  if (!path) return [];
+  const parts = path.split("/").filter(Boolean);
+  return parts.map((label, i) => ({ label, path: parts.slice(0, i + 1).join("/") }));
+}
+
+function ItemIcon({ item }: { item: BrowserItem }) {
+  if (item.nav_path) return <Folder size={15} className="shrink-0 text-ink-faint" />;
+  return null;
+}
 
 export function BrowserView({ module, pageId }: { module: string; pageId: string }) {
+  const [currentPath, setCurrentPath] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // Reset selection when path or query changes.
+  useEffect(() => {
+    setSelectedId(null);
+  }, [currentPath, activeQuery]);
+
+  const params: Record<string, string> = {};
+  if (activeQuery) params.q = activeQuery;
+  else if (currentPath) params.path = currentPath;
+
   const query = useQuery({
-    queryKey: ["module-page", module, pageId],
-    queryFn: () => api.modulePage(module, pageId),
+    queryKey: ["module-page", module, pageId, currentPath, activeQuery],
+    queryFn: () => api.modulePage(module, pageId, Object.keys(params).length ? params : undefined),
   });
 
   if (query.isLoading) {
@@ -40,68 +77,168 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
 
   const data = BrowserData.parse(query.data ?? {});
   const selected = data.items.find((item) => item.id === selectedId) ?? null;
+  const breadcrumbs = crumbs(currentPath);
+
+  function navigateTo(path: string) {
+    setCurrentPath(path);
+    setSearchInput("");
+    setActiveQuery("");
+  }
+
+  function submitSearch(e: React.FormEvent) {
+    e.preventDefault();
+    setActiveQuery(searchInput.trim());
+    setCurrentPath("");
+  }
+
+  function clearSearch() {
+    setSearchInput("");
+    setActiveQuery("");
+    searchRef.current?.focus();
+  }
 
   return (
-    <div className="grid h-full min-h-0 sm:grid-cols-[minmax(0,20rem)_1fr]">
-      {/* list pane — hidden on phone once an item is open */}
-      <div
-        className={cn(
-          "min-h-0 overflow-y-auto border-edge sm:border-r",
-          selected && "hidden sm:block",
-        )}
-      >
-        {data.items.length === 0 ? (
-          <EmptyState quote="Nothing here yet." />
-        ) : (
-          <ul className="flex flex-col p-2">
-            {data.items.map((item) => (
-              <li key={item.id}>
-                <button
-                  onClick={() => setSelectedId(item.id)}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
-                    item.id === selectedId
-                      ? "bg-accent-dim text-accent-strong"
-                      : "text-ink hover:bg-surface-2",
-                  )}
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">{item.title}</span>
-                    {item.subtitle && (
-                      <span className="block truncate text-xs text-ink-faint">{item.subtitle}</span>
-                    )}
-                  </span>
-                  <ChevronRight size={15} className="shrink-0 text-ink-faint" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+    <div className="flex h-full min-h-0 flex-col">
+      {/* toolbar: breadcrumbs + optional search */}
+      {(breadcrumbs.length > 0 || data.search_enabled) && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-1.5">
+          {/* breadcrumbs */}
+          {breadcrumbs.length > 0 && (
+            <nav className="flex min-w-0 flex-1 items-center gap-1 text-xs text-ink-dim">
+              <button
+                onClick={() => navigateTo("")}
+                className="hover:text-ink shrink-0"
+                aria-label="root"
+              >
+                /
+              </button>
+              {breadcrumbs.map((crumb) => (
+                <span key={crumb.path} className="flex items-center gap-1">
+                  <ChevronRight size={12} className="shrink-0" />
+                  <button
+                    onClick={() => navigateTo(crumb.path)}
+                    className="max-w-[10rem] truncate hover:text-ink"
+                  >
+                    {crumb.label}
+                  </button>
+                </span>
+              ))}
+            </nav>
+          )}
 
-      {/* detail pane — hidden on phone until an item is open */}
-      <div className={cn("min-h-0 overflow-y-auto", !selected && "hidden sm:block")}>
-        {selected ? (
-          <article className="mx-auto max-w-2xl px-5 py-5">
-            <button
-              onClick={() => setSelectedId(null)}
-              className="mb-3 inline-flex items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
-            >
-              <ChevronLeft size={15} /> back
-            </button>
-            <h2 className="font-serif text-xl text-ink">{selected.title}</h2>
-            {selected.subtitle && <p className="mt-0.5 text-sm text-ink-dim">{selected.subtitle}</p>}
-            {selected.body && (
-              <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">
-                {selected.body}
-              </p>
-            )}
-          </article>
-        ) : (
-          <div className="hidden h-full items-center justify-center sm:flex">
-            <EmptyState quote="Select something to read it here." />
-          </div>
-        )}
+          {/* search */}
+          {data.search_enabled && (
+            <form onSubmit={submitSearch} className="flex items-center gap-1 ml-auto">
+              <div className="relative flex items-center">
+                <Search size={13} className="pointer-events-none absolute left-2 text-ink-faint" />
+                <input
+                  ref={searchRef}
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  placeholder="Search…"
+                  className="h-7 rounded-(--radius-field) border border-edge bg-surface-1 pl-6 pr-7 text-xs text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                {(searchInput || activeQuery) && (
+                  <button
+                    type="button"
+                    onClick={clearSearch}
+                    className="absolute right-1.5 text-ink-faint hover:text-ink"
+                    aria-label="clear search"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+        </div>
+      )}
+
+      {/* two-pane body */}
+      <div className="grid min-h-0 flex-1 sm:grid-cols-[minmax(0,20rem)_1fr]">
+        {/* list pane — hidden on phone once an item is open */}
+        <div
+          className={cn(
+            "min-h-0 overflow-y-auto border-edge sm:border-r",
+            selected && "hidden sm:block",
+          )}
+        >
+          {data.items.length === 0 ? (
+            <EmptyState quote={activeQuery ? "No matches." : "Nothing here yet."} />
+          ) : (
+            <ul className="flex flex-col p-2">
+              {data.items.map((item) => (
+                <li key={item.id}>
+                  <button
+                    onClick={() => {
+                      if (item.nav_path) {
+                        navigateTo(item.nav_path);
+                      } else {
+                        setSelectedId(item.id);
+                      }
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
+                      item.id === selectedId
+                        ? "bg-accent-dim text-accent-strong"
+                        : "text-ink hover:bg-surface-2",
+                    )}
+                  >
+                    <ItemIcon item={item} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm">{item.title}</span>
+                      {item.subtitle && (
+                        <span className="block truncate text-xs text-ink-faint">{item.subtitle}</span>
+                      )}
+                    </span>
+                    {item.nav_path ? (
+                      <ChevronRight size={15} className="shrink-0 text-ink-faint" />
+                    ) : (
+                      <ChevronRight size={15} className="shrink-0 text-ink-faint" />
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* detail pane — hidden on phone until an item is open */}
+        <div className={cn("min-h-0 overflow-y-auto", !selected && "hidden sm:block")}>
+          {selected ? (
+            <article className="mx-auto max-w-2xl px-5 py-5">
+              <button
+                onClick={() => setSelectedId(null)}
+                className="mb-3 inline-flex items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
+              >
+                <ChevronLeft size={15} /> back
+              </button>
+              <h2 className="font-serif text-xl text-ink">{selected.title}</h2>
+              {selected.subtitle && (
+                <p className="mt-0.5 text-sm text-ink-dim">{selected.subtitle}</p>
+              )}
+              {selected.body && (
+                <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">
+                  {selected.body}
+                </p>
+              )}
+              {selected.href && (
+                <a
+                  href={selected.href}
+                  download={selected.title}
+                  className="mt-5 inline-flex items-center gap-2 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 transition-colors"
+                >
+                  <Download size={14} />
+                  Download
+                </a>
+              )}
+            </article>
+          ) : (
+            <div className="hidden h-full items-center justify-center sm:flex">
+              <EmptyState quote="Select a file to see its details." />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -12,13 +12,16 @@ Object-store tools (read/write, backed by MinIO):
   storage_object_get  — retrieve a stored object by key
 
 The /download HTTP endpoint (binary streaming) lives on the FastAPI layer.
+The /pages/{page_id} HTTP endpoint (browser archetype data) lives on the FastAPI layer.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
-from epicurus_core import EpicurusModule, UiAction, UiSection
+from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
 from epicurus_storage.db import FileEntry, FileIndex
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.scanner import scan
@@ -26,7 +29,59 @@ from epicurus_storage.settings import READ_MAX_BYTES
 
 MODULE_NAME = "storage"
 
+STORAGE_PAGE_ID = "files"
+
 SCAN_COMPLETE_SUBJECT = "storage.scan.completed"
+
+
+def _fmt_size(size: int) -> str:
+    """Human-readable file size."""
+    for unit, threshold in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if size >= threshold:
+            return f"{size / threshold:.1f} {unit}"
+    return f"{size} B"
+
+
+def _entry_to_item(entry: FileEntry, *, download_base: str) -> dict[str, Any]:
+    """Convert a ``FileEntry`` to a ``BrowserItem``-shaped dict (ADR-0018)."""
+    is_dir = entry.kind == "dir"
+    subtitle = "directory" if is_dir else _fmt_size(entry.size)
+    return {
+        "id": entry.path,
+        "title": entry.name,
+        "subtitle": subtitle,
+        "body": None,
+        "icon": "folder" if is_dir else "file",
+        "nav_path": entry.path if is_dir else None,
+        "href": f"{download_base}?path={quote(entry.path)}" if not is_dir else None,
+    }
+
+
+def build_page_data(
+    entries: list[FileEntry],
+    *,
+    path: str,
+    query: str,
+    download_base: str,
+) -> dict[str, Any]:
+    """Return ``BrowserData``-shaped dict for the Files left-nav page (ADR-0018).
+
+    ``download_base`` is the URL prefix for the core download proxy, e.g.
+    ``/platform/v1/modules/storage/download``.
+    """
+    if query:
+        title = f"Files — {query}"
+    elif path:
+        title = f"Files — {path}"
+    else:
+        title = "Files"
+
+    return {
+        "title": title,
+        "path": path,
+        "search_enabled": True,
+        "items": [_entry_to_item(e, download_base=download_base) for e in entries],
+    }
 
 
 def build_module(
@@ -39,7 +94,7 @@ def build_module(
     """Build the storage module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.1.0",
+        version="0.2.0",
         description=(
             "File-tree index (list, search, read) over the operator's HDD, "
             "plus app-managed object storage via MinIO."
@@ -76,6 +131,15 @@ def build_module(
                 ),
             ],
         ),
+        pages=[
+            PageSpec(
+                id=STORAGE_PAGE_ID,
+                title="Files",
+                archetype="browser",
+                icon="folder",
+                nav_order=10,
+            )
+        ],
     )
 
     module.emits(SCAN_COMPLETE_SUBJECT, "published after each full directory scan")

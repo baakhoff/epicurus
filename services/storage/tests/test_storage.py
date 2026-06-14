@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.scanner import scan
-from epicurus_storage.service import build_module
+from epicurus_storage.service import STORAGE_PAGE_ID, build_module, build_page_data
 
 TENANT = "test"
 
@@ -294,6 +294,72 @@ async def test_manifest_declares_tools_and_event(
     }
     assert expected <= tool_names
     assert any(e.subject == "storage.scan.completed" for e in manifest.events_emitted)
+
+
+async def test_manifest_declares_files_page(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    module = build_module(tmp_index, fake_objects, storage_root="/data", tenant=TENANT)
+    manifest = await module.manifest()
+    page_ids = {p.id for p in manifest.pages}
+    assert STORAGE_PAGE_ID in page_ids
+    page = next(p for p in manifest.pages if p.id == STORAGE_PAGE_ID)
+    assert page.archetype == "browser"
+    assert page.title == "Files"
+
+
+# ── Page data (browser archetype) ────────────────────────────────────────────
+
+
+async def test_page_data_root_browse(tmp_index: FileIndex, sample_tree: Path) -> None:
+    await scan(sample_tree, tmp_index, tenant=TENANT)
+    entries = await tmp_index.browse(tenant=TENANT, path="")
+    data = build_page_data(entries, path="", query="", download_base="/proxy/download")
+    assert data["title"] == "Files"
+    assert data["search_enabled"] is True
+    assert data["path"] == ""
+    names = {item["title"] for item in data["items"]}
+    assert names == {"docs", "images"}
+
+
+async def test_page_data_subdir_browse(tmp_index: FileIndex, sample_tree: Path) -> None:
+    await scan(sample_tree, tmp_index, tenant=TENANT)
+    entries = await tmp_index.browse(tenant=TENANT, path="docs")
+    data = build_page_data(entries, path="docs", query="", download_base="/proxy/download")
+    assert "docs" in data["title"]
+    names = {item["title"] for item in data["items"]}
+    assert "readme.txt" in names
+    assert "notes.md" in names
+
+
+async def test_page_data_dirs_have_nav_path(tmp_index: FileIndex, sample_tree: Path) -> None:
+    await scan(sample_tree, tmp_index, tenant=TENANT)
+    entries = await tmp_index.browse(tenant=TENANT, path="")
+    data = build_page_data(entries, path="", query="", download_base="/proxy/download")
+    dir_items = [i for i in data["items"] if i["nav_path"] is not None]
+    assert dir_items, "directories must carry nav_path"
+    for item in dir_items:
+        assert item["href"] is None
+
+
+async def test_page_data_files_have_href(tmp_index: FileIndex, sample_tree: Path) -> None:
+    await scan(sample_tree, tmp_index, tenant=TENANT)
+    entries = await tmp_index.browse(tenant=TENANT, path="docs")
+    data = build_page_data(entries, path="docs", query="", download_base="/proxy/download")
+    file_items = [i for i in data["items"] if i["nav_path"] is None]
+    assert file_items, "files must carry href"
+    for item in file_items:
+        assert item["href"] is not None
+        assert "/proxy/download" in item["href"]
+
+
+async def test_page_data_search(tmp_index: FileIndex, sample_tree: Path) -> None:
+    await scan(sample_tree, tmp_index, tenant=TENANT)
+    entries = await tmp_index.search(tenant=TENANT, query="readme", limit=200)
+    data = build_page_data(entries, path="", query="readme", download_base="/proxy/download")
+    assert "readme" in data["title"].lower()
+    assert len(data["items"]) == 1
+    assert data["items"][0]["title"] == "readme.txt"
 
 
 # ── Tenant isolation ──────────────────────────────────────────────────────────

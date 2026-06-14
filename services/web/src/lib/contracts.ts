@@ -196,6 +196,10 @@ export const BrowserItem = z.object({
   subtitle: z.string().nullish(),
   body: z.string().nullish(),
   icon: z.string().nullish(),
+  /** URL the shell uses to navigate into a directory (directories only). */
+  nav_path: z.string().nullish(),
+  /** Absolute download URL proxied through the core (files only). */
+  href: z.string().nullish(),
 });
 export type BrowserItem = z.infer<typeof BrowserItem>;
 
@@ -203,6 +207,10 @@ export type BrowserItem = z.infer<typeof BrowserItem>;
 export const BrowserData = z.object({
   title: z.string().nullish(),
   items: z.array(BrowserItem).default([]),
+  /** Current directory path being browsed (empty = root). */
+  path: z.string().nullish(),
+  /** When true the shell renders a search input above the list. */
+  search_enabled: z.boolean().optional(),
 });
 export type BrowserData = z.infer<typeof BrowserData>;
 

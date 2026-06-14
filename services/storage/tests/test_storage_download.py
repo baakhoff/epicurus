@@ -73,3 +73,29 @@ async def test_download_directory_rejected(storage_app: object) -> None:
     ) as client:
         resp = await client.get("/download", params={"path": "sub"})
     assert resp.status_code == 400
+
+
+# ── /pages/{page_id} ─────────────────────────────────────────────────────────
+# The 404 guard fires before any DB access, so ASGITransport (no lifespan) is fine.
+# Data-shape correctness is covered by the unit tests in test_storage.py via
+# build_page_data() directly.
+
+
+@pytest.mark.anyio
+async def test_pages_unknown_id_returns_404(storage_app: object) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/pages/nonexistent")
+    assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_pages_404_for_second_unknown(storage_app: object) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/pages/not-a-real-page-id")
+    assert resp.status_code == 404

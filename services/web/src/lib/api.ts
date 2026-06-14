@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import {
   AttachmentUploaded,
+  EmailMessage,
   HoverCard,
   LlmPrefs,
   MessageRecord,
@@ -135,6 +136,12 @@ export const api = {
     request(
       z.array(ModuleAttachmentItem),
       `/platform/v1/modules/${encodeURIComponent(name)}/attachments`,
+    ),
+  // Full email message for the right-panel email-reader view (ADR-0019).
+  readMailMessage: (module: string, refId: string) =>
+    request(
+      EmailMessage,
+      `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
     ),
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).

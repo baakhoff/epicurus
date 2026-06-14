@@ -2,6 +2,9 @@
 
 Three provider-agnostic tools: ``mail_search``, ``mail_read``, ``mail_send``.
 The tool names and signatures are domain-neutral; no Gmail specifics appear here.
+``mail_search`` returns a :func:`~epicurus_core.tool_envelope` so the UI renders
+each result as an entity-reference chip (ADR-0019): hover for the hover-card,
+click to open the full message in the right-panel email-reader.
 ``mail_send`` is declared a danger action (ADR-0007): it sends a real message
 and cannot be undone, so the web shell displays a confirmation prompt before
 invoking it.
@@ -9,8 +12,8 @@ invoking it.
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, UiAction, UiSection
-from epicurus_mail.provider import MailMessage, MailProvider
+from epicurus_core import EntityRef, EpicurusModule, UiAction, UiSection, tool_envelope
+from epicurus_mail.provider import MailProvider
 
 MODULE_NAME = "mail"
 
@@ -19,7 +22,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.1.0",
+        version="0.2.0",
         description=(
             "Provider-agnostic mail — search, read, and send. Gmail is the v0.1 provider."
         ),
@@ -42,37 +45,68 @@ def build_module(provider: MailProvider) -> EpicurusModule:
                 ),
             ],
         ),
+        resolver=True,
     )
 
     module.emits("mail.sent", "Published after a message is sent successfully.")
 
     @module.tool()
-    async def mail_search(query: str, max_results: int = 10) -> list[MailMessage]:
+    async def mail_search(query: str, max_results: int = 10) -> str:
         """Search for mail matching *query*.
 
         Supports the same query syntax as Gmail (e.g. ``from:alice``,
         ``subject:invoice``, ``is:unread``).  Returns up to *max_results*
-        messages with metadata only — no body.  Call ``mail_read`` with a
-        message ``id`` to retrieve the full body.
+        messages as entity-reference chips — hover for a quick preview, click
+        to open the full message in the panel.  Each chip carries the message
+        id; call ``mail_read`` explicitly only when you need the body as text.
 
         Args:
             query: Mail search expression (Gmail query syntax).
             max_results: Maximum number of messages to return (1-50, default 10).
         """
         capped = max(1, min(max_results, 50))
-        return await provider.search(query, capped)
+        messages = await provider.search(query, capped)
+        if not messages:
+            return tool_envelope("No messages found.", [])
+        refs = [
+            EntityRef(
+                ref_id=m.id,
+                module=MODULE_NAME,
+                kind="message",
+                title=m.subject or "(no subject)",
+                summary=m.snippet,
+            )
+            for m in messages
+        ]
+        lines = [
+            f"- [{m.subject or '(no subject)'}] from {m.sender}"
+            + (f" ({m.date})" if m.date else "")
+            for m in messages
+        ]
+        text = f"Found {len(messages)} message(s):\n" + "\n".join(lines)
+        return tool_envelope(text, refs)
 
     @module.tool()
-    async def mail_read(message_id: str) -> MailMessage:
+    async def mail_read(message_id: str) -> str:
         """Fetch the full content of a mail message by its *message_id*.
 
-        Returns the message with the decoded plain-text body.  Use
-        ``mail_search`` first to discover message IDs.
+        Returns the message subject, sender, date, and decoded plain-text body
+        as a readable block.  Use ``mail_search`` first to discover message IDs.
+        The UI opens the full message in the right-panel when a user clicks an
+        email chip — call this tool only when you need the body as text for
+        reasoning or quoting.
 
         Args:
             message_id: The message ID returned by ``mail_search``.
         """
-        return await provider.read(message_id)
+        m = await provider.read(message_id)
+        parts = [f"Subject: {m.subject or '(no subject)'}"]
+        parts.append(f"From: {m.sender}")
+        if m.date:
+            parts.append(f"Date: {m.date}")
+        parts.append("")
+        parts.append(m.body or "(no body)")
+        return "\n".join(parts)
 
     @module.tool()
     async def mail_send(to: str, subject: str, body: str) -> str:

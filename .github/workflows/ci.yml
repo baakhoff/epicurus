@@ -101,21 +101,24 @@ jobs:
 
       - name: Check Prometheus config and rules
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}/infra/observability/prometheus:/prometheus:ro" \
+          # prom/prometheus' entrypoint is `prometheus`; override it to run promtool.
+          # Mount at /etc/prometheus so the config's absolute rule_files glob
+          # (/etc/prometheus/rules/*.yml) resolves during `check config`.
+          docker run --rm --entrypoint=promtool \
+            -v "${{ github.workspace }}/infra/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.1.0 \
-            promtool check config /prometheus/prometheus.yml
-          docker run --rm \
-            -v "${{ github.workspace }}/infra/observability/prometheus/rules:/rules:ro" \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint=promtool \
+            -v "${{ github.workspace }}/infra/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.1.0 \
-            promtool check rules /rules/epicurus-alerts.yml
+            check rules /etc/prometheus/rules/epicurus-alerts.yml
 
       - name: Check Alertmanager config
         run: |
-          docker run --rm \
+          docker run --rm --entrypoint=amtool \
             -v "${{ github.workspace }}/infra/observability/alertmanager:/alertmanager:ro" \
             prom/alertmanager:v0.27.0 \
-            amtool check-config /alertmanager/alertmanager.yml
+            check-config /alertmanager/alertmanager.yml
 
   images:
     runs-on: ubuntu-latest

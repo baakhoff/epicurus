@@ -144,7 +144,7 @@ headers = {"Authorization": f"Bearer {token}"}
 
 **Always go through `get_oauth_token`.** Do not call `/platform/v1/oauth/{provider}/token`
 directly, and do not add your own token method to `PlatformClient` — every module shares
-this one contract so the credential boundary stays in the core (ADR-0010, ADR-0016). The
+this one contract so the credential boundary stays in the core (ADR-0010, ADR-0020). The
 user connects the account and grants scopes from the web Settings page; provisioning the
 provider's client credentials is an operator step (see
 [Secrets](../infrastructure/secrets.md)).

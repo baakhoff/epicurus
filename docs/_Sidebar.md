@@ -46,4 +46,5 @@
 - [Building a module](developer/building-a-module.md)
 - [Testing](developer/testing.md)
 - [Contributing](developer/contributing.md)
+- [Versioning](developer/versioning.md)
 - [Releases](developer/releases.md)

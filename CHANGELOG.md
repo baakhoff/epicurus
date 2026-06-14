@@ -12,7 +12,51 @@ images to GHCR.
 
 ## [Unreleased]
 
-Phase 2 (knowledge & storage) is in progress.
+**Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations)** —
+the platform grows from the core runtime into a module fleet. Targeted for the next
+bundled-stack release, **v0.2.0**.
+
+### Added
+
+- **Knowledge module** — Obsidian-vault RAG: incremental ingestion into Qdrant and a
+  `knowledge_search` retrieval tool for the agent. epicurus also indexes its own
+  `docs/` tree by default, so the assistant can answer questions about the platform
+  (ADR-0013).
+- **Storage module** — indexes the on-disk file tree with browse / search / download
+  APIs and agent file tools, plus a **MinIO** object store for app-managed objects.
+- **Web search** — self-hosted **SearXNG** with a `web_search` MCP tool.
+- **Connected accounts (OAuth 2.0)** — core-managed Authorization-Code flow with a
+  per-tenant token vault and transparent refresh, plus a "Connected accounts"
+  Settings screen to connect / disconnect providers and grant scopes incrementally.
+  Modules fetch tokens through the platform API and never hold client secrets
+  (ADR-0020).
+- **Calendar module** — provider-neutral calendar with **local** and **Google**
+  providers behind one tool surface (ADR-0016).
+- **Mail module** — Gmail provider v0.1: `mail_search`, `mail_read`, `mail_send`.
+- **Tasks module** — provider-neutral tasks (`tasks_list`, `tasks_add`,
+  `tasks_complete`) with **local** and **Google** providers (ADR-0016).
+- **Platform inference API** — `embed` + `chat` over the core LLM gateway, exposed to
+  modules through `PlatformClient`; modules never call models directly.
+- **Versioning policy** — per-component SemVer plus a bundled-stack release tag;
+  every PR and dispatch brief declares its version bump (ADR-0017).
+- **Runtime smoke gate** — CI boots the whole stack on every PR and asserts the
+  integration last mile (image tags, mounts, module discovery, one MCP round-trip),
+  catching breakage that lint and `compose config` miss (ADR-0015).
+
+### Changed
+
+- **Persistent secrets** — OpenBao moves from dev (in-memory) mode to file storage
+  with an init / unseal lifecycle, so provider keys and module config survive a
+  restart (ADR-0014). Resolves the v0.1.0 "secrets are not yet persistent" limitation.
+- **Documentation** — a navigable `docs/` tree with a page per service / module and a
+  full reference section (ADR-0013).
+
+### Fixed
+
+- Stability fixes across the data plane and modules: the MinIO client image tag,
+  knowledge `mtime_ns` stored as `BigInteger`, the OpenBao bootstrap
+  (init / unseal / policy / token), the SearXNG image tag and settings mount, and the
+  pytest `importlib` import mode.
 
 ## [0.1.0] — 2026-06-12
 

@@ -39,3 +39,11 @@ and provider-pluggable, not provider-locked). -->
 - meaningful tests (unit + integration; cover the contract, edges, failure modes);
 - docs updated in the same PR — a behaviour change without a docs change is rejected (ADR-0013);
 - `task smoke` / the runtime-smoke CI gate is green. -->
+
+## Version bump
+<!-- The target SemVer bump for each component this work touches, per ADR-0017
+(docs/developer/versioning.md): MAJOR (a brand-new/unseen capability or rewrite),
+MINOR (a new user-visible capability), PATCH (a fix or invisible internal change).
+State it per component — e.g. a new module starts at its own 0.1.0; an added
+user-visible tool on an existing module is a MINOR for that module. The PR repeats
+this and the reviewer enforces it. -->

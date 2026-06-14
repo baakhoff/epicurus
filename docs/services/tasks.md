@@ -64,7 +64,7 @@ class Task(BaseModel):
 
 - Calls the Google Tasks REST API (`tasks.googleapis.com`).
 - OAuth token fetched from `GET /platform/v1/oauth/google/token` — **no client
-  secret or refresh token lives in this module** (ADR-0016 / non-negotiable #8).
+  secret or refresh token lives in this module** (ADR-0020 / non-negotiable #8).
 - Requires the Google account to be connected via the Settings screen (issue #86
   OAuth flow) before any tool call can succeed.
 - `list_id` defaults to `@default` (the user's default Google task list).

@@ -2,7 +2,7 @@
 
 OAuth tokens are fetched from the core via ``PlatformClient.get_oauth_token``
 (which calls ``GET /platform/v1/oauth/google/token``) — no client secret or
-refresh token ever leaves the core (ADR-0016 / non-negotiable #8).
+refresh token ever leaves the core (ADR-0020 / non-negotiable #8).
 """
 
 from __future__ import annotations

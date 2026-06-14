@@ -14,7 +14,8 @@ epicurus.
   `epicurus-core`, and how they fit together.
 - **[Testing](testing.md)** — the quality gates and how tests are written.
 - **[Contributing](contributing.md)** — the workflow for getting a change merged.
-- **[Releases](releases.md)** — versioning and how releases are cut.
+- **[Versioning](versioning.md)** — per-component SemVer and the bundled-stack tag.
+- **[Releases](releases.md)** — how a release is cut and published.
 
 ## Tech stack
 

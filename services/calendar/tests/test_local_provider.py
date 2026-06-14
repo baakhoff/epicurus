@@ -77,6 +77,24 @@ async def test_delete_event(store: LocalEventStore) -> None:
     assert await store.count(tenant="t1") == 0
 
 
+async def test_get_event_returns_match(store: LocalEventStore) -> None:
+    created = await store.create_event(tenant="t1", title="Find me", start=_dt(9), end=_dt(10))
+    fetched = await store.get_event(tenant="t1", event_id=created.id)
+    assert fetched is not None
+    assert fetched.id == created.id
+    assert fetched.title == "Find me"
+
+
+async def test_get_event_missing_returns_none(store: LocalEventStore) -> None:
+    assert await store.get_event(tenant="t1", event_id="missing") is None
+
+
+async def test_get_event_is_tenant_scoped(store: LocalEventStore) -> None:
+    created = await store.create_event(tenant="t1", title="Owned", start=_dt(9), end=_dt(10))
+    # Another tenant must not resolve t1's event id.
+    assert await store.get_event(tenant="t2", event_id=created.id) is None
+
+
 # ── LocalCalendarProvider ────────────────────────────────────────────────────
 
 
@@ -98,6 +116,16 @@ async def test_provider_create_and_list(provider: LocalCalendarProvider) -> None
 
 async def test_provider_is_available(provider: LocalCalendarProvider) -> None:
     assert await provider.is_available(tenant_id="t1") is True
+
+
+async def test_provider_get_event(provider: LocalCalendarProvider) -> None:
+    created = await provider.create_event(
+        tenant_id="t1", title="Review", start=_dt(14), end=_dt(15)
+    )
+    fetched = await provider.get_event(tenant_id="t1", event_id=created.id)
+    assert fetched is not None
+    assert fetched.title == "Review"
+    assert await provider.get_event(tenant_id="t1", event_id="nope") is None
 
 
 # ── Free-slot algorithm ──────────────────────────────────────────────────────

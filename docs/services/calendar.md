@@ -23,13 +23,19 @@ Since **v0.2** the module also contributes a core-rendered **Calendar page** (mo
 week / agenda) via the `calendar` archetype — it supplies the events, the shell draws the
 views (see *Calendar page* under Contract, below).
 
+Since **v0.4** the module speaks the **entity-reference contract** (ADR-0019): listed events
+come back as interactive chips, a referenced event resolves to a core **hover-card**, and the
+module is a **chat-attachment source** so an event can be attached to a turn. It supplies data
+only — the core renders the chip, the hover-card, and the panel (see *Entity references,
+hover-cards & attachments* under Contract, below).
+
 ## Contract
 
 ### MCP tools
 
 | Tool | Description |
 |------|-------------|
-| `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns a list of event objects ordered by start time. |
+| `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
 | `calendar_create_event(title, start, end, description?, location?)` | Create a new event. `start`/`end` are ISO-8601 strings. Returns the created event. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
@@ -79,6 +85,31 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
 Read-first in v0.2 (view + navigate); creating and editing events from the page is a later
 bump — the `calendar_*` MCP tools remain the agent's write path.
 
+### Entity references, hover-cards & attachments (ADR-0019)
+
+`calendar_list_events` returns its events as **entity-reference chips** rather than a bare list:
+each chip carries the event id (`kind = "event"`, `module = "calendar"`), so the agent can refer
+to an event later without re-listing. Hovering a chip fetches the event's **hover-card**; clicking
+opens it in the right panel's `entity-detail` view. The module supplies data only — the core
+renders both. (Because the list tool now returns a chip envelope rather than plain text, it is no
+longer a module-card action button — events are surfaced through chat.)
+
+**Resolver** (`resolver = true`) — `GET /resolve/event/{ref_id}` returns the uniform `HoverCard`
+envelope (`title` · `description` · `details: [{label, value}]`): *When* (start–end), *Location*
+(when set), and *Calendar* (the active provider). An unknown `kind` or a missing event is a `404`.
+The core proxies it at `GET /platform/v1/modules/calendar/resolve/{kind}/{ref_id}`.
+
+**Attachment source** (`attachable = true`) — an event can be attached to a turn:
+
+- **Picker** — `GET /attachments` lists up to 50 **upcoming** events (next 30 days) as
+  `{ref_id, kind: "event", title}` rows the composer shows.
+- **Resolve** — `GET /attachments/{ref_id}` returns `{title, excerpt}` — the event's title, time,
+  location, and description — which the agent injects into the turn's context.
+
+Both are proxied by the core at `GET /platform/v1/modules/calendar/attachments[/{ref_id}]`; a
+missing event is a `404`. All three surfaces use the active provider's `get_event`, so they
+behave identically against the local and Google backends.
+
 ### REST endpoints
 
 | Method | Path | Description |
@@ -88,6 +119,9 @@ bump — the `calendar_*` MCP tools remain the agent's write path.
 | `GET` | `/manifest` | Module manifest (tools, events, UI descriptor). |
 | `GET` | `/status` | Live status: active provider, availability, event count (local only). |
 | `GET` | `/pages/{page_id}` | Calendar archetype page data (ADR-0018). Accepts `start`/`end` (ISO-8601) query params bounding the window; defaults to the current month. The core proxies this — the shell never calls it directly. |
+| `GET` | `/resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced event (ADR-0019); `kind` is `event`. Returns a `HoverCard`; unknown kind / missing event is `404`. Core-proxied. |
+| `GET` | `/attachments` | Chat-attachment picker (ADR-0019): upcoming events as `{ref_id, kind, title}`. Core-proxied. |
+| `GET` | `/attachments/{ref_id}` | Resolve an attached event to `{title, excerpt}` (ADR-0019); missing event is `404`. Core-proxied. |
 | `POST /GET …` | `/mcp` | MCP SSE endpoint used by the core agent host. |
 
 ### NATS events

@@ -18,6 +18,16 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Notes module + page (attach-only, RAG-indexed)** — a new **`notes`** module: a
+  **Notes** left-nav page (the `editor` archetype) to write notes in the ε editor, each
+  saved to Postgres (the source of truth) and indexed into its **own** tenant-scoped Qdrant
+  collection. Notes are **attach-only** — the module exposes **no agent tool**, so the
+  assistant reads a note only when the user **attaches** it to a message (`attachable`,
+  ADR-0019); this is the line between Notes (you author + manually attach) and Knowledge
+  (your vault, agent-retrievable). The shared core editor gains in-app **authoring** — a
+  "New note" control creates documents through the existing save path, opt-in per page via
+  `EditorData.can_create` (knowledge keeps authoring in Obsidian) (ADR-0018 / ADR-0022 /
+  ADR-0026) (new `notes` → 0.1.0, `web` → 0.7.0).
 - **Cited knowledge documents get a hover-card** — when the agent cites a vault note or a
   platform-docs page (a `knowledge_search` result), it now renders in chat as an
   **entity-reference chip**: `knowledge_search` returns a `ToolEnvelope` and the module

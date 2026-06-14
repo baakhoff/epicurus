@@ -46,9 +46,9 @@ def test_name_derivation_matches_template(new_module: ModuleType) -> None:
 
 
 def test_next_free_port_in_repo(new_module: ModuleType) -> None:
-    # 8082-8091 are taken in the real tree; the next free module port is 8092.
-    assert new_module.next_free_port(REPO) == 8092
-    assert 8092 not in new_module.published_ports(REPO)
+    # 8082-8092 are taken in the real tree (notes took 8092); next free is 8093.
+    assert new_module.next_free_port(REPO) == 8093
+    assert 8093 not in new_module.published_ports(REPO)
 
 
 def test_run_scaffolds_and_wires(new_module: ModuleType, tmp_path: Path) -> None:

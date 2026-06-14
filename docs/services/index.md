@@ -16,6 +16,7 @@ contract. This is the map of every running block — each row links its full ref
 | **calendar** | module | provider-neutral calendar — events and scheduling (local + Google) | `8087` | [calendar](calendar.md) |
 | **mail** | module | provider-agnostic mail — search, read, and send via Gmail (v0.1) | `8090` | [mail](mail.md) |
 | **tasks** | module | task management — Google Tasks plus a local store (ADR-0016) | `8091` | [tasks](tasks.md) |
+| **notes** | module | author Obsidian-style notes into a private, attach-only RAG collection | `8092` | [notes](notes.md) |
 | **echo** | module | the reference module — proves the MCP tool + NATS event contract end to end | `8080` | [echo](echo.md) |
 
 Ports are loopback-bound by default; the [edge gateway](../infrastructure/index.md#edge-gateway)

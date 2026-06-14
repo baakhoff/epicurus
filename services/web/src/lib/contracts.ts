@@ -309,6 +309,12 @@ export type EditorDoc = z.infer<typeof EditorDoc>;
 export const EditorData = z.object({
   title: z.string().default("Knowledge"),
   docs: z.array(EditorDoc).default([]),
+  /**
+   * Opt into in-app authoring (ADR-0026): when true the shared editor shows a
+   * "New note" affordance that saves to a fresh path. Notes sets this; knowledge
+   * leaves it false (its documents are authored externally in Obsidian).
+   */
+  can_create: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 

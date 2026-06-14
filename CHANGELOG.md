@@ -130,6 +130,11 @@ bundled-stack release, **v0.2.0**.
   `testcontainers` ≥4.14.2); web deps (`jsdom` → 29, `lucide-react` → 1.x, plus a
   dev-dependency group). The `eslint` 10, `@vitejs/plugin-react` 6, and one
   Python-group bump are **deferred pending migration** (tracked in #172).
+- Declared the `sqlalchemy[asyncio]` ≥2.0.50 floor in the five service
+  `pyproject.toml` manifests (calendar, core-app, knowledge, storage, tasks). The
+  Dependabot bump (#168) had raised it in `uv.lock` only, leaving the source
+  manifests at ≥2.0 — `uv.lock` and the manifests now agree. No resolution change
+  (sqlalchemy stays 2.0.50).
 
 ## [0.1.0] — 2026-06-12
 

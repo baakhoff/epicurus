@@ -8,13 +8,18 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.providers.google import GoogleCalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
-from epicurus_calendar.service import MODULE_NAME, build_module
+from epicurus_calendar.service import (
+    CALENDAR_PAGE_ID,
+    MODULE_NAME,
+    build_module,
+    calendar_page,
+)
 from epicurus_calendar.settings import CalendarSettings
 from epicurus_core import (
     EventBus,
@@ -91,6 +96,28 @@ def create_app() -> FastAPI:
         if settings.calendar_provider == "local":
             status["event_count"] = await store.count(tenant=settings.default_tenant_id)
         return status
+
+    @app.get("/pages/{page_id}")
+    async def get_page(
+        page_id: str, start: str | None = None, end: str | None = None
+    ) -> dict[str, Any]:
+        """Serve the calendar archetype's page data (ADR-0018); the core proxies this.
+
+        ``start``/``end`` (ISO-8601) bound the window the shell is viewing — the core
+        forwards them from ``GET /platform/v1/modules/calendar/pages/{page_id}``. When
+        absent, the page falls back to the current month.
+        """
+        if page_id != CALENDAR_PAGE_ID:
+            raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+        try:
+            return await calendar_page(
+                provider,
+                tenant_id=settings.default_tenant_id,
+                start=start,
+                end=end,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     app.mount("/mcp", mcp_app)
 

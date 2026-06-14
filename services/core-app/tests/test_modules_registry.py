@@ -59,6 +59,14 @@ def _pages_manifest() -> ModuleManifest:
     )
 
 
+def _editor_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="knowledge",
+        version="0.4.0",
+        pages=[PageSpec(id="vault", title="Knowledge", archetype="editor")],
+    )
+
+
 def _resolver_manifest() -> ModuleManifest:
     return ModuleManifest(name="calendar", version="0.1.0", resolver=True)
 
@@ -189,7 +197,7 @@ async def test_get_page_proxies_declared_page() -> None:
         result = await registry.get_page("files", "browse")
 
     assert result["items"][0]["id"] == "a"
-    mock_client.get.assert_called_once_with("/pages/browse")
+    mock_client.get.assert_called_once_with("/pages/browse", params={})
 
 
 async def test_get_page_404_for_undeclared_page() -> None:
@@ -203,6 +211,91 @@ async def test_get_page_404_for_unknown_module() -> None:
     registry, _, _ = _registry(manifest=_pages_manifest())
     with pytest.raises(HTTPException) as err:
         await registry.get_page("ghost", "browse")
+    assert err.value.status_code == 404
+
+
+async def test_get_page_forwards_query_params() -> None:
+    """A parameterized archetype (e.g. a calendar's start/end) reaches the module."""
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_pages_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"events": []}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.get_page("files", "browse", params={"start": "s", "end": "e"})
+
+    assert result == {"events": []}
+    mock_client.get.assert_called_once_with("/pages/browse", params={"start": "s", "end": "e"})
+
+
+async def test_get_page_doc_proxies_editor_document() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_editor_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"path": "a.md", "title": "a", "content": "# A"}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.get_page_doc("knowledge", "vault", "a.md")
+
+    assert result["content"] == "# A"
+    mock_client.get.assert_called_once_with("/pages/vault/doc", params={"path": "a.md"})
+
+
+async def test_save_page_doc_proxies_put_with_body() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_editor_manifest())
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"path": "a.md", "indexed": True, "chunk_count": 2}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.put = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.save_page_doc("knowledge", "vault", "a.md", "# A")
+
+    assert result["indexed"] is True
+    mock_client.put.assert_called_once_with(
+        "/pages/vault/doc", params={"path": "a.md"}, json={"content": "# A"}
+    )
+
+
+async def test_get_page_doc_404_for_non_editor_page() -> None:
+    # A browser page owns no per-document read/write — the doc paths 404 for it.
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page_doc("files", "browse", "a.md")
+    assert err.value.status_code == 404
+
+
+async def test_get_page_doc_404_for_unknown_page() -> None:
+    registry, _, _ = _registry(manifest=_editor_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page_doc("knowledge", "ghost", "a.md")
+    assert err.value.status_code == 404
+
+
+async def test_save_page_doc_404_for_non_editor_page() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.save_page_doc("files", "browse", "a.md", "x")
     assert err.value.status_code == 404
 
 

@@ -135,16 +135,17 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 | `capability` | `str \| None` | `None` | reserved gate the shell may check before showing the page (e.g. a connected account) — not yet enforced |
 
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
-`browser` (tree/list + detail), `calendar`, `editor` (Obsidian-like doc),
-`board` (lists/cards). The shell ships one first-party screen per archetype;
-`browser` and `board` are implemented today, `calendar` and `editor` land with
-their module pages (Phase 3.8).
+`browser` (tree/list + detail), `calendar` (month / week / agenda), `editor`
+(Obsidian-like doc), `board` (lists/cards). The shell ships one first-party screen per
+archetype; `browser`, `calendar`, `editor`, and `board` are all implemented today.
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
 **`GET /platform/v1/modules/{name}/pages/{id}`** (validated against the manifest's
-declared pages — 404 otherwise), so the shell never calls a module directly. The
-`browser` archetype's data shape is:
+declared pages — 404 otherwise), so the shell never calls a module directly. Query params
+are **forwarded verbatim** to the module, so a parameterized archetype reads its window
+from the same path — e.g. the `calendar` passes `?start=…&end=…`. The `browser`
+archetype's data shape is:
 
 ```jsonc
 {
@@ -190,6 +191,45 @@ After a successful call the shell refetches the page.
   "actions": [
     { "tool": "tasks_add", "label": "Add task", "intent": "primary", "icon": "plus",
       "form": true, "fields": ["title", "notes", "due"] }
+  ]
+}
+```
+
+**The `editor` archetype (Obsidian-like docs).** Its `GET /pages/{id}` returns a
+document *list* (content is fetched lazily per document), and it owns two extra,
+**editor-only** doc endpoints the core proxies (a non-`editor` page 404s on them):
+
+```jsonc
+// GET /pages/{id}  →  the browsable document list
+{ "title": "Knowledge", "docs": [ { "id": "a.md", "title": "a", "path": "a.md" } ] }
+// GET /pages/{id}/doc?path=<rel>  →  one document's content
+{ "path": "a.md", "title": "a", "content": "# A\n…" }
+// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save
+{ "path": "a.md", "indexed": true, "chunk_count": 3 }
+```
+
+Proxied at `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`. `path` is
+module-relative and the module **must** confine it to its own store (reject `..`,
+absolute paths, and non-document files) — the editor writes real files, so this is the
+trust boundary. The shared core editor component (knowledge's vault page is the first
+user, #130) provides the list + markdown source/preview + save; a module supplies only
+the data above. The first knowledge implementation re-indexes a saved document so it
+stays agent-retrievable.
+
+The `calendar` archetype's data shape is a window of events (the shell renders the month /
+week / agenda views and re-fetches as the user navigates):
+
+```jsonc
+{
+  "title": "Calendar",
+  "provider": "local",                              // active provider
+  "range": { "start": "2026-06-01T00:00:00+00:00",  // the window actually returned
+             "end":   "2026-07-01T00:00:00+00:00" },
+  "events": [
+    { "id": "e1", "title": "Standup",
+      "start": "2026-06-15T09:00:00+00:00",
+      "end":   "2026-06-15T09:30:00+00:00",
+      "location": "Room 4", "description": "…", "provider": "local" }
   ]
 }
 ```

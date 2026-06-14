@@ -6,6 +6,7 @@ import {
   Attachment,
   BoardData,
   BrowserData,
+  CalendarData,
   MessageRecord,
   ModuleSnapshot,
   PageSpec,
@@ -174,5 +175,28 @@ describe("contracts", () => {
 
   it("rejects an unknown attachment source", () => {
     expect(() => Attachment.parse({ att_id: "a1", source: "magic" })).toThrow();
+  });
+
+  it("parses the calendar archetype data, coercing timestamps to Date (ADR-0018)", () => {
+    const data = CalendarData.parse({
+      provider: "local",
+      range: { start: "2026-06-01T00:00:00Z", end: "2026-07-01T00:00:00Z" },
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00Z",
+          end: "2026-06-15T09:30:00Z",
+          location: "Room 4",
+        },
+      ],
+    });
+    expect(data.events[0].start instanceof Date).toBe(true);
+    expect(data.events[0].title).toBe("Standup");
+    expect(data.range?.start instanceof Date).toBe(true);
+  });
+
+  it("defaults calendar events to empty (a quiet calendar stays valid)", () => {
+    expect(CalendarData.parse({}).events).toEqual([]);
   });
 });

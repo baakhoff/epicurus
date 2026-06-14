@@ -39,14 +39,35 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 
 No module code runs in the shell; all data flows through the core.
 
+### Knowledge page (`editor` archetype, ADR-0018)
+
+The module contributes a **Knowledge** left-nav page — an Obsidian-style browse-and-edit
+view over the vault, declared as a `pages` entry `{id: "vault", archetype: "editor"}`.
+The **core renders** the editor from its bounded vocabulary (a document list, a markdown
+source/preview editor, a save button); the module ships **no markup** and only supplies
+data over three endpoints the core proxies (`GET /pages/{id}`, `GET/PUT /pages/{id}/doc`).
+
+Saving a document writes it back to the vault and **re-indexes just that file** into
+`<tenant>__knowledge`, so an edit made in the shell is immediately retrievable by the
+agent (the vault is agent-retrievable by default — contrast a future Notes module). The
+editor component is **core-owned and shared**; Notes reuses it. The bundled platform docs
+are *not* exposed as an editor page (they are read-only, image-bundled self-documentation).
+
+The vault must be mounted **read-write** for saving to work (see Configuration); the
+default empty named volume is writable, and an operator binding their Obsidian vault should
+mount it writable by the container user (uid 10001).
+
 ### HTTP
 
 | Endpoint | Description |
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, events, UI declaration). |
+| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `GET /pages/{page_id}` | Editor document list `{title, docs:[{id, title, path}]}` (page id `vault`). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
+| `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
+| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ## How search works
@@ -103,9 +124,11 @@ services:
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | File hash/mtime tracking. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
 
-The vault is bound to `/vault` **read-only** via `KNOWLEDGE_HOST_VAULT`, which
+The vault is bound to `/vault` **read-write** via `KNOWLEDGE_HOST_VAULT`, which
 defaults to an **empty named volume** (point it at your vault to index real notes).
-The platform docs at `/docs` are always present — bundled at image build time.
+Read-write so the Knowledge editor page can save edits back to the vault (#130); mount a
+host directory the container user (uid 10001) can write. The platform docs at `/docs` are
+always present — bundled at image build time, and are not editable from the shell.
 
 ## Data model
 
@@ -140,7 +163,8 @@ Package `epicurus_knowledge`:
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`). |
-| `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source). |
-| `service.py` | MCP tools (`knowledge_search`, `knowledge_reindex`) + manifest UI. |
-| `app.py` | Lifespan, `GET /status` endpoint, initial index of both sources on startup. |
+| `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); `index_path` re-indexes a single file for the editor save. |
+| `service.py` | MCP tools (`knowledge_search`, `knowledge_reindex`) + manifest UI + the `editor` page spec. |
+| `pages.py` | The `editor` page surface (#130): document list, read, and save (with vault-path safety + re-index). |
+| `app.py` | Lifespan, `GET /status` endpoint, the `/pages/*` router, initial index of both sources on startup. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

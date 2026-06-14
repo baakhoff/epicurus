@@ -18,6 +18,17 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Knowledge page (browse + edit, Obsidian-style)** — the knowledge module contributes an
+  **`editor`** left-nav page: browse the vault's documents and read/edit them in a
+  core-rendered markdown editor (source **and** preview), saving back to the vault. A save
+  **re-indexes just that document**, so edits made in the shell are immediately
+  agent-retrievable. This introduces the **shared core doc-editor component** (a future
+  Notes module reuses it) and the editor doc read/write proxy
+  (`GET|PUT /platform/v1/modules/{name}/pages/{id}/doc`, editor-only); the knowledge vault
+  mount becomes **read-write** and document paths are strictly confined to the vault (no
+  traversal). The `knowledge` package version is also realigned with its manifest (the
+  pyproject had drifted behind the shipped 0.2/0.3 features) (ADR-0018) (`knowledge` →
+  0.4.0, `core-app` → 0.4.0, `web` → 0.6.0).
 - **Module-contributed pages** — modules can add **left-nav pages, core-rendered from a
   bounded archetype vocabulary** (`browser` / `calendar` / `editor` / `board`): a module
   declares a `PageSpec` and serves its data, the shell renders it — **no module markup, JS,
@@ -25,6 +36,13 @@ bundled-stack release, **v0.2.0**.
   ships first; echo gains a demo **Echoes** page. Page data is proxied through the core
   (`GET /platform/v1/modules/{name}/pages/{id}`) (ADR-0018) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Calendar page** — the calendar module contributes a **Calendar** left-nav page in the
+  `calendar` archetype (ADR-0018): month / week / agenda views the **core renders** from the
+  module's "events in a range" data. Navigation re-fetches the visible window — the core page
+  proxy now **forwards query params** (`start`/`end`) to the module — so the calendar scrolls
+  arbitrarily far without loading every event. Read-first (view + navigate); the active
+  provider (local or Google) supplies the events (`calendar` → 0.2.0, `core-app` → 0.3.1,
+  `web` → 0.6.0).
 - **Tasks page — the first `board`** — the tasks module gains a **Tasks** left-nav page: a
   core-rendered `board` of open tasks grouped by due date (Overdue / Today / Upcoming / No
   date) where the user **completes, edits, and adds** tasks. The `board` archetype is new in
@@ -137,6 +155,11 @@ bundled-stack release, **v0.2.0**.
   `testcontainers` ≥4.14.2); web deps (`jsdom` → 29, `lucide-react` → 1.x, plus a
   dev-dependency group). The `eslint` 10, `@vitejs/plugin-react` 6, and one
   Python-group bump are **deferred pending migration** (tracked in #172).
+- Declared the `sqlalchemy[asyncio]` ≥2.0.50 floor in the five service
+  `pyproject.toml` manifests (calendar, core-app, knowledge, storage, tasks). The
+  Dependabot bump (#168) had raised it in `uv.lock` only, leaving the source
+  manifests at ≥2.0 — `uv.lock` and the manifests now agree. No resolution change
+  (sqlalchemy stays 2.0.50).
 
 ## [0.1.0] — 2026-06-12
 

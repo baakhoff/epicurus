@@ -60,6 +60,7 @@ function HoverCardBody({ data, loading }: { data: HoverCard; loading: boolean })
 export function EntityRefChip({ entref }: { entref: EntityRef }) {
   const open = usePanel((s) => s.open);
   const [active, setActive] = useState(false);
+  const [opening, setOpening] = useState(false);
   const card = useQuery({
     queryKey: ["entity", entref.module, entref.kind, entref.ref_id],
     queryFn: () => api.resolveEntity(entref.module, entref.kind, entref.ref_id),
@@ -69,6 +70,21 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
   });
   const data = card.data ?? cardFromRef(entref);
 
+  const isMailMessage = entref.module === "mail" && entref.kind === "message";
+
+  const handleClick = () => {
+    if (isMailMessage) {
+      setOpening(true);
+      api
+        .readMailMessage(entref.module, entref.ref_id)
+        .then((email) => open("email-reader", email, entref.title))
+        .catch(() => open("entity-detail", data, entref.title))
+        .finally(() => setOpening(false));
+    } else {
+      open("entity-detail", data, entref.title);
+    }
+  };
+
   return (
     <span
       className="group relative inline-block align-baseline"
@@ -77,8 +93,12 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
     >
       <button
         type="button"
-        onClick={() => open("entity-detail", card.data ?? cardFromRef(entref), entref.title)}
-        className="inline-flex items-center gap-1 rounded-full border border-edge bg-surface-2 px-2 py-0.5 align-baseline text-[13px] leading-5 text-accent-strong transition-colors hover:border-accent"
+        onClick={handleClick}
+        disabled={opening}
+        className={
+          "inline-flex items-center gap-1 rounded-full border border-edge bg-surface-2 px-2 py-0.5 align-baseline text-[13px] leading-5 text-accent-strong transition-colors hover:border-accent" +
+          (opening ? " opacity-60" : "")
+        }
       >
         <AtSign size={11} className="shrink-0" />
         {entref.title}

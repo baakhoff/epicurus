@@ -9,8 +9,9 @@ Registers two tools the agent can call:
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, UiAction, UiSection
+from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
+from epicurus_knowledge.pages import VAULT_PAGE_ID
 
 MODULE_NAME = "knowledge"
 
@@ -31,11 +32,20 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.3.0",
+        version="0.4.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
         ),
+        pages=[
+            PageSpec(
+                id=VAULT_PAGE_ID,
+                title="Knowledge",
+                archetype="editor",
+                icon="book",
+                nav_order=30,
+            )
+        ],
         ui=UiSection(
             icon="book",
             summary=(

@@ -22,6 +22,7 @@ from epicurus_core import (
 )
 from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.indexer import KnowledgeIndexer
+from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.service import MODULE_NAME, build_module
 from epicurus_knowledge.settings import KnowledgeSettings
 
@@ -101,6 +102,9 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+
+    # The editor page (#130): the shell renders it; this module supplies vault docs.
+    app.include_router(create_pages_router(VaultPages(settings.vault_path, vault_indexer)))
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:

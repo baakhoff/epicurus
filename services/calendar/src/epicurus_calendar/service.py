@@ -17,9 +17,15 @@ from typing import Any
 
 from epicurus_calendar.models import DateTimeRange
 from epicurus_calendar.providers.base import CalendarProvider
-from epicurus_core import EpicurusModule, UiAction, UiSection
+from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
 
 MODULE_NAME = "calendar"
+CALENDAR_PAGE_ID = "calendar"
+
+# A single page fetch must not scan an unbounded range. The shell's month grid spans
+# ~42 days and never needs more than a few weeks; this cap keeps a stray or hostile
+# request bounded without clipping any real view.
+_MAX_RANGE_DAYS = 92
 
 
 def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
@@ -31,7 +37,7 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.1.0",
+        version="0.2.0",
         description=(
             "Provider-neutral calendar: list events, create events, and find"
             " free time slots. Supports a local store (no account needed) and"
@@ -79,6 +85,17 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
                 ),
             ],
         ),
+        # A left-nav Calendar page (ADR-0018): the module supplies events in a range,
+        # the core shell renders the month / week / agenda views. No module markup.
+        pages=[
+            PageSpec(
+                id=CALENDAR_PAGE_ID,
+                title="Calendar",
+                archetype="calendar",
+                icon="calendar",
+                nav_order=40,
+            )
+        ],
     )
 
     @module.tool()
@@ -160,3 +177,76 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
         return [s.model_dump(mode="json") for s in slots]
 
     return module
+
+
+async def calendar_page(
+    provider: CalendarProvider,
+    *,
+    tenant_id: str,
+    start: str | None = None,
+    end: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build the ``calendar`` archetype's page data (ADR-0018): events in a range.
+
+    The shell drives navigation by requesting a ``[start, end)`` window (ISO-8601);
+    when it omits them the page falls back to the current month. The module supplies
+    data only — the core renders the month / week / agenda views from this shape::
+
+        {"title", "provider", "range": {"start", "end"}, "events": [Event, ...]}
+
+    Args:
+        provider: The active calendar backend.
+        tenant_id: Tenant whose events to return.
+        start: Range start (ISO-8601); with *end*, the window to list.
+        end: Range end (ISO-8601, exclusive).
+        now: Reference instant for the default range (injected in tests).
+
+    Raises:
+        ValueError: if *start*/*end* are unparseable or ``end <= start``.
+    """
+    time_range = _resolve_range(start, end, now=now or datetime.now(tz=UTC))
+    events = await provider.list_events(tenant_id=tenant_id, time_range=time_range)
+    return {
+        "title": "Calendar",
+        "provider": provider.name,
+        "range": {
+            "start": time_range.start.isoformat(),
+            "end": time_range.end.isoformat(),
+        },
+        "events": [e.model_dump(mode="json") for e in events],
+    }
+
+
+def _resolve_range(start: str | None, end: str | None, *, now: datetime) -> DateTimeRange:
+    """Parse the requested ``[start, end)`` window, or default to *now*'s month."""
+    if start is None or end is None:
+        return _month_bounds(now)
+    start_dt = _parse_instant(start)
+    end_dt = _parse_instant(end)
+    if end_dt <= start_dt:
+        raise ValueError("end must be after start")
+    # Clamp an over-wide window rather than reject it: the shell's views never need
+    # more than a few weeks, but a stray request shouldn't scan years of events.
+    if end_dt - start_dt > timedelta(days=_MAX_RANGE_DAYS):
+        end_dt = start_dt + timedelta(days=_MAX_RANGE_DAYS)
+    return DateTimeRange(start=start_dt, end=end_dt)
+
+
+def _parse_instant(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp to a timezone-aware datetime (UTC if naive)."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid ISO-8601 timestamp: {value!r}") from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _month_bounds(now: datetime) -> DateTimeRange:
+    """The ``[first-of-month, first-of-next-month)`` window around *now*, in UTC."""
+    month_start = now.astimezone(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1)
+    return DateTimeRange(start=month_start, end=next_month)

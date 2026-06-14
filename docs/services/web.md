@@ -19,7 +19,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | Screen | What it does |
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE delta/tool/done/error), session sidebar (cross-chat memory), per-chat model picker. |
-| **Models** | Local models: pull with live progress, delete; hosted providers: status + **API-key entry** (stored core → OpenBao, never in the browser). |
+| **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
 

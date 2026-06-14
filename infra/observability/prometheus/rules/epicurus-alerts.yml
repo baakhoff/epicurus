@@ -57,6 +57,6 @@ groups:
           summary: "Disk usage above 85% on {{ $labels.mountpoint }}"
           description: >
             Filesystem {{ $labels.mountpoint }} ({{ $labels.device }}) is
-            {{ printf "%.0f" (mul $value 100) }}% full. Docker volume data lives
+            {{ $value | humanizePercentage }} full. Docker volume data lives
             in the WSL2 VM filesystem; free space to prevent write failures.
           runbook_url: https://github.com/baakhoff/epicurus/blob/main/docs/infrastructure/backup-and-restore.md#disk-space

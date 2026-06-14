@@ -1,7 +1,8 @@
-"""Attachment expansion + the upload route (ADR-0019).
+"""Attachment expansion + the upload route (ADR-0019) + the storage upload sink (ADR-0025).
 
 The expander runs against a real SQLite-backed AttachmentStore; memory and the module
-registry are faked. The upload route is exercised end-to-end over ASGI.
+registry are faked. The upload route is exercised end-to-end over ASGI, and the sink is
+exercised both as a fake (route behaviour) and for real over an in-process ASGI stub.
 """
 
 from __future__ import annotations
@@ -10,12 +11,13 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core import Attachment
 from epicurus_core_app.agent.agent import Agent
+from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.memory.memory import Memory
@@ -132,3 +134,107 @@ async def test_upload_route_stores_the_file_and_returns_a_handle() -> None:
     row = await store.get(tenant="local", att_id=body["att_id"])
     assert row is not None
     assert row.content == b"buy milk"
+
+
+# ── Upload sink (ADR-0025) ────────────────────────────────────────────────────
+
+
+class _RecordingSink:
+    """Captures what the route hands the sink without any network I/O."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def persist(
+        self, *, tenant: str, att_id: str, filename: str, content_type: str, data: bytes
+    ) -> None:
+        self.calls.append(
+            {
+                "tenant": tenant,
+                "att_id": att_id,
+                "filename": filename,
+                "content_type": content_type,
+                "data": data,
+            }
+        )
+
+
+async def _upload(store: AttachmentStore, sink: Any) -> httpx.Response:
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            cast(Agent, None), cast(Memory, None), "local", store, sink=cast(AttachmentSink, sink)
+        )
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(
+            "/platform/v1/agent/attachments",
+            files={"file": ("notes.txt", b"buy milk", "text/plain")},
+        )
+
+
+async def test_upload_route_forwards_the_bytes_to_the_sink() -> None:
+    store = await _attachment_store()
+    sink = _RecordingSink()
+    resp = await _upload(store, sink)
+    assert resp.status_code == 200
+    att_id = resp.json()["att_id"]
+
+    assert len(sink.calls) == 1
+    call = sink.calls[0]
+    assert call == {
+        "tenant": "local",
+        "att_id": att_id,
+        "filename": "notes.txt",
+        "content_type": "text/plain",
+        "data": b"buy milk",
+    }
+    # The core-side handle is still saved (the sink is additive, not a replacement).
+    row = await store.get(tenant="local", att_id=att_id)
+    assert row is not None and row.content == b"buy milk"
+
+
+async def test_upload_route_survives_a_failing_sink() -> None:
+    store = await _attachment_store()
+
+    class _BoomSink:
+        async def persist(self, **_: Any) -> None:
+            raise RuntimeError("storage down")
+
+    resp = await _upload(store, _BoomSink())
+    # Durability is best-effort: the upload still succeeds and the handle is kept.
+    assert resp.status_code == 200
+    row = await store.get(tenant="local", att_id=resp.json()["att_id"])
+    assert row is not None
+
+
+async def test_attachment_sink_posts_raw_bytes_to_ingest() -> None:
+    """The real AttachmentSink, driven against an in-process /ingest stub."""
+    captured: dict[str, Any] = {}
+    stub = FastAPI()
+
+    @stub.post("/ingest")
+    async def _ingest(request: Request, filename: str, att_id: str = "") -> dict[str, str]:
+        captured["filename"] = filename
+        captured["att_id"] = att_id
+        captured["content_type"] = request.headers.get("content-type")
+        captured["tenant"] = request.headers.get("x-epicurus-tenant")
+        captured["data"] = await request.body()
+        return {"status": "ok"}
+
+    sink = AttachmentSink("http://sink", transport=httpx.ASGITransport(app=stub))
+    await sink.persist(
+        tenant="local",
+        att_id="a1",
+        filename="photo.jpg",
+        content_type="image/jpeg",
+        data=bytes(range(8)),
+    )
+    assert captured == {
+        "filename": "photo.jpg",
+        "att_id": "a1",
+        "content_type": "image/jpeg",
+        "tenant": "local",
+        "data": bytes(range(8)),
+    }

@@ -58,6 +58,8 @@ See the [Architecture](../developer/architecture.md) guide for how the pieces fi
 
 ## Operations
 
+- [Auto-deploy (CD)](auto-deploy.md) — how a released tag rolls out to the box
+  automatically (scheduled reconcile script or Watchtower), and how to roll back.
 - [Startup and recovery](startup-and-recovery.md) — configure Docker Desktop
   launch-on-login (Windows) and recovery procedures for common failure modes.
 - [Backup and restore](backup-and-restore.md) — snapshot volumes, store the

@@ -18,9 +18,10 @@ What it serves today:
 - The **LLM gateway** (ADR-0010), via LiteLLM over local **Ollama** *and* hosted
   providers (Claude, ChatGPT, Grok, DeepSeek, Gemini, and a generic
   OpenAI-compatible "any LLM"):
-  - `POST /platform/v1/llm/chat` — a completion for a list of messages. `model` is
-    `<provider>/<model>` (e.g. `claude/claude-3-5-sonnet-latest`); a bare name
-    (e.g. `llama3.2`) targets local Ollama.
+  - Chat completions go through `POST /platform/v1/chat` — the single module-facing
+    chat path (ADR-0021). `model` is `<provider>/<model>` (e.g.
+    `claude/claude-3-5-sonnet-latest`); a bare name (e.g. `llama3.2`) targets local
+    Ollama. (The gateway's own `/platform/v1/llm/chat` was removed in 0.2.0.)
   - `GET /platform/v1/llm/models` · `POST /platform/v1/llm/pull` — list / fetch local
     models; `POST /platform/v1/llm/pull/stream` streams pull progress as SSE;
     `DELETE /platform/v1/llm/models?name=…` removes one.

@@ -10,13 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
-from epicurus_core_app.llm.models import (
-    ChatMessage,
-    ChatResult,
-    ModelInfo,
-    PowerState,
-    ProviderInfo,
-)
+from epicurus_core_app.llm.models import ModelInfo, PowerState, ProviderInfo
 from epicurus_core_app.llm.power import PowerController
 
 SSE_HEADERS = {
@@ -24,11 +18,6 @@ SSE_HEADERS = {
     # Tell buffering proxies (the web container's nginx) to pass events through.
     "X-Accel-Buffering": "no",
 }
-
-
-class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    model: str | None = None
 
 
 class PullRequest(BaseModel):
@@ -50,12 +39,13 @@ class PowerStatus(BaseModel):
 
 
 def create_llm_router(gateway: LlmGateway) -> APIRouter:
-    """Routes that expose the LLM gateway to modules and the UI."""
-    router = APIRouter(prefix="/platform/v1/llm", tags=["llm"])
+    """Gateway management routes — model catalog, providers, pulls.
 
-    @router.post("/chat", response_model=ChatResult)
-    async def chat(request: ChatRequest) -> ChatResult:
-        return await gateway.chat(request.messages, model=request.model)
+    Chat completions go through the single module-facing path
+    ``POST /platform/v1/chat`` (ADR-0021); the gateway no longer exposes its own
+    ``/llm/chat``.
+    """
+    router = APIRouter(prefix="/platform/v1/llm", tags=["llm"])
 
     @router.get("/models", response_model=list[ModelInfo])
     async def list_models() -> list[ModelInfo]:

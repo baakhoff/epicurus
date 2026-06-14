@@ -28,7 +28,7 @@ plus the shared ops endpoints. All of it is internal/local-only by default.
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/embed` | Embed texts (returns float vectors). Defaults to `MEMORY_EMBED_MODEL`. |
-| `POST /platform/v1/chat` | Chat completion. Module supplies messages; the core owns model/keys/fallback. |
+| `POST /platform/v1/chat` | Chat completion — **the single module-facing chat path** (ADR-0021). Module supplies messages; the core owns model/keys/fallback. Returns the shared `ChatResult`. |
 
 Modules never hold model keys — all AI goes through here (ADR-0010). See
 [platform-client](../reference/platform-client.md).
@@ -47,9 +47,13 @@ Passing a `session_id` opts a turn into cross-chat memory (below).
 
 ### LLM gateway (ADR-0010)
 
+The gateway's HTTP surface is **model/provider management** (consumed by the web UI).
+Chat completions go through `POST /platform/v1/chat` above (ADR-0021); the gateway's
+own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it duplicated
+`/chat` (which is a strict superset: it also accepts `tools` + `tenant_id`).
+
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/llm/chat` | A completion for a list of messages. `model` is `<provider>/<model>` or a bare name for local Ollama. |
 | `GET /platform/v1/llm/models` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
@@ -85,6 +89,10 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `OLLAMA_URL` | `http://ollama:11434` | Local LLM runtime. |
 | `LLM_DEFAULT_MODEL` | `llama3.2` | Model when a request names none. |
 | `LLM_FALLBACKS` | — | Comma-separated fallback chain (e.g. `claude/claude-3-5-sonnet-latest`). |
+| `LLM_KEEP_ALIVE` | `5m` | How long Ollama keeps a model loaded (ADR-0005). |
+| `LLM_TEMPERATURE` | — | Sampling temperature (local + hosted); blank = provider default. |
+| `LLM_TOP_P` | — | Nucleus-sampling `top_p` (local + hosted). |
+| `LLM_NUM_CTX` | — | Ollama context window (`num_ctx`); local models only. |
 | `MODULE_URLS` | `http://echo:8080,…` | Module base URLs the host discovers tools from. |
 | `AGENT_MAX_STEPS` | `4` | Max tool-calling rounds per turn. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |

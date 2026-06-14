@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pydantic import field_validator
+
 from epicurus_core import CoreSettings
 
 
@@ -19,6 +21,15 @@ class CoreAppSettings(CoreSettings):
     llm_fallbacks: str = ""
     # Per-model retries on 429 / 5xx (exponential backoff), handled by LiteLLM.
     llm_num_retries: int = 2
+    # ── LLM tuning (optional; None = use the provider/runtime default) ──────────
+    # These pass straight through to the LiteLLM call, so tuning needs no code
+    # edit — set the env var and restart (extend this block to wire more knobs).
+    # Sampling temperature, applied to each chat completion (local and hosted).
+    llm_temperature: float | None = None
+    # Nucleus-sampling top_p, applied to each chat completion (local and hosted).
+    llm_top_p: float | None = None
+    # Ollama context-window size (num_ctx); applied to local models only.
+    llm_num_ctx: int | None = None
     # Comma-separated module base URLs. Each module serves its MCP tools at
     # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
     # (the registry + web shell read these).
@@ -43,6 +54,18 @@ class CoreAppSettings(CoreSettings):
     # HMAC key for signing the OAuth ``state`` parameter (CSRF protection).
     # Change this before first use; rotating it invalidates in-flight connect flows.
     oauth_state_secret: str = "change-this-before-use"
+
+    @field_validator("llm_temperature", "llm_top_p", "llm_num_ctx", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: object) -> object:
+        """Treat a blank env value (e.g. ``LLM_TEMPERATURE=``) as unset.
+
+        Compose passes these as ``${LLM_TEMPERATURE:-}``; an empty string would
+        otherwise fail numeric parsing instead of falling back to the default.
+        """
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
 
     @property
     def fallback_models(self) -> list[str]:

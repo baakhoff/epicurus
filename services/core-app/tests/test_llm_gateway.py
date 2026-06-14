@@ -41,6 +41,9 @@ def _gateway(
     secrets: Any = None,
     bus: Any = None,
     fallbacks: list[str] | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    num_ctx: int | None = None,
 ) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
@@ -52,6 +55,9 @@ def _gateway(
         bus=bus or _FakeBus(),
         fallbacks=fallbacks or [],
         num_retries=2,
+        temperature=temperature,
+        top_p=top_p,
+        num_ctx=num_ctx,
     )
 
 
@@ -397,3 +403,58 @@ async def test_stream_chat_assembles_tool_call_fragments(monkeypatch: pytest.Mon
     assert call["function"]["name"] == "echo"
     # the two argument fragments were concatenated into valid JSON
     assert call["function"]["arguments"] == '{"message": "hi"}'
+
+
+# ── LLM tuning (#114) ────────────────────────────────────────────────────────────
+
+
+async def test_tuning_params_applied_to_local_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    await _gateway(temperature=0.2, top_p=0.8, num_ctx=8192).chat(
+        [ChatMessage(role="user", content="hi")]
+    )
+    assert captured["temperature"] == 0.2
+    assert captured["top_p"] == 0.8
+    assert captured["num_ctx"] == 8192
+
+
+async def test_num_ctx_is_local_only_temperature_is_universal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    await _gateway(secrets=secrets, temperature=0.3, num_ctx=8192).chat(
+        [ChatMessage(role="user", content="hi")], model="claude/claude-3-5-sonnet-latest"
+    )
+    assert captured["temperature"] == 0.3  # sampling knob applies to hosted too
+    assert "num_ctx" not in captured  # Ollama-only runtime option, never sent to hosted
+
+
+async def test_no_tuning_keys_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    await _gateway().chat([ChatMessage(role="user", content="hi")])
+    assert "temperature" not in captured
+    assert "top_p" not in captured
+    assert "num_ctx" not in captured

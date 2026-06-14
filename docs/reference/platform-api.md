@@ -19,7 +19,7 @@ Discovery — what core version and contract are running.
 ```json
 {
   "contract_version": "0.1",
-  "core_version": "0.1.0",
+  "core_version": "0.2.0",
   "tenant": "local"
 }
 ```
@@ -72,7 +72,10 @@ event on NATS.  No provider key ever leaves the core.
 ## `POST /platform/v1/chat`
 
 Chat completion via the core's LLM gateway.  The core owns model routing,
-fallback, key management, and usage accounting.
+fallback, key management, and usage accounting.  This is the **single
+module-facing chat path** (ADR-0021); the response is the shared `ChatResult`
+model.  (The gateway's former `POST /platform/v1/llm/chat` was removed in
+`core-app` 0.2.0 — it duplicated this endpoint.)
 
 **Request body**
 
@@ -155,7 +158,12 @@ Chat completion.
 
 Raises `httpx.HTTPStatusError` on non-2xx.
 
-### `PlatformMessage`
+### `PlatformMessage` and `PlatformChatResponse`
+
+Both are the **shared chat contract** (ADR-0021): `PlatformMessage` is an alias of
+`ChatMessage` and `PlatformChatResponse` of `ChatResult` (both exported from
+`epicurus_core`). The `Platform*` names are retained for backward compatibility, so
+there is a single definition of each shape.
 
 ```python
 class PlatformMessage(BaseModel):

@@ -164,6 +164,38 @@ export const BrowserData = z.object({
 });
 export type BrowserData = z.infer<typeof BrowserData>;
 
+/* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
+
+/** One label/value row of a hover-card / entity-detail panel. */
+export const HoverCardDetail = z.object({ label: z.string(), value: z.string() });
+export type HoverCardDetail = z.infer<typeof HoverCardDetail>;
+
+/** An outbound link a hover-card may carry (e.g. to a future GitHub-issue module). */
+export const HoverCardLink = z.object({ label: z.string(), url: z.string() });
+export type HoverCardLink = z.infer<typeof HoverCardLink>;
+
+/**
+ * The uniform hover-card / entity-detail envelope every module entity resolves to
+ * (ADR-0019). Rendered both as the inline hover-card and, in full, as the panel's
+ * `entity-detail` view — one shape, core-owned.
+ */
+export const HoverCard = z.object({
+  title: z.string(),
+  description: z.string().default(""),
+  details: z.array(HoverCardDetail).default([]),
+  href: HoverCardLink.nullish(),
+});
+export type HoverCard = z.infer<typeof HoverCard>;
+
+/** A read-only email shown in the panel's `email-reader` view (used by 3.8 mail). */
+export const EmailMessage = z.object({
+  subject: z.string().default("(no subject)"),
+  from: z.string().nullish(),
+  date: z.string().nullish(),
+  body: z.string().default(""),
+});
+export type EmailMessage = z.infer<typeof EmailMessage>;
+
 export const PlatformInfo = z.object({
   contract_version: z.string(),
   core_version: z.string(),

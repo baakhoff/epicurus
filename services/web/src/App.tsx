@@ -6,6 +6,7 @@ import { useRegisterSW } from "virtual:pwa-register/react";
 import { SURFACES, modulePageNavs } from "@/app/registry";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
+import { PanelHost } from "@/components/Panel";
 import { Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
@@ -163,6 +164,8 @@ function Shell() {
           })}
         </nav>
       </div>
+
+      <PanelHost />
 
       <DownloadTray />
       <UpdateToast />

@@ -23,6 +23,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
+| **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`) programmatically (ADR-0018). |
 
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
@@ -37,6 +38,16 @@ renders each at `/m/:module/:pageId` via a first-party screen for that archetype
 the others land with their module pages (Phase 3.8). Page data is fetched through the core
 proxy (`GET /platform/v1/modules/{name}/pages/{id}`) — **no module markup, JS, or CSS ever
 runs in the shell**.
+
+### Right panel / split-screen (ADR-0018)
+
+A core-owned side panel (`src/components/Panel.tsx`, driven by the `src/stores/panel.ts`
+Zustand store) opened programmatically — `open(view, payload, title)` — e.g. from a chat
+entity-reference click (ADR-0019). It is a **resizable right column** on wide screens and a
+**bottom sheet** on phones, with a back-stack (`back()`) and `close()`. Views are a
+**bounded, core-defined vocabulary** — `entity-detail` (the hover-card envelope in full
+form) and `email-reader` (read-only, used by the 3.8 mail reader). Module-supplied URLs are
+followed only when `http(s)`; the panel never runs module markup.
 
 ### The chat SSE protocol
 

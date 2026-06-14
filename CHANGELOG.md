@@ -25,6 +25,11 @@ bundled-stack release, **v0.2.0**.
   ships first; echo gains a demo **Echoes** page. Page data is proxied through the core
   (`GET /platform/v1/modules/{name}/pages/{id}`) (ADR-0018) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Right-panel / split-screen host** — a core-owned side panel: a resizable right column
+  on wide screens, a bottom sheet on phones, opened programmatically with a back-stack. It
+  renders a **bounded, core-defined** set of views (`entity-detail`, `email-reader`) — the
+  substrate the chat entity-reference click and the 3.8 mail reader build on (ADR-0018)
+  (`web` → 0.5.0).
 - **Model catalog browser** — replaces "type a name to pull" with a browsable catalog of 24
   curated Ollama models. Search by name, family, or description; filter by tag (General, Code,
   Multilingual, Vision, Embedding, Small); pull any entry with live SSE progress. The

@@ -785,7 +785,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.8" },
-    { name = "testcontainers", extras = ["minio"], specifier = ">=4.8" },
+    { name = "testcontainers", extras = ["minio"], specifier = ">=4.14.2" },
 ]
 
 [[package]]

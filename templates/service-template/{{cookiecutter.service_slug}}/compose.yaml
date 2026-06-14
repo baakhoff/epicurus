@@ -1,7 +1,7 @@
 # {{ cookiecutter.service_name }} module — a per-module compose fragment (ADR-0006).
-# Wiring it into the stack is a short checklist (root compose `include:` + the core's
-# `module_urls` + a unique port) — see this module's README. The CI runtime-smoke
-# gate boots the stack and fails if the module isn't discoverable, so don't skip it.
+# `task new-module` already wired this in (root compose `include:` + the core's
+# `module_urls` + a unique host port from docs/reference/ports.md). The CI
+# runtime-smoke gate boots the stack and fails if the module isn't discoverable.
 services:
   {{ cookiecutter.service_slug }}:
     build:
@@ -18,8 +18,10 @@ services:
       # PLATFORM_URL: http://core-app:8080
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
+    # Host port is overridable via {{ cookiecutter.port_env }} and registered in
+    # docs/reference/ports.md so two modules never collide.
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:{{ cookiecutter.port }}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:{{ '${' }}{{ cookiecutter.port_env }}:-{{ cookiecutter.port }}{{ '}' }}:8080"
     depends_on:
       nats:
         condition: service_started

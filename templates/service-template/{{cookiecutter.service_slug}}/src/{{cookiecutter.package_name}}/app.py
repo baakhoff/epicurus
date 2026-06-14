@@ -10,7 +10,14 @@ from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI
 
-from epicurus_core import CoreSettings, EventBus, add_ops_routes, configure_logging, get_logger
+from epicurus_core import (
+    CoreSettings,
+    EventBus,
+    add_manifest_route,
+    add_ops_routes,
+    configure_logging,
+    get_logger,
+)
 from {{ cookiecutter.package_name }}.service import MODULE_NAME, build_module
 
 
@@ -45,6 +52,9 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
+    # GET /manifest — how the core discovers this module's tools (ADR-0004). Without
+    # it the agent never sees the module and the smoke gate's discovery check fails.
+    add_manifest_route(app, module)
     app.mount("/mcp", mcp_app)
     return app
 

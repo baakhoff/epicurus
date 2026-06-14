@@ -8,6 +8,10 @@
 #
 # `!reset []` requires Docker Compose v2.24+ (the runner and Docker Desktop both
 # satisfy this); the smoke script asserts the merge resolves before booting.
+#
+# Every service the smoke boots that publishes a host port must appear here, or it
+# leaks that binding and collides with a dev stack. `task new-module` appends new
+# modules automatically (scripts/new_module.py), so this list does not drift.
 
 networks:
   epicurus:
@@ -23,6 +27,12 @@ services:
   knowledge:
     ports: !reset []
   websearch:
+    ports: !reset []
+  calendar:
+    ports: !reset []
+  mail:
+    ports: !reset []
+  tasks:
     ports: !reset []
   web:
     ports: !reset []

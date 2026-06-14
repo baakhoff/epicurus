@@ -6,7 +6,9 @@ are exercised end-to-end without needing a running Docker stack.
 Tools are called via ``module.mcp.call_tool(name, args)`` which returns
 ``(content, structured)`` — the same wire path used by the agent.  The
 structured dict carries a ``"result"`` key (or is the result itself if the
-tool returns a plain dict).
+tool returns a plain dict); a tool that returns an entity-reference envelope
+(``calendar_list_events``) serializes a :class:`ToolEnvelope` as its text
+content, parsed here with :func:`_parse_envelope`.
 """
 
 from __future__ import annotations
@@ -21,7 +23,21 @@ from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
-from epicurus_calendar.service import CALENDAR_PAGE_ID, build_module, calendar_page
+from epicurus_calendar.service import (
+    CALENDAR_PAGE_ID,
+    EVENT_KIND,
+    EventNotFound,
+    build_module,
+    calendar_attachments,
+    calendar_page,
+    event_attachment,
+    event_attachment_item,
+    event_entity_ref,
+    event_excerpt,
+    event_hover_card,
+    fetch_event,
+)
+from epicurus_core.contracts import ToolEnvelope
 
 
 def _dt(hour: int) -> datetime:
@@ -35,6 +51,27 @@ def _extract(structured: dict[str, Any] | None) -> Any:
     return structured.get("result", structured)
 
 
+def _parse_envelope(content: list[Any]) -> ToolEnvelope:
+    """Parse the ToolEnvelope from the first text-content item of a call_tool result."""
+    text = content[0].text
+    return ToolEnvelope.model_validate_json(text)
+
+
+def _event(**kw: Any) -> Event:
+    """Build an Event with sensible defaults, overridable per test."""
+    base: dict[str, Any] = {
+        "id": "e1",
+        "title": "Standup",
+        "start": datetime(2026, 6, 15, 9, 0, tzinfo=UTC),
+        "end": datetime(2026, 6, 15, 9, 30, tzinfo=UTC),
+        "description": None,
+        "location": None,
+        "provider": "local",
+    }
+    base.update(kw)
+    return Event(**base)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -46,16 +83,18 @@ async def local_provider() -> LocalCalendarProvider:
     return LocalCalendarProvider(store=store)
 
 
-# ── calendar_list_events ─────────────────────────────────────────────────────
+# ── calendar_list_events (entity-reference envelope, ADR-0019) ────────────────
 
 
-async def test_list_events_empty(local_provider: LocalCalendarProvider) -> None:
+async def test_list_events_empty_has_no_refs(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 7})
-    assert _extract(structured) == []
+    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 7})
+    envelope = _parse_envelope(content)
+    assert envelope.entity_refs == []
+    assert "No events" in envelope.text
 
 
-async def test_list_events_returns_created(local_provider: LocalCalendarProvider) -> None:
+async def test_list_events_returns_event_chips(local_provider: LocalCalendarProvider) -> None:
     await local_provider.create_event(
         tenant_id="t1",
         title="Sprint planning",
@@ -63,18 +102,23 @@ async def test_list_events_returns_created(local_provider: LocalCalendarProvider
         end=datetime.now(tz=UTC) + timedelta(hours=2),
     )
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
-    result = _extract(structured)
-    assert len(result) == 1
-    assert result[0]["title"] == "Sprint planning"
-    assert result[0]["provider"] == "local"
+    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == 1
+    ref = envelope.entity_refs[0]
+    assert ref.module == "calendar"
+    assert ref.kind == "event"
+    assert ref.title == "Sprint planning"
+    assert "Sprint planning" in envelope.text
+    assert "1 event" in envelope.text
 
 
 async def test_list_events_clamps_range(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    # range_days=200 is clamped to 90; must not raise
-    _content, structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 200})
-    assert isinstance(_extract(structured), list)
+    # range_days=200 is clamped to 90; must not raise and yields a valid envelope.
+    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 200})
+    envelope = _parse_envelope(content)
+    assert isinstance(envelope.entity_refs, list)
 
 
 # ── calendar_create_event ────────────────────────────────────────────────────
@@ -138,6 +182,117 @@ async def test_find_free_clamps_args(local_provider: LocalCalendarProvider) -> N
     assert isinstance(_extract(structured), list)
 
 
+# ── Entity references, hover-cards & attachments (ADR-0019) ───────────────────
+
+
+def test_event_entity_ref_shape() -> None:
+    ref = event_entity_ref(_event(location="Room 4"))
+    assert ref.ref_id == "e1"
+    assert ref.module == "calendar"
+    assert ref.kind == EVENT_KIND
+    assert ref.title == "Standup"
+    assert ref.summary is not None
+    assert "09:00" in ref.summary
+    assert "Room 4" in ref.summary
+
+
+def test_event_hover_card_full() -> None:
+    card = event_hover_card(_event(description="Daily sync", location="Room 4"))
+    assert card["title"] == "Standup"
+    assert card["description"] == "Daily sync"
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert "When" in labels
+    assert labels["Location"] == "Room 4"
+    assert labels["Calendar"] == "local"
+    assert card.get("href") is None
+
+
+def test_event_hover_card_omits_location_when_absent() -> None:
+    card = event_hover_card(_event())
+    labels = [d["label"] for d in card["details"]]
+    assert "Location" not in labels
+    assert card["description"] == ""
+
+
+def test_event_excerpt_includes_when_and_description() -> None:
+    excerpt = event_excerpt(_event(description="Daily sync", location="Room 4"))
+    assert "Standup" in excerpt
+    assert "Room 4" in excerpt
+    assert "Daily sync" in excerpt
+    assert "09:00" in excerpt
+
+
+def test_event_attachment_item_shape() -> None:
+    assert event_attachment_item(_event()) == {
+        "ref_id": "e1",
+        "kind": "event",
+        "title": "Standup",
+    }
+
+
+def test_event_attachment_payload_has_title_and_excerpt() -> None:
+    payload = event_attachment(_event(description="Daily sync"))
+    assert payload["title"] == "Standup"
+    assert "Daily sync" in payload["excerpt"]
+
+
+def test_format_when_same_day_is_compact() -> None:
+    # A same-day event collapses to one date and a start-end time range.
+    ref = event_entity_ref(_event())
+    assert ref.summary is not None
+    assert "15 Jun 2026" in ref.summary
+    assert "09:00" in ref.summary and "09:30" in ref.summary
+
+
+def test_format_when_multi_day_uses_arrow() -> None:
+    multi = _event(end=datetime(2026, 6, 16, 10, 0, tzinfo=UTC))
+    ref = event_entity_ref(multi)
+    assert ref.summary is not None
+    assert "→" in ref.summary
+
+
+async def test_fetch_event_returns_event(local_provider: LocalCalendarProvider) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Review", start=_dt(14), end=_dt(15)
+    )
+    fetched = await fetch_event(local_provider, tenant_id="t1", ref_id=created.id)
+    assert fetched.id == created.id
+    assert fetched.title == "Review"
+
+
+async def test_fetch_event_missing_raises(local_provider: LocalCalendarProvider) -> None:
+    with pytest.raises(EventNotFound):
+        await fetch_event(local_provider, tenant_id="t1", ref_id="does-not-exist")
+
+
+async def test_calendar_attachments_lists_upcoming(local_provider: LocalCalendarProvider) -> None:
+    now = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    soon = await local_provider.create_event(
+        tenant_id="t1", title="Soon", start=now + timedelta(hours=1), end=now + timedelta(hours=2)
+    )
+    past_start = now - timedelta(days=2)
+    await local_provider.create_event(
+        tenant_id="t1", title="Past", start=past_start, end=past_start + timedelta(hours=1)
+    )
+    items = await calendar_attachments(local_provider, tenant_id="t1", now=now)
+    titles = [i["title"] for i in items]
+    assert "Soon" in titles
+    assert "Past" not in titles
+    assert all(i["kind"] == "event" for i in items)
+    assert any(i["ref_id"] == soon.id for i in items)
+
+
+async def test_calendar_attachments_respects_limit(local_provider: LocalCalendarProvider) -> None:
+    now = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    for n in range(5):
+        start = now + timedelta(days=n + 1)
+        await local_provider.create_event(
+            tenant_id="t1", title=f"E{n}", start=start, end=start + timedelta(hours=1)
+        )
+    items = await calendar_attachments(local_provider, tenant_id="t1", now=now, limit=3)
+    assert len(items) == 3
+
+
 # ── Google provider (mocked) ─────────────────────────────────────────────────
 
 
@@ -149,6 +304,9 @@ class _MockGoogleProvider(CalendarProvider):
 
     async def list_events(self, *, tenant_id: str, time_range: DateTimeRange) -> list[Event]:
         return [e for e in self.events if e.start < time_range.end and e.end > time_range.start]
+
+    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+        return next((e for e in self.events if e.id == event_id), None)
 
     async def create_event(
         self,
@@ -211,9 +369,22 @@ async def test_google_mock_provider_lists_events() -> None:
         )
     ]
     module = build_module(mock_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
-    result = _extract(structured)
-    assert any(r["title"] == "Seeded" for r in result)
+    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    envelope = _parse_envelope(content)
+    assert any(r.title == "Seeded" for r in envelope.entity_refs)
+
+
+async def test_google_mock_provider_get_event() -> None:
+    mock_provider = _MockGoogleProvider()
+    created = await mock_provider.create_event(
+        tenant_id="t1",
+        title="Sync",
+        start=datetime(2026, 6, 15, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 6, 15, 11, 0, tzinfo=UTC),
+    )
+    found = await fetch_event(mock_provider, tenant_id="t1", ref_id=created.id)
+    assert found.title == "Sync"
+    assert await mock_provider.get_event(tenant_id="t1", event_id="nope") is None
 
 
 async def test_both_providers_same_tool_interface() -> None:
@@ -240,6 +411,9 @@ async def test_both_providers_same_tool_interface() -> None:
         assert result["provider"] == prov.name
 
 
+# ── Manifest ──────────────────────────────────────────────────────────────────
+
+
 async def test_manifest_declares_tools_and_ui() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     store = LocalEventStore(engine)
@@ -254,6 +428,30 @@ async def test_manifest_declares_tools_and_ui() -> None:
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     assert manifest.ui.icon == "calendar"
+
+
+async def test_manifest_declares_resolver_and_attachable(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    assert manifest.resolver is True
+    assert manifest.attachable is True
+
+
+async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvider) -> None:
+    # The list tool now returns an entity-ref envelope (chips), so it is not a card
+    # action — the module exposes no plain-text action button (mirrors mail).
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    assert manifest.ui is not None
+    assert manifest.ui.actions == []
+
+
+async def test_manifest_version_is_0_4_0(local_provider: LocalCalendarProvider) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    assert manifest.version == "0.4.0"
 
 
 # ── calendar_page (the `calendar` archetype data, ADR-0018) ───────────────────
@@ -361,7 +559,6 @@ async def test_manifest_declares_calendar_page(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.2.0"
     pages = {p.id: p for p in manifest.pages}
     assert CALENDAR_PAGE_ID in pages
     assert pages[CALENDAR_PAGE_ID].archetype == "calendar"

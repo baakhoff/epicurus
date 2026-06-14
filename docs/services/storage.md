@@ -1,6 +1,6 @@
 # storage — file-tree index + object store
 
-**`epicurus-storage`** v0.2.0 is a sidecar module that gives the agent access to a file
+**`epicurus-storage`** v0.3.0 is a sidecar module that gives the agent access to a file
 tree on disk — a **read-only index** it can list, search, and read — plus **app-managed
 object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
@@ -10,6 +10,10 @@ covers generated files, exports, and attachments.
 v0.2.0 adds a **Files** left-nav page (the `browser` archetype, ADR-0018): browse the
 indexed tree by directory, search by name, and download files — all core-rendered from
 data the module supplies; no module markup runs in the shell.
+
+v0.3.0 adds the **chat upload sink** (`POST /ingest`, ADR-0025): files attached in chat are
+durably persisted to the object store and appear under an **`uploads/`** folder in the
+Files page, downloadable like any other file.
 
 ## The contract it exposes
 
@@ -29,13 +33,16 @@ data the module supplies; no module markup runs in the shell.
 
 | Method · Path | Purpose |
 | --- | --- |
+| `POST /ingest?filename=…&att_id=…` | **Chat upload sink (ADR-0025).** Body is the raw file bytes; `Content-Type` carries the media type. Stores the bytes in the object store under `uploads/<att_id>-<name>`, catalogues them (browsable + downloadable), and returns `{key, name, size}`. Called by the core's attachment-upload route. |
 | `GET /pages/files?path=…&q=…` | `BrowserData`-shaped payload for the Files left-nav page (ADR-0018). `path` browses a directory (empty = root); `q` runs a search. Proxied by the core at `GET /platform/v1/modules/storage/pages/files`. |
-| `GET /download?path=…` | Stream a file (binary-safe). Path-traversal attempts → **HTTP 400**. Proxied by the core at `GET /platform/v1/modules/storage/download`. |
+| `GET /download?path=…` | Stream a file (binary-safe) — an `uploads/…` object from MinIO, or a file from the read-only tree. Path-traversal attempts → **HTTP 400**. Proxied by the core at `GET /platform/v1/modules/storage/download`. |
 | `GET /health` · `GET /metrics` · `GET /manifest` | Ops + the module manifest. |
 
-> **Path safety.** Both `storage_read` and `/download` resolve `(root / path)` and require
-> it to stay within the configured root (`relative_to`), rejecting `..`, absolute paths,
-> and symlink escapes. The tree is mounted **read-only**.
+> **Path safety.** For tree files, both `storage_read` and `/download` resolve `(root / path)`
+> and require it to stay within the configured root (`relative_to`), rejecting `..`, absolute
+> paths, and symlink escapes. The tree is mounted **read-only**; uploaded objects live in the
+> writable, tenant-scoped object bucket instead, and `/download` routes them there by their
+> catalogued `source`.
 
 ### Events (NATS)
 
@@ -60,6 +67,27 @@ the storage module is reachable. It renders a two-pane tree/list + detail view:
 
 The module supplies data only; the shell (`BrowserView`) owns all chrome and styling.
 
+### The chat upload sink (ADR-0025)
+
+When a user attaches a file in chat, the core's upload route keeps its core-side handle
+**and** best-effort POSTs the bytes to this module's `POST /ingest`. The module:
+
+1. **Stores the bytes** in the object bucket under `uploads/<att_id>-<name>` — the core
+   attachment id makes the key unique, so two uploads of the same filename never collide.
+2. **Catalogues** the upload in `storage_files` with `source="object"`, plus an `uploads`
+   directory row, so it shows in the Files page (and `storage_search` finds it). The bytes
+   live in MinIO; the index row is metadata pointing at them — exactly how scanned files
+   point at bytes on disk.
+3. **Serves it back**: `/download` sees the catalogued `source="object"` entry and streams
+   the bytes from MinIO (with their stored content type), while filesystem paths still
+   resolve against the read-only tree.
+
+The read-only file tree (`scanner.py`) is untouched — a rescan's `purge_stale` only
+removes `source="fs"` rows, so uploads survive every scan. Tenant scoping holds end to
+end: the bytes land in the `{tenant}-storage` bucket and the catalogue rows are
+tenant-scoped. The core treats persistence as **best-effort** — a down or absent storage
+module never fails a chat upload.
+
 ## Configuration
 
 `StorageSettings` extends [`CoreSettings`](../reference/config.md):
@@ -78,10 +106,14 @@ until you point it at a real directory (never the host home dir).
 ## Data model
 
 - **Postgres `storage_files`** — one row per indexed entry: `id`, `tenant`, `path`,
-  `name`, `size`, `mtime`, `kind` (`file`/`dir`), `updated_at`; unique on
-  `(tenant, path)`. Tenant-scoped; a re-scan upserts and purges stale rows.
+  `name`, `size`, `mtime`, `kind` (`file`/`dir`), `updated_at`, and `source`
+  (`fs` = scanned, read-only · `object` = an `uploads/…` object in MinIO); unique on
+  `(tenant, path)`. Tenant-scoped; a re-scan upserts and purges stale **`fs`** rows only.
+  The `source` column is added in place at init on a pre-v0.3 deployment (no migration
+  tool — the index uses `create_all`), backfilled to `fs`.
 - **MinIO bucket `{tenant}-storage`** (`scope_bucket`) — app-managed objects, created
-  lazily, one bucket per tenant.
+  lazily, one bucket per tenant. Chat uploads live here under the `uploads/` prefix; the
+  `storage_object_*` tools store text objects in the same bucket.
 
 ## Dependencies
 
@@ -95,5 +127,7 @@ STORAGE_HOST_ROOT=/path/to/your/files docker compose up -d storage
 ```
 
 Package `epicurus_storage`: `scanner.py` (walk + incremental upsert), `db.py`
-(`storage_files` + queries), `object_store.py` (MinIO via aioboto3), `service.py` (the MCP
-tools + manifest UI + `build_page_data`), `app.py` (lifespan + `/download` + `/pages/files`).
+(`storage_files` + queries + `source` column), `object_store.py` (MinIO via aioboto3 —
+text **and** binary `put_bytes`/`get_object`), `service.py` (the MCP tools + manifest UI +
+`build_page_data` + `ingest_object`/`load_object_download`), `app.py` (lifespan + `/ingest`
++ `/download` + `/pages/files`).

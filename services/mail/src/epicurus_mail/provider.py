@@ -23,6 +23,9 @@ class MailMessage(BaseModel):
     date: str
     snippet: str
     body: str | None = None
+    # Whether the message is unread. Provider-agnostic; the Gmail provider derives it
+    # from the ``UNREAD`` label. Surfaced in the hover-card resolver (ADR-0019).
+    unread: bool = False
 
 
 class MailProvider(ABC):

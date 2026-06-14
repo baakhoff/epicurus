@@ -119,6 +119,9 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
     body: str | None = None
     if full:
         body = _extract_body(data.get("payload", {}))
+    # Gmail flags an unread message with the system ``UNREAD`` label; ``labelIds`` is
+    # returned for both the ``metadata`` and ``full`` formats, so search and read agree.
+    unread = "UNREAD" in data.get("labelIds", [])
     return MailMessage(
         id=data["id"],
         thread_id=data.get("threadId", ""),
@@ -128,6 +131,7 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         date=headers.get("date", ""),
         snippet=data.get("snippet", ""),
         body=body,
+        unread=unread,
     )
 
 

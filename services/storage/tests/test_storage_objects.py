@@ -52,3 +52,23 @@ async def test_tenant_isolation(minio_store: ObjectStore) -> None:
     await minio_store.put(tenant="tenant-a", key="secret.txt", content="private")
     result = await minio_store.get(tenant="tenant-b", key="secret.txt")
     assert result is None
+
+
+@pytest.mark.integration
+async def test_binary_round_trip_preserves_bytes_and_content_type(
+    minio_store: ObjectStore,
+) -> None:
+    """The chat upload sink path: arbitrary bytes + their media type survive a round-trip."""
+    blob = bytes(range(256))
+    await minio_store.put_bytes(
+        tenant=TENANT, key="uploads/a-photo.jpg", data=blob, content_type="image/jpeg"
+    )
+    stored = await minio_store.get_object(tenant=TENANT, key="uploads/a-photo.jpg")
+    assert stored is not None
+    assert stored.data == blob
+    assert stored.content_type == "image/jpeg"
+
+
+@pytest.mark.integration
+async def test_get_object_missing_returns_none(minio_store: ObjectStore) -> None:
+    assert await minio_store.get_object(tenant=TENANT, key="uploads/nope.bin") is None

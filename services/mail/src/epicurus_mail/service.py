@@ -22,7 +22,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.4.0",
         description=(
             "Provider-agnostic mail — search, read, and send. Gmail is the v0.1 provider."
         ),

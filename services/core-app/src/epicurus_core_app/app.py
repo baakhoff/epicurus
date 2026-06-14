@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
 from epicurus_core_app.agent.agent import Agent
+from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
@@ -84,6 +85,11 @@ def create_app() -> FastAPI:
 
     memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
     attachment_store = AttachmentStore(engine)
+    attachment_sink = (
+        AttachmentSink(settings.attachment_sink_url)
+        if settings.attachment_sink_url.strip()
+        else None
+    )
     mcp_host = McpHost(settings.module_mcp_urls)
     registry = ModuleRegistry(
         settings.module_base_urls,
@@ -132,7 +138,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(
-        create_agent_router(agent, memory, settings.default_tenant_id, attachment_store)
+        create_agent_router(
+            agent, memory, settings.default_tenant_id, attachment_store, sink=attachment_sink
+        )
     )
     app.include_router(create_modules_router(registry))
     app.include_router(create_oauth_router(oauth, default_tenant=settings.default_tenant_id))

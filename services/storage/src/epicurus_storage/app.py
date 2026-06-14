@@ -1,4 +1,4 @@
-"""Runnable storage service: ops endpoints + MCP tool surface + file download."""
+"""Runnable storage service: ops endpoints + MCP tools + upload ingest + download."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import (
@@ -21,8 +21,22 @@ from epicurus_core import (
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.scanner import scan
-from epicurus_storage.service import MODULE_NAME, STORAGE_PAGE_ID, build_module, build_page_data
+from epicurus_storage.service import (
+    MODULE_NAME,
+    STORAGE_PAGE_ID,
+    UPLOADS_PREFIX,
+    build_module,
+    build_page_data,
+    ingest_object,
+    load_object_download,
+)
 from epicurus_storage.settings import StorageSettings
+
+
+def _attachment_disposition(name: str) -> str:
+    """A ``Content-Disposition`` header that downloads as *name* (header-safe)."""
+    safe = name.replace('"', "").replace("\\", "").replace("\r", "").replace("\n", "")
+    return f'attachment; filename="{safe}"'
 
 
 def _service_version() -> str:
@@ -83,15 +97,58 @@ def create_app() -> FastAPI:
     _tenant = settings.default_tenant_id
     _download_base = f"/platform/v1/modules/{MODULE_NAME}/download"
 
+    @app.post("/ingest")
+    async def ingest(
+        request: Request,
+        filename: str = Query(..., description="Original filename of the uploaded file"),
+        att_id: str = Query(default="", description="Core attachment id (uniqueness token)"),
+    ) -> dict[str, object]:
+        """Durably persist an uploaded file's bytes — the chat upload sink (ADR-0025).
+
+        The core's attachment-upload route POSTs the raw bytes here (the ``Content-Type``
+        header carries the media type) so the upload is kept in the object store and
+        becomes browsable in the Files page. Returns the stored object's
+        ``{key, name, size}``.
+        """
+        data = await request.body()
+        content_type = request.headers.get("content-type") or "application/octet-stream"
+        return await ingest_object(
+            index=index,
+            objects=objects,
+            tenant=_tenant,
+            att_id=att_id,
+            filename=filename,
+            content_type=content_type,
+            data=data,
+        )
+
     @app.get("/download")
     async def download(
         path: str = Query(..., description="Path relative to the storage root"),
-    ) -> FileResponse:
-        """Stream a file from the indexed tree.
+    ) -> Response:
+        """Stream a file — an object-store upload or a file from the indexed tree.
 
-        *path* must be relative to the configured storage root; path-traversal
-        attempts (``..`` components) are rejected with HTTP 400.
+        A catalogued ``uploads/…`` object (a chat attachment) is streamed from MinIO;
+        every other *path* is resolved against the configured storage root, with
+        path-traversal attempts (``..`` components) rejected with HTTP 400.
         """
+        # Object-backed uploads live under the uploads prefix; the index entry's source
+        # is the authority, so the prefix test just spares ordinary files a DB round-trip.
+        if path == UPLOADS_PREFIX or path.startswith(f"{UPLOADS_PREFIX}/"):
+            try:
+                obj = await load_object_download(
+                    index=index, objects=objects, tenant=_tenant, path=path
+                )
+            except Exception as exc:  # an index/object hiccup must not break fs downloads
+                log.warning("object download lookup failed", path=path, error=str(exc))
+                obj = None
+            if obj is not None:
+                return Response(
+                    content=obj.data,
+                    media_type=obj.content_type,
+                    headers={"content-disposition": _attachment_disposition(obj.name)},
+                )
+
         try:
             resolved = (_root / path).resolve()
         except Exception as exc:

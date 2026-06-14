@@ -64,6 +64,19 @@ class GoogleCalendarProvider(CalendarProvider):
             resp.raise_for_status()
         return [_google_item_to_event(item) for item in resp.json().get("items", [])]
 
+    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+        """Fetch a single event by id; ``None`` when Google reports it gone (404)."""
+        headers = await self._auth_headers()
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.get(
+                f"{_CALENDAR_API}/calendars/{self._calendar_id}/events/{event_id}",
+                headers=headers,
+            )
+        if resp.status_code == httpx.codes.NOT_FOUND:
+            return None
+        resp.raise_for_status()
+        return _google_item_to_event(resp.json())
+
     async def create_event(
         self,
         *,

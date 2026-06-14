@@ -1,4 +1,4 @@
-"""Calendar module — MCP tool surface.
+"""Calendar module — MCP tool surface, entity-ref resolver, and attachment source.
 
 Registers three provider-agnostic tools the agent can call:
 
@@ -8,6 +8,13 @@ Registers three provider-agnostic tools the agent can call:
 
 The tools delegate entirely to the active ``CalendarProvider``; swapping the
 provider (local ↔ Google ↔ future CalDAV) requires no tool changes.
+
+Since **v0.4** the module also speaks the entity-reference contract (ADR-0019):
+``calendar_list_events`` returns events as entity-reference chips, the module
+resolves a referenced event to a core **hover-card**, and it is a
+**chat-attachment source** — the helpers that back those surfaces live here
+(``event_hover_card``, ``event_attachment``, ``calendar_attachments``,
+``fetch_event``) so they are unit-testable without a running app.
 """
 
 from __future__ import annotations
@@ -15,17 +22,33 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from epicurus_calendar.models import DateTimeRange
+from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
-from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
+from epicurus_core import (
+    EntityRef,
+    EpicurusModule,
+    HoverCard,
+    HoverCardDetail,
+    PageSpec,
+    UiSection,
+    tool_envelope,
+)
 
 MODULE_NAME = "calendar"
 CALENDAR_PAGE_ID = "calendar"
+
+# The kind every calendar entity-reference and attachment carries (ADR-0019).
+EVENT_KIND = "event"
 
 # A single page fetch must not scan an unbounded range. The shell's month grid spans
 # ~42 days and never needs more than a few weeks; this cap keeps a stray or hostile
 # request bounded without clipping any real view.
 _MAX_RANGE_DAYS = 92
+
+# Chat-attachment picker bounds (ADR-0019): the composer lists *upcoming* events to
+# attach, so the window looks forward only and is capped to keep the menu manageable.
+_ATTACH_RANGE_DAYS = 30
+_ATTACH_LIMIT = 50
 
 
 def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
@@ -37,7 +60,7 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.4.0",
         description=(
             "Provider-neutral calendar: list events, create events, and find"
             " free time slots. Supports a local store (no account needed) and"
@@ -76,14 +99,10 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
                 },
             },
             status_url="/status",
-            actions=[
-                UiAction(
-                    tool="calendar_list_events",
-                    label="List events",
-                    description="Show the next 7 days of calendar events.",
-                    intent="default",
-                ),
-            ],
+            # No manifest actions: the one read tool (`calendar_list_events`) now returns
+            # an entity-reference envelope (chips), which the module card's plain-text
+            # result panel can't render — events are surfaced through chat instead. This
+            # mirrors mail keeping `mail_search` out of its actions (ADR-0019).
         ),
         # A left-nav Calendar page (ADR-0018): the module supplies events in a range,
         # the core shell renders the month / week / agenda views. No module markup.
@@ -96,26 +115,39 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
                 nav_order=40,
             )
         ],
+        # Resolve a referenced event to a hover-card at GET /resolve/event/{id} (ADR-0019).
+        resolver=True,
+        # Be a chat-attachment source: GET /attachments (picker) + /attachments/{id} (ADR-0019).
+        attachable=True,
     )
 
     @module.tool()
-    async def calendar_list_events(range_days: int = 7) -> list[dict[str, Any]]:
+    async def calendar_list_events(range_days: int = 7) -> str:
         """List calendar events in the next *range_days* days (default 7).
 
-        Returns events sorted by start time, each with ``id``, ``title``,
-        ``start``, ``end``, ``description``, ``location``, and ``provider``
-        fields.  Times are ISO-8601 strings.
+        Returns the events as entity-reference chips (ADR-0019): hover a chip for
+        the event's hover-card, click it to open the event in the side panel. Each
+        chip carries the event id, so you can refer to an event later without
+        listing again. The accompanying text lists each event's title and time.
 
         Args:
             range_days: How many days ahead to look (1-90).
 
-        Returns a list of event dicts, or an empty list when none exist.
+        Returns a tool envelope whose chips reference the matching events.
         """
         capped = min(max(range_days, 1), 90)
         now = datetime.now(tz=UTC)
         time_range = DateTimeRange(start=now, end=now + timedelta(days=capped))
         events = await provider.list_events(tenant_id=tenant_id, time_range=time_range)
-        return [e.model_dump(mode="json") for e in events]
+        if not events:
+            return tool_envelope(f"No events in the next {capped} day(s).", [])
+        refs = [event_entity_ref(e) for e in events]
+        lines = [
+            f"- {e.title} ({_format_when(e)})" + (f" @ {e.location}" if e.location else "")
+            for e in events
+        ]
+        text = f"Found {len(events)} event(s):\n" + "\n".join(lines)
+        return tool_envelope(text, refs)
 
     @module.tool()
     async def calendar_create_event(
@@ -177,6 +209,107 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
         return [s.model_dump(mode="json") for s in slots]
 
     return module
+
+
+# ── Entity references, hover-cards & attachments (ADR-0019) ───────────────────
+
+
+class EventNotFound(Exception):
+    """Raised when an event id does not resolve for the active provider/tenant."""
+
+
+def _format_when(event: Event) -> str:
+    """A compact, human ``when`` line for an event (chips, hover-cards, excerpts)."""
+    start, end = event.start, event.end
+    if start.date() == end.date():
+        return f"{start:%a %d %b %Y, %H:%M}-{end:%H:%M}"
+    return f"{start:%a %d %b %Y %H:%M} → {end:%a %d %b %Y %H:%M}"
+
+
+def event_entity_ref(event: Event) -> EntityRef:
+    """The chip an agent turn carries for a listed event (ADR-0019)."""
+    summary = _format_when(event)
+    if event.location:
+        summary = f"{summary} · {event.location}"
+    return EntityRef(
+        ref_id=event.id,
+        module=MODULE_NAME,
+        kind=EVENT_KIND,
+        title=event.title,
+        summary=summary,
+    )
+
+
+def event_hover_card(event: Event) -> dict[str, Any]:
+    """The core hover-card / entity-detail envelope for an event (ADR-0019).
+
+    Core-owned, uniform shape: the module supplies the data, the shell renders the
+    inline hover-card and the panel's entity-detail view from it.
+    """
+    details = [HoverCardDetail(label="When", value=_format_when(event))]
+    if event.location:
+        details.append(HoverCardDetail(label="Location", value=event.location))
+    details.append(HoverCardDetail(label="Calendar", value=event.provider))
+    return HoverCard(
+        title=event.title,
+        description=event.description or "",
+        details=details,
+    ).model_dump()
+
+
+def event_excerpt(event: Event) -> str:
+    """A short plain-text rendering of an event for the agent's turn context."""
+    lines = [event.title, _format_when(event)]
+    if event.location:
+        lines.append(f"Location: {event.location}")
+    if event.description:
+        lines.extend(["", event.description])
+    return "\n".join(lines)
+
+
+def event_attachment_item(event: Event) -> dict[str, str]:
+    """One picker row the composer lists for the attachment source (ADR-0019)."""
+    return {"ref_id": event.id, "kind": EVENT_KIND, "title": event.title}
+
+
+def event_attachment(event: Event) -> dict[str, str]:
+    """The resolve payload the agent injects when an attached event is expanded."""
+    return {"title": event.title, "excerpt": event_excerpt(event)}
+
+
+async def fetch_event(provider: CalendarProvider, *, tenant_id: str, ref_id: str) -> Event:
+    """Fetch one event by id, raising :class:`EventNotFound` when it does not exist."""
+    event = await provider.get_event(tenant_id=tenant_id, event_id=ref_id)
+    if event is None:
+        raise EventNotFound(ref_id)
+    return event
+
+
+async def calendar_attachments(
+    provider: CalendarProvider,
+    *,
+    tenant_id: str,
+    now: datetime | None = None,
+    range_days: int = _ATTACH_RANGE_DAYS,
+    limit: int = _ATTACH_LIMIT,
+) -> list[dict[str, str]]:
+    """Picker for the chat-attachment composer (ADR-0019): upcoming events as items.
+
+    Returns up to *limit* events overlapping the next *range_days* days as
+    ``{ref_id, kind, title}`` rows. The agent later resolves the chosen one through
+    ``GET /attachments/{ref_id}`` into the turn's context.
+
+    Args:
+        provider: The active calendar backend.
+        tenant_id: Tenant whose events to offer.
+        now: Reference instant for the forward window (injected in tests).
+        range_days: How many days ahead to offer.
+        limit: Maximum number of items returned.
+    """
+    ref = now or datetime.now(tz=UTC)
+    time_range = DateTimeRange(start=ref, end=ref + timedelta(days=range_days))
+    events = await provider.list_events(tenant_id=tenant_id, time_range=time_range)
+    return [event_attachment_item(e) for e in events[:limit]]
 
 
 async def calendar_page(

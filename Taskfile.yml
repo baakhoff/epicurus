@@ -8,6 +8,11 @@ tasks:
     cmds:
       - uv sync --all-packages
 
+  new-module:
+    desc: Scaffold + wire in a new module (e.g. `task new-module -- "Weather"`); see docs/reference/ports.md
+    cmds:
+      - uv run python scripts/new_module.py {{.CLI_ARGS}}
+
   lint:
     desc: Lint with ruff
     cmds:

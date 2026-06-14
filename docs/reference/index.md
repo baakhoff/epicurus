@@ -47,4 +47,6 @@ log.info("service starting", service=settings.service_name)
 
 The module↔core **wire contract** (the HTTP endpoints behind `PlatformClient`) is
 documented in [platform-api](platform-api.md). The running services that consume all of
-this are under [Services & Modules](../services/index.md).
+this are under [Services & Modules](../services/index.md). The host ports each one
+publishes — and how a new module gets a collision-free one — are in the
+[host-port registry](ports.md).

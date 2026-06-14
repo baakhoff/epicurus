@@ -4,5 +4,6 @@
   "package_name": "epicurus_{{ cookiecutter.service_slug.replace('-', '_') }}",
   "description": "An epicurus module.",
   "image": "ghcr.io/baakhoff/epicurus-{{ cookiecutter.service_slug }}",
-  "port": "8090"
+  "port": "8092",
+  "port_env": "{{ cookiecutter.service_slug.upper().replace('-', '_') }}_PORT"
 }

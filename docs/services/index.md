@@ -13,11 +13,14 @@ contract. This is the map of every running block — each row links its full ref
 | **storage** | module | a read-only index of a file tree (list / search / read / download) plus a MinIO object store | `8083` | [storage](storage.md) |
 | **knowledge** | module | Obsidian-vault RAG — incremental index into a tenant-scoped Qdrant collection | `8085` | [knowledge](knowledge.md) |
 | **websearch** | module | self-hosted web search via SearXNG — no API key required | `8086` | [websearch](websearch.md) |
-| **mail** | module | provider-agnostic mail — search, read, and send via Gmail (v0.1) | `8087` | [mail](mail.md) |
+| **calendar** | module | provider-neutral calendar — events and scheduling (local + Google) | `8087` | [calendar](calendar.md) |
+| **mail** | module | provider-agnostic mail — search, read, and send via Gmail (v0.1) | `8090` | [mail](mail.md) |
+| **tasks** | module | task management — Google Tasks plus a local store (ADR-0016) | `8091` | [tasks](tasks.md) |
 | **echo** | module | the reference module — proves the MCP tool + NATS event contract end to end | `8080` | [echo](echo.md) |
 
 Ports are loopback-bound by default; the [edge gateway](../infrastructure/index.md#edge-gateway)
-is the front door at `http://<host>:8088/`.
+is the front door at `http://<host>:8088/`. The full allocation (and how a new
+module gets a collision-free one) lives in the [host-port registry](../reference/ports.md).
 
 ## How a module plugs in
 

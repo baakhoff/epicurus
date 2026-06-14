@@ -18,6 +18,11 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Model catalog browser** — replaces "type a name to pull" with a browsable catalog of 24
+  curated Ollama models. Search by name, family, or description; filter by tag (General, Code,
+  Multilingual, Vision, Embedding, Small); pull any entry with live SSE progress. The
+  `src/data/catalog.ts` module is the seam: swap it for a `GET /platform/v1/llm/catalog`
+  fetch when live Ollama-registry browse lands (`web` → 0.4.0).
 - **Code-block copy button** — a one-click copy button with a language label appears on
   every fenced code block in assistant messages. Streaming partial fences are
   pre-closed so they render as code rather than raw text mid-stream (`web` → 0.3.0).

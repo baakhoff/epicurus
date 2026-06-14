@@ -290,3 +290,172 @@ async def test_disconnect_already_disconnected_is_ok() -> None:
     svc, _, _, fake_delete = _service(secrets_raise=SecretError("not found"))
     fake_delete.side_effect = SecretError("not found")
     await svc.disconnect(PROVIDER_GOOGLE, TEST_TENANT)  # should not raise
+
+
+# ── set_client_credentials / get_client_status ───────────────────────────────
+
+
+async def test_set_client_credentials_stores_in_vault() -> None:
+    svc, _, fake_set, _ = _service()
+    await svc.set_client_credentials(PROVIDER_GOOGLE, "my-client-id", "my-secret", TEST_TENANT)
+    fake_set.assert_awaited_once()
+    path, payload, tenant = fake_set.call_args[0]
+    assert "clients/google" in path
+    assert payload["client_id"] == "my-client-id"
+    assert payload["client_secret"] == "my-secret"
+    assert tenant == TEST_TENANT
+
+
+async def test_set_client_credentials_unknown_provider_raises() -> None:
+    svc, *_ = _service()
+    with pytest.raises(OAuthError, match="unknown provider"):
+        await svc.set_client_credentials("github", "id", "secret", TEST_TENANT)
+
+
+async def test_get_client_status_configured_when_secret_exists() -> None:
+    svc, *_ = _service(secrets_get=CLIENT_CREDS)
+    status = await svc.get_client_status(PROVIDER_GOOGLE, TEST_TENANT)
+    assert status.configured is True
+    assert status.provider == PROVIDER_GOOGLE
+
+
+async def test_get_client_status_not_configured_when_no_secret() -> None:
+    svc, *_ = _service(secrets_raise=SecretError("not found"))
+    status = await svc.get_client_status(PROVIDER_GOOGLE, TEST_TENANT)
+    assert status.configured is False
+
+
+async def test_get_client_status_never_returns_secret() -> None:
+    svc, *_ = _service(secrets_get=CLIENT_CREDS)
+    status = await svc.get_client_status(PROVIDER_GOOGLE, TEST_TENANT)
+    assert not hasattr(status, "client_secret")
+    assert not hasattr(status, "client_id")
+
+
+# ── _union_scopes ────────────────────────────────────────────────────────────
+
+
+def test_union_scopes_merges_disjoint() -> None:
+    result = OAuthService._union_scopes("openid email", "https://www.googleapis.com/auth/calendar")
+    assert "openid" in result
+    assert "email" in result
+    assert "calendar" in result
+
+
+def test_union_scopes_deduplicates() -> None:
+    result = OAuthService._union_scopes("openid email profile", "openid email")
+    assert result.count("openid") == 1
+    assert result.count("email") == 1
+
+
+def test_union_scopes_empty_existing() -> None:
+    result = OAuthService._union_scopes("", "openid email")
+    assert result == "openid email"
+
+
+def test_union_scopes_empty_new() -> None:
+    result = OAuthService._union_scopes("openid email", "")
+    assert result == "openid email"
+
+
+# ── scope union in handle_callback ───────────────────────────────────────────
+
+
+async def test_handle_callback_unions_scopes_with_existing() -> None:
+    """A second connect must not clobber the first module's scopes."""
+    existing_token = {
+        "access_token": "ya29.old",
+        "refresh_token": "1//old-refresh",
+        "token_type": "Bearer",
+        "scope": "openid email profile https://www.googleapis.com/auth/calendar",
+        "expires_at": None,
+    }
+    new_token_resp = {
+        "access_token": "ya29.new",
+        "refresh_token": "1//new-refresh",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.readonly",
+    }
+
+    call_count = 0
+
+    async def _fake_get(path: str, tenant: str) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        if "tokens" in path:
+            return existing_token
+        return CLIENT_CREDS
+
+    store = AsyncMock()
+    store.get.side_effect = _fake_get
+    store.set = AsyncMock()
+
+    svc = OAuthService(
+        store,  # type: ignore[arg-type]
+        redirect_base_url=TEST_REDIRECT,
+        state_secret=TEST_SECRET,
+    )
+    state = svc._create_state(PROVIDER_GOOGLE, TEST_TENANT)
+
+    with patch(
+        "epicurus_core_app.oauth.service.OAuthService._exchange_code",
+        new=AsyncMock(return_value=new_token_resp),
+    ):
+        await svc.handle_callback("code", state)
+
+    stored_payload = store.set.call_args[0][1]
+    scope = stored_payload["scope"]
+    assert "calendar" in scope
+    assert "gmail.readonly" in scope
+    assert scope.count("openid") == 1
+
+
+async def test_handle_callback_first_connect_no_existing_token() -> None:
+    """First connect (no prior token) must not fail and must store the returned scope."""
+    token_resp = {
+        "access_token": "ya29.first",
+        "refresh_token": "1//first",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "openid email profile",
+    }
+
+    call_count = 0
+
+    async def _fake_get(path: str, tenant: str) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        if "tokens" in path:
+            raise SecretError("not found")
+        return CLIENT_CREDS
+
+    store = AsyncMock()
+    store.get.side_effect = _fake_get
+    store.set = AsyncMock()
+
+    svc = OAuthService(
+        store,  # type: ignore[arg-type]
+        redirect_base_url=TEST_REDIRECT,
+        state_secret=TEST_SECRET,
+    )
+    state = svc._create_state(PROVIDER_GOOGLE, TEST_TENANT)
+
+    with patch(
+        "epicurus_core_app.oauth.service.OAuthService._exchange_code",
+        new=AsyncMock(return_value=token_resp),
+    ):
+        provider, _tenant = await svc.handle_callback("code", state)
+
+    assert provider == PROVIDER_GOOGLE
+    stored_payload = store.set.call_args[0][1]
+    assert stored_payload["scope"] == "openid email profile"
+
+
+# ── incremental scopes in _auth_url ─────────────────────────────────────────
+
+
+async def test_connect_auth_url_includes_include_granted_scopes() -> None:
+    svc, *_ = _service(secrets_get=CLIENT_CREDS)
+    result = await svc.connect(PROVIDER_GOOGLE, TEST_TENANT)
+    assert "include_granted_scopes=true" in result.auth_url

@@ -1,6 +1,8 @@
 """FastAPI router for the OAuth connect flow and token-vault surface.
 
 User-facing (web shell → core):
+    PUT  /platform/v1/oauth/{provider}/client   — store client credentials (write-only)
+    GET  /platform/v1/oauth/{provider}/client   — check whether credentials are configured
     GET  /platform/v1/oauth/{provider}/connect  — initiate the consent flow
     GET  /platform/v1/oauth/callback            — provider callback (redirect after exchange)
     GET  /platform/v1/oauth/{provider}/status   — connected or not
@@ -19,7 +21,13 @@ from fastapi.responses import RedirectResponse
 
 from epicurus_core import get_logger
 
-from .models import OAuthConnectResponse, OAuthStatus, OAuthTokenResponse
+from .models import (
+    OAuthClientCredentials,
+    OAuthClientStatus,
+    OAuthConnectResponse,
+    OAuthStatus,
+    OAuthTokenResponse,
+)
 from .service import OAuthError, OAuthService
 
 log = get_logger("epicurus_core_app.oauth")
@@ -28,6 +36,36 @@ log = get_logger("epicurus_core_app.oauth")
 def create_oauth_router(service: OAuthService, *, default_tenant: str) -> APIRouter:
     """Build the ``/platform/v1/oauth`` router."""
     router = APIRouter(prefix="/platform/v1/oauth", tags=["oauth"])
+
+    @router.put("/{provider}/client", response_model=dict)
+    async def set_client(
+        provider: str,
+        body: OAuthClientCredentials,
+        tenant_id: str = Query(default=default_tenant),
+    ) -> dict[str, Any]:
+        """Store the provider's OAuth client credentials in the vault.
+
+        Write-only: the secret is never returned.  Use GET /client to check
+        whether credentials are configured.
+        """
+        try:
+            await service.set_client_credentials(
+                provider, body.client_id, body.client_secret, tenant_id
+            )
+        except OAuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok"}
+
+    @router.get("/{provider}/client", response_model=OAuthClientStatus)
+    async def get_client_status(
+        provider: str,
+        tenant_id: str = Query(default=default_tenant),
+    ) -> OAuthClientStatus:
+        """Return whether client credentials are configured — never the secret itself."""
+        try:
+            return await service.get_client_status(provider, tenant_id)
+        except OAuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.get("/{provider}/connect", response_model=OAuthConnectResponse)
     async def connect(

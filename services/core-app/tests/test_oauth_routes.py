@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from epicurus_core_app.oauth.models import (
     PROVIDER_GOOGLE,
+    OAuthClientStatus,
     OAuthConnectResponse,
     OAuthStatus,
     OAuthTokenResponse,
@@ -29,6 +30,7 @@ class _FakeOAuthService:
         status_result: OAuthStatus | None = None,
         token_result: OAuthTokenResponse | None = None,
         callback_result: tuple[str, str] | None = None,
+        client_status_result: OAuthClientStatus | None = None,
         raise_on: str | None = None,
         raise_exc: Exception | None = None,
     ) -> None:
@@ -40,6 +42,9 @@ class _FakeOAuthService:
             access_token="ya29.test", token_type="Bearer"
         )
         self._callback = callback_result or (PROVIDER_GOOGLE, DEFAULT_TENANT)
+        self._client_status = client_status_result or OAuthClientStatus(
+            provider=PROVIDER_GOOGLE, configured=False
+        )
         self._raise_on = raise_on
         self._raise_exc = raise_exc or OAuthError("test error")
         self.calls: list[tuple[str, ...]] = []
@@ -47,6 +52,17 @@ class _FakeOAuthService:
     def _maybe_raise(self, method: str) -> None:
         if self._raise_on == method:
             raise self._raise_exc
+
+    async def set_client_credentials(
+        self, provider: str, client_id: str, client_secret: str, tenant_id: str
+    ) -> None:
+        self.calls.append(("set_client", provider, client_id, tenant_id))
+        self._maybe_raise("set_client")
+
+    async def get_client_status(self, provider: str, tenant_id: str) -> OAuthClientStatus:
+        self.calls.append(("get_client", provider, tenant_id))
+        self._maybe_raise("get_client")
+        return self._client_status
 
     async def connect(self, provider: str, tenant_id: str, **_: object) -> OAuthConnectResponse:
         self.calls.append(("connect", provider, tenant_id))
@@ -247,4 +263,99 @@ async def test_get_token_not_connected_returns_400() -> None:
         transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
     ) as client:
         resp = await client.get(f"/platform/v1/oauth/{PROVIDER_GOOGLE}/token")
+    assert resp.status_code == 400
+
+
+# ── PUT /{provider}/client ────────────────────────────────────────────────────
+
+
+async def test_set_client_returns_ok() -> None:
+    fake = _FakeOAuthService()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client",
+            json={"client_id": "my-id", "client_secret": "my-secret"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert fake.calls[0][0] == "set_client"
+    assert fake.calls[0][2] == "my-id"
+
+
+async def test_set_client_secret_not_echoed_in_response() -> None:
+    fake = _FakeOAuthService()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client",
+            json={"client_id": "my-id", "client_secret": "super-secret"},
+        )
+    body = resp.json()
+    assert "super-secret" not in str(body)
+    assert "client_secret" not in body
+
+
+async def test_set_client_error_returns_400() -> None:
+    fake = _FakeOAuthService(raise_on="set_client")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client",
+            json={"client_id": "x", "client_secret": "y"},
+        )
+    assert resp.status_code == 400
+
+
+async def test_set_client_missing_fields_returns_422() -> None:
+    fake = _FakeOAuthService()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client",
+            json={"client_id": "only-id"},
+        )
+    assert resp.status_code == 422
+
+
+# ── GET /{provider}/client ────────────────────────────────────────────────────
+
+
+async def test_get_client_status_configured() -> None:
+    fake = _FakeOAuthService(
+        client_status_result=OAuthClientStatus(provider=PROVIDER_GOOGLE, configured=True)
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.get(f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["configured"] is True
+    assert body["provider"] == PROVIDER_GOOGLE
+    assert "client_secret" not in body
+
+
+async def test_get_client_status_not_configured() -> None:
+    fake = _FakeOAuthService(
+        client_status_result=OAuthClientStatus(provider=PROVIDER_GOOGLE, configured=False)
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.get(f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client")
+    assert resp.status_code == 200
+    assert resp.json()["configured"] is False
+
+
+async def test_get_client_status_error_returns_400() -> None:
+    fake = _FakeOAuthService(raise_on="get_client")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(fake)), base_url="http://test"
+    ) as client:
+        resp = await client.get(f"/platform/v1/oauth/{PROVIDER_GOOGLE}/client")
     assert resp.status_code == 400

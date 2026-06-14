@@ -1,10 +1,10 @@
 """OAuth 2.0 service — connect flow, token exchange, transparent refresh, and vault storage.
 
 The operator provisions client credentials (client_id + client_secret) into OpenBao
-once. The service uses them to run the authorization-code flow per tenant, stores the
-resulting tokens back in OpenBao, and refreshes them transparently when they expire.
-Modules never see a client secret or refresh token — they call
-``GET /platform/v1/oauth/{provider}/token`` and receive a valid access token.
+once (via Settings UI or CLI). The service uses them to run the authorization-code
+flow per tenant, stores the resulting tokens back in OpenBao, and refreshes them
+transparently when they expire.  Modules never see a client secret or refresh token —
+they call ``GET /platform/v1/oauth/{provider}/token`` and receive a valid access token.
 
 Secret paths (all tenant-scoped via ``scope_secret_path``):
     ``oauth/clients/{provider}``  → operator-provisioned: ``{client_id, client_secret}``
@@ -31,6 +31,7 @@ from epicurus_core import SecretError, SecretStore
 from .models import (
     PROVIDER_GOOGLE,
     SUPPORTED_PROVIDERS,
+    OAuthClientStatus,
     OAuthConnectResponse,
     OAuthStatus,
     OAuthTokenResponse,
@@ -155,6 +156,9 @@ class OAuthService:
                 "state": state,
                 "access_type": "offline",
                 "prompt": "consent",  # always return a refresh token
+                # accumulate previously-granted scopes so connecting a second Google
+                # module doesn't clobber the first module's grant (#102)
+                "include_granted_scopes": "true",
             }
             return _GOOGLE_AUTH_URL + "?" + urlencode(params)
         raise OAuthError(f"unsupported provider: {provider!r}")
@@ -198,6 +202,17 @@ class OAuthService:
                 return dict(resp.json())
         raise OAuthError(f"unsupported provider: {provider!r}")
 
+    @staticmethod
+    def _union_scopes(existing: str, new: str) -> str:
+        """Return the union of two space-separated scope strings, preserving order."""
+        seen: set[str] = set()
+        merged: list[str] = []
+        for part in (existing + " " + new).split():
+            if part not in seen:
+                seen.add(part)
+                merged.append(part)
+        return " ".join(merged)
+
     # ── public API ───────────────────────────────────────────────────────────
 
     def _validate_provider(self, provider: str) -> None:
@@ -205,6 +220,31 @@ class OAuthService:
             raise OAuthError(
                 f"unknown provider {provider!r}; supported: {sorted(SUPPORTED_PROVIDERS)}"
             )
+
+    async def set_client_credentials(
+        self, provider: str, client_id: str, client_secret: str, tenant_id: str
+    ) -> None:
+        """Store operator-supplied client credentials in the vault.
+
+        Write-only: the secret is never read back through this path.
+        Callers should use :meth:`get_client_status` to check whether credentials
+        exist without exposing the secret.
+        """
+        self._validate_provider(provider)
+        await self._secrets.set(
+            self._client_path(provider),
+            {"client_id": client_id, "client_secret": client_secret},
+            tenant_id,
+        )
+
+    async def get_client_status(self, provider: str, tenant_id: str) -> OAuthClientStatus:
+        """Return whether client credentials are configured — never returns the secret."""
+        self._validate_provider(provider)
+        try:
+            await self._secrets.get(self._client_path(provider), tenant_id)
+            return OAuthClientStatus(provider=provider, configured=True)
+        except SecretError:
+            return OAuthClientStatus(provider=provider, configured=False)
 
     async def connect(
         self, provider: str, tenant_id: str, *, scope: str | None = None
@@ -221,7 +261,7 @@ class OAuthService:
         except SecretError as exc:
             raise OAuthError(
                 f"no OAuth client credentials for provider {provider!r} — "
-                "store them in OpenBao at "
+                "add them in Settings or store them in OpenBao at "
                 f"'oauth/clients/{provider}' (client_id, client_secret)"
             ) from exc
         client_id: str = creds["client_id"]
@@ -234,6 +274,9 @@ class OAuthService:
         """Process the provider callback: exchange code, store tokens.
 
         Returns ``(provider, tenant_id)`` so the caller can redirect accordingly.
+        The stored scope is the *union* of any previously-granted scopes and the
+        scopes returned by this grant, so connecting a second Google module does
+        not clobber the first module's grant (#102).
         """
         self._require_configured_secret()
         provider, tenant_id = self._verify_state(state)
@@ -252,13 +295,22 @@ class OAuthService:
         if "expires_in" in token_data:
             expires_at = time.time() + float(token_data["expires_in"])
 
+        # Accumulate scopes: union with whatever was previously stored so that
+        # connecting a second Google module doesn't clobber the first one's grant.
+        new_scope = token_data.get("scope", "")
+        try:
+            prev = await self._secrets.get(self._token_path(provider), tenant_id)
+            new_scope = self._union_scopes(prev.get("scope", ""), new_scope)
+        except SecretError:
+            pass  # first connect — no prior token to merge
+
         await self._secrets.set(
             self._token_path(provider),
             {
                 "access_token": token_data["access_token"],
                 "refresh_token": token_data.get("refresh_token", ""),
                 "token_type": token_data.get("token_type", "Bearer"),
-                "scope": token_data.get("scope", ""),
+                "scope": new_scope,
                 "expires_at": expires_at,
             },
             tenant_id,

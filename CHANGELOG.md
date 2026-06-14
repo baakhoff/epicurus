@@ -18,6 +18,17 @@ bundled-stack release, **v0.2.0**.
 
 ### Added
 
+- **Knowledge page (browse + edit, Obsidian-style)** — the knowledge module contributes an
+  **`editor`** left-nav page: browse the vault's documents and read/edit them in a
+  core-rendered markdown editor (source **and** preview), saving back to the vault. A save
+  **re-indexes just that document**, so edits made in the shell are immediately
+  agent-retrievable. This introduces the **shared core doc-editor component** (a future
+  Notes module reuses it) and the editor doc read/write proxy
+  (`GET|PUT /platform/v1/modules/{name}/pages/{id}/doc`, editor-only); the knowledge vault
+  mount becomes **read-write** and document paths are strictly confined to the vault (no
+  traversal). The `knowledge` package version is also realigned with its manifest (the
+  pyproject had drifted behind the shipped 0.2/0.3 features) (ADR-0018) (`knowledge` →
+  0.4.0, `core-app` → 0.4.0, `web` → 0.6.0).
 - **Module-contributed pages** — modules can add **left-nav pages, core-rendered from a
   bounded archetype vocabulary** (`browser` / `calendar` / `editor` / `board`): a module
   declares a `PageSpec` and serves its data, the shell renders it — **no module markup, JS,

@@ -206,6 +206,37 @@ export const BrowserData = z.object({
 });
 export type BrowserData = z.infer<typeof BrowserData>;
 
+/** One document in an `editor` page's list (content fetched lazily on open). */
+export const EditorDoc = z.object({
+  id: z.string(),
+  title: z.string(),
+  path: z.string(),
+});
+export type EditorDoc = z.infer<typeof EditorDoc>;
+
+/** The `editor` archetype's list contract: the browsable set of documents. */
+export const EditorData = z.object({
+  title: z.string().default("Knowledge"),
+  docs: z.array(EditorDoc).default([]),
+});
+export type EditorData = z.infer<typeof EditorData>;
+
+/** One document's content, returned when the editor opens it. */
+export const EditorDocContent = z.object({
+  path: z.string(),
+  title: z.string(),
+  content: z.string(),
+});
+export type EditorDocContent = z.infer<typeof EditorDocContent>;
+
+/** The result of saving an `editor` document. */
+export const EditorSaveResult = z.object({
+  path: z.string(),
+  indexed: z.boolean().default(false),
+  chunk_count: z.number().default(0),
+});
+export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
+
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 
 /** One label/value row of a hover-card / entity-detail panel. */

@@ -6,6 +6,8 @@ import { z } from "zod";
 
 import {
   AttachmentUploaded,
+  EditorDocContent,
+  EditorSaveResult,
   HoverCard,
   LlmPrefs,
   MessageRecord,
@@ -123,6 +125,19 @@ export const api = {
     request(
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}`,
+    ),
+  // One `editor` document's content, proxied through the core (ADR-0018).
+  modulePageDoc: (name: string, pageId: string, path: string) =>
+    request(
+      EditorDocContent,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
+    ),
+  // Save an `editor` document; the module writes it and (for knowledge) re-indexes it.
+  saveModulePageDoc: (name: string, pageId: string, path: string, content: string) =>
+    request(
+      EditorSaveResult,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
     ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>

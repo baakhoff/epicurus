@@ -137,7 +137,8 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
 `browser` (tree/list + detail), `calendar`, `editor` (Obsidian-like doc),
 `board` (lists/cards). The shell ships one first-party screen per archetype;
-`browser` is implemented today, the rest land with their module pages (Phase 3.8).
+`browser` and `editor` are implemented today, `calendar` and `board` land with their
+module pages (Phase 3.8).
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
@@ -153,6 +154,27 @@ declared pages — 404 otherwise), so the shell never calls a module directly. T
   ]
 }
 ```
+
+**The `editor` archetype (Obsidian-like docs).** Its `GET /pages/{id}` returns a
+document *list* (content is fetched lazily per document), and it owns two extra,
+**editor-only** doc endpoints the core proxies (a non-`editor` page 404s on them):
+
+```jsonc
+// GET /pages/{id}  →  the browsable document list
+{ "title": "Knowledge", "docs": [ { "id": "a.md", "title": "a", "path": "a.md" } ] }
+// GET /pages/{id}/doc?path=<rel>  →  one document's content
+{ "path": "a.md", "title": "a", "content": "# A\n…" }
+// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save
+{ "path": "a.md", "indexed": true, "chunk_count": 3 }
+```
+
+Proxied at `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`. `path` is
+module-relative and the module **must** confine it to its own store (reject `..`,
+absolute paths, and non-document files) — the editor writes real files, so this is the
+trust boundary. The shared core editor component (knowledge's vault page is the first
+user, #130) provides the list + markdown source/preview + save; a module supplies only
+the data above. The first knowledge implementation re-indexes a saved document so it
+stays agent-retrievable.
 
 ### Entity references & the resolver (ADR-0019)
 

@@ -84,4 +84,59 @@ describe("EditorView", () => {
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     expect(await screen.findByText(/empty vault/i)).toBeInTheDocument();
   });
+
+  it("shows the New note control only when the page is authorable", async () => {
+    mockModulePage.mockResolvedValue({ docs: [], can_create: false });
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText(/empty vault/i);
+    expect(screen.queryByRole("button", { name: /new note/i })).toBeNull();
+    unmount();
+
+    mockModulePage.mockResolvedValue({ docs: [], can_create: true });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    expect(await screen.findByRole("button", { name: /new note/i })).toBeInTheDocument();
+    expect(screen.getByText(/no notes yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/empty vault/i)).toBeNull();
+  });
+
+  it("creates a note: seeds an H1 title and saves to a fresh slug", async () => {
+    mockModulePage.mockResolvedValue({ title: "Notes", docs: [], can_create: true });
+    mockSave.mockResolvedValue({ path: "my-idea", indexed: true, chunk_count: 1 });
+    // After a create-save the editor re-syncs the now-saved note from the server.
+    mockModulePageDoc.mockResolvedValue({
+      path: "my-idea",
+      title: "My Idea",
+      content: "# My Idea\n\n",
+    });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: /new note/i }));
+    fireEvent.change(screen.getByLabelText("New note title"), { target: { value: "My Idea" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    const textarea = (await screen.findByLabelText("Edit my-idea")) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("# My Idea\n\n");
+    // A brand-new note never fetches the (absent) document.
+    expect(mockModulePageDoc).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("notes", "notes", "my-idea", "# My Idea\n\n"),
+    );
+  });
+
+  it("disambiguates the new slug against an existing note", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Notes",
+      docs: [{ id: "my-idea", title: "My Idea", path: "my-idea" }],
+      can_create: true,
+    });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: /new note/i }));
+    fireEvent.change(screen.getByLabelText("New note title"), { target: { value: "My Idea" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByLabelText("Edit my-idea-2")).toBeInTheDocument();
+  });
 });

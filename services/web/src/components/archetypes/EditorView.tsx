@@ -1,27 +1,54 @@
 /**
  * The `editor` archetype (ADR-0018): an Obsidian-like document editor, core-rendered
- * and **shared** — the knowledge vault page is the first user (#130); Notes reuses it
- * verbatim. The module supplies only data through the core proxy: a document list
- * (`GET /pages/{id}`), one document's content (`GET …/doc`), and a save (`PUT …/doc`).
- * No module markup runs here.
+ * and **shared** — knowledge is the first user (#130), notes the second (#134). The
+ * module supplies only data through the core proxy: a document list (`GET /pages/{id}`),
+ * one document's content (`GET …/doc`), and a save (`PUT …/doc`). No module markup runs
+ * here.
+ *
+ * Authoring (ADR-0026): when the page's data sets `can_create`, the editor shows a
+ * "New note" control that opens a blank buffer at a fresh slug; the first save creates
+ * the document (knowledge leaves `can_create` false — its notes are authored in
+ * Obsidian). The shell derives the slug; the module derives the title from the body.
  *
  * Layout mirrors the browser archetype: list + detail side-by-side on wide screens; on
  * phones the list fills the view and opening a document slides to the editor with a
  * back affordance. Edit shows the markdown source; Preview renders it with the shell's
- * prose styler. Saving persists through the core, which (for knowledge) re-indexes.
+ * prose styler. Saving persists through the core, which (for knowledge/notes) re-indexes.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, FileText } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ChevronLeft, ChevronRight, FileText, Plus } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Markdown } from "@/components/Markdown";
-import { Badge, Button, EmptyState, Spinner, TextArea, cn } from "@/components/ui";
+import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
+
+/** A filesystem-safe, readable slug for a note title (the editor `path`). */
+function slugify(name: string): string {
+  const base = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base || "note";
+}
+
+/** Disambiguate a slug against the ones already in the list (append -2, -3, …). */
+function uniqueSlug(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
 
 export function EditorView({ module, pageId }: { module: string; pageId: string }) {
   const qc = useQueryClient();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // True while the selected slug is a not-yet-saved new note: skip the doc fetch
+  // (a GET would 404) and keep the seeded buffer.
+  const [isNew, setIsNew] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [draft, setDraft] = useState("");
   const [baseline, setBaseline] = useState("");
@@ -34,7 +61,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const doc = useQuery({
     queryKey: ["module-doc", module, pageId, selectedPath],
     queryFn: () => api.modulePageDoc(module, pageId, selectedPath as string),
-    enabled: selectedPath != null,
+    enabled: selectedPath != null && !isNew,
   });
 
   // Seed the editor buffer when a document loads; track the saved baseline so we
@@ -51,7 +78,9 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     mutationFn: () => api.saveModulePageDoc(module, pageId, selectedPath as string, draft),
     onSuccess: () => {
       setBaseline(draft);
-      // A newly created document joins the list; refresh it.
+      // The note now exists — let the doc fetch take over on re-select…
+      setIsNew(false);
+      // …and the newly created note joins the list; refresh it.
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
     },
   });
@@ -77,23 +106,79 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
 
   const data = EditorData.parse(list.data ?? {});
 
+  const openDoc = (path: string) => {
+    setIsNew(false);
+    setSelectedPath(path);
+  };
+
+  const startNewNote = (event: FormEvent) => {
+    event.preventDefault();
+    const name = newName.trim();
+    if (!name) return;
+    const taken = new Set(data.docs.map((d) => d.path));
+    const slug = uniqueSlug(slugify(name), taken);
+    setIsNew(true);
+    setSelectedPath(slug);
+    setDraft(`# ${name}\n\n`); // module derives the title from this first heading
+    setBaseline(""); // differs from the seed → Save is enabled immediately
+    setMode("edit");
+    setCreating(false);
+    setNewName("");
+  };
+
   return (
     <div className="grid h-full min-h-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
       {/* document list — hidden on phone once a document is open */}
       <div
         className={cn(
-          "min-h-0 overflow-y-auto border-edge sm:border-r",
-          selectedPath && "hidden sm:block",
+          "flex min-h-0 flex-col overflow-y-auto border-edge sm:border-r",
+          selectedPath && "hidden sm:flex",
         )}
       >
+        {data.can_create && (
+          <div className="border-b border-edge p-2">
+            {creating ? (
+              <form onSubmit={startNewNote} className="flex items-center gap-2">
+                <TextInput
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setCreating(false);
+                      setNewName("");
+                    }
+                  }}
+                  placeholder="Note title…"
+                  aria-label="New note title"
+                />
+                <Button type="submit" variant="primary" disabled={!newName.trim()}>
+                  Create
+                </Button>
+              </form>
+            ) : (
+              <Button
+                variant="ghost"
+                className="w-full justify-start"
+                onClick={() => setCreating(true)}
+              >
+                <Plus size={15} /> New note
+              </Button>
+            )}
+          </div>
+        )}
         {data.docs.length === 0 ? (
-          <EmptyState quote="An empty vault. Add notes in Obsidian and they appear here." />
+          data.can_create ? (
+            <EmptyState quote="No notes yet — create one to begin." />
+          ) : (
+            <EmptyState quote="An empty vault. Add notes in Obsidian and they appear here." />
+          )
         ) : (
           <ul className="flex flex-col p-2">
             {data.docs.map((d) => (
               <li key={d.id}>
                 <button
-                  onClick={() => setSelectedPath(d.path)}
+                  onClick={() => openDoc(d.path)}
                   className={cn(
                     "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
                     d.path === selectedPath
@@ -137,17 +222,19 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
             {/* toolbar */}
             <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
               <button
-                onClick={() => setSelectedPath(null)}
+                onClick={() => {
+                  setSelectedPath(null);
+                  setIsNew(false);
+                }}
                 className="inline-flex items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
               >
                 <ChevronLeft size={15} /> back
               </button>
               <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-dim">
-                {doc.data?.path}
+                {selectedPath}
+                {isNew && <span className="ml-1 text-ink-faint">(new)</span>}
               </span>
-              {save.data && !save.data.indexed && (
-                <Badge tone="warn">saved · not indexed</Badge>
-              )}
+              {save.data && !save.data.indexed && <Badge tone="warn">saved · not indexed</Badge>}
               {save.isSuccess && !dirty && save.data?.indexed && <Badge tone="ok">saved</Badge>}
               {dirty && <span className="text-xs text-ink-faint">unsaved</span>}
               <div className="inline-flex overflow-hidden rounded-(--radius-field) border border-edge">
@@ -190,7 +277,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                   }}
                   spellCheck={false}
                   className="h-full min-h-full rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
-                  aria-label={`Edit ${doc.data?.path}`}
+                  aria-label={`Edit ${selectedPath}`}
                 />
               ) : (
                 <div className="mx-auto max-w-2xl px-5 py-4">

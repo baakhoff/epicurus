@@ -1,0 +1,51 @@
+# Notes module — a per-module compose fragment (ADR-0006).
+# `task new-module` already wired this in (root compose `include:` + the core's
+# `module_urls` + a unique host port from docs/reference/ports.md). The CI
+# runtime-smoke gate boots the stack and fails if the module isn't discoverable.
+services:
+  notes:
+    build:
+      context: ../..
+      dockerfile: services/notes/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-notes:${EPICURUS_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Postgres is the source of truth for note bodies (notes are authored in-app,
+      # so state is externalized, not on disk — constraint #2).
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
+      # Qdrant holds the derived per-tenant `<tenant>__notes` vector collection.
+      QDRANT_URL: http://qdrant:6333
+      # Embeddings come from the core's LLM gateway — the module holds no model key
+      # (ADR-0010). Service name on the internal network is `core-app`, not `core`.
+      PLATFORM_URL: http://core-app:8080
+    # Loopback-bound by default; the gateway is the intended front door. Set
+    # BIND_ADDRESS to expose directly (the module<->core contract stays local).
+    # Host port is overridable via NOTES_PORT and registered in
+    # docs/reference/ports.md so two modules never collide.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${NOTES_PORT:-8092}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      # Routed by the edge gateway (ADR-0008). No effect if no gateway is running.
+      - traefik.enable=true
+      - traefik.http.routers.notes.rule=Host(`notes.localhost`)
+      - traefik.http.routers.notes.entrypoints=web
+      - traefik.http.services.notes.loadbalancer.server.port=8080
+      # Scraped by Prometheus via Docker service discovery.
+      - epicurus.metrics.port=8080
+    networks: [epicurus]

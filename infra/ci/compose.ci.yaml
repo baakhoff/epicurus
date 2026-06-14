@@ -18,6 +18,8 @@ networks:
     name: ${COMPOSE_PROJECT_NAME:-epicurus-ci}
 
 services:
+  notes:
+    ports: !reset []
   core-app:
     ports: !reset []
   echo:

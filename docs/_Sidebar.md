@@ -39,6 +39,8 @@
 
 - [Overview](infrastructure/index.md)
 - [Secrets (OpenBao)](infrastructure/secrets.md)
+- [Startup and recovery](infrastructure/startup-and-recovery.md)
+- [Backup and restore](infrastructure/backup-and-restore.md)
 
 **Developer Guide**
 

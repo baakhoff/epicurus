@@ -61,10 +61,11 @@ loopback-bound and individually overridable.
 | `9000` | MinIO — API | `MINIO_API_PORT` |
 | `9001` | MinIO — console | `MINIO_CONSOLE_PORT` |
 | `9090` | Prometheus | `PROMETHEUS_PORT` |
+| `9093` | Alertmanager | `ALERTMANAGER_PORT` |
 | `3100` | Loki | `LOKI_PORT` |
 | `4317` | OTel collector — gRPC | `OTLP_GRPC_PORT` |
 | `4318` | OTel collector — HTTP | `OTLP_HTTP_PORT` |
 | `3000` | Grafana | `GRAFANA_PORT` |
 
-> Ollama (`11434`) and SearXNG are internal-only — not published to the host
-> (private-by-default; the core is the front door). They take no host port.
+> Ollama (`11434`), SearXNG, `blackbox-exporter`, and `node-exporter` are
+> internal-only — not published to the host. They take no host port.

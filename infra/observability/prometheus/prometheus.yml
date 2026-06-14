@@ -1,6 +1,16 @@
 global:
   scrape_interval: 15s
 
+# Send firing alerts to Alertmanager.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+# Load alert rule files from the rules/ subdirectory.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
 scrape_configs:
   - job_name: prometheus
     static_configs:
@@ -28,3 +38,27 @@ scrape_configs:
       - source_labels: [__meta_docker_container_name]
         regex: /(.*)
         target_label: container
+
+  # node-exporter: host-level filesystem, CPU, memory metrics from the
+  # WSL2 VM where Docker stores its volumes (disk-full alerts live here).
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # blackbox-exporter: HTTP health probe for OpenBao.
+  # The /v1/sys/health endpoint returns 200 only when the vault is active
+  # (unsealed); probe_success == 0 fires the OpenBaoSealed alert.
+  - job_name: blackbox-openbao
+    metrics_path: /probe
+    params:
+      module: [http_200]
+    static_configs:
+      - targets:
+          - http://openbao:8200/v1/sys/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

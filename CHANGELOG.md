@@ -37,6 +37,13 @@ bundled-stack release, **v0.2.0**.
   `tasks_complete`) with **local** and **Google** providers (ADR-0016).
 - **Platform inference API** — `embed` + `chat` over the core LLM gateway, exposed to
   modules through `PlatformClient`; modules never call models directly.
+- **Shared chat contract** — `ChatMessage` and `ChatResult` are exported from
+  `epicurus_core` as the single source of truth for the chat shapes the gateway,
+  platform API, and `PlatformClient` all use; `PlatformMessage` / `PlatformChatResponse`
+  remain backward-compatible aliases (ADR-0021).
+- **LLM tuning via env** — `LLM_TEMPERATURE`, `LLM_TOP_P`, and `LLM_NUM_CTX` (alongside
+  the existing `LLM_KEEP_ALIVE`) flow compose → settings → gateway, so tuning needs no
+  code edit (ADR-0021).
 - **Versioning policy** — per-component SemVer plus a bundled-stack release tag;
   every PR and dispatch brief declares its version bump (ADR-0017).
 - **Runtime smoke gate** — CI boots the whole stack on every PR and asserts the
@@ -45,11 +52,23 @@ bundled-stack release, **v0.2.0**.
 
 ### Changed
 
+- **One module-facing chat path** — `POST /platform/v1/chat` is the single module → core
+  chat endpoint and returns the shared `ChatResult`; the gateway's duplicate
+  `POST /platform/v1/llm/chat` was removed (ADR-0021).
+- **Component versions** — `core-app`, `epicurus-core`, and `web` move to **0.2.0** to
+  reflect the user-visible capability shipped since v0.1.0 (ADR-0017); the six modules
+  added this cycle are at their first `0.1.0`.
 - **Persistent secrets** — OpenBao moves from dev (in-memory) mode to file storage
   with an init / unseal lifecycle, so provider keys and module config survive a
   restart (ADR-0014). Resolves the v0.1.0 "secrets are not yet persistent" limitation.
 - **Documentation** — a navigable `docs/` tree with a page per service / module and a
   full reference section (ADR-0013).
+
+### Removed
+
+- **`POST /platform/v1/llm/chat`** — folded into `POST /platform/v1/chat`, a strict
+  superset (it also accepts `tools` and `tenant_id`). `PlatformClient` already used
+  `/chat`, so live module code is unaffected (ADR-0021).
 
 ### Fixed
 
@@ -57,34 +76,9 @@ bundled-stack release, **v0.2.0**.
   knowledge `mtime_ns` stored as `BigInteger`, the OpenBao bootstrap
   (init / unseal / policy / token), the SearXNG image tag and settings mount, and the
   pytest `importlib` import mode.
-
-### Added
-
-- **Shared chat contract** — `ChatMessage` and `ChatResult` are now exported from
-  `epicurus_core` as the single source of truth for the chat shapes the gateway,
-  platform API, and `PlatformClient` all use (#114).
-- **LLM tuning via env** — `LLM_TEMPERATURE`, `LLM_TOP_P`, and `LLM_NUM_CTX`
-  (alongside the existing `LLM_KEEP_ALIVE`) flow through compose → settings →
-  gateway, so tuning needs no code edit (#114).
-
-### Changed
-
-- **One module-facing chat path.** `POST /platform/v1/chat` is now the single
-  module → core chat endpoint and returns the shared `ChatResult`. `PlatformMessage`
-  and `PlatformChatResponse` are kept as backward-compatible aliases of
-  `ChatMessage` / `ChatResult` (#114). `epicurus-core` and `core-app` → **0.2.0**.
-
-### Removed
-
-- **`POST /platform/v1/llm/chat`** — folded into `POST /platform/v1/chat`, a strict
-  superset (it also accepts `tools` and `tenant_id`). `PlatformClient` already used
-  `/chat`, so live module code is unaffected (#114).
-
-### Fixed
-
-- **Smoke gate isolation** — `infra/ci/compose.ci.yaml` now resets host ports for the
+- **Smoke gate isolation** — `infra/ci/compose.ci.yaml` resets host ports for the
   wave-2 modules (calendar, mail, tasks) too, so `task smoke` runs alongside a
-  developer's dev stack without port collisions, as its header promises (#114).
+  developer's dev stack without port collisions (#114).
 
 ## [0.1.0] — 2026-06-12
 

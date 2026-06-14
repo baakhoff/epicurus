@@ -12,9 +12,11 @@ images to GHCR.
 
 ## [Unreleased]
 
-**Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations)** —
-the platform grows from the core runtime into a module fleet. Targeted for the next
-bundled-stack release, **v0.2.0**.
+## [0.2.0] — 2026-06-14
+
+**Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations),
+consolidated through Phases 3.5 / 3.7 / 3.8.** The platform grows from the core runtime
+into a module fleet with a module-contributed UI — the first public release.
 
 ### Added
 

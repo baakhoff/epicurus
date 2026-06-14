@@ -1,10 +1,17 @@
 # epicurus
 
+[![CI](https://github.com/baakhoff/epicurus/actions/workflows/ci.yml/badge.svg)](https://github.com/baakhoff/epicurus/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 > A self-hosted, modular, **local-first** personal-assistant platform: an AI agent
 > plus a growing fleet of sidecar modules (calendar, notes, tasks, mail, chat,
 > knowledge base, storage), private and self-hosted on your own machine or server.
 
-**Status:** ✅ _Phase 1 complete — the agent, LLM gateway, cross-chat memory, and the web UI shell are live. Building Phase 2 (knowledge & storage)._ ·
+**Status:** ✅ _Phases 0–3 complete, consolidated through 3.5 / 3.7 / 3.8 — the agent,
+LLM gateway, cross-chat memory, and web shell, plus the **knowledge, storage, web-search,
+calendar, mail, tasks, and notes** modules, module-contributed left-nav pages, and chat
+entity-references + attachments. First public release: **v0.2.0**. Next: chat bridges (Phase 4)._ ·
 **License:** [AGPL-3.0](LICENSE)
 
 epicurus runs on your own machine under Docker. A **core** service runs the agent

@@ -59,6 +59,11 @@ bundled-stack release, **v0.2.0**.
 
 ### Changed
 
+- **Pinned image tags** — all service compose fragments now use
+  `${EPICURUS_VERSION:-latest}` instead of hard-coded `:latest`. Local dev
+  continues to work without any change; staging / prod deployments set
+  `EPICURUS_VERSION=<semver>` in `.env` to pin every service to a known-good,
+  immutable image (see `docs/developer/releases.md` and `.env.example`).
 - **One module-facing chat path** — `POST /platform/v1/chat` is the single module → core
   chat endpoint and returns the shared `ChatResult`; the gateway's duplicate
   `POST /platform/v1/llm/chat` was removed (ADR-0021).

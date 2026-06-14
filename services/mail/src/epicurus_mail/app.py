@@ -69,15 +69,23 @@ def create_app() -> FastAPI:
     async def resolve_message(ref_id: str) -> dict[str, Any]:
         """Hover-card resolver for a mail message entity (ADR-0019).
 
-        Returns a compact HoverCard envelope — subject, snippet, sender, and date
-        — for display in the inline hover-card. The full message body is served
-        by ``GET /messages/{ref_id}`` for the panel's email-reader view.
+        Returns a compact HoverCard envelope — subject as title, snippet as
+        description, and detail rows for unread status (only when unread), sender,
+        recipients, and date — for display in the inline hover-card. No ``href``:
+        the chip's click opens the read-only ``email-reader`` panel directly (the
+        full message is served by ``GET /messages/{ref_id}``), so there is no
+        outbound URL to carry.
         """
         try:
             message = await provider.read(ref_id)
         except Exception as exc:
             raise HTTPException(status_code=404, detail=f"message {ref_id!r} not found") from exc
-        details: list[dict[str, str]] = [{"label": "From", "value": message.sender}]
+        details: list[dict[str, str]] = []
+        # An unread flag is the actionable signal, so lead with it; read messages omit
+        # the row entirely rather than render a redundant "Read" on every message.
+        if message.unread:
+            details.append({"label": "Status", "value": "Unread"})
+        details.append({"label": "From", "value": message.sender})
         if message.to:
             details.append({"label": "To", "value": ", ".join(message.to)})
         if message.date:

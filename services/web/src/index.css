@@ -274,6 +274,53 @@ select {
   font-size: 0.84rem;
 }
 
+/* ── code block with copy button ─────────────────────────────────────────── */
+
+.ep-code-block {
+  background: var(--ep-surface-2);
+  border: 1px solid var(--ep-border);
+  border-radius: 10px;
+  margin: 0.6em 0;
+  overflow: hidden;
+}
+
+.ep-code-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3em 0.5em 0.3em 0.75em;
+  border-bottom: 1px solid var(--ep-border);
+}
+
+.ep-code-lang {
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  color: var(--ep-text-faint);
+  margin-right: auto;
+}
+
+.ep-code-copy {
+  display: flex;
+  align-items: center;
+  padding: 0.2em 0.35em;
+  border-radius: 4px;
+  color: var(--ep-text-faint);
+  transition: color 0.15s, background 0.15s;
+}
+
+.ep-code-copy:hover {
+  color: var(--ep-text-dim);
+  background: var(--ep-border);
+}
+
+.ep-prose .ep-code-block pre {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0.7em 1em;
+  margin: 0;
+}
+
 .ep-prose a {
   color: var(--ep-accent-strong);
   text-decoration: underline;

@@ -135,21 +135,42 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 | `capability` | `str \| None` | `None` | reserved gate the shell may check before showing the page (e.g. a connected account) — not yet enforced |
 
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
-`browser` (tree/list + detail), `calendar`, `editor` (Obsidian-like doc),
-`board` (lists/cards). The shell ships one first-party screen per archetype;
-`browser` is implemented today, the rest land with their module pages (Phase 3.8).
+`browser` (tree/list + detail), `calendar` (month / week / agenda), `editor`
+(Obsidian-like doc), `board` (lists/cards). The shell ships one first-party screen per
+archetype; `browser` and `calendar` are implemented today, the rest land with their
+module pages.
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
 **`GET /platform/v1/modules/{name}/pages/{id}`** (validated against the manifest's
-declared pages — 404 otherwise), so the shell never calls a module directly. The
-`browser` archetype's data shape is:
+declared pages — 404 otherwise), so the shell never calls a module directly. Query params
+are **forwarded verbatim** to the module, so a parameterized archetype reads its window
+from the same path — e.g. the `calendar` passes `?start=…&end=…`. The `browser`
+archetype's data shape is:
 
 ```jsonc
 {
   "title": "Echoes",              // optional page heading
   "items": [
     { "id": "hello", "title": "hello", "subtitle": "…", "body": "…" }
+  ]
+}
+```
+
+The `calendar` archetype's data shape is a window of events (the shell renders the month /
+week / agenda views and re-fetches as the user navigates):
+
+```jsonc
+{
+  "title": "Calendar",
+  "provider": "local",                              // active provider
+  "range": { "start": "2026-06-01T00:00:00+00:00",  // the window actually returned
+             "end":   "2026-07-01T00:00:00+00:00" },
+  "events": [
+    { "id": "e1", "title": "Standup",
+      "start": "2026-06-15T09:00:00+00:00",
+      "end":   "2026-06-15T09:30:00+00:00",
+      "location": "Room 4", "description": "…", "provider": "local" }
   ]
 }
 ```

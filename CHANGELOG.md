@@ -25,6 +25,13 @@ bundled-stack release, **v0.2.0**.
   ships first; echo gains a demo **Echoes** page. Page data is proxied through the core
   (`GET /platform/v1/modules/{name}/pages/{id}`) (ADR-0018) (`epicurus-core` → 0.3.0,
   `core-app` → 0.3.0, `web` → 0.5.0, `echo` → 0.2.0).
+- **Calendar page** — the calendar module contributes a **Calendar** left-nav page in the
+  `calendar` archetype (ADR-0018): month / week / agenda views the **core renders** from the
+  module's "events in a range" data. Navigation re-fetches the visible window — the core page
+  proxy now **forwards query params** (`start`/`end`) to the module — so the calendar scrolls
+  arbitrarily far without loading every event. Read-first (view + navigate); the active
+  provider (local or Google) supplies the events (`calendar` → 0.2.0, `core-app` → 0.3.1,
+  `web` → 0.6.0).
 - **Right-panel / split-screen host** — a core-owned side panel: a resizable right column
   on wide screens, a bottom sheet on phones, opened programmatically with a back-stack. It
   renders a **bounded, core-defined** set of views (`entity-detail`, `email-reader`) — the

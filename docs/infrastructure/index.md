@@ -14,7 +14,7 @@ The stateful services every block builds on (`infra/compose/`):
 | **Postgres** | `postgres:17` | 5432 | Relational store (tables per service: `agent_messages`, `storage_files`, `knowledge_notes`). |
 | **Valkey** | `valkey/valkey:8` | 6379 | Cache / queues (Redis-compatible, SSPL-free — ADR-0002). |
 | **NATS** | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring. |
-| **Qdrant** | `qdrant/qdrant:v1.12.4` | 6333, 6334 | Vector DB — memory recall + knowledge RAG. |
+| **Qdrant** | `qdrant/qdrant:v1.18.2` | 6333, 6334 | Vector DB — memory recall + knowledge RAG. |
 | **OpenBao** | `openbao/openbao:2.2.0` | 8200 | Secrets — persistent file storage, auto-unseal sidecar. See [Secrets](secrets.md). |
 | **MinIO** | `minio/minio` | 9000, 9001 | S3-compatible object store for app-managed objects. |
 

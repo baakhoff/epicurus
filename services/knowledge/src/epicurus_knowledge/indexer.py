@@ -158,14 +158,16 @@ class KnowledgeIndexer:
         if not await self._qdrant.collection_exists(self._collection):
             return []
         [query_vec] = await self._platform.embed([query])
-        hits = await self._qdrant.search(
+        # qdrant-client 1.14 removed the legacy `search`; `query_points` is the
+        # current API (mirrors core-app's memory recall). Results are on `.points`.
+        response = await self._qdrant.query_points(
             collection_name=self._collection,
-            query_vector=query_vec,
+            query=query_vec,
             limit=k,
             with_payload=True,
         )
         results: list[SearchHit] = []
-        for hit in hits:
+        for hit in response.points:
             if not hit.payload:
                 continue
             results.append(

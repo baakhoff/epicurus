@@ -78,6 +78,8 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `module_urls` | `MODULE_URLS` | `str` | `http://echo:8080` | Comma-separated module base URLs; each serves MCP at `<base>/mcp` and its manifest at `<base>/manifest`. |
 | `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | Max tool-calling rounds per agent turn. |
 | `attachment_sink_url` | `ATTACHMENT_SINK_URL` | `str` | `http://storage:8080` | Base URL of the module that durably keeps chat uploads (ADR-0025); the upload route best-effort POSTs bytes to `<url>/ingest`. Empty disables the sink (uploads stay core-side only); a failed push never breaks the upload. |
+| `attachment_max_bytes` | `ATTACHMENT_MAX_BYTES` | `int` | `10485760` (10 MiB) | Max size of a single chat upload; the route returns **413** above it. Keep the web container's nginx `client_max_body_size` at or above this. |
+| `attachment_allowed_types` | `ATTACHMENT_ALLOWED_TYPES` | `str` | `text/*,image/*,application/pdf,application/json` | Allowed upload content-types (comma-separated; `type/*` wildcards, `*/*` disables the allowlist). A disallowed type is rejected with **415**. |
 | `database_url` | `DATABASE_URL` | `str` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for conversation persistence. |
 | `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
 | `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |
@@ -87,6 +89,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 - **`fallback_models -> list[str]`** — the `llm_fallbacks` chain, parsed.
 - **`module_base_urls -> list[str]`** — the `module_urls`, trimmed of a trailing `/`.
 - **`module_mcp_urls -> list[str]`** — each module's `<base>/mcp` endpoint.
+- **`attachment_allowed_type_list -> list[str]`** — the `attachment_allowed_types`, parsed + lowercased.
 
 ## Type aliases
 

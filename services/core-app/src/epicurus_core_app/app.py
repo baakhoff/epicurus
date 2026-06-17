@@ -139,7 +139,13 @@ def create_app() -> FastAPI:
     app.include_router(create_power_router(gateway, power))
     app.include_router(
         create_agent_router(
-            agent, memory, settings.default_tenant_id, attachment_store, sink=attachment_sink
+            agent,
+            memory,
+            settings.default_tenant_id,
+            attachment_store,
+            sink=attachment_sink,
+            max_upload_bytes=settings.attachment_max_bytes,
+            allowed_upload_types=settings.attachment_allowed_type_list,
         )
     )
     app.include_router(create_modules_router(registry))

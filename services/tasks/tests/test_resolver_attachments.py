@@ -64,6 +64,26 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app, raise_server_exceptions=True)
 
 
+class TestResolveEntity:
+    def test_task_returns_hovercard(self, client: TestClient) -> None:
+        resp = client.get("/resolve/task/t1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["title"] == "Write report"
+        assert body["description"] == "Q2 numbers"
+        details = {d["label"]: d["value"] for d in body["details"]}
+        assert details["Due"] == "2026-06-20"
+        assert details["Status"] == "Open"
+
+    def test_unknown_kind_is_404(self, client: TestClient) -> None:
+        resp = client.get("/resolve/event/t1")
+        assert resp.status_code == 404
+
+    def test_missing_task_is_404(self, client: TestClient) -> None:
+        resp = client.get("/resolve/task/nope")
+        assert resp.status_code == 404
+
+
 class TestAttachments:
     def test_picker_lists_tasks(self, client: TestClient) -> None:
         resp = client.get("/attachments")

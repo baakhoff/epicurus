@@ -14,6 +14,13 @@ images to GHCR.
 
 ### Added
 
+- **Tasks — agent-referenced tasks get a hover-card** — `tasks_list` now returns its open
+  tasks as **entity-reference chips** (ADR-0019): hover a chip for the task's **core hover-card**
+  (due date, open/completed status) and click to open it in the right-panel `entity-detail` view.
+  The module declares `resolver` and serves `GET /resolve/task/{id}` over the active provider's
+  `get_task`; the list tool is no longer a module-card action (an envelope can't render as a
+  plain-text result, mirroring calendar / mail). The shell renders the chips, hover-card, and
+  panel generically — no web change (ADR-0019) (closes #141) (`tasks` → 0.4.0).
 - **Tasks — attach a task to the chat** — the tasks module becomes a **chat-attachment
   source** (`attachable`): pick an open task in the composer's attach menu and the agent uses
   it as explicit context for the turn. The module serves the picker (`GET /attachments`) and

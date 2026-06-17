@@ -11,7 +11,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
+from epicurus_core import (
+    EntityRef,
+    EpicurusModule,
+    HoverCard,
+    HoverCardDetail,
+    PageSpec,
+    UiSection,
+    tool_envelope,
+)
 from epicurus_tasks.google_provider import GoogleTasksError
 from epicurus_tasks.models import Task
 from epicurus_tasks.providers import TasksProvider
@@ -36,7 +44,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.3.0",
+        version="0.4.0",
         description=(
             f"Task management via the {provider.provider_name()!r} provider: "
             "list, add, edit, and complete tasks."
@@ -49,13 +57,10 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 "TASKS_PROVIDER in .env without changing these tools."
             ),
             status_url="/status",
-            actions=[
-                UiAction(
-                    tool="tasks_list",
-                    label="List tasks",
-                    description="Show all open tasks from the active provider.",
-                )
-            ],
+            # No manifest actions: `tasks_list` now returns an entity-reference envelope
+            # (chips), which the module card's plain-text result panel can't render — tasks
+            # are surfaced through chat and the Tasks board page instead (mirrors calendar /
+            # mail, ADR-0019).
         ),
         # The Tasks left-nav page (ADR-0018): a core-rendered board of open tasks
         # grouped by due date. The module supplies data via GET /pages/{id}.
@@ -68,25 +73,37 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 nav_order=40,
             )
         ],
+        # Resolve a referenced task to a hover-card at GET /resolve/task/{id} (ADR-0019).
+        resolver=True,
         # Be a chat-attachment source: GET /attachments (picker) + /attachments/{id} (ADR-0019).
         attachable=True,
     )
 
     @module.tool()
-    async def tasks_list(list_id: str | None = None) -> list[Task]:
-        """Return open tasks from the active provider.
+    async def tasks_list(list_id: str | None = None) -> str:
+        """List open tasks from the active provider as entity-reference chips.
+
+        Returns the tasks as entity-reference chips (ADR-0019): hover a chip for the
+        task's hover-card, click it to open the task in the side panel. Each chip
+        carries the task id, so you can refer to a task later without listing again.
+        The accompanying text lists each task's title and due date.
 
         Args:
             list_id: Provider-specific list identifier.  Omit to use the
                 provider's default list (e.g. ``"@default"`` for Google Tasks).
 
-        Returns a list of :class:`Task` objects (id, title, notes, due,
-        completed, completed_at).
+        Returns a tool envelope whose chips reference the matching open tasks.
         """
         try:
-            return await provider.list_tasks(tenant_id, list_id=list_id)
+            tasks = await provider.list_tasks(tenant_id, list_id=list_id)
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
+        if not tasks:
+            return tool_envelope("No open tasks.", [])
+        refs = [task_entity_ref(t) for t in tasks]
+        lines = [f"- {t.title}" + (f" (due {t.due[:10]})" if t.due else "") for t in tasks]
+        text = f"Found {len(tasks)} open task(s):\n" + "\n".join(lines)
+        return tool_envelope(text, refs)
 
     @module.tool()
     async def tasks_add(
@@ -255,17 +272,54 @@ def build_tasks_board(tasks: list[Task], *, today: str) -> dict[str, Any]:
     }
 
 
-# ── Chat-attachment source (ADR-0019) ─────────────────────────────────────────
+# ── Entity references, hover-cards & attachments (ADR-0019) ───────────────────
 #
-# The module is a chat-attachment source: the composer lists open tasks (picker) and
-# an attached task is resolved to the text the agent injects into the turn. These
-# helpers are provider-agnostic and app-free so they are unit-testable without a
-# running app; a task is fetched by id via the active provider's `get_task`, so they
-# behave identically against the local and Google backends.
+# `tasks_list` returns its tasks as entity-reference chips; the module resolves a
+# referenced task to a core hover-card; and it is a chat-attachment source. These
+# helpers (provider-agnostic and app-free) back those surfaces so they are unit-
+# testable without a running app; a task is fetched by id via the active provider's
+# `get_task`, so they behave identically against the local and Google backends.
 
 
 class TaskNotFound(Exception):
     """Raised when a task id does not resolve for the active provider/tenant."""
+
+
+def _task_summary(task: Task) -> str:
+    """A compact one-line summary for a task chip (due date, then status)."""
+    parts = [f"Due {task.due[:10]}" if task.due else "No due date"]
+    if task.completed:
+        parts.append("Completed")
+    return " · ".join(parts)
+
+
+def task_entity_ref(task: Task) -> EntityRef:
+    """The chip an agent turn carries for a listed task (ADR-0019)."""
+    return EntityRef(
+        ref_id=task.id,
+        module=MODULE_NAME,
+        kind=TASK_KIND,
+        title=task.title,
+        summary=_task_summary(task),
+    )
+
+
+def task_hover_card(task: Task) -> dict[str, Any]:
+    """The core hover-card / entity-detail envelope for a task (ADR-0019).
+
+    Core-owned, uniform shape: the module supplies the data, the shell renders the
+    inline hover-card and the panel's entity-detail view from it. Details are the
+    task's due date (when set) and its open/completed status.
+    """
+    details: list[HoverCardDetail] = []
+    if task.due:
+        details.append(HoverCardDetail(label="Due", value=task.due[:10]))
+    details.append(HoverCardDetail(label="Status", value="Completed" if task.completed else "Open"))
+    return HoverCard(
+        title=task.title,
+        description=task.notes or "",
+        details=details,
+    ).model_dump()
 
 
 def task_excerpt(task: Task) -> str:

@@ -27,12 +27,14 @@ from epicurus_tasks.models import Task
 from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.service import (
     MODULE_NAME,
+    TASK_KIND,
     TASKS_PAGE_ID,
     TaskNotFound,
     build_module,
     build_tasks_board,
     fetch_task,
     task_attachment,
+    task_hover_card,
     tasks_attachments,
 )
 from epicurus_tasks.settings import TasksSettings
@@ -143,6 +145,18 @@ def create_app() -> FastAPI:
     async def get_attachment(ref_id: str) -> dict[str, str]:
         """Resolve an attached task to the text the agent injects (ADR-0019)."""
         return task_attachment(await _require_task(ref_id))
+
+    @app.get("/resolve/{kind}/{ref_id}")
+    async def resolve_entity(kind: str, ref_id: str) -> dict[str, Any]:
+        """Resolve a referenced task to a core hover-card (ADR-0019); core-proxied.
+
+        Tasks only references tasks; an unknown *kind* is a 404. Returns the uniform
+        HoverCard envelope the shell renders inline and in the entity-detail panel —
+        the task's due date and open/completed status.
+        """
+        if kind != TASK_KIND:
+            raise HTTPException(status_code=404, detail=f"unknown entity kind {kind!r}")
+        return task_hover_card(await _require_task(ref_id))
 
     app.mount("/mcp", mcp_app)
     return app

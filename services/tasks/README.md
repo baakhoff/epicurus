@@ -27,7 +27,7 @@ Full documentation: [docs/services/tasks.md](../../docs/services/tasks.md).
 
 | Tool | Description |
 | --- | --- |
-| `tasks_list(list_id?)` | Return open tasks from the active provider. |
+| `tasks_list(list_id?)` | Return open tasks as entity-reference chips (hover → hover-card, click → detail panel). |
 | `tasks_add(title, notes?, due?, list_id?)` | Create a new task. |
 | `tasks_complete(task_id, list_id?)` | Mark a task complete. |
 | `tasks_update(task_id, title?, notes?, due?, list_id?)` | Edit a task's title, notes, or due date. |

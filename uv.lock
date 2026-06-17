@@ -981,7 +981,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-tasks"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "services/tasks" }
 dependencies = [
     { name = "asyncpg" },

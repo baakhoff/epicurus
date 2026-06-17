@@ -8,20 +8,29 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import CONTRACT_VERSION
+from epicurus_core.contracts import ToolEnvelope
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
 from epicurus_tasks.service import (
+    TASK_KIND,
     TaskNotFound,
     build_module,
     fetch_task,
     task_attachment,
     task_attachment_item,
+    task_entity_ref,
     task_excerpt,
+    task_hover_card,
     tasks_attachments,
 )
 
 TENANT = "test-tenant"
+
+
+def _parse_envelope(content: list[Any]) -> ToolEnvelope:
+    """Parse the ToolEnvelope from the first text-content item of a call_tool result."""
+    return ToolEnvelope.model_validate_json(content[0].text)
 
 
 @pytest.fixture()
@@ -37,7 +46,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.3.0"
+    assert manifest.version == "0.4.0"
     assert manifest.contract_version == CONTRACT_VERSION
     tool_names = {t.name for t in manifest.tools}
     assert tool_names == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
@@ -45,15 +54,20 @@ async def test_manifest(module_fixture: object) -> None:
     pages = {p.id: p for p in manifest.pages}
     assert pages["board"].archetype == "board"
     assert pages["board"].title == "Tasks"
-    # Tasks is a chat-attachment source (ADR-0019).
+    # Tasks references tasks in chat (resolver) and is a chat-attachment source (ADR-0019).
+    assert manifest.resolver is True
     assert manifest.attachable is True
+    # `tasks_list` returns an entity-ref envelope (chips), so it is no longer a card action.
+    assert manifest.ui is not None
+    assert manifest.ui.actions == []
 
 
 async def test_tasks_list_empty(module_fixture: object) -> None:
     mod = module_fixture
-    _, structured = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
-    # list return → {"result": [...]}
-    assert structured == {"result": []}
+    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    envelope = _parse_envelope(content)
+    assert envelope.entity_refs == []
+    assert "No open tasks" in envelope.text
 
 
 async def test_tasks_add_and_list(module_fixture: object) -> None:
@@ -66,10 +80,14 @@ async def test_tasks_add_and_list(module_fixture: object) -> None:
     assert task["due"] == "2025-12-31"
     assert not task["completed"]
 
-    _, list_result = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
-    tasks = list_result["result"]
-    assert len(tasks) == 1
-    assert tasks[0]["id"] == task["id"]
+    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == 1
+    ref = envelope.entity_refs[0]
+    assert ref.ref_id == task["id"]
+    assert ref.module == "tasks"
+    assert ref.kind == TASK_KIND
+    assert ref.title == "Deploy to prod"
 
 
 async def test_tasks_complete(module_fixture: object) -> None:
@@ -84,8 +102,9 @@ async def test_tasks_complete(module_fixture: object) -> None:
     )
     assert done["completed"]
 
-    _, list_result = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
-    assert all(t["id"] != task_id for t in list_result["result"])
+    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    envelope = _parse_envelope(content)
+    assert all(r.ref_id != task_id for r in envelope.entity_refs)
 
 
 async def test_complete_nonexistent_raises(module_fixture: object) -> None:
@@ -139,6 +158,39 @@ def _task(**kw: Any) -> Task:
     }
     base.update(kw)
     return Task(**base)
+
+
+def test_task_entity_ref_shape() -> None:
+    ref = task_entity_ref(_task(due="2026-06-20"))
+    assert ref.ref_id == "t1"
+    assert ref.module == "tasks"
+    assert ref.kind == TASK_KIND
+    assert ref.title == "Write report"
+    assert ref.summary is not None
+    assert "2026-06-20" in ref.summary
+
+
+def test_task_entity_ref_summary_without_due() -> None:
+    ref = task_entity_ref(_task())
+    assert ref.summary == "No due date"
+
+
+def test_task_hover_card_full() -> None:
+    card = task_hover_card(_task(due="2026-06-20", notes="Q2 numbers"))
+    assert card["title"] == "Write report"
+    assert card["description"] == "Q2 numbers"
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Due"] == "2026-06-20"
+    assert labels["Status"] == "Open"
+    assert card.get("href") is None
+
+
+def test_task_hover_card_omits_due_when_absent_and_marks_completed() -> None:
+    card = task_hover_card(_task(completed=True))
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert "Due" not in labels
+    assert labels["Status"] == "Completed"
+    assert card["description"] == ""
 
 
 def test_task_excerpt_includes_due_status_and_notes() -> None:

@@ -14,7 +14,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Download, Folder, Search, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { EmptyState, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -44,10 +44,14 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Reset selection when path or query changes.
-  useEffect(() => {
+  // Reset selection when the path or query changes — adjust state during render
+  // (the React-blessed alternative to a setState-in-effect, no extra commit).
+  const navKey = JSON.stringify([currentPath, activeQuery]);
+  const [lastNavKey, setLastNavKey] = useState(navKey);
+  if (navKey !== lastNavKey) {
+    setLastNavKey(navKey);
     setSelectedId(null);
-  }, [currentPath, activeQuery]);
+  }
 
   const params: Record<string, string> = {};
   if (activeQuery) params.q = activeQuery;

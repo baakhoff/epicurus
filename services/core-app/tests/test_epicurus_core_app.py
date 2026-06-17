@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from epicurus_core import CONTRACT_VERSION
+from epicurus_core import CONTRACT_VERSION, route_paths
 from epicurus_core_app.app import create_app
 
 
 def test_exposes_ops_and_platform_routes() -> None:
-    paths = [getattr(route, "path", "") for route in create_app().routes]
+    paths = route_paths(create_app())
     assert "/health" in paths
     assert "/metrics" in paths
     assert "/platform/v1/info" in paths

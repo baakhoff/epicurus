@@ -86,6 +86,18 @@ images to GHCR.
   `page_id` segments it interpolates into a module request (**400**, defense-in-depth).
   (`core-app` → 0.5.1.)
 
+### Dependencies
+
+- **fastapi 0.137.1, mcp 1.28.0, litellm 1.89.1** (supersedes #203) — FastAPI 0.137 makes
+  `include_router` attach a lazy `_IncludedRouter` to `app.routes` instead of eagerly
+  flattening the included sub-routes, so the long-standing `[r.path for r in app.routes]`
+  idiom stopped seeing nested routes (`/health` and friends vanished from the list, which
+  failed every service's app-route test). The endpoints themselves were never affected —
+  only introspection. New shared helper **`epicurus_core.route_paths(app)`** flattens the
+  route tree across this change (and older FastAPI), and the service app-route tests use it.
+  Also realigns the drifted `epicurus_core.__version__` (was `0.3.0`) with the package
+  version (`epicurus-core` → 0.6.0).
+
 ## [0.2.0] — 2026-06-14
 
 **Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations),

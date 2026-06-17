@@ -73,6 +73,8 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, ADR-0028): stop + remove the module's container via the Docker socket, then tombstone it. Refuses core-app / web / data-plane, scoped to the core's own Compose project. **403** protected · **503** no Docker access · **404** unknown. |
+| `GET` · `PUT /platform/v1/modules/{name}/models` | Per-module model-slot selections (#128, ADR-0029): `{slot_key: model_id}`. `PUT` validates each key against the manifest's `required_models` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
+| `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 
@@ -115,7 +117,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `session_id`, `role`, `content`, `created_at`. Tenant-scoped.
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
-  deleted (#127). A module with no row defaults to enabled and not-removed.
+  deleted (#127), `models` holds per-slot model choices (#128). A module with no row defaults
+  to enabled, not-removed, and core-default models.
 - **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
   (768-dim, cosine), one collection per tenant.
 

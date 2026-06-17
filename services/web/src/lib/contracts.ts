@@ -161,6 +161,14 @@ export const PageSpec = z.object({
 });
 export type PageSpec = z.infer<typeof PageSpec>;
 
+export const ModelSlot = z.object({
+  key: z.string(),
+  role: z.enum(["embedding", "chat"]),
+  label: z.string(),
+  description: z.string().default(""),
+});
+export type ModelSlot = z.infer<typeof ModelSlot>;
+
 export const ModuleManifest = z.object({
   name: z.string(),
   version: z.string(),
@@ -176,6 +184,9 @@ export const ModuleManifest = z.object({
   pages: z.array(PageSpec).default([]),
   resolver: z.boolean().default(false),
   attachable: z.boolean().default(false),
+  // Model slots the operator fills per module (#128); the module fetches its choice and
+  // passes it to embed/chat, falling back to the core default when unset.
+  required_models: z.array(ModelSlot).default([]),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 

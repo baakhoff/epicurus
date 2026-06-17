@@ -14,6 +14,15 @@ images to GHCR.
 
 ### Added
 
+- **Per-module model / embedding selection** — a module can declare model **slots** in its
+  manifest (`required_models`: `{key, role: embedding|chat, label}`) and the operator picks
+  which model fills each from a "Models" section in the module's card. The choice persists in
+  `module_prefs.models` (`PUT /platform/v1/modules/{name}/models`, validated against the
+  declared slots); the module fetches it with the new `PlatformClient.get_module_model(slot)`
+  and passes it to `embed` / `chat`, falling back to the core default when unset. `/embed` and
+  `/chat` are unchanged — per-module selection rides their existing explicit-`model` override
+  (ADR-0021). First consumer: knowledge's embedding model (3.8) (ADR-0029) (closes #128)
+  (`epicurus-core` → 0.5.0, `core-app` → 0.8.0, `web` → 0.10.0).
 - **Module removal — confirmed container delete** — the operator can delete a module's
   **container** from the Modules screen ("Danger zone → Remove module"), behind a confirm
   dialog. The core stops + removes the container through the Docker socket via a single,

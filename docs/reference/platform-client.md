@@ -18,7 +18,8 @@ client = PlatformClient(
 ```
 
 The client is stateless and cheap; make one per module, scoped to its tenant. Every
-request carries that tenant, so usage is metered and resources are scoped correctly.
+request carries that tenant, so usage is metered and resources are scoped correctly. Pass
+`module=<name>` as well if the module uses per-module model slots (see `get_module_model`).
 
 ## Methods
 
@@ -63,6 +64,19 @@ headers = {"Authorization": f"Bearer {token}"}
 This is the **only** way a module should obtain a connected-account token — don't call the
 endpoint directly or add a bespoke client method, so the credential boundary stays single
 and owned by the core.
+
+### `await client.get_module_model(slot) -> str | None`
+
+The operator's chosen model for one of this module's manifest **model slots** (#128,
+ADR-0029), or `None` when unset. Construct the client with `module=<name>`; pass the result
+straight to `embed` / `chat` — a model id means "use this", `None` means "let the core pick
+its default". Backed by `GET /platform/v1/modules/{module}/models/{slot}`.
+
+```python
+client = PlatformClient(base_url=..., tenant_id=..., module="knowledge")
+model = await client.get_module_model("embedding")   # chosen id, or None
+vectors = await client.embed(texts, model=model)      # None -> core default
+```
 
 ## Errors
 

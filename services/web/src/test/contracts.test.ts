@@ -49,6 +49,20 @@ describe("contracts", () => {
     expect(snapshot.manifest.ui).toBeUndefined();
     expect(snapshot.manifest.tools).toEqual([]);
     expect(snapshot.manifest.pages).toEqual([]);
+    expect(snapshot.manifest.required_models).toEqual([]);
+  });
+
+  it("parses a manifest declaring model slots (#128)", () => {
+    const snapshot = ModuleSnapshot.parse({
+      manifest: {
+        name: "knowledge",
+        version: "0.6.0",
+        required_models: [{ key: "embedding", role: "embedding", label: "Embedding model" }],
+      },
+      status: { healthy: true },
+    });
+    expect(snapshot.manifest.required_models[0].key).toBe("embedding");
+    expect(snapshot.manifest.required_models[0].role).toBe("embedding");
   });
 
   it("defaults a module snapshot to enabled with no tags, and round-trips both (#126)", () => {

@@ -8,7 +8,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from epicurus_core import ModuleManifest, PageSpec, SecretError, ToolSpec, UiAction, UiSection
+from epicurus_core import (
+    ModelSlot,
+    ModuleManifest,
+    PageSpec,
+    SecretError,
+    ToolSpec,
+    UiAction,
+    UiSection,
+)
 from epicurus_core_app.docker_control import DockerError
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
@@ -41,6 +49,7 @@ class _FakeModulePrefs:
     def __init__(self) -> None:
         self.flags: dict[tuple[str, str], bool] = {}
         self.removed: set[tuple[str, str]] = set()
+        self.models: dict[tuple[str, str], dict[str, str]] = {}
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         return {m: e for (t, m), e in self.flags.items() if t == tenant}
@@ -59,6 +68,12 @@ class _FakeModulePrefs:
             self.removed.add((tenant, module))
         else:
             self.removed.discard((tenant, module))
+
+    async def get_models(self, tenant: str, module: str) -> dict[str, str]:
+        return dict(self.models.get((tenant, module), {}))
+
+    async def set_models(self, tenant: str, module: str, models: dict[str, str]) -> None:
+        self.models[(tenant, module)] = dict(models)
 
 
 class _FakeDocker:
@@ -560,3 +575,47 @@ async def test_reconcile_tombstones_re_removes_resurrected() -> None:
 async def test_reconcile_without_docker_is_noop() -> None:
     registry, _, _ = _registry(docker=None)
     await registry.reconcile_tombstones()  # must not raise
+
+
+# ── Per-module model selection (#128) ──────────────────────────────────────────
+
+
+def _models_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="knowledge",
+        version="0.6.0",
+        required_models=[ModelSlot(key="embedding", role="embedding", label="Embedding model")],
+    )
+
+
+async def test_set_and_get_models() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    await registry.set_models("knowledge", {"embedding": "nomic-embed-text"})
+    assert await registry.get_models("knowledge") == {"embedding": "nomic-embed-text"}
+
+
+async def test_set_models_rejects_unknown_slot() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_models("knowledge", {"bogus": "x"})
+    assert err.value.status_code == 400
+
+
+async def test_set_models_drops_blank_selection() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    await registry.set_models("knowledge", {"embedding": ""})  # blank → fall back to default
+    assert await registry.get_models("knowledge") == {}
+
+
+async def test_model_for_slot_returns_choice_or_none() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    assert await registry.model_for_slot("knowledge", "embedding") is None
+    await registry.set_models("knowledge", {"embedding": "nomic-embed-text"})
+    assert await registry.model_for_slot("knowledge", "embedding") == "nomic-embed-text"
+
+
+async def test_get_models_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_models("ghost")
+    assert err.value.status_code == 404

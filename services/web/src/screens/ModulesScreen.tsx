@@ -6,7 +6,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Play, Plus } from "lucide-react";
-import { Fragment, useState } from "react";
+import { Fragment, createElement, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Card, Confirm, Dot, Spinner, cn } from "@/components/ui";
@@ -144,7 +144,6 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
   const [open, setOpen] = useState(false);
   const { manifest, status } = snapshot;
   const ui = manifest.ui;
-  const Icon = moduleIcon(ui?.icon ?? "puzzle");
   const known = ui == null || ui.ui_version === "1";
 
   return (
@@ -155,7 +154,7 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
         aria-expanded={open}
       >
         <span className="flex size-10 items-center justify-center rounded-(--radius-field) border border-edge bg-surface-2 text-accent">
-          <Icon size={19} />
+          {createElement(moduleIcon(ui?.icon ?? "puzzle"), { size: 19 })}
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
@@ -175,16 +175,18 @@ function Shell() {
 
 export default function App() {
   const theme = usePrefs((s) => s.theme);
-  const [booted, setBooted] = useState(false);
 
+  // Keep the live theme in sync; the initial value is applied in main.tsx before
+  // first paint so there is no flash and the shell can render immediately.
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
-  useEffect(() => setBooted(true), []);
 
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>{booted && <Shell />}</BrowserRouter>
+      <BrowserRouter>
+        <Shell />
+      </BrowserRouter>
     </QueryClientProvider>
   );
 }

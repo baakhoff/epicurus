@@ -6,7 +6,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
-import { Fragment, useState } from "react";
+import { Fragment, createElement, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Button, Card, Confirm, Dot, Spinner, Switch, TextInput, cn } from "@/components/ui";
@@ -195,7 +195,6 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
   const queryClient = useQueryClient();
   const { manifest, status, enabled } = snapshot;
   const ui = manifest.ui;
-  const Icon = moduleIcon(ui?.icon ?? "puzzle");
   const known = ui == null || ui.ui_version === "1";
 
   // Toggling the registry flag (#126) hides the module's tools/pages/UI; the container
@@ -224,7 +223,7 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
           aria-expanded={open}
         >
           <span className="flex size-10 shrink-0 items-center justify-center rounded-(--radius-field) border border-edge bg-surface-2 text-accent">
-            <Icon size={19} />
+            {createElement(moduleIcon(ui?.icon ?? "puzzle"), { size: 19 })}
           </span>
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-2">

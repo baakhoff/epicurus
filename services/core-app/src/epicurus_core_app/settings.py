@@ -50,6 +50,14 @@ class CoreAppSettings(CoreSettings):
     # becomes browsable in the Files page. Empty disables the sink (e.g. an OSS build
     # without the storage module); a failed push never breaks the upload.
     attachment_sink_url: str = "http://storage:8080"
+    # ── Chat-upload limits (#175) ───────────────────────────────────────────────
+    # Max size of a single chat upload (POST /platform/v1/agent/attachments); above
+    # this the route returns 413. Keep the web container's nginx client_max_body_size
+    # at or above this so a legitimate upload reaches the core's clean JSON error.
+    attachment_max_bytes: int = 10 * 1024 * 1024  # 10 MiB
+    # Allowed upload content-types (comma-separated). Supports "type/*" wildcards and
+    # "*/*" to disable the allowlist; a disallowed type is rejected with 415.
+    attachment_allowed_types: str = "text/*,image/*,application/pdf,application/json"
     # Postgres DSN (async driver) for conversation persistence.
     database_url: str = "postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus"
     # Qdrant endpoint for semantic recall.
@@ -92,3 +100,8 @@ class CoreAppSettings(CoreSettings):
     def module_mcp_urls(self) -> list[str]:
         """Each module's MCP endpoint (``<base>/mcp``)."""
         return [f"{base}/mcp" for base in self.module_base_urls]
+
+    @property
+    def attachment_allowed_type_list(self) -> list[str]:
+        """The upload content-type allowlist parsed from ``attachment_allowed_types``."""
+        return [t.strip().lower() for t in self.attachment_allowed_types.split(",") if t.strip()]

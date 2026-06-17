@@ -23,12 +23,19 @@ from epicurus_core import (
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.local_provider import LocalTasksProvider
+from epicurus_tasks.models import Task
 from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.service import (
     MODULE_NAME,
+    TASK_KIND,
     TASKS_PAGE_ID,
+    TaskNotFound,
     build_module,
     build_tasks_board,
+    fetch_task,
+    task_attachment,
+    task_hover_card,
+    tasks_attachments,
 )
 from epicurus_tasks.settings import TasksSettings
 
@@ -112,6 +119,44 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         today = datetime.now(UTC).date().isoformat()
         return build_tasks_board(tasks, today=today)
+
+    async def _require_task(ref_id: str) -> Task:
+        """Fetch an attached/referenced task, translating misses into proxy errors.
+
+        A missing task is a ``404``; a provider failure (e.g. Google not connected)
+        is a ``502`` carrying the reason — the same contract the page endpoint uses.
+        """
+        try:
+            return await fetch_task(provider, tenant_id=settings.default_tenant_id, ref_id=ref_id)
+        except TaskNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"task {ref_id!r} not found") from exc
+        except (GoogleTasksError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/attachments")
+    async def list_attachments() -> list[dict[str, str]]:
+        """Chat-attachment picker (ADR-0019): open tasks the composer can attach."""
+        try:
+            return await tasks_attachments(provider, tenant_id=settings.default_tenant_id)
+        except (GoogleTasksError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/attachments/{ref_id}")
+    async def get_attachment(ref_id: str) -> dict[str, str]:
+        """Resolve an attached task to the text the agent injects (ADR-0019)."""
+        return task_attachment(await _require_task(ref_id))
+
+    @app.get("/resolve/{kind}/{ref_id}")
+    async def resolve_entity(kind: str, ref_id: str) -> dict[str, Any]:
+        """Resolve a referenced task to a core hover-card (ADR-0019); core-proxied.
+
+        Tasks only references tasks; an unknown *kind* is a 404. Returns the uniform
+        HoverCard envelope the shell renders inline and in the entity-detail panel —
+        the task's due date and open/completed status.
+        """
+        if kind != TASK_KIND:
+            raise HTTPException(status_code=404, detail=f"unknown entity kind {kind!r}")
+        return task_hover_card(await _require_task(ref_id))
 
     app.mount("/mcp", mcp_app)
     return app

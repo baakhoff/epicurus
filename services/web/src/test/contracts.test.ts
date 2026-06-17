@@ -49,6 +49,37 @@ describe("contracts", () => {
     expect(snapshot.manifest.ui).toBeUndefined();
     expect(snapshot.manifest.tools).toEqual([]);
     expect(snapshot.manifest.pages).toEqual([]);
+    expect(snapshot.manifest.required_models).toEqual([]);
+  });
+
+  it("parses a manifest declaring model slots (#128)", () => {
+    const snapshot = ModuleSnapshot.parse({
+      manifest: {
+        name: "knowledge",
+        version: "0.6.0",
+        required_models: [{ key: "embedding", role: "embedding", label: "Embedding model" }],
+      },
+      status: { healthy: true },
+    });
+    expect(snapshot.manifest.required_models[0].key).toBe("embedding");
+    expect(snapshot.manifest.required_models[0].role).toBe("embedding");
+  });
+
+  it("defaults a module snapshot to enabled with no tags, and round-trips both (#126)", () => {
+    const dflt = ModuleSnapshot.parse({
+      manifest: { name: "m", version: "1.0" },
+      status: { healthy: true },
+    });
+    expect(dflt.enabled).toBe(true);
+    expect(dflt.manifest.tags).toEqual([]);
+
+    const set = ModuleSnapshot.parse({
+      manifest: { name: "m", version: "1.0", tags: ["calendar", "google"] },
+      status: { healthy: true },
+      enabled: false,
+    });
+    expect(set.enabled).toBe(false);
+    expect(set.manifest.tags).toEqual(["calendar", "google"]);
   });
 
   it("parses a module page spec with archetype defaults (ADR-0018)", () => {

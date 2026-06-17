@@ -22,6 +22,60 @@ images to GHCR.
   first **runtime-smoke** coverage of the chat-attachment last mile: the gate now asserts
   an attachable module's picker round-trips through the core (covering notes, knowledge,
   and calendar) (#136) (`notes` → 0.2.0).
+- **Per-module model / embedding selection** — a module can declare model **slots** in its
+  manifest (`required_models`: `{key, role: embedding|chat, label}`) and the operator picks
+  which model fills each from a "Models" section in the module's card. The choice persists in
+  `module_prefs.models` (`PUT /platform/v1/modules/{name}/models`, validated against the
+  declared slots); the module fetches it with the new `PlatformClient.get_module_model(slot)`
+  and passes it to `embed` / `chat`, falling back to the core default when unset. `/embed` and
+  `/chat` are unchanged — per-module selection rides their existing explicit-`model` override
+  (ADR-0021). First consumer: knowledge's embedding model (3.8) (ADR-0029) (closes #128)
+  (`epicurus-core` → 0.5.0, `core-app` → 0.8.0, `web` → 0.10.0).
+- **Module removal — confirmed container delete** — the operator can delete a module's
+  **container** from the Modules screen ("Danger zone → Remove module"), behind a confirm
+  dialog. The core stops + removes the container through the Docker socket via a single,
+  tightly-scoped `DockerController` that touches **only a configured module's own container**
+  (matched by service **and** Compose-project label) and **never** core-app, web, or a
+  data-plane service. Removal **tombstones** the module (a `removed` flag on `module_prefs`)
+  and is re-enforced on startup, so a `compose up` / Watchtower pull can't silently resurrect
+  it. New `DELETE /platform/v1/modules/{name}` (403 protected · 503 no socket); the socket is
+  mounted read-write on `core-app` only and the feature degrades to 503 without it
+  (ADR-0028) (closes #127) (`core-app` → 0.7.0, `web` → 0.9.0).
+- **Modules page: enable/disable + browse by tags** — the operator can turn any module
+  **on or off** from the Modules screen, and search modules by name, description, or tag.
+  Disabling drops the module from the agent's tools, the left-nav pages, and the chat attach
+  menu while its **container keeps running** — re-enabling restores everything. The flag is a
+  core-side registry preference (Postgres `module_prefs`, tenant-scoped), toggled via
+  `POST /platform/v1/modules/{name}/enabled`; the module list now carries each module's
+  `enabled` flag, and `ModuleManifest` gains free-text `tags`. Container *removal* stays a
+  separate, privileged action (#127) (closes #126) (`epicurus-core` → 0.4.0, `core-app` →
+  0.6.0, `web` → 0.8.0).
+- **Tasks — agent-referenced tasks get a hover-card** — `tasks_list` now returns its open
+  tasks as **entity-reference chips** (ADR-0019): hover a chip for the task's **core hover-card**
+  (due date, open/completed status) and click to open it in the right-panel `entity-detail` view.
+  The module declares `resolver` and serves `GET /resolve/task/{id}` over the active provider's
+  `get_task`; the list tool is no longer a module-card action (an envelope can't render as a
+  plain-text result, mirroring calendar / mail). The shell renders the chips, hover-card, and
+  panel generically — no web change (ADR-0019) (closes #141) (`tasks` → 0.4.0).
+- **Tasks — attach a task to the chat** — the tasks module becomes a **chat-attachment
+  source** (`attachable`): pick an open task in the composer's attach menu and the agent uses
+  it as explicit context for the turn. The module serves the picker (`GET /attachments`) and
+  resolve (`GET /attachments/{ref_id}` → `{title, excerpt}`) over its open tasks; a new
+  provider `get_task` backs them for both the local and Google backends. The existing core
+  attach proxy and web attach menu render it unchanged — the module only supplies data
+  (ADR-0019) (closes #139) (`tasks` → 0.3.0).
+
+### Security
+
+- **Bounded chat uploads + module-proxy path segments** (#175) — the attachment upload
+  route (`POST /platform/v1/agent/attachments`) now enforces a size cap (**413** above
+  `ATTACHMENT_MAX_BYTES`, 10 MiB default) and a content-type allowlist (**415**,
+  `ATTACHMENT_ALLOWED_TYPES`), and the web container's nginx caps `/platform/` request
+  bodies at the edge (`client_max_body_size 12m`) — previously the core endpoint was
+  unbounded on the internal network and silently limited to nginx's 1 MB default. The
+  module registry also rejects `/`, `\`, or `..` in the `ref_id` / entity `kind` /
+  `page_id` segments it interpolates into a module request (**400**, defense-in-depth).
+  (`core-app` → 0.5.1.)
 
 ## [0.2.0] — 2026-06-14
 

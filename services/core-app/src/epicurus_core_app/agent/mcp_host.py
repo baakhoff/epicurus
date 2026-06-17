@@ -7,6 +7,7 @@ reflects the modules currently running.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp import ClientSession
@@ -26,14 +27,35 @@ def _text(content: list[Any]) -> str:
 class McpHost:
     """Discovers and calls tools on the configured module MCP servers."""
 
-    def __init__(self, module_urls: list[str]) -> None:
+    def __init__(
+        self,
+        module_urls: list[str],
+        *,
+        url_provider: Callable[[], Awaitable[list[str]]] | None = None,
+    ) -> None:
         self._module_urls = list(module_urls)
+        # When set, discovery asks this for the live set of enabled-module MCP URLs, so a
+        # disabled module's tools are never offered to the model (#126). Without it, the
+        # static configured list is scanned (back-compatible default).
+        self._url_provider = url_provider
+
+    def set_url_provider(self, provider: Callable[[], Awaitable[list[str]]]) -> None:
+        """Wire the live enabled-modules URL source.
+
+        A setter (rather than a constructor arg) avoids a construction cycle: the registry
+        needs this host, and the host needs the registry's ``enabled_mcp_urls`` (#126).
+        """
+        self._url_provider = provider
 
     async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
-        """Return ``(OpenAI tool specs, tool-name -> module-URL route)``."""
+        """Return ``(OpenAI tool specs, tool-name -> module-URL route)``.
+
+        Only **enabled** modules are scanned when a ``url_provider`` is wired (#126).
+        """
+        urls = await self._url_provider() if self._url_provider is not None else self._module_urls
         specs: list[dict[str, Any]] = []
         route: dict[str, str] = {}
-        for url in self._module_urls:
+        for url in urls:
             try:
                 async with (
                     streamablehttp_client(url) as (read, write, _),

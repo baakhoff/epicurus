@@ -161,11 +161,20 @@ export const PageSpec = z.object({
 });
 export type PageSpec = z.infer<typeof PageSpec>;
 
+export const ModelSlot = z.object({
+  key: z.string(),
+  role: z.enum(["embedding", "chat"]),
+  label: z.string(),
+  description: z.string().default(""),
+});
+export type ModelSlot = z.infer<typeof ModelSlot>;
+
 export const ModuleManifest = z.object({
   name: z.string(),
   version: z.string(),
   description: z.string().default(""),
   contract_version: z.string().default("0.1"),
+  tags: z.array(z.string()).default([]),
   tools: z.array(ToolSpec).default([]),
   events_emitted: z.array(EventSpec).default([]),
   events_consumed: z.array(EventSpec).default([]),
@@ -175,6 +184,9 @@ export const ModuleManifest = z.object({
   pages: z.array(PageSpec).default([]),
   resolver: z.boolean().default(false),
   attachable: z.boolean().default(false),
+  // Model slots the operator fills per module (#128); the module fetches its choice and
+  // passes it to embed/chat, falling back to the core default when unset.
+  required_models: z.array(ModelSlot).default([]),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 
@@ -184,6 +196,9 @@ export const ModuleSnapshot = z.object({
     healthy: z.boolean(),
     version: z.string().nullish(),
   }),
+  // The operator's enable/disable choice (#126). A disabled module is hidden from the
+  // agent and the left-nav but still shown on the Modules screen with a re-enable toggle.
+  enabled: z.boolean().default(true),
 });
 export type ModuleSnapshot = z.infer<typeof ModuleSnapshot>;
 

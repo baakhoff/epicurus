@@ -70,6 +70,7 @@ app = module.http_app()
 | `version` | `str` | — | module version |
 | `description` | `str` | `""` | one-line description |
 | `contract_version` | `str` | `CONTRACT_VERSION` | contract version targeted |
+| `tags` | `list[str]` | `[]` | free-text tags for browsing/filtering modules in the shell (#126); the core never routes on them |
 | `image` | `str \| None` | `None` | container image (for distribution) |
 | `tools` | `list[ToolSpec]` | `[]` | exposed tools |
 | `events_emitted` | `list[EventSpec]` | `[]` | published subjects |
@@ -80,6 +81,7 @@ app = module.http_app()
 | `pages` | `list[PageSpec]` | `[]` | left-nav pages, core-rendered from a bounded vocabulary (ADR-0018) |
 | `resolver` | `bool` | `False` | module serves `GET /resolve/{kind}/{ref_id}` for hover-cards (ADR-0019) |
 | `attachable` | `bool` | `False` | module is a chat-attachment source: serves a picker + resolve (ADR-0019) |
+| `required_models` | `list[ModelSlot]` | `[]` | model "slots" the operator fills in the shell (#128); the module fetches its choice and passes it to embed/chat |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -287,3 +289,69 @@ upload. See [storage](../services/storage.md#the-chat-upload-sink-adr-0025).
 
 ### `CONTRACT_VERSION`
 `"0.1"` — the module↔core contract version this release targets.
+
+## Enabling, disabling & browsing modules (#126)
+
+The operator can turn a module **on or off** from the shell's Modules screen and find
+modules by name, description, or tag. The flag is a **core-side registry preference**
+(persisted per tenant in Postgres — the `module_prefs` table), so the module's
+**container keeps running**: disabling never touches Docker. (Removing the container
+is a separate, privileged action — see issue #127.)
+
+- **Disabling hides the module** from the agent's tools (it is dropped from MCP tool
+  discovery), the **left-nav pages**, and the chat attach menu — while it stays listed on
+  the Modules screen with a re-enable toggle. Re-enabling restores everything.
+- **Endpoint** — `POST /platform/v1/modules/{name}/enabled` with body `{ "enabled": bool }`
+  persists the choice (404 for an unknown module).
+- **The module list** (`GET /platform/v1/modules`) carries the flag on each snapshot —
+  `{manifest, status, enabled}` — and **includes disabled modules** so the shell can show
+  the toggle. The shell omits a disabled module's pages from the nav and its entities from
+  the attach menu.
+- **Invoking a disabled module's tool** through the core returns **403**; the agent never
+  sees the tool in the first place.
+- **Tags** — `ModuleManifest.tags` feed the shell's search alongside the name and
+  description.
+
+## Removing a module — confirmed container delete (#127, ADR-0028)
+
+Beyond disabling, the operator can **delete** a module's container from the Modules screen
+("Danger zone → Remove module"), gated by a confirm dialog. This is a **privileged** action:
+the core stops and removes the container through the Docker socket.
+
+- **Endpoint** — `DELETE /platform/v1/modules/{name}` stops + removes the module's container
+  and **tombstones** the module (a `removed` flag on `module_prefs`). **404** unknown module ·
+  **403** protected service · **503** when the core has no Docker access.
+- **Tightly scoped (security).** The core reaches Docker only through one `DockerController`,
+  which removes **only a configured module's own container** — matched by both its
+  `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
+  stack is never touched — and **never** core-app, web, or a data-plane / infra service (a
+  hard denylist on top of the configured-module guard). The read-write socket is mounted on
+  `core-app` only; drop that mount to disable removal entirely (the endpoint then 503s).
+- **It stays gone.** A removed module is dropped from the module list, agent tool discovery,
+  and the nav. Because a `compose up` / Watchtower pull could recreate the container, the core
+  **re-removes** any tombstoned module whose container reappears, on every startup. Bringing a
+  module back means redeploying it and clearing its tombstone.
+
+See ADR-0028 for the full rationale and security posture.
+
+## Per-module model selection (#128, ADR-0029)
+
+A module can let the operator pick which model fills a named **slot** — e.g. knowledge's
+embedding model, independent of the chat default.
+
+- **Declare slots** in the manifest: `required_models: list[ModelSlot]`, where
+  `ModelSlot = {key, role: "embedding" | "chat", label, description?}`. The shell renders a
+  model picker per slot (in the module's card); the core never routes on slots.
+- **The core stores the choice; the module reads it and passes it.** Selections persist in
+  `module_prefs.models` (`{slot_key: model_id}`), set via
+  `PUT /platform/v1/modules/{name}/models` (`{"models": {...}}`; an unknown slot key is `400`).
+  A module resolves its slot with **`PlatformClient.get_module_model(slot)`** (construct the
+  client with `module=<name>`) → the chosen model id or `None`, and passes it to `embed` /
+  `chat`. `GET …/models/{slot}` backs the helper; `GET …/models` returns the full
+  `{slot: model}` map for the shell.
+- **Unset = core default.** A blank pick clears the slot; an unset slot (or a module that
+  never calls the helper) falls back to the core's configured default. `/embed` and `/chat`
+  are unchanged — per-module selection rides their existing explicit-`model` override (ADR-0021).
+
+See ADR-0029 for the rationale (why the module passes the model rather than the core resolving
+it by identity).

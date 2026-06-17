@@ -16,13 +16,23 @@ tool surface. Host port **8091**.
 by due date, where the user completes, edits, and adds tasks — and the `tasks_update` tool
 that backs editing (ADR-0018). The module supplies data only; the shell renders it.
 
+**v0.3.0** makes the module a **chat-attachment source** (ADR-0019): a task can be picked in
+the composer's attach menu and the agent uses it as explicit context for the turn. The module
+serves the picker and resolve over its open tasks (see *Chat-attachment source*, below); the
+core attach menu renders it.
+
+**v0.4.0** makes agent-referenced tasks **entity-reference chips** (ADR-0019): `tasks_list`
+returns its tasks as chips, hovering one shows the core **hover-card** (due date, status) and
+clicking opens it in the right-panel `entity-detail` view. The module declares `resolver` and
+serves `GET /resolve/task/{id}`; the core renders the chip, the hover-card, and the panel.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
 
 | Tool | Inputs | Returns |
 | --- | --- | --- |
-| `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | List of open `Task` objects for the tenant. |
+| `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
 | `tasks_add(title, notes?, due?, list_id?)` | `title`: required; `notes`/`due`/`list_id`: optional | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
 | `tasks_update(task_id, title?, notes?, due?, list_id?)` | `task_id`: provider task ID; only the fields passed change, the rest are left intact | The updated `Task`. |
@@ -50,6 +60,9 @@ class Task(BaseModel):
 | `GET /manifest` | Module manifest (tools, UI declaration). |
 | `GET /status` | Active provider name: `{"provider": "local" \| "google"}`. |
 | `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). 404 for an unknown id. |
+| `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
+| `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
+| `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ### Web UI (manifest, ADR-0007 Tier 1)
@@ -57,7 +70,7 @@ class Task(BaseModel):
 | Panel | What it shows / does |
 | --- | --- |
 | **Status** | Active provider name (polled from `GET /status`). |
-| **Actions** | **List tasks** — calls `tasks_list` through the core. |
+| **Actions** | None — `tasks_list` returns entity-reference chips (surfaced in chat), so it is not a card-action button. |
 | **Tasks page** | A left-nav `board` page (see below). |
 
 ### The Tasks page — `board` archetype (ADR-0018)
@@ -75,6 +88,37 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card);
   the board offers **Add task** (`tasks_add`, a form). The board never carries credentials
   or business logic — it is data plus tool references.
+
+### Entity references & hover-cards (ADR-0019)
+
+`tasks_list` returns its open tasks as **entity-reference chips** rather than a bare list: each
+chip carries the task id (`kind = "task"`, `module = "tasks"`), so the agent can refer to a task
+later without re-listing. Hovering a chip fetches the task's **hover-card**; clicking opens it in
+the right panel's `entity-detail` view. The module supplies data only — the core renders both.
+(Because the list tool now returns a chip envelope rather than plain text, it is no longer a
+module-card action button — tasks are surfaced through chat.)
+
+**Resolver** (`resolver = true`) — `GET /resolve/task/{ref_id}` returns the uniform `HoverCard`
+envelope (`title` · `description` · `details: [{label, value}]`): the task's notes as the
+description, plus **Due** (when set) and **Status** (Open / Completed) detail rows. An unknown
+`kind` or a missing task is a `404`. The core proxies it at
+`GET /platform/v1/modules/tasks/resolve/{kind}/{ref_id}`. The hover-card carries no `href` —
+clicking opens the in-app entity-detail panel, not an outbound URL.
+
+### Chat-attachment source (ADR-0019)
+
+`attachable = true` — a task can be attached to a turn so the agent uses its details as
+explicit context, beyond anything it would list itself:
+
+- **Picker** — `GET /attachments` lists up to 50 **open** tasks as
+  `{ref_id, kind: "task", title}` rows the composer shows.
+- **Resolve** — `GET /attachments/{ref_id}` returns `{title, excerpt}` — the task's title,
+  due date, status, and notes — which the agent injects into the turn's context.
+
+Both are proxied by the core at `GET /platform/v1/modules/tasks/attachments[/{ref_id}]`; a
+missing task is a `404`. They use the active provider's `get_task`, so they behave identically
+against the local and Google backends. The picker offers the **default list** only (the core
+attach proxy forwards no list selector).
 
 ## Provider detail
 
@@ -155,10 +199,10 @@ Package `epicurus_tasks`:
 | Module | Responsibility |
 | --- | --- |
 | `models.py` | `Task` domain model (provider-neutral). |
-| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam. |
+| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update + `get_task`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store. |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API. |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder). |
-| `app.py` | Lifespan, provider selection, `GET /status`, `GET /pages/{id}`, app factory. |
+| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + entity-reference, hover-card & chat-attachment helpers (`task_entity_ref`/`task_hover_card`/`tasks_attachments`/`task_attachment`/`fetch_task`). |
+| `app.py` | Lifespan, provider selection, `GET /status`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `tasks_provider`, `platform_url`, `database_url`). |

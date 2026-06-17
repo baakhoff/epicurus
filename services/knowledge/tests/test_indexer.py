@@ -7,6 +7,7 @@ client and PlatformClient, so no Docker infra is needed.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,13 +31,18 @@ def _make_mock_platform() -> Any:
     return platform
 
 
+def _query_response(points: list[Any]) -> Any:
+    """Wrap hits as a qdrant ``query_points`` response — results live on ``.points``."""
+    return SimpleNamespace(points=points)
+
+
 def _make_mock_qdrant() -> Any:
     qdrant = MagicMock()
     qdrant.collection_exists = AsyncMock(return_value=True)
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()
-    qdrant.search = AsyncMock(return_value=[])
+    qdrant.query_points = AsyncMock(return_value=_query_response([]))
     return qdrant
 
 
@@ -255,7 +261,7 @@ async def test_search_returns_hits(note_index: NoteIndex, vault: Path) -> None:
         "heading": "Note A",
         "text": "Content of A.",
     }
-    qdrant.search = AsyncMock(return_value=[hit])
+    qdrant.query_points = AsyncMock(return_value=_query_response([hit]))
 
     indexer = KnowledgeIndexer(
         note_index,
@@ -279,7 +285,7 @@ async def test_search_skips_hits_with_no_payload(note_index: NoteIndex, vault: P
     hit_no_payload = MagicMock()
     hit_no_payload.score = 0.5
     hit_no_payload.payload = None
-    qdrant.search = AsyncMock(return_value=[hit_no_payload])
+    qdrant.query_points = AsyncMock(return_value=_query_response([hit_no_payload]))
 
     indexer = KnowledgeIndexer(
         note_index,
@@ -301,7 +307,7 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Pat
     hit = MagicMock()
     hit.score = 0.8
     hit.payload = {"note_path": "note_b.md", "heading": None, "text": "Content of B."}
-    qdrant.search = AsyncMock(return_value=[hit])
+    qdrant.query_points = AsyncMock(return_value=_query_response([hit]))
 
     vault_indexer = KnowledgeIndexer(
         note_index,
@@ -351,7 +357,7 @@ async def test_merged_search_returns_hits_from_both_sources(
     vault_hit = MagicMock()
     vault_hit.score = 0.7
     vault_hit.payload = {"note_path": "note_a.md", "heading": None, "text": "Vault content."}
-    vault_qdrant.search = AsyncMock(return_value=[vault_hit])
+    vault_qdrant.query_points = AsyncMock(return_value=_query_response([vault_hit]))
 
     docs_qdrant = _make_mock_qdrant()
     docs_hit = MagicMock()
@@ -362,7 +368,7 @@ async def test_merged_search_returns_hits_from_both_sources(
         "heading": "knowledge",
         "text": "Platform docs content.",
     }
-    docs_qdrant.search = AsyncMock(return_value=[docs_hit])
+    docs_qdrant.query_points = AsyncMock(return_value=_query_response([docs_hit]))
 
     from sqlalchemy.ext.asyncio import create_async_engine
 

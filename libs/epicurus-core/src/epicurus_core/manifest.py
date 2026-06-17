@@ -18,6 +18,8 @@ CONTRACT_VERSION = "0.1"
 __all__ = [
     "CONTRACT_VERSION",
     "EventSpec",
+    "ModelRole",
+    "ModelSlot",
     "ModuleManifest",
     "PageArchetype",
     "PageSpec",
@@ -52,6 +54,24 @@ class EventSpec(BaseModel):
     """
 
     subject: str
+    description: str = ""
+
+
+ModelRole = Literal["embedding", "chat"]
+"""The kind of model a slot needs — an embedding model or a chat/LLM (#128)."""
+
+
+class ModelSlot(BaseModel):
+    """A model the module needs the operator to choose (#128, ADR-0029).
+
+    The module declares slots; the user picks which model fills each in the shell; the
+    core stores the choice and the module fetches it via ``PlatformClient.get_module_model``
+    and passes it to ``embed`` / ``chat``. An unset slot falls back to the core default.
+    """
+
+    key: str
+    role: ModelRole
+    label: str
     description: str = ""
 
 
@@ -136,6 +156,9 @@ class ModuleManifest(BaseModel):
     version: str
     description: str = ""
     contract_version: str = CONTRACT_VERSION
+    # Free-text tags for browsing/filtering modules in the shell (by name, description,
+    # or tag — #126). Purely descriptive; the core never routes on them.
+    tags: list[str] = Field(default_factory=list)
     # Container image — populated for distribution / the installer.
     image: str | None = None
     tools: list[ToolSpec] = Field(default_factory=list)
@@ -154,3 +177,7 @@ class ModuleManifest(BaseModel):
     # The module is a chat-attachment source: it serves a picker (``GET /attachments``) and
     # a resolve (``GET /attachments/{ref_id}``) so its entities can be attached (ADR-0019).
     attachable: bool = False
+    # Model "slots" the operator fills via the shell (#128): the module fetches its chosen
+    # model with ``PlatformClient.get_module_model`` and passes it to embed/chat; an unset
+    # slot falls back to the core default.
+    required_models: list[ModelSlot] = Field(default_factory=list)

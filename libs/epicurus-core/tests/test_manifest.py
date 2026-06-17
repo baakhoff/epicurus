@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
     EventSpec,
+    ModelSlot,
     ModuleManifest,
     PageSpec,
     ToolSpec,
@@ -23,6 +24,22 @@ def test_defaults() -> None:
     assert m.tools == []
     assert m.events_emitted == []
     assert m.secrets == []
+    assert m.required_models == []
+
+
+def test_model_slots_declared_on_manifest() -> None:
+    m = ModuleManifest(
+        name="knowledge",
+        version="0.6.0",
+        required_models=[ModelSlot(key="embedding", role="embedding", label="Embedding model")],
+    )
+    assert m.required_models[0].key == "embedding"
+    assert m.required_models[0].role == "embedding"
+
+
+def test_model_slot_rejects_unknown_role() -> None:
+    with pytest.raises(ValidationError):
+        ModelSlot(key="x", role="vision", label="X")  # type: ignore[arg-type]
 
 
 def test_roundtrip() -> None:

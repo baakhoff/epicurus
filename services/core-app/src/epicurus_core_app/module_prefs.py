@@ -9,7 +9,10 @@ flag lives here in the core, never in the module. Auto-created on first use via
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, String, inspect, select
+import json
+from typing import cast
+
+from sqlalchemy import Boolean, String, Text, inspect, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -31,6 +34,9 @@ class _ModulePrefRow(_ModulePrefBase):
     # True tombstones the module after its container is removed (#127): it is hidden from
     # every surface, and re-removed on startup if a reconcile has resurrected the container.
     removed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # JSON ``{slot_key: model_id}`` — the operator's per-slot model choices (#128). A slot
+    # absent here falls back to the core default model.
+    models: Mapped[str] = mapped_column(Text, default="{}", server_default="'{}'")
 
 
 class ModulePrefsStore:
@@ -58,7 +64,7 @@ class ModulePrefsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_ModulePrefRow.__tablename__)}
-        for name in ("removed",):
+        for name in ("removed", "models"):
             if name not in existing:
                 type_sql = _ModulePrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -112,4 +118,23 @@ class ModulePrefsStore:
                 session.add(_ModulePrefRow(tenant=tenant, module=module, removed=removed))
             else:
                 row.removed = removed
+            await session.commit()
+
+    async def get_models(self, tenant: str, module: str) -> dict[str, str]:
+        """The operator's per-slot model choices for ``module`` (``{}`` when unset) (#128)."""
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                return {}
+            return cast("dict[str, str]", json.loads(row.models or "{}"))
+
+    async def set_models(self, tenant: str, module: str, models: dict[str, str]) -> None:
+        """Replace ``module``'s per-slot model choices (upsert) (#128)."""
+        encoded = json.dumps(models)
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                session.add(_ModulePrefRow(tenant=tenant, module=module, models=encoded))
+            else:
+                row.models = encoded
             await session.commit()

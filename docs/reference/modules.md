@@ -81,6 +81,7 @@ app = module.http_app()
 | `pages` | `list[PageSpec]` | `[]` | left-nav pages, core-rendered from a bounded vocabulary (ADR-0018) |
 | `resolver` | `bool` | `False` | module serves `GET /resolve/{kind}/{ref_id}` for hover-cards (ADR-0019) |
 | `attachable` | `bool` | `False` | module is a chat-attachment source: serves a picker + resolve (ADR-0019) |
+| `required_models` | `list[ModelSlot]` | `[]` | model "slots" the operator fills in the shell (#128); the module fetches its choice and passes it to embed/chat |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -332,3 +333,25 @@ the core stops and removes the container through the Docker socket.
   module back means redeploying it and clearing its tombstone.
 
 See ADR-0028 for the full rationale and security posture.
+
+## Per-module model selection (#128, ADR-0029)
+
+A module can let the operator pick which model fills a named **slot** — e.g. knowledge's
+embedding model, independent of the chat default.
+
+- **Declare slots** in the manifest: `required_models: list[ModelSlot]`, where
+  `ModelSlot = {key, role: "embedding" | "chat", label, description?}`. The shell renders a
+  model picker per slot (in the module's card); the core never routes on slots.
+- **The core stores the choice; the module reads it and passes it.** Selections persist in
+  `module_prefs.models` (`{slot_key: model_id}`), set via
+  `PUT /platform/v1/modules/{name}/models` (`{"models": {...}}`; an unknown slot key is `400`).
+  A module resolves its slot with **`PlatformClient.get_module_model(slot)`** (construct the
+  client with `module=<name>`) → the chosen model id or `None`, and passes it to `embed` /
+  `chat`. `GET …/models/{slot}` backs the helper; `GET …/models` returns the full
+  `{slot: model}` map for the shell.
+- **Unset = core default.** A blank pick clears the slot; an unset slot (or a module that
+  never calls the helper) falls back to the core's configured default. `/embed` and `/chat`
+  are unchanged — per-module selection rides their existing explicit-`model` override (ADR-0021).
+
+See ADR-0029 for the rationale (why the module passes the model rather than the core resolving
+it by identity).

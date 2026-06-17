@@ -101,3 +101,39 @@ async def test_enabled_and_removed_coexist_on_one_row() -> None:
     await store.set_removed("t1", "tasks", True)
     assert await store.is_enabled("t1", "tasks") is False
     assert await store.removed_modules("t1") == {"tasks"}
+
+
+# ── Per-slot model selection (#128) ────────────────────────────────────────────
+
+
+async def test_models_default_to_empty() -> None:
+    store, _ = await _fresh_store()
+    assert await store.get_models("t1", "knowledge") == {}
+
+
+async def test_set_and_get_models() -> None:
+    store, _ = await _fresh_store()
+    await store.set_models("t1", "knowledge", {"embedding": "nomic-embed-text"})
+    assert await store.get_models("t1", "knowledge") == {"embedding": "nomic-embed-text"}
+
+
+async def test_set_models_replaces() -> None:
+    store, _ = await _fresh_store()
+    await store.set_models("t1", "knowledge", {"embedding": "a"})
+    await store.set_models("t1", "knowledge", {"embedding": "b"})
+    assert await store.get_models("t1", "knowledge") == {"embedding": "b"}
+
+
+async def test_models_are_tenant_and_module_scoped() -> None:
+    store, _ = await _fresh_store()
+    await store.set_models("t1", "knowledge", {"embedding": "a"})
+    assert await store.get_models("t2", "knowledge") == {}
+    assert await store.get_models("t1", "notes") == {}
+
+
+async def test_models_coexist_with_enabled_and_removed() -> None:
+    store, _ = await _fresh_store()
+    await store.set_enabled("t1", "knowledge", False)
+    await store.set_models("t1", "knowledge", {"embedding": "a"})
+    assert await store.is_enabled("t1", "knowledge") is False
+    assert await store.get_models("t1", "knowledge") == {"embedding": "a"}

@@ -67,6 +67,12 @@ class EnabledUpdate(BaseModel):
     enabled: bool
 
 
+class ModelsUpdate(BaseModel):
+    """The body of a per-module model-slot update (#128): ``{slot_key: model_id}``."""
+
+    models: dict[str, str]
+
+
 class ToolInvocation(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -209,6 +215,34 @@ class ModuleRegistry:
                     log.info("re-removed resurrected module", module=name, containers=containers)
             except Exception as exc:
                 log.warning("tombstone reconcile failed", module=name, error=str(exc))
+
+    async def get_models(self, name: str) -> dict[str, str]:
+        """The operator's per-slot model choices for *name* (#128). 404 if unknown."""
+        await self._resolve(name)
+        return await self._prefs.get_models(self._tenant, name)
+
+    async def set_models(self, name: str, models: dict[str, str]) -> None:
+        """Persist per-slot model choices for *name*, validating the slot keys (#128).
+
+        Each key must be a slot the module declares in ``required_models``; a blank value
+        clears that slot (falls back to the core default). 404 unknown module, 400 unknown slot.
+        """
+        _, manifest = await self._resolve(name)
+        valid = {slot.key for slot in manifest.required_models}
+        chosen = {key: model for key, model in models.items() if model}
+        unknown = set(chosen) - valid
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown model slot(s): {sorted(unknown)}")
+        await self._prefs.set_models(self._tenant, name, chosen)
+
+    async def model_for_slot(self, name: str, slot: str) -> str | None:
+        """The chosen model for *name*'s *slot*, or ``None`` to use the core default (#128).
+
+        Reads the stored choice directly (no manifest round-trip) so a module can resolve
+        its own slot cheaply; an unset slot or unknown module yields ``None`` → core default.
+        """
+        models = await self._prefs.get_models(self._tenant, name)
+        return models.get(slot)
 
     async def invoke(self, name: str, tool: str, arguments: dict[str, Any]) -> str:
         """Run a module tool (a manifest-declared UI action) through the MCP host."""
@@ -427,6 +461,22 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         503 when the core has no Docker access, 404 for an unknown module.
         """
         return await registry.remove(name)
+
+    @router.get("/{name}/models")
+    async def get_module_models(name: str) -> dict[str, dict[str, str]]:
+        """The module's per-slot model selections (#128)."""
+        return {"models": await registry.get_models(name)}
+
+    @router.put("/{name}/models")
+    async def set_module_models(name: str, body: ModelsUpdate) -> dict[str, str]:
+        """Set the module's per-slot model selections (#128); validates slot keys."""
+        await registry.set_models(name, body.models)
+        return {"status": "ok"}
+
+    @router.get("/{name}/models/{slot}")
+    async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
+        """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
+        return {"model": await registry.model_for_slot(name, slot)}
 
     @router.post("/{name}/tools/{tool}", response_model=ToolResult)
     async def invoke_tool(name: str, tool: str, request: ToolInvocation) -> ToolResult:

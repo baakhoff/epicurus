@@ -125,6 +125,17 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+  // The module's per-slot model selections (#128): { slot_key: model_id }.
+  getModuleModels: (name: string) =>
+    request(
+      z.object({ models: z.record(z.string(), z.string()) }).transform((o) => o.models),
+      `/platform/v1/modules/${encodeURIComponent(name)}/models`,
+    ),
+  setModuleModels: (name: string, models: Record<string, string>) =>
+    request(z.object({ status: z.string() }), `/platform/v1/modules/${encodeURIComponent(name)}/models`, {
+      method: "PUT",
+      body: JSON.stringify({ models }),
+    }),
   invokeModuleTool: (name: string, tool: string, args: Record<string, unknown>) =>
     request(
       z.object({ result: z.string() }),

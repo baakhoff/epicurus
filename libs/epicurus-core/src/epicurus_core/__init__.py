@@ -29,6 +29,8 @@ from epicurus_core.logging import configure_logging, get_logger
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
     EventSpec,
+    ModelRole,
+    ModelSlot,
     ModuleManifest,
     PageArchetype,
     PageSpec,
@@ -72,6 +74,8 @@ __all__ = [
     "HoverCardDetail",
     "HoverCardLink",
     "LogLevel",
+    "ModelRole",
+    "ModelSlot",
     "ModuleManifest",
     "PageArchetype",
     "PageSpec",

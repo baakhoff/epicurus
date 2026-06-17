@@ -140,6 +140,56 @@ function ModuleConfig({ snapshot }: { snapshot: ModuleSnapshot }) {
   );
 }
 
+function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
+  const name = snapshot.manifest.name;
+  const slots = snapshot.manifest.required_models;
+  const queryClient = useQueryClient();
+  const selections = useQuery({
+    queryKey: ["module-models", name],
+    queryFn: () => api.getModuleModels(name),
+  });
+  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const save = useMutation({
+    mutationFn: (next: Record<string, string>) => api.setModuleModels(name, next),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-models", name] }),
+  });
+  if (slots.length === 0) return null;
+
+  // Choosing "Core default" (value "") clears the slot; the core falls back to its default.
+  const current = selections.data ?? {};
+  const available = (models.data ?? []).filter((m) => !m.hidden);
+
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Models</h4>
+      <div className="flex flex-col gap-3">
+        {slots.map((slot) => (
+          <label key={slot.key} className="block">
+            <span className="text-[13px] text-ink">{slot.label}</span>
+            {slot.description && (
+              <span className="block text-xs text-ink-dim">{slot.description}</span>
+            )}
+            <select
+              className="mt-1 w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+              value={current[slot.key] ?? ""}
+              disabled={save.isPending || selections.isLoading}
+              onChange={(e) => save.mutate({ ...current, [slot.key]: e.target.value })}
+            >
+              <option value="">Core default</option>
+              {available.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+      {save.isError && <p className="mt-2 text-sm text-danger">{(save.error as Error).message}</p>}
+    </div>
+  );
+}
+
 function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
@@ -229,6 +279,8 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
           {known && status.healthy && ui?.status_url && <ModuleStatus name={manifest.name} />}
 
           {known && status.healthy && <ModuleConfig snapshot={snapshot} />}
+
+          {known && <ModuleModels snapshot={snapshot} />}
 
           {known && status.healthy && enabled && (ui?.actions.length ?? 0) > 0 && (
             <div>

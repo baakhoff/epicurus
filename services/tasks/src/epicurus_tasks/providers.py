@@ -87,3 +87,18 @@ class TasksProvider(Protocol):
             list_id: List containing the task; ``None`` means the default list.
         """
         ...
+
+    async def get_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> Task | None:
+        """Return a single task by id, or ``None`` if it does not exist.
+
+        Backs the chat-attachment source and the entity-ref resolver (ADR-0019):
+        the module fetches one attached / referenced task without re-listing.
+
+        Args:
+            tenant_id: Tenant scope.
+            task_id: Provider-specific task identifier.
+            list_id: List containing the task; ``None`` means the default list.
+        """
+        ...

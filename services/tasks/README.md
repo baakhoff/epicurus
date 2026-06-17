@@ -1,8 +1,8 @@
 # epicurus-tasks
 
 Provider-neutral task management module for the epicurus platform (ADR-0016).
-Exposes three MCP tools (`tasks_list`, `tasks_add`, `tasks_complete`) backed by a
-swappable provider — **local Postgres store** (default) or **Google Tasks**.
+Exposes four MCP tools (`tasks_list`, `tasks_add`, `tasks_complete`, `tasks_update`)
+backed by a swappable provider — **local Postgres store** (default) or **Google Tasks**.
 
 ## Quick start
 
@@ -18,7 +18,7 @@ Full documentation: [docs/services/tasks.md](../../docs/services/tasks.md).
 
 ## Wire-in checklist (when adding a new module)
 
-1. `services/tasks/compose.yaml` — this file; service + port `8087`.
+1. `services/tasks/compose.yaml` — this file; service + port `8091`.
 2. Root `compose.yaml` — `include: services/tasks/compose.yaml` ✓
 3. `services/core-app/src/epicurus_core_app/settings.py` — `http://tasks:8080`
    added to `module_urls` ✓
@@ -27,9 +27,10 @@ Full documentation: [docs/services/tasks.md](../../docs/services/tasks.md).
 
 | Tool | Description |
 | --- | --- |
-| `tasks_list(list_id?)` | Return open tasks from the active provider. |
+| `tasks_list(list_id?)` | Return open tasks as entity-reference chips (hover → hover-card, click → detail panel). |
 | `tasks_add(title, notes?, due?, list_id?)` | Create a new task. |
 | `tasks_complete(task_id, list_id?)` | Mark a task complete. |
+| `tasks_update(task_id, title?, notes?, due?, list_id?)` | Edit a task's title, notes, or due date. |
 
 ## Adding a provider
 

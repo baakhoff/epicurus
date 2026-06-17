@@ -93,14 +93,32 @@ export const AgentTurn = z.object({
 });
 export type AgentTurn = z.infer<typeof AgentTurn>;
 
+/** One component's warming state in a readiness snapshot (ADR-0027). */
+export const ReadinessComponent = z.object({
+  name: z.string(),
+  ready: z.boolean(),
+  detail: z.string().default(""),
+});
+export type ReadinessComponent = z.infer<typeof ReadinessComponent>;
+
+/** A point-in-time readiness snapshot, led on the chat stream (ADR-0027). */
+export const Readiness = z.object({
+  ready: z.boolean(),
+  power: PowerState,
+  components: z.array(ReadinessComponent).default([]),
+});
+export type Readiness = z.infer<typeof Readiness>;
+
 /** One SSE event of a streaming agent turn (event name == `type`). */
 export const AgentEvent = z.object({
-  type: z.enum(["delta", "tool", "done", "error"]),
+  type: z.enum(["delta", "tool", "done", "error", "readiness"]),
   text: z.string().nullish(),
   tool: z.string().nullish(),
   status: z.enum(["running", "ok", "error"]).nullish(),
   turn: AgentTurn.nullish(),
   detail: z.string().nullish(),
+  // Present on `readiness` events that lead a streaming turn (ADR-0027).
+  readiness: Readiness.nullish(),
 });
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

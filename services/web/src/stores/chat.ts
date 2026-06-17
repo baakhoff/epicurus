@@ -5,7 +5,7 @@
  */
 import { create } from "zustand";
 
-import { AgentEvent, type Attachment } from "@/lib/contracts";
+import { AgentEvent, type Attachment, type Readiness } from "@/lib/contracts";
 import { sse } from "@/lib/sse";
 
 export interface ToolRun {
@@ -25,6 +25,8 @@ interface ChatState {
   /** The assistant turn under construction, in order. */
   segments: ChatSegment[];
   streaming: boolean;
+  /** Warming progress emitted before the first token (ADR-0027); null once answered. */
+  readiness: Readiness | null;
   error: string | null;
   paused: boolean;
   abort: AbortController | null;
@@ -52,6 +54,7 @@ export const useChat = create<ChatState>()((set, get) => ({
   pendingUser: null,
   segments: [],
   streaming: false,
+  readiness: null,
   error: null,
   paused: false,
   abort: null,
@@ -63,6 +66,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       pendingUser: null,
       segments: [],
       streaming: false,
+      readiness: null,
       error: null,
       paused: false,
       abort: null,
@@ -76,6 +80,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       pendingUser: null,
       segments: [],
       streaming: false,
+      readiness: null,
       error: null,
       paused: false,
       abort: null,
@@ -89,6 +94,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       pendingUser: text,
       segments: [],
       streaming: true,
+      readiness: null,
       error: null,
       paused: false,
       abort,
@@ -133,7 +139,8 @@ export const useChat = create<ChatState>()((set, get) => ({
       };
       for await (const message of sse("/platform/v1/agent/chat/stream", body, abort.signal)) {
         const event = AgentEvent.parse(JSON.parse(message.data));
-        if (event.type === "delta" && event.text) appendText(event.text);
+        if (event.type === "readiness" && event.readiness) set({ readiness: event.readiness });
+        else if (event.type === "delta" && event.text) appendText(event.text);
         else if (event.type === "tool" && event.tool && event.status)
           setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
         else if (event.type === "error") {
@@ -146,7 +153,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       if (completed) {
         // The server now owns this turn: refetch history, then drop the live copy.
         await onDone();
-        set({ streaming: false, abort: null, pendingUser: null, segments: [] });
+        set({ streaming: false, abort: null, pendingUser: null, segments: [], readiness: null });
       } else {
         set({ streaming: false, abort: null });
       }

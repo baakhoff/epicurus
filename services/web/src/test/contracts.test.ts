@@ -10,6 +10,7 @@ import {
   MessageRecord,
   ModuleSnapshot,
   PageSpec,
+  Readiness,
 } from "@/lib/contracts";
 
 describe("contracts", () => {
@@ -21,6 +22,33 @@ describe("contracts", () => {
       turn: { content: "hi", tools_used: ["echo"], stopped: "completed" },
     });
     expect(done.turn?.tools_used).toEqual(["echo"]);
+  });
+
+  it("parses a readiness event leading the stream (ADR-0027)", () => {
+    const event = AgentEvent.parse({
+      type: "readiness",
+      readiness: {
+        ready: false,
+        power: "idle",
+        components: [{ name: "model", ready: false, detail: "llama3.2 · warming" }],
+      },
+    });
+    expect(event.type).toBe("readiness");
+    expect(event.readiness?.components[0].name).toBe("model");
+  });
+
+  it("parses a standalone readiness snapshot and defaults its detail", () => {
+    const readiness = Readiness.parse({
+      ready: true,
+      power: "active",
+      components: [{ name: "modules", ready: true }],
+    });
+    expect(readiness.components[0].detail).toBe("");
+    expect(readiness.power).toBe("active");
+  });
+
+  it("rejects an unknown power state in a readiness snapshot", () => {
+    expect(() => Readiness.parse({ ready: true, power: "asleep", components: [] })).toThrow();
   });
 
   it("parses a manifest-driven module snapshot (the ADR-0007 surface)", () => {

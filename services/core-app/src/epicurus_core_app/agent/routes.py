@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, UploadFile
@@ -14,6 +15,7 @@ from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
+from epicurus_core_app.readiness import ReadinessProbe
 
 log = get_logger("epicurus_core_app.agent.routes")
 
@@ -22,6 +24,10 @@ SSE_HEADERS = {
     # Tell buffering proxies (the web container's nginx) to pass events through.
     "X-Accel-Buffering": "no",
 }
+
+# How long the in-stream readiness probe may run before we stop waiting and start the
+# answer. A slow or still-booting module must never delay the first token (ADR-0027).
+READINESS_BUDGET_S = 2.0
 
 
 class AgentRequest(BaseModel):
@@ -49,11 +55,14 @@ def create_agent_router(
     tenant: str,
     attachments: AttachmentStore,
     sink: AttachmentSink | None = None,
+    probe: ReadinessProbe | None = None,
 ) -> APIRouter:
     """The agent turn endpoints plus the conversation (session) surface.
 
     ``sink`` (when configured) durably persists uploads to the storage module; passing
     ``None`` keeps uploads core-side only (e.g. a build without the storage module).
+    ``probe`` (when configured) leads a streamed turn with ``readiness`` events so the UI
+    can show warming progress before the first token (ADR-0027).
     """
     router = APIRouter(prefix="/platform/v1/agent", tags=["agent"])
 
@@ -63,9 +72,22 @@ def create_agent_router(
 
     @router.post("/chat/stream")
     async def chat_stream(request: AgentRequest) -> StreamingResponse:
-        """The same turn as ``/chat``, streamed as SSE (delta / tool / done / error)."""
+        """The same turn as ``/chat``, streamed as SSE.
+
+        Leads with ``readiness`` events (warming progress, best-effort and time-boxed),
+        then ``delta`` / ``tool`` / ``done`` / ``error`` for the turn itself (ADR-0027).
+        """
 
         async def events() -> AsyncIterator[str]:
+            if probe is not None:
+                try:
+                    async with asyncio.timeout(READINESS_BUDGET_S):
+                        async for snap in probe.stream(model=request.model, tenant_id=tenant):
+                            yield _sse(AgentEvent(type="readiness", readiness=snap))
+                except TimeoutError:  # a slow probe must not delay the answer
+                    log.info("readiness probe slow; proceeding to the turn")
+                except Exception as exc:  # readiness is an enhancement, never a hard dependency
+                    log.warning("readiness probe failed; proceeding", error=str(exc))
             async for event in agent.run_stream(
                 request.messages, model=request.model, session_id=request.session_id
             ):

@@ -39,6 +39,7 @@ from epicurus_core_app.modules import ModuleRegistry, create_modules_router
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
+from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.settings import CoreAppSettings
 
 SERVICE_NAME = "core-app"
@@ -110,6 +111,12 @@ def create_app() -> FastAPI:
         redirect_base_url=settings.oauth_redirect_base_url,
         state_secret=settings.oauth_state_secret,
     )
+    readiness = ReadinessProbe(
+        power=power,
+        gateway=gateway,
+        registry=registry,
+        default_tenant=settings.default_tenant_id,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -139,9 +146,15 @@ def create_app() -> FastAPI:
     app.include_router(create_power_router(gateway, power))
     app.include_router(
         create_agent_router(
-            agent, memory, settings.default_tenant_id, attachment_store, sink=attachment_sink
+            agent,
+            memory,
+            settings.default_tenant_id,
+            attachment_store,
+            sink=attachment_sink,
+            probe=readiness,
         )
     )
+    app.include_router(create_readiness_router(readiness))
     app.include_router(create_modules_router(registry))
     app.include_router(create_oauth_router(oauth, default_tenant=settings.default_tenant_id))
 

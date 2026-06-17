@@ -89,6 +89,32 @@ class LlmGateway:
                 return stored
         return self._default_model
 
+    async def model_readiness(
+        self, model: str | None = None, *, tenant_id: str | None = None
+    ) -> tuple[str, bool | None]:
+        """Report whether a model is ready to answer *now* (ADR-0027).
+
+        Returns ``(resolved_model, warm)``. ``warm`` is ``None`` for hosted providers — they
+        need no local warm-up, so they are always ready; for the local runtime it is ``True``
+        only when the model is already loaded in memory (``False`` while paused, or cold).
+        Best-effort: a runtime probe failure reports the model as cold rather than raising.
+        """
+        resolved = model or await self.effective_default(tenant_id)
+        _, provider = registry.resolve(resolved)
+        if not provider.is_local:
+            return resolved, None
+        if self._power.paused:
+            return resolved, False
+        target = resolved.split("/", 1)[-1]  # a bare local name has no prefix; this is a no-op
+        try:
+            loaded = {info.name for info in await self.models(tenant_id) if info.loaded}
+        except Exception:  # runtime unreachable — treat as cold, never raise into readiness
+            log.warning("model readiness probe failed; reporting cold", model=resolved)
+            return resolved, False
+        # The runtime tags loaded models (e.g. "llama3.2:latest"); match the bare name too.
+        warm = target in loaded or any(name.split(":", 1)[0] == target for name in loaded)
+        return resolved, warm
+
     def _candidates(self, model: str) -> list[str]:
         """The chosen model followed by the configured fallback chain (deduped)."""
         ordered = [model]

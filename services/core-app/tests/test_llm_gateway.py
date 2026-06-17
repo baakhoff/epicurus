@@ -12,7 +12,7 @@ from structlog.testing import capture_logs
 
 from epicurus_core import SecretError
 from epicurus_core_app.llm.gateway import LlmGateway
-from epicurus_core_app.llm.models import ChatMessage, PowerState
+from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 
@@ -556,3 +556,68 @@ async def test_explicit_model_ignores_stored_default(monkeypatch: pytest.MonkeyP
     # An explicit model in the request must win over the stored default.
     await _gateway(prefs=prefs).chat([ChatMessage(role="user", content="hi")], model="mistral")
     assert captured["model"] == "ollama_chat/mistral"
+
+
+# ── model readiness (ADR-0027) ───────────────────────────────────────────────────
+
+
+async def test_model_readiness_local_warm_matches_tagged_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gw = _gateway()
+
+    async def fake_models(tenant_id: str | None = None) -> list[ModelInfo]:
+        # The runtime tags the loaded model "llama3.2:latest"; the bare name must match.
+        return [
+            ModelInfo(name="llama3.2:latest", loaded=True),
+            ModelInfo(name="qwen2.5:0.5b", loaded=False),
+        ]
+
+    monkeypatch.setattr(gw, "models", fake_models)
+    assert await gw.model_readiness("llama3.2") == ("llama3.2", True)
+
+
+async def test_model_readiness_local_cold(monkeypatch: pytest.MonkeyPatch) -> None:
+    gw = _gateway()
+
+    async def fake_models(tenant_id: str | None = None) -> list[ModelInfo]:
+        return [ModelInfo(name="llama3.2:latest", loaded=False)]
+
+    monkeypatch.setattr(gw, "models", fake_models)
+    assert await gw.model_readiness("llama3.2") == ("llama3.2", False)
+
+
+async def test_model_readiness_hosted_is_always_ready() -> None:
+    # Hosted providers need no local warm-up — warm is None (always ready), no runtime probe.
+    name, warm = await _gateway().model_readiness("claude/claude-sonnet-4-6")
+    assert name == "claude/claude-sonnet-4-6" and warm is None
+
+
+async def test_model_readiness_paused_local_is_cold_without_probing() -> None:
+    power = PowerController()
+    power.pause()
+    # While paused the runtime is never probed (that would wake the GPU): cold by definition.
+    name, warm = await _gateway(power=power).model_readiness("llama3.2")
+    assert name == "llama3.2" and warm is False
+
+
+async def test_model_readiness_runtime_error_reports_cold(monkeypatch: pytest.MonkeyPatch) -> None:
+    gw = _gateway()
+
+    async def boom(tenant_id: str | None = None) -> list[ModelInfo]:
+        raise RuntimeError("ollama unreachable")
+
+    monkeypatch.setattr(gw, "models", boom)
+    assert await gw.model_readiness("llama3.2") == ("llama3.2", False)
+
+
+async def test_model_readiness_defaults_to_effective_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gw = _gateway()  # default_model="llama3.2"
+
+    async def fake_models(tenant_id: str | None = None) -> list[ModelInfo]:
+        return [ModelInfo(name="llama3.2:latest", loaded=True)]
+
+    monkeypatch.setattr(gw, "models", fake_models)
+    assert await gw.model_readiness() == ("llama3.2", True)

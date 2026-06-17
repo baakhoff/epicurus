@@ -18,7 +18,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 
 | Screen | What it does |
 | --- | --- |
-| **Chat** | Streaming agent turns (SSE delta/tool/done/error), session sidebar (cross-chat memory), per-chat model picker. |
+| **Chat** | Streaming agent turns (SSE readiness/delta/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **process timeline** of the agent's tool calls (#121), session sidebar (cross-chat memory), per-chat model picker. |
 | **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
@@ -87,9 +87,17 @@ upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
 
 ### The chat SSE protocol
 
-`POST /platform/v1/agent/chat/stream` returns Server-Sent Events: `delta` (content
-tokens), `tool` (a tool call's `running`→`ok`/`error`), `done` (the final `AgentTurn`),
-`error`. The shell renders tokens live and tool calls as chips.
+`POST /platform/v1/agent/chat/stream` returns Server-Sent Events: an optional leading
+`readiness` (a warming snapshot — power state, module health, model warm; ADR-0027),
+then `delta` (content tokens), `tool` (a tool call's `running`→`ok`/`error`), `done` (the
+final `AgentTurn`), `error`.
+
+Before the first token the shell shows the turn's *process*, not a bare caret: a
+**readiness bar** while the system warms (`readiness` events, #122), a **"Thinking…"** cue
+once it is ready and a token is pending, then a **process timeline** that lists each tool
+step with a human-readable label and live status (#121). The timeline folds to a one-line
+summary as the answer streams in, and the whole live turn is replaced by the clean
+server-stored answer on `done`.
 
 ## Configuration
 

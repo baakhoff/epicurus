@@ -12,6 +12,18 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Added
+
+- **Chat process display + readiness bar** — the chat surface now shows *what the agent is
+  doing* instead of a bare streaming caret. Before the first token a **readiness bar**
+  reports warming progress (module health + whether the turn's model is warm, tied to the
+  power state), then a **"Thinking…"** cue, then a step-by-step **process timeline** of the
+  agent's tool calls with human-readable labels (e.g. "Searching knowledge") that folds to a
+  summary as the answer streams in. The core gains a readiness contract (ADR-0027): a
+  queryable `GET /platform/v1/readiness` and matching `readiness` events that **lead** the
+  `POST /platform/v1/agent/chat/stream` SSE turn (best-effort and time-boxed, so a slow or
+  booting module never delays the answer) (#121, #122) (`core-app` → 0.6.0, `web` → 0.8.0).
+
 ## [0.2.0] — 2026-06-14
 
 **Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations),

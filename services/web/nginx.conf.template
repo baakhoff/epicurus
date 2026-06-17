@@ -31,6 +31,11 @@ server {
         proxy_cache off;
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
+        # Cap chat-upload bodies at the edge (#175). The core also enforces its own
+        # byte limit (413) and a content-type allowlist (415); keep this at or above
+        # the core's ATTACHMENT_MAX_BYTES (10 MiB default) so a legitimate upload
+        # reaches the core's clean JSON error instead of nginx's HTML 413.
+        client_max_body_size 12m;
     }
 
     # Hashed build assets are immutable; cache them hard.

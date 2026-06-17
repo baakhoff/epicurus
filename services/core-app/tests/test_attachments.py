@@ -19,7 +19,7 @@ from epicurus_core import Attachment
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
-from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.routes import _content_type_allowed, create_agent_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, MessageRecord
 
@@ -134,6 +134,55 @@ async def test_upload_route_stores_the_file_and_returns_a_handle() -> None:
     row = await store.get(tenant="local", att_id=body["att_id"])
     assert row is not None
     assert row.content == b"buy milk"
+
+
+async def test_upload_rejects_oversize_file_413() -> None:
+    store = await _attachment_store()
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            cast(Agent, None), cast(Memory, None), "local", store, max_upload_bytes=8
+        )
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/platform/v1/agent/attachments",
+            files={"file": ("big.txt", b"far more than eight bytes", "text/plain")},
+        )
+    assert resp.status_code == 413
+
+
+async def test_upload_rejects_disallowed_type_415() -> None:
+    store = await _attachment_store()
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            cast(Agent, None),
+            cast(Memory, None),
+            "local",
+            store,
+            allowed_upload_types=("text/*",),
+        )
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/platform/v1/agent/attachments",
+            files={"file": ("logo.png", b"\x89PNG\r\n", "image/png")},
+        )
+    assert resp.status_code == 415
+
+
+def test_content_type_allowlist_matches_wildcards_and_params() -> None:
+    allowed = ["text/*", "application/pdf"]
+    assert _content_type_allowed("text/plain", allowed)
+    assert _content_type_allowed("text/markdown; charset=utf-8", allowed)  # params ignored
+    assert _content_type_allowed("TEXT/CSV", allowed)  # case-insensitive
+    assert _content_type_allowed("application/pdf", allowed)
+    assert not _content_type_allowed("image/png", allowed)
+    assert not _content_type_allowed("", allowed)
+    assert _content_type_allowed("anything/at-all", ["*/*"])  # allowlist disabled
 
 
 # ── Upload sink (ADR-0025) ────────────────────────────────────────────────────

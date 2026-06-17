@@ -20,6 +20,13 @@ MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
 """The id of the Tasks left-nav page; forms its nav route and data path."""
 
+# The kind every task entity-reference and attachment carries (ADR-0019).
+TASK_KIND = "task"
+
+# Chat-attachment picker bound (ADR-0019): the composer lists open tasks to attach;
+# the cap keeps the menu manageable for a long backlog.
+_ATTACH_LIMIT = 50
+
 
 def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """Register the provider-agnostic task tools and the Tasks page on the module.
@@ -29,7 +36,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.3.0",
         description=(
             f"Task management via the {provider.provider_name()!r} provider: "
             "list, add, edit, and complete tasks."
@@ -61,6 +68,8 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 nav_order=40,
             )
         ],
+        # Be a chat-attachment source: GET /attachments (picker) + /attachments/{id} (ADR-0019).
+        attachable=True,
     )
 
     @module.tool()
@@ -244,3 +253,66 @@ def build_tasks_board(tasks: list[Task], *, today: str) -> dict[str, Any]:
             }
         ],
     }
+
+
+# ── Chat-attachment source (ADR-0019) ─────────────────────────────────────────
+#
+# The module is a chat-attachment source: the composer lists open tasks (picker) and
+# an attached task is resolved to the text the agent injects into the turn. These
+# helpers are provider-agnostic and app-free so they are unit-testable without a
+# running app; a task is fetched by id via the active provider's `get_task`, so they
+# behave identically against the local and Google backends.
+
+
+class TaskNotFound(Exception):
+    """Raised when a task id does not resolve for the active provider/tenant."""
+
+
+def task_excerpt(task: Task) -> str:
+    """A short plain-text rendering of a task for the agent's turn context."""
+    lines = [task.title]
+    if task.due:
+        lines.append(f"Due {task.due[:10]}")
+    lines.append("Completed" if task.completed else "Open")
+    if task.notes:
+        lines.extend(["", task.notes])
+    return "\n".join(lines)
+
+
+def task_attachment_item(task: Task) -> dict[str, str]:
+    """One picker row the composer lists for the attachment source (ADR-0019)."""
+    return {"ref_id": task.id, "kind": TASK_KIND, "title": task.title}
+
+
+def task_attachment(task: Task) -> dict[str, str]:
+    """The resolve payload the agent injects when an attached task is expanded."""
+    return {"title": task.title, "excerpt": task_excerpt(task)}
+
+
+async def fetch_task(provider: TasksProvider, *, tenant_id: str, ref_id: str) -> Task:
+    """Fetch one task by id, raising :class:`TaskNotFound` when it does not exist."""
+    task = await provider.get_task(tenant_id, ref_id)
+    if task is None:
+        raise TaskNotFound(ref_id)
+    return task
+
+
+async def tasks_attachments(
+    provider: TasksProvider,
+    *,
+    tenant_id: str,
+    limit: int = _ATTACH_LIMIT,
+) -> list[dict[str, str]]:
+    """Picker for the chat-attachment composer (ADR-0019): open tasks as items.
+
+    Returns up to *limit* open tasks from the active provider's default list as
+    ``{ref_id, kind, title}`` rows. The agent later resolves the chosen one through
+    ``GET /attachments/{ref_id}`` into the turn's context.
+
+    Args:
+        provider: The active tasks backend.
+        tenant_id: Tenant whose tasks to offer.
+        limit: Maximum number of items returned.
+    """
+    tasks = await provider.list_tasks(tenant_id)
+    return [task_attachment_item(t) for t in tasks[:limit]]

@@ -12,6 +12,16 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Added
+
+- **Tasks — attach a task to the chat** — the tasks module becomes a **chat-attachment
+  source** (`attachable`): pick an open task in the composer's attach menu and the agent uses
+  it as explicit context for the turn. The module serves the picker (`GET /attachments`) and
+  resolve (`GET /attachments/{ref_id}` → `{title, excerpt}`) over its open tasks; a new
+  provider `get_task` backs them for both the local and Google backends. The existing core
+  attach proxy and web attach menu render it unchanged — the module only supplies data
+  (ADR-0019) (closes #139) (`tasks` → 0.3.0).
+
 ## [0.2.0] — 2026-06-14
 
 **Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations),

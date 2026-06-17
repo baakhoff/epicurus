@@ -115,3 +115,16 @@ async def test_update_task_noop_returns_current(provider: LocalTasksProvider) ->
 async def test_update_unknown_raises(provider: LocalTasksProvider) -> None:
     with pytest.raises(ValueError, match="not found"):
         await provider.update_task(TENANT, "nonexistent-id", title="x")
+
+
+async def test_get_task_returns_task(provider: LocalTasksProvider) -> None:
+    """get_task backs the resolver / attachment source (ADR-0019)."""
+    task = await provider.add_task(TENANT, "Find me", notes="here")
+    fetched = await provider.get_task(TENANT, task.id)
+    assert fetched is not None
+    assert fetched.id == task.id
+    assert fetched.title == "Find me"
+
+
+async def test_get_task_missing_returns_none(provider: LocalTasksProvider) -> None:
+    assert await provider.get_task(TENANT, "nonexistent-id") is None

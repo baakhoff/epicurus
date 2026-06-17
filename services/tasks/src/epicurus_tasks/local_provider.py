@@ -60,3 +60,8 @@ class LocalTasksProvider:
             )
         except KeyError as exc:
             raise ValueError(str(exc)) from exc
+
+    async def get_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> Task | None:
+        return await self._store.get_task(tenant_id=tenant_id, task_id=task_id)

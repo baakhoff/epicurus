@@ -16,6 +16,11 @@ tool surface. Host port **8091**.
 by due date, where the user completes, edits, and adds tasks — and the `tasks_update` tool
 that backs editing (ADR-0018). The module supplies data only; the shell renders it.
 
+**v0.3.0** makes the module a **chat-attachment source** (ADR-0019): a task can be picked in
+the composer's attach menu and the agent uses it as explicit context for the turn. The module
+serves the picker and resolve over its open tasks (see *Chat-attachment source*, below); the
+core attach menu renders it.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -50,6 +55,8 @@ class Task(BaseModel):
 | `GET /manifest` | Module manifest (tools, UI declaration). |
 | `GET /status` | Active provider name: `{"provider": "local" \| "google"}`. |
 | `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). 404 for an unknown id. |
+| `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
+| `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ### Web UI (manifest, ADR-0007 Tier 1)
@@ -75,6 +82,21 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card);
   the board offers **Add task** (`tasks_add`, a form). The board never carries credentials
   or business logic — it is data plus tool references.
+
+### Chat-attachment source (ADR-0019)
+
+`attachable = true` — a task can be attached to a turn so the agent uses its details as
+explicit context, beyond anything it would list itself:
+
+- **Picker** — `GET /attachments` lists up to 50 **open** tasks as
+  `{ref_id, kind: "task", title}` rows the composer shows.
+- **Resolve** — `GET /attachments/{ref_id}` returns `{title, excerpt}` — the task's title,
+  due date, status, and notes — which the agent injects into the turn's context.
+
+Both are proxied by the core at `GET /platform/v1/modules/tasks/attachments[/{ref_id}]`; a
+missing task is a `404`. They use the active provider's `get_task`, so they behave identically
+against the local and Google backends. The picker offers the **default list** only (the core
+attach proxy forwards no list selector).
 
 ## Provider detail
 
@@ -155,10 +177,10 @@ Package `epicurus_tasks`:
 | Module | Responsibility |
 | --- | --- |
 | `models.py` | `Task` domain model (provider-neutral). |
-| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam. |
+| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update + `get_task`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store. |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API. |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder). |
-| `app.py` | Lifespan, provider selection, `GET /status`, `GET /pages/{id}`, app factory. |
+| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + chat-attachment helpers (`tasks_attachments`/`task_attachment`/`fetch_task`). |
+| `app.py` | Lifespan, provider selection, `GET /status`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, app factory. |
 | `settings.py` | `TasksSettings` (adds `tasks_provider`, `platform_url`, `database_url`). |

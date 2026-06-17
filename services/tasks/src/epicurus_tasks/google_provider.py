@@ -136,6 +136,30 @@ class GoogleTasksProvider:
             resp.raise_for_status()
             return self._parse_task(resp.json())
 
+    async def get_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> Task | None:
+        """Fetch a single task from the specified (or default) Google task list.
+
+        Returns ``None`` when the task does not exist (HTTP 404) so the caller can
+        surface a clean 404; an auth failure still raises :class:`GoogleTasksError`.
+        """
+        tasklist = list_id or _DEFAULT_LIST
+        token = await self._access_token()
+        async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
+            resp = await client.get(
+                f"/lists/{tasklist}/tasks/{task_id}",
+                headers=self._auth_headers(token),
+            )
+            if resp.status_code == 404:
+                return None
+            if resp.status_code == 401:
+                raise GoogleTasksError(
+                    "Google token is invalid or revoked — reconnect via Settings"
+                )
+            resp.raise_for_status()
+            return self._parse_task(resp.json())
+
     async def update_task(
         self,
         tenant_id: str,

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
-from fastapi import APIRouter, UploadFile
+from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -28,6 +28,28 @@ SSE_HEADERS = {
 # How long the in-stream readiness probe may run before we stop waiting and start the
 # answer. A slow or still-booting module must never delay the first token (ADR-0027).
 READINESS_BUDGET_S = 2.0
+
+# Chat-upload limits (#175) — used when a caller (production wiring) passes no override.
+DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MiB
+DEFAULT_ALLOWED_UPLOAD_TYPES: tuple[str, ...] = (
+    "text/*",
+    "image/*",
+    "application/pdf",
+    "application/json",
+)
+
+
+def _content_type_allowed(content_type: str, allowed: Sequence[str]) -> bool:
+    """Whether *content_type* matches the allowlist (supports ``type/*`` and ``*/*``)."""
+    ct = content_type.split(";", 1)[0].strip().lower()
+    if not ct:
+        return False
+    for rule in allowed:
+        if rule in ("*/*", ct):
+            return True
+        if rule.endswith("/*") and ct.startswith(rule[:-1]):
+            return True
+    return False
 
 
 class AgentRequest(BaseModel):
@@ -56,6 +78,9 @@ def create_agent_router(
     attachments: AttachmentStore,
     sink: AttachmentSink | None = None,
     probe: ReadinessProbe | None = None,
+    *,
+    max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
+    allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
     """The agent turn endpoints plus the conversation (session) surface.
 
@@ -63,6 +88,8 @@ def create_agent_router(
     ``None`` keeps uploads core-side only (e.g. a build without the storage module).
     ``probe`` (when configured) leads a streamed turn with ``readiness`` events so the UI
     can show warming progress before the first token (ADR-0027).
+
+    ``max_upload_bytes`` / ``allowed_upload_types`` bound the upload route (#175).
     """
     router = APIRouter(prefix="/platform/v1/agent", tags=["agent"])
 
@@ -112,13 +139,23 @@ def create_agent_router(
     async def upload_attachment(file: UploadFile) -> AttachmentUploaded:
         """Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).
 
-        Keeps the core-side handle (read back to expand the attachment into the turn) and,
-        best-effort, persists the bytes to the storage sink so the upload is durably kept
-        and browsable in the Files page (ADR-0025). A sink failure never fails the upload.
+        Rejects an upload whose type is not in the allowlist (415) or whose size exceeds
+        ``max_upload_bytes`` (413) before storing it (#175). Otherwise keeps the core-side
+        handle (read back to expand the attachment into the turn) and, best-effort, persists
+        the bytes to the storage sink so the upload is durably kept and browsable in the
+        Files page (ADR-0025). A sink failure never fails the upload.
         """
-        content = await file.read()
-        title = file.filename or "file"
         kind = file.content_type or "application/octet-stream"
+        if not _content_type_allowed(kind, allowed_upload_types):
+            raise HTTPException(status_code=415, detail=f"unsupported file type: {kind}")
+        over_limit = f"file exceeds the {max_upload_bytes}-byte limit"
+        # Starlette sets file.size from the parsed part — reject before reading the spool.
+        if file.size is not None and file.size > max_upload_bytes:
+            raise HTTPException(status_code=413, detail=over_limit)
+        content = await file.read()
+        if len(content) > max_upload_bytes:  # defense if size was unset or understated
+            raise HTTPException(status_code=413, detail=over_limit)
+        title = file.filename or "file"
         att_id = await attachments.save(tenant=tenant, kind=kind, title=title, content=content)
         if sink is not None:
             try:

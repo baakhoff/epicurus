@@ -45,6 +45,11 @@ class _HttpClient:
         self._capture["body"] = json
         return self._response
 
+    async def get(self, url: str, *, params: Any = None) -> _Resp:
+        self._capture["url"] = url
+        self._capture["params"] = params
+        return self._response
+
 
 # ── embed ──────────────────────────────────────────────────────────────────────
 
@@ -182,3 +187,36 @@ async def test_chat_omits_none_fields_from_message(monkeypatch: pytest.MonkeyPat
     assert "tool_calls" not in msg
     assert "tool_call_id" not in msg
     assert "name" not in msg
+
+
+# ── get_module_model (#128) ──────────────────────────────────────────────────────
+
+
+async def test_get_module_model_returns_selected(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    resp = _Resp(body={"model": "nomic-embed-text"})
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture=captured),
+    )
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local", module="knowledge")
+    model = await client.get_module_model("embedding")
+    assert model == "nomic-embed-text"
+    assert captured["url"] == "/platform/v1/modules/knowledge/models/embedding"
+    assert captured["params"] == {"tenant_id": "local"}
+
+
+async def test_get_module_model_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    resp = _Resp(body={"model": None})
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture={}),
+    )
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local", module="knowledge")
+    assert await client.get_module_model("embedding") is None
+
+
+async def test_get_module_model_requires_module_name() -> None:
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local")
+    with pytest.raises(ValueError, match="module must be set"):
+        await client.get_module_model("embedding")

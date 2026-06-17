@@ -8,7 +8,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from epicurus_core import ModuleManifest, PageSpec, SecretError, ToolSpec, UiAction, UiSection
+from epicurus_core import (
+    ModelSlot,
+    ModuleManifest,
+    PageSpec,
+    SecretError,
+    ToolSpec,
+    UiAction,
+    UiSection,
+)
+from epicurus_core_app.docker_control import DockerError
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
 
@@ -32,6 +41,54 @@ class _FakeSecrets:
 
     async def set(self, path: str, data: dict[str, Any], tenant_id: str | None = None) -> None:
         self.stored[path] = data
+
+
+class _FakeModulePrefs:
+    """In-memory stand-in for ModulePrefsStore (no DB) — a module defaults to enabled."""
+
+    def __init__(self) -> None:
+        self.flags: dict[tuple[str, str], bool] = {}
+        self.removed: set[tuple[str, str]] = set()
+        self.models: dict[tuple[str, str], dict[str, str]] = {}
+
+    async def enabled_map(self, tenant: str) -> dict[str, bool]:
+        return {m: e for (t, m), e in self.flags.items() if t == tenant}
+
+    async def is_enabled(self, tenant: str, module: str) -> bool:
+        return self.flags.get((tenant, module), True)
+
+    async def set_enabled(self, tenant: str, module: str, enabled: bool) -> None:
+        self.flags[(tenant, module)] = enabled
+
+    async def removed_modules(self, tenant: str) -> set[str]:
+        return {m for (t, m) in self.removed if t == tenant}
+
+    async def set_removed(self, tenant: str, module: str, removed: bool) -> None:
+        if removed:
+            self.removed.add((tenant, module))
+        else:
+            self.removed.discard((tenant, module))
+
+    async def get_models(self, tenant: str, module: str) -> dict[str, str]:
+        return dict(self.models.get((tenant, module), {}))
+
+    async def set_models(self, tenant: str, module: str, models: dict[str, str]) -> None:
+        self.models[(tenant, module)] = dict(models)
+
+
+class _FakeDocker:
+    """In-memory stand-in for DockerController — records removals; never touches Docker."""
+
+    def __init__(self, *, count: int = 1, error: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self._count = count
+        self._error = error
+
+    def remove_module(self, name: str) -> int:
+        self.calls.append(name)
+        if self._error is not None:
+            raise self._error
+        return self._count
 
 
 def _echo_manifest() -> ModuleManifest:
@@ -94,11 +151,20 @@ class _StubRegistry(ModuleRegistry):
 
 
 def _registry(
-    *, healthy: bool = True, manifest: ModuleManifest | None = None
+    *,
+    healthy: bool = True,
+    manifest: ModuleManifest | None = None,
+    docker: _FakeDocker | None = None,
 ) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
     mcp, secrets = _FakeMcp(), _FakeSecrets()
     registry = _StubRegistry(  # type: ignore[arg-type]
-        healthy=healthy, manifest=manifest, mcp=mcp, secrets=secrets, tenant="local"
+        healthy=healthy,
+        manifest=manifest,
+        mcp=mcp,
+        secrets=secrets,
+        tenant="local",
+        prefs=_FakeModulePrefs(),
+        docker=docker,
     )
     return registry, mcp, secrets
 
@@ -403,4 +469,185 @@ async def test_resolve_attachment_404_when_not_attachable() -> None:
     registry, _, _ = _registry()
     with pytest.raises(HTTPException) as err:
         await registry.resolve_attachment("echo", "n1")
+    assert err.value.status_code == 404
+
+
+# ── Enable / disable (#126) ───────────────────────────────────────────────────
+
+
+async def test_snapshot_defaults_to_enabled() -> None:
+    registry, _, _ = _registry()
+    snaps = await registry.snapshot()
+    assert snaps[0].enabled is True
+
+
+async def test_snapshot_reflects_disabled_flag() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    snaps = await registry.snapshot()
+    assert snaps[0].enabled is False
+
+
+async def test_enabled_mcp_urls_includes_enabled_module() -> None:
+    registry, _, _ = _registry()
+    assert await registry.enabled_mcp_urls() == ["http://echo:8080/mcp"]
+
+
+async def test_enabled_mcp_urls_excludes_disabled_module() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_enabled_mcp_urls_excludes_unhealthy_module() -> None:
+    registry, _, _ = _registry(healthy=False)
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_invoke_disabled_module_is_403() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    with pytest.raises(HTTPException) as err:
+        await registry.invoke("echo", "echo", {"message": "hi"})
+    assert err.value.status_code == 403
+
+
+async def test_re_enable_restores_invoke() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    await registry.set_enabled("echo", True)
+    assert await registry.invoke("echo", "echo", {}) == "ran"
+
+
+async def test_set_enabled_unknown_module_is_404() -> None:
+    registry, _, _ = _registry()
+    with pytest.raises(HTTPException) as err:
+        await registry.set_enabled("ghost", False)
+    assert err.value.status_code == 404
+
+
+# ── Removal (#127) ─────────────────────────────────────────────────────────────
+
+
+async def test_remove_tombstones_and_hides_module() -> None:
+    docker = _FakeDocker(count=1)
+    registry, _, _ = _registry(docker=docker)
+    result = await registry.remove("echo")
+    assert result == {"removed": "echo", "containers": 1}
+    assert docker.calls == ["echo"]
+    # Tombstoned: still 1:1 with bases (flagged), excluded from discovery, dropped by list.
+    snaps = await registry.snapshot()
+    assert snaps[0].removed is True
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_remove_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(docker=_FakeDocker())
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("ghost")
+    assert err.value.status_code == 404
+
+
+async def test_remove_without_docker_is_503() -> None:
+    registry, _, _ = _registry(docker=None)
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("echo")
+    assert err.value.status_code == 503
+
+
+async def test_remove_protected_propagates_as_403() -> None:
+    docker = _FakeDocker(error=DockerError("'echo' is protected and cannot be removed"))
+    registry, _, _ = _registry(docker=docker)
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("echo")
+    assert err.value.status_code == 403
+
+
+async def test_reconcile_tombstones_re_removes_resurrected() -> None:
+    docker = _FakeDocker(count=1)
+    registry, _, _ = _registry(docker=docker)
+    await registry.remove("echo")
+    docker.calls.clear()
+    await registry.reconcile_tombstones()
+    assert docker.calls == ["echo"]
+
+
+async def test_reconcile_without_docker_is_noop() -> None:
+    registry, _, _ = _registry(docker=None)
+    await registry.reconcile_tombstones()  # must not raise
+
+
+# ── Path-segment hardening (#175): reject '/', '\', '..' in interpolated segments ──
+
+
+async def test_resolve_entity_rejects_unsafe_segment() -> None:
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+    for kind, ref_id in (("event", "../secret"), ("a/b", "e1"), ("event", "a/b")):
+        with pytest.raises(HTTPException) as err:
+            await registry.resolve_entity("calendar", kind, ref_id)
+        assert err.value.status_code == 400
+
+
+async def test_resolve_attachment_rejects_unsafe_ref() -> None:
+    registry, _, _ = _registry(manifest=_attachable_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_attachment("notes", "../n1")
+    assert err.value.status_code == 400
+
+
+async def test_read_message_rejects_unsafe_ref() -> None:
+    registry, _, _ = _registry()
+    with pytest.raises(HTTPException) as err:
+        await registry.read_message("echo", "a/b")
+    assert err.value.status_code == 400
+
+
+async def test_get_page_rejects_unsafe_page_id() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("files", "..")
+    assert err.value.status_code == 400
+
+
+# ── Per-module model selection (#128) ──────────────────────────────────────────
+
+
+def _models_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="knowledge",
+        version="0.6.0",
+        required_models=[ModelSlot(key="embedding", role="embedding", label="Embedding model")],
+    )
+
+
+async def test_set_and_get_models() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    await registry.set_models("knowledge", {"embedding": "nomic-embed-text"})
+    assert await registry.get_models("knowledge") == {"embedding": "nomic-embed-text"}
+
+
+async def test_set_models_rejects_unknown_slot() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_models("knowledge", {"bogus": "x"})
+    assert err.value.status_code == 400
+
+
+async def test_set_models_drops_blank_selection() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    await registry.set_models("knowledge", {"embedding": ""})  # blank → fall back to default
+    assert await registry.get_models("knowledge") == {}
+
+
+async def test_model_for_slot_returns_choice_or_none() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    assert await registry.model_for_slot("knowledge", "embedding") is None
+    await registry.set_models("knowledge", {"embedding": "nomic-embed-text"})
+    assert await registry.model_for_slot("knowledge", "embedding") == "nomic-embed-text"
+
+
+async def test_get_models_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(manifest=_models_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_models("ghost")
     assert err.value.status_code == 404

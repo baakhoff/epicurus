@@ -75,7 +75,9 @@ services:
     networks: [epicurus]
 
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    # Server minor must stay within 1 of the qdrant-client (1.18) or the client
+    # refuses to connect — keep this in lockstep with the pyproject pin.
+    image: qdrant/qdrant:v1.18.2
     restart: unless-stopped
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"

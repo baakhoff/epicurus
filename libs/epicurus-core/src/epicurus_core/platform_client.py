@@ -47,9 +47,12 @@ class PlatformClient:
         tenant_id: The tenant this module acts on behalf of.
     """
 
-    def __init__(self, base_url: str, tenant_id: str) -> None:
+    def __init__(self, base_url: str, tenant_id: str, *, module: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._tenant_id = tenant_id
+        # The module's own name — needed only by ``get_module_model`` (#128). Callers that
+        # use embed / chat / oauth need not set it.
+        self._module = module
 
     async def embed(
         self,
@@ -127,3 +130,27 @@ class PlatformClient:
             )
             resp.raise_for_status()
             return str(resp.json()["access_token"])
+
+    async def get_module_model(self, slot: str) -> str | None:
+        """The operator's chosen model for one of this module's slots, or ``None`` (#128).
+
+        The module declares model slots in its manifest (``required_models``); the operator
+        picks a model per slot in the shell. Returns the selected model id, or ``None`` when
+        the slot is unset — pass the result straight to :meth:`embed` / :meth:`chat`: a model
+        means "use this", ``None`` means "let the core pick its default".
+
+        Requires the client to know its module name (``PlatformClient(..., module=...)``).
+
+        Args:
+            slot: A slot key from the module's ``required_models`` (e.g. ``"embedding"``).
+        """
+        if self._module is None:
+            raise ValueError("PlatformClient.module must be set to resolve a model slot")
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                f"/platform/v1/modules/{self._module}/models/{slot}",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            model = resp.json().get("model")
+            return str(model) if model else None

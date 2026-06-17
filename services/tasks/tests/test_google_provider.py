@@ -183,6 +183,27 @@ async def test_update_task_noop_reads_current(provider: GoogleTasksProvider) -> 
     client.patch.assert_not_awaited()
 
 
+async def test_get_task_returns_task(provider: GoogleTasksProvider) -> None:
+    """get_task GETs a single task and parses it (backs resolver / attachments)."""
+    with patch(
+        "epicurus_tasks.google_provider.httpx.AsyncClient",
+        return_value=_tasks_client(_GOOGLE_TASK),
+    ):
+        task = await provider.get_task(TENANT, "goog-task-1")
+
+    assert task is not None
+    assert task.id == "goog-task-1"
+    assert task.title == "Write tests"
+
+
+async def test_get_task_missing_returns_none(provider: GoogleTasksProvider) -> None:
+    """A 404 from Google resolves to None, not an error, so the proxy returns a clean 404."""
+    client = _tasks_client(None)
+    client.get = AsyncMock(return_value=_FakeResponse(None, status_code=404))
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        assert await provider.get_task(TENANT, "missing-id") is None
+
+
 async def test_due_date_stripped_to_date(provider: GoogleTasksProvider) -> None:
     """RFC 3339 due timestamp should be stripped to ISO date (YYYY-MM-DD)."""
     task_data = {

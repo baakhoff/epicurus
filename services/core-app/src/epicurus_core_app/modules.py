@@ -21,8 +21,22 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import ModuleManifest, SecretError, SecretStore, get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.docker_control import DockerController, DockerError
+from epicurus_core_app.module_prefs import ModulePrefsStore
 
 log = get_logger("epicurus_core_app.modules")
+
+
+def _safe_segment(value: str, *, label: str) -> str:
+    """A caller-supplied URL path segment, rejected if it could escape the module path.
+
+    ``ref_id`` / entity ``kind`` / ``page_id`` are interpolated straight into the
+    outbound module request path; a separator or ``..`` could redirect the request to
+    another path on the (trusted, internal) module host. Defense-in-depth (#175).
+    """
+    if not value or "/" in value or "\\" in value or ".." in value:
+        raise HTTPException(status_code=400, detail=f"invalid {label}: {value!r}")
+    return value
 
 
 class ModuleStatus(BaseModel):
@@ -33,10 +47,30 @@ class ModuleStatus(BaseModel):
 
 
 class ModuleSnapshot(BaseModel):
-    """One installed module: its manifest plus current status."""
+    """One installed module: its manifest, current status, and operator enable flag."""
 
     manifest: ModuleManifest
     status: ModuleStatus
+    # The operator's enable/disable choice (#126). A disabled module keeps running but is
+    # hidden from the agent's tools, the left-nav, and the chat surfaces; it still appears
+    # here so the shell's Modules screen can show it with a re-enable toggle.
+    enabled: bool = True
+    # Tombstoned after a confirmed container removal (#127). The registry hides it from
+    # every surface — the module list drops it before serialization — so it is always
+    # ``False`` on the snapshots the API returns; the flag is an internal gating signal.
+    removed: bool = False
+
+
+class EnabledUpdate(BaseModel):
+    """The body of an enable/disable toggle (#126)."""
+
+    enabled: bool
+
+
+class ModelsUpdate(BaseModel):
+    """The body of a per-module model-slot update (#128): ``{slot_key: model_id}``."""
+
+    models: dict[str, str]
 
 
 class ToolInvocation(BaseModel):
@@ -57,16 +91,39 @@ class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
     def __init__(
-        self, base_urls: list[str], *, mcp: McpHost, secrets: SecretStore, tenant: str
+        self,
+        base_urls: list[str],
+        *,
+        mcp: McpHost,
+        secrets: SecretStore,
+        tenant: str,
+        prefs: ModulePrefsStore,
+        docker: DockerController | None = None,
     ) -> None:
         self._bases = list(base_urls)
         self._mcp = mcp
         self._secrets = secrets
         self._tenant = tenant
+        self._prefs = prefs
+        self._docker = docker
 
     async def snapshot(self) -> list[ModuleSnapshot]:
-        """Every configured module — reachable ones with their manifest, dead ones flagged."""
-        return list(await asyncio.gather(*(self._probe(base) for base in self._bases)))
+        """Every configured module — reachable ones with their manifest, dead ones flagged.
+
+        Each snapshot carries the operator's ``enabled`` flag (#126) and a ``removed``
+        tombstone (#127); unset defaults to enabled and not-removed. The list stays **1:1
+        with the configured bases** (``_resolve`` / ``enabled_mcp_urls`` zip it against them),
+        so disabled and removed modules are flagged in place, not dropped — disabled ones
+        are still shown so the shell can re-enable them, while removed ones are dropped by
+        the list endpoint.
+        """
+        probed = await asyncio.gather(*(self._probe(base) for base in self._bases))
+        enabled = await self._prefs.enabled_map(self._tenant)
+        removed = await self._prefs.removed_modules(self._tenant)
+        for snap in probed:
+            snap.enabled = enabled.get(snap.manifest.name, True)
+            snap.removed = snap.manifest.name in removed
+        return list(probed)
 
     async def _probe(self, base: str) -> ModuleSnapshot:
         try:
@@ -95,9 +152,103 @@ class ModuleRegistry:
                 return base, snapshot.manifest
         raise HTTPException(status_code=404, detail=f"no reachable module named {name!r}")
 
+    async def enabled_mcp_urls(self) -> list[str]:
+        """The ``/mcp`` URLs of healthy, **enabled** modules — the agent's tool surface.
+
+        Backs ``McpHost.discover`` so a disabled module's tools are never offered to the
+        model (#126). Order follows ``self._bases`` (``snapshot`` preserves it).
+        """
+        snaps = await self.snapshot()
+        return [
+            f"{base}/mcp"
+            for snap, base in zip(snaps, self._bases, strict=True)
+            if snap.status.healthy and snap.enabled and not snap.removed
+        ]
+
+    async def set_enabled(self, name: str, enabled: bool) -> None:
+        """Enable or disable a module, persisting the operator's choice (#126).
+
+        The container is untouched — only the core-side flag changes. 404 for a name that
+        is not a configured module (reachable or not).
+        """
+        live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
+        if name not in live:
+            raise HTTPException(status_code=404, detail=f"no module named {name!r}")
+        await self._prefs.set_enabled(self._tenant, name, enabled)
+
+    async def remove(self, name: str) -> dict[str, Any]:
+        """Stop + remove a module's container, then tombstone it (#127, ADR-0028).
+
+        Privileged and confirmed in the UI. 404 for an unknown module, 403 for a
+        protected/core service (also enforced in the Docker layer), 503 when the Docker
+        socket is unavailable. Idempotent: a module whose container is already gone still
+        tombstones. The tombstone hides the module everywhere and is re-enforced on the
+        next startup, so a ``compose up`` cannot silently resurrect it.
+        """
+        live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
+        if name not in live:
+            raise HTTPException(status_code=404, detail=f"no module named {name!r}")
+        if self._docker is None:
+            raise HTTPException(
+                status_code=503, detail="module removal unavailable: the core has no Docker access"
+            )
+        try:
+            containers = await asyncio.to_thread(self._docker.remove_module, name)
+        except DockerError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        await self._prefs.set_removed(self._tenant, name, True)
+        log.info("module removed", module=name, containers=containers)
+        return {"removed": name, "containers": containers}
+
+    async def reconcile_tombstones(self) -> None:
+        """Re-remove any tombstoned module whose container has reappeared (#127).
+
+        Run at startup so a removal survives a ``compose up`` / Watchtower pull. Best-effort
+        — a missing socket or a transient Docker error is logged, never fatal.
+        """
+        if self._docker is None:
+            return
+        for name in await self._prefs.removed_modules(self._tenant):
+            try:
+                containers = await asyncio.to_thread(self._docker.remove_module, name)
+                if containers:
+                    log.info("re-removed resurrected module", module=name, containers=containers)
+            except Exception as exc:
+                log.warning("tombstone reconcile failed", module=name, error=str(exc))
+
+    async def get_models(self, name: str) -> dict[str, str]:
+        """The operator's per-slot model choices for *name* (#128). 404 if unknown."""
+        await self._resolve(name)
+        return await self._prefs.get_models(self._tenant, name)
+
+    async def set_models(self, name: str, models: dict[str, str]) -> None:
+        """Persist per-slot model choices for *name*, validating the slot keys (#128).
+
+        Each key must be a slot the module declares in ``required_models``; a blank value
+        clears that slot (falls back to the core default). 404 unknown module, 400 unknown slot.
+        """
+        _, manifest = await self._resolve(name)
+        valid = {slot.key for slot in manifest.required_models}
+        chosen = {key: model for key, model in models.items() if model}
+        unknown = set(chosen) - valid
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown model slot(s): {sorted(unknown)}")
+        await self._prefs.set_models(self._tenant, name, chosen)
+
+    async def model_for_slot(self, name: str, slot: str) -> str | None:
+        """The chosen model for *name*'s *slot*, or ``None`` to use the core default (#128).
+
+        Reads the stored choice directly (no manifest round-trip) so a module can resolve
+        its own slot cheaply; an unset slot or unknown module yields ``None`` → core default.
+        """
+        models = await self._prefs.get_models(self._tenant, name)
+        return models.get(slot)
+
     async def invoke(self, name: str, tool: str, arguments: dict[str, Any]) -> str:
         """Run a module tool (a manifest-declared UI action) through the MCP host."""
         base, manifest = await self._resolve(name)
+        if not await self._prefs.is_enabled(self._tenant, name):
+            raise HTTPException(status_code=403, detail=f"module {name!r} is disabled")
         if tool not in {t.name for t in manifest.tools}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no tool {tool!r}")
         return await self._mcp.call(tool, arguments, f"{base}/mcp")
@@ -144,6 +295,7 @@ class ModuleRegistry:
         UI markup. Returns 404 if the module is unreachable or declares no such page.
         Query params (e.g. ``path``, ``q``) are forwarded to the module as-is.
         """
+        _safe_segment(page_id, label="page_id")
         base, manifest = await self._resolve(name)
         if page_id not in {p.id for p in manifest.pages}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
@@ -219,6 +371,8 @@ class ModuleRegistry:
         ``GET /resolve/{kind}/{ref_id}`` on the module and returns the hover-card
         envelope. 404 if the module is unreachable or declares no resolver.
         """
+        _safe_segment(kind, label="kind")
+        _safe_segment(ref_id, label="ref_id")
         base, manifest = await self._resolve(name)
         if not manifest.resolver:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no resolver")
@@ -249,6 +403,7 @@ class ModuleRegistry:
         Returns the entity's content/excerpt for the agent to inject into the turn. 404 if
         the module is unreachable or not attachable.
         """
+        _safe_segment(ref_id, label="ref_id")
         base, manifest = await self._resolve(name)
         if not manifest.attachable:
             raise HTTPException(status_code=404, detail=f"module {name!r} is not attachable")
@@ -265,6 +420,7 @@ class ModuleRegistry:
         EmailMessage envelope — subject, from, date, and body — consumed by the
         right-panel ``email-reader`` view. 404 if the module is unreachable.
         """
+        _safe_segment(ref_id, label="ref_id")
         base, _ = await self._resolve(name)
         async with httpx.AsyncClient(base_url=base, timeout=10) as client:
             resp = await client.get(f"/messages/{ref_id}")
@@ -279,7 +435,8 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
 
     @router.get("", response_model=list[ModuleSnapshot])
     async def list_modules() -> list[ModuleSnapshot]:
-        return await registry.snapshot()
+        # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
+        return [snap for snap in await registry.snapshot() if not snap.removed]
 
     @router.get("/{name}/config")
     async def get_config(name: str) -> dict[str, Any]:
@@ -289,6 +446,37 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def set_config(name: str, values: dict[str, Any]) -> dict[str, str]:
         await registry.set_config(name, values)
         return {"status": "ok"}
+
+    @router.post("/{name}/enabled")
+    async def set_module_enabled(name: str, body: EnabledUpdate) -> dict[str, str]:
+        """Enable or disable a module (#126) — hides its tools/pages/UI; container stays up."""
+        await registry.set_enabled(name, body.enabled)
+        return {"status": "ok"}
+
+    @router.delete("/{name}")
+    async def remove_module(name: str) -> dict[str, Any]:
+        """Confirmed module removal (#127): stop + remove the container, then tombstone it.
+
+        Privileged — gated by a confirm dialog in the shell. 403 for a protected service,
+        503 when the core has no Docker access, 404 for an unknown module.
+        """
+        return await registry.remove(name)
+
+    @router.get("/{name}/models")
+    async def get_module_models(name: str) -> dict[str, dict[str, str]]:
+        """The module's per-slot model selections (#128)."""
+        return {"models": await registry.get_models(name)}
+
+    @router.put("/{name}/models")
+    async def set_module_models(name: str, body: ModelsUpdate) -> dict[str, str]:
+        """Set the module's per-slot model selections (#128); validates slot keys."""
+        await registry.set_models(name, body.models)
+        return {"status": "ok"}
+
+    @router.get("/{name}/models/{slot}")
+    async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
+        """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
+        return {"model": await registry.model_for_slot(name, slot)}
 
     @router.post("/{name}/tools/{tool}", response_model=ToolResult)
     async def invoke_tool(name: str, tool: str, request: ToolInvocation) -> ToolResult:

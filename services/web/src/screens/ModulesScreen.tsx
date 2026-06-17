@@ -5,11 +5,11 @@
  * here with no UI rebuild. No module code ever runs in this shell.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Play, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
-import { Badge, Card, Confirm, Dot, Spinner, cn } from "@/components/ui";
+import { Badge, Button, Card, Confirm, Dot, Spinner, Switch, TextInput, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import type { ModuleSnapshot, ToolSpec, UiAction } from "@/lib/contracts";
@@ -140,40 +140,131 @@ function ModuleConfig({ snapshot }: { snapshot: ModuleSnapshot }) {
   );
 }
 
+function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
+  const name = snapshot.manifest.name;
+  const slots = snapshot.manifest.required_models;
+  const queryClient = useQueryClient();
+  const selections = useQuery({
+    queryKey: ["module-models", name],
+    queryFn: () => api.getModuleModels(name),
+  });
+  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const save = useMutation({
+    mutationFn: (next: Record<string, string>) => api.setModuleModels(name, next),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-models", name] }),
+  });
+  if (slots.length === 0) return null;
+
+  // Choosing "Core default" (value "") clears the slot; the core falls back to its default.
+  const current = selections.data ?? {};
+  const available = (models.data ?? []).filter((m) => !m.hidden);
+
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Models</h4>
+      <div className="flex flex-col gap-3">
+        {slots.map((slot) => (
+          <label key={slot.key} className="block">
+            <span className="text-[13px] text-ink">{slot.label}</span>
+            {slot.description && (
+              <span className="block text-xs text-ink-dim">{slot.description}</span>
+            )}
+            <select
+              className="mt-1 w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+              value={current[slot.key] ?? ""}
+              disabled={save.isPending || selections.isLoading}
+              onChange={(e) => save.mutate({ ...current, [slot.key]: e.target.value })}
+            >
+              <option value="">Core default</option>
+              {available.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+      {save.isError && <p className="mt-2 text-sm text-danger">{(save.error as Error).message}</p>}
+    </div>
+  );
+}
+
 function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
   const [open, setOpen] = useState(false);
-  const { manifest, status } = snapshot;
+  const queryClient = useQueryClient();
+  const { manifest, status, enabled } = snapshot;
   const ui = manifest.ui;
   const Icon = moduleIcon(ui?.icon ?? "puzzle");
   const known = ui == null || ui.ui_version === "1";
 
+  // Toggling the registry flag (#126) hides the module's tools/pages/UI; the container
+  // keeps running. Refetch the list so the new flag (and the vanished nav page) take hold.
+  const toggleEnabled = useMutation({
+    mutationFn: (next: boolean) => api.setModuleEnabled(manifest.name, next),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
+  });
+
+  // Confirmed container removal (#127) — privileged and destructive, gated by a dialog.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const removeModule = useMutation({
+    mutationFn: () => api.removeModule(manifest.name),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
+  });
+
   return (
     <Card className="p-0">
-      <button
-        className="flex w-full items-center gap-3 p-4 text-left"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        <span className="flex size-10 items-center justify-center rounded-(--radius-field) border border-edge bg-surface-2 text-accent">
-          <Icon size={19} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <span className="font-serif text-base text-ink">{manifest.name}</span>
-            <Badge tone="dim">v{status.version ?? manifest.version}</Badge>
+      <div className="flex w-full items-center gap-2 p-4">
+        <button
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-3 text-left",
+            !enabled && "opacity-60",
+          )}
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-(--radius-field) border border-edge bg-surface-2 text-accent">
+            <Icon size={19} />
           </span>
-          <span className="mt-0.5 block truncate text-sm text-ink-dim">
-            {ui?.summary || manifest.description || "—"}
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="font-serif text-base text-ink">{manifest.name}</span>
+              <Badge tone="dim">v{status.version ?? manifest.version}</Badge>
+              {!enabled && <Badge tone="warn">disabled</Badge>}
+              {manifest.tags.map((tag) => (
+                <Badge key={tag} tone="accent">
+                  {tag}
+                </Badge>
+              ))}
+            </span>
+            <span className="mt-0.5 block truncate text-sm text-ink-dim">
+              {ui?.summary || manifest.description || "—"}
+            </span>
           </span>
-        </span>
-        <span className="flex items-center gap-2">
-          <Dot tone={status.healthy ? "ok" : "danger"} />
-          {open ? <ChevronDown size={16} className="text-ink-faint" /> : <ChevronRight size={16} className="text-ink-faint" />}
-        </span>
-      </button>
+        </button>
+        <Switch
+          checked={enabled}
+          onChange={(next) => toggleEnabled.mutate(next)}
+          label={`${enabled ? "Disable" : "Enable"} ${manifest.name}`}
+        />
+        <Dot tone={status.healthy ? "ok" : "danger"} />
+        <button
+          className="text-ink-faint"
+          onClick={() => setOpen((v) => !v)}
+          aria-label={open ? "Collapse" : "Expand"}
+        >
+          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+      </div>
 
       {open && (
         <div className="flex flex-col gap-5 border-t border-edge p-4">
+          {!enabled && (
+            <p className="text-sm text-ink-dim">
+              Disabled — hidden from the agent and the left-nav. The container keeps running;
+              re-enable any time with the toggle above.
+            </p>
+          )}
           {!status.healthy && (
             <p className="text-sm text-warn">
               Unreachable right now — the card shows the last known manifest.
@@ -189,7 +280,9 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
 
           {known && status.healthy && <ModuleConfig snapshot={snapshot} />}
 
-          {known && status.healthy && (ui?.actions.length ?? 0) > 0 && (
+          {known && <ModuleModels snapshot={snapshot} />}
+
+          {known && status.healthy && enabled && (ui?.actions.length ?? 0) > 0 && (
             <div>
               <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
                 Actions
@@ -227,10 +320,48 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
               )}
             </div>
           )}
+
+          <div className="border-t border-edge pt-4">
+            <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+              Danger zone
+            </h4>
+            <Button
+              variant="danger"
+              busy={removeModule.isPending}
+              onClick={() => setConfirmingRemove(true)}
+            >
+              <Trash2 size={14} /> Remove module
+            </Button>
+            <p className="mt-1.5 text-xs text-ink-faint">
+              Stops and deletes this module's container. Core, the web shell, and the data
+              plane can never be removed; the module stays gone until you redeploy it.
+            </p>
+            {removeModule.isError && (
+              <p className="mt-2 text-sm text-danger">{(removeModule.error as Error).message}</p>
+            )}
+          </div>
         </div>
       )}
+      <Confirm
+        open={confirmingRemove}
+        danger
+        message={`Remove the “${manifest.name}” module? This stops and deletes its container, and it stays removed until you redeploy it.`}
+        confirmLabel="Remove module"
+        onCancel={() => setConfirmingRemove(false)}
+        onConfirm={() => {
+          removeModule.mutate();
+          setConfirmingRemove(false);
+        }}
+      />
     </Card>
   );
+}
+
+/** Match a module against a free-text query over its name, description, and tags (#126). */
+function matchesQuery(snapshot: ModuleSnapshot, query: string): boolean {
+  const m = snapshot.manifest;
+  const haystack = [m.name, m.description, m.ui?.summary ?? "", ...m.tags].join(" ").toLowerCase();
+  return haystack.includes(query);
 }
 
 export function ModulesScreen() {
@@ -239,6 +370,11 @@ export function ModulesScreen() {
     queryFn: api.modules,
     refetchInterval: 30_000,
   });
+  const [query, setQuery] = useState("");
+
+  const q = query.trim().toLowerCase();
+  const all = modules.data ?? [];
+  const filtered = q ? all.filter((s) => matchesQuery(s, q)) : all;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -246,20 +382,32 @@ export function ModulesScreen() {
         <div>
           <h1 className="font-serif text-xl text-ink">Modules</h1>
           <p className="mt-1 text-sm text-ink-dim">
-            Each capability is its own container. Add one to the stack and its
-            settings, status and actions appear here — drawn from its manifest, no
-            rebuild, no module code in this app.
+            Each capability is its own container. Add one to the stack and its settings,
+            status and actions appear here — drawn from its manifest, no rebuild, no module
+            code in this app. Toggle a module off to hide it from the agent and the left-nav;
+            the container keeps running.
           </p>
         </div>
+        {all.length > 0 && (
+          <TextInput
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search modules by name, description, or tag…"
+            aria-label="Search modules"
+          />
+        )}
         {modules.isLoading && <Spinner />}
         {modules.isError && (
           <Card className="border-warn/40 text-sm text-warn">
             The core is unreachable — module discovery is down.
           </Card>
         )}
-        {modules.data?.map((snapshot) => (
+        {filtered.map((snapshot) => (
           <ModuleCard key={snapshot.manifest.name} snapshot={snapshot} />
         ))}
+        {!modules.isLoading && q !== "" && filtered.length === 0 && (
+          <p className="text-sm text-ink-dim">No modules match “{query}”.</p>
+        )}
         <button
           className="flex items-center justify-center gap-2 rounded-(--radius-card) border border-dashed border-edge-strong px-4 py-6 text-sm text-ink-faint"
           disabled

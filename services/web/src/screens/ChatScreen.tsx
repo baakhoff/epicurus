@@ -1,8 +1,8 @@
 /**
- * Chat — the main surface. Streams agent turns over SSE (tokens settle in
- * behind a pulsing caret, tool calls surface as live chips), grounds every
- * session in cross-chat memory via session_id, and lets you switch the model
- * mid-conversation.
+ * Chat — the main surface. Streams agent turns over SSE: a warming readiness bar and a
+ * step-by-step process timeline lead the turn (tokens then settle in behind a pulsing
+ * caret), every session is grounded in cross-chat memory via session_id, and the model
+ * can be switched mid-conversation.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -14,10 +14,8 @@ import {
   Square,
   SendHorizonal,
   Trash2,
-  Wrench,
-  X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { AttachButton, AttachmentPill } from "@/components/AttachMenu";
@@ -28,6 +26,7 @@ import {
   refsById,
 } from "@/components/EntityRef";
 import { Markdown } from "@/components/Markdown";
+import { ProcessTimeline, ReadinessBar, ThinkingIndicator } from "@/components/TurnActivity";
 import {
   Badge,
   Button,
@@ -49,54 +48,18 @@ import { usePrefs } from "@/stores/prefs";
 const QUOTE =
   "It is not what we have but what we enjoy that constitutes our abundance.";
 
-/* ── tool chip ──────────────────────────────────────────────────────────── */
+/* ── assistant turn scaffolding ─────────────────────────────────────────── */
 
-function ToolChip({ segment }: { segment: Extract<ChatSegment, { kind: "tool" }> }) {
-  const [open, setOpen] = useState(false);
-  const { run } = segment;
+function AssistantRow({ children }: { children: ReactNode }) {
   return (
-    <div className="my-2">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
-          run.status === "running" && "border-accent/40 text-accent-strong",
-          run.status === "ok" && "border-ok/40 text-ok",
-          run.status === "error" && "border-danger/40 text-danger",
-        )}
-      >
-        <Wrench size={12} />
-        {run.tool}
-        {run.status === "running" ? (
-          <Spinner className="size-3" />
-        ) : run.status === "ok" ? (
-          <Check size={12} />
-        ) : (
-          <X size={12} />
-        )}
-      </button>
-      {open && run.detail && (
-        <pre className="mt-1.5 max-h-40 overflow-auto rounded-(--radius-field) border border-edge bg-surface-2 p-2.5 font-mono text-[11px] leading-relaxed text-ink-dim">
-          {run.detail}
-        </pre>
-      )}
+    <div className="flex gap-3">
+      <div className="mt-1.5 font-serif text-[15px] leading-none text-accent select-none">ε</div>
+      <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
 }
 
-/* ── live (streaming) assistant turn ────────────────────────────────────── */
-
-function LiveTurn() {
-  const segments = useChat((s) => s.segments);
-  const streaming = useChat((s) => s.streaming);
-  if (segments.length === 0 && !streaming) return null;
-  return (
-    <div className="ep-settle">
-      <AssistantBlock segments={segments} streaming={streaming} />
-    </div>
-  );
-}
-
+/** A finished or streaming assistant message: a process timeline (#121) over the prose. */
 function AssistantBlock({
   segments,
   streaming,
@@ -107,6 +70,10 @@ function AssistantBlock({
   entityRefs?: EntityRef[];
 }) {
   const refsMap = useMemo(() => refsById(entityRefs), [entityRefs]);
+  const toolRuns = useMemo(
+    () => segments.flatMap((s) => (s.kind === "tool" ? [s.run] : [])),
+    [segments],
+  );
   const text = useMemo(
     () => segments.map((s) => (s.kind === "text" ? s.text : "")).join("\n"),
     [segments],
@@ -119,29 +86,52 @@ function AssistantBlock({
   }, [entityRefs, text]);
 
   return (
-    <div className="flex gap-3">
-      <div className="mt-1.5 font-serif text-[15px] leading-none text-accent select-none">ε</div>
-      <div className="min-w-0 flex-1">
-        <EntityRefsContext.Provider value={refsMap}>
-          {segments.map((segment, i) =>
-            segment.kind === "text" ? (
-              <Markdown key={i}>{segment.text}</Markdown>
-            ) : (
-              <ToolChip key={i} segment={segment} />
-            ),
+    <AssistantRow>
+      {/* The activity timeline folds to its summary header once the answer starts. */}
+      {toolRuns.length > 0 && <ProcessTimeline runs={toolRuns} collapsed={text.length > 0} />}
+      <EntityRefsContext.Provider value={refsMap}>
+        {text && <Markdown>{text}</Markdown>}
+      </EntityRefsContext.Provider>
+      {streaming && text.length > 0 && (
+        <span className="ep-caret ml-0.5 inline-block h-4 w-2 translate-y-0.5 rounded-[2px] bg-accent" />
+      )}
+      {rowRefs.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {rowRefs.map((ref) => (
+            <EntityRefChip key={ref.ref_id} entref={ref} />
+          ))}
+        </div>
+      )}
+    </AssistantRow>
+  );
+}
+
+/* ── live (streaming) assistant turn ────────────────────────────────────── */
+
+function LiveTurn() {
+  const segments = useChat((s) => s.segments);
+  const streaming = useChat((s) => s.streaming);
+  const readiness = useChat((s) => s.readiness);
+  if (segments.length === 0 && !streaming) return null;
+
+  // Before the first token or tool: warming progress (#122), then a thinking cue (#121).
+  if (streaming && segments.length === 0) {
+    return (
+      <div className="ep-settle">
+        <AssistantRow>
+          {readiness && !readiness.ready ? (
+            <ReadinessBar readiness={readiness} />
+          ) : (
+            <ThinkingIndicator />
           )}
-        </EntityRefsContext.Provider>
-        {streaming && (
-          <span className="ep-caret ml-0.5 inline-block h-4 w-2 translate-y-0.5 rounded-[2px] bg-accent" />
-        )}
-        {rowRefs.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {rowRefs.map((ref) => (
-              <EntityRefChip key={ref.ref_id} entref={ref} />
-            ))}
-          </div>
-        )}
+        </AssistantRow>
       </div>
+    );
+  }
+
+  return (
+    <div className="ep-settle">
+      <AssistantBlock segments={segments} streaming={streaming} />
     </div>
   );
 }

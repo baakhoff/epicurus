@@ -166,6 +166,11 @@ for m in $EXPECT_MODULES; do
 done
 ok "every module reachable through core (live status where declared)"
 
+rdy="$(http "http://core-app:8080/platform/v1/readiness" || true)"
+printf '%s' "$rdy" | grep -q '"components"' || die "readiness endpoint returned no snapshot: $rdy"
+printf '%s' "$rdy" | grep -q '"power"' || die "readiness snapshot missing power state: $rdy"
+ok "readiness endpoint serves a warming snapshot (ADR-0027)"
+
 ws="$(http -X POST "http://core-app:8080/platform/v1/modules/websearch/tools/web_search" \
   -H 'Content-Type: application/json' -d '{"arguments":{"query":"epicurus"}}' || true)"
 printf '%s' "$ws" | grep -q '"result"' || die "web_search tool did not round-trip: $ws"

@@ -22,6 +22,7 @@ from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.readiness import Readiness
 
 log = get_logger("epicurus_core_app.agent")
 
@@ -87,15 +88,17 @@ class AgentEvent(BaseModel):
 
     ``delta`` carries a content token; ``tool`` reports a tool call's progress
     (``running`` → ``ok``/``error``); ``done`` carries the final turn; ``error``
-    ends a failed stream.
+    ends a failed stream. A ``readiness`` event may *lead* the stream (warming
+    progress; emitted by the route, not the loop) — see ADR-0027.
     """
 
-    type: str  # "delta" | "tool" | "done" | "error"
+    type: str  # "delta" | "tool" | "done" | "error" | "readiness"
     text: str | None = None
     tool: str | None = None
     status: str | None = None
     turn: AgentTurn | None = None
     detail: str | None = None
+    readiness: Readiness | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:

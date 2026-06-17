@@ -118,6 +118,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
+  // Confirmed module removal (#127): stop + remove the module's container, then tombstone it.
+  removeModule: (name: string) =>
+    request(
+      z.object({ removed: z.string(), containers: z.number() }),
+      `/platform/v1/modules/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
   invokeModuleTool: (name: string, tool: string, args: Record<string, unknown>) =>
     request(
       z.object({ result: z.string() }),

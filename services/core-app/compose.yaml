@@ -28,6 +28,16 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:-http://localhost:8084}
       OAUTH_STATE_SECRET: ${OAUTH_STATE_SECRET:-change-this-before-use}
+      # Scopes confirmed module removal (#127) to this stack's containers only, so a
+      # co-located stack (e.g. the CI smoke run beside a dev stack) is never touched.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-epicurus}
+    # Confirmed module removal (#127, ADR-0028): the core stops/removes a *module's own*
+    # container through the Docker socket. Read-write socket access is privileged — the
+    # DockerController is the only code path that uses it, and it refuses anything but a
+    # known module's container (never core-app / web / a data-plane service). Remove this
+    # mount to disable removal entirely (the endpoint then returns 503).
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     ports:

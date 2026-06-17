@@ -5,11 +5,11 @@
  * here with no UI rebuild. No module code ever runs in this shell.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Play, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
-import { Badge, Card, Confirm, Dot, Spinner, Switch, TextInput, cn } from "@/components/ui";
+import { Badge, Button, Card, Confirm, Dot, Spinner, Switch, TextInput, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import type { ModuleSnapshot, ToolSpec, UiAction } from "@/lib/contracts";
@@ -155,6 +155,13 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
   });
 
+  // Confirmed container removal (#127) — privileged and destructive, gated by a dialog.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const removeModule = useMutation({
+    mutationFn: () => api.removeModule(manifest.name),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
+  });
+
   return (
     <Card className="p-0">
       <div className="flex w-full items-center gap-2 p-4">
@@ -261,8 +268,39 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
               )}
             </div>
           )}
+
+          <div className="border-t border-edge pt-4">
+            <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+              Danger zone
+            </h4>
+            <Button
+              variant="danger"
+              busy={removeModule.isPending}
+              onClick={() => setConfirmingRemove(true)}
+            >
+              <Trash2 size={14} /> Remove module
+            </Button>
+            <p className="mt-1.5 text-xs text-ink-faint">
+              Stops and deletes this module's container. Core, the web shell, and the data
+              plane can never be removed; the module stays gone until you redeploy it.
+            </p>
+            {removeModule.isError && (
+              <p className="mt-2 text-sm text-danger">{(removeModule.error as Error).message}</p>
+            )}
+          </div>
         </div>
       )}
+      <Confirm
+        open={confirmingRemove}
+        danger
+        message={`Remove the “${manifest.name}” module? This stops and deletes its container, and it stays removed until you redeploy it.`}
+        confirmLabel="Remove module"
+        onCancel={() => setConfirmingRemove(false)}
+        onConfirm={() => {
+          removeModule.mutate();
+          setConfirmingRemove(false);
+        }}
+      />
     </Card>
   );
 }

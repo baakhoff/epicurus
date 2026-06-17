@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from epicurus_core import ModuleManifest, PageSpec, SecretError, ToolSpec, UiAction, UiSection
+from epicurus_core_app.docker_control import DockerError
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
 
@@ -39,6 +40,7 @@ class _FakeModulePrefs:
 
     def __init__(self) -> None:
         self.flags: dict[tuple[str, str], bool] = {}
+        self.removed: set[tuple[str, str]] = set()
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         return {m: e for (t, m), e in self.flags.items() if t == tenant}
@@ -48,6 +50,30 @@ class _FakeModulePrefs:
 
     async def set_enabled(self, tenant: str, module: str, enabled: bool) -> None:
         self.flags[(tenant, module)] = enabled
+
+    async def removed_modules(self, tenant: str) -> set[str]:
+        return {m for (t, m) in self.removed if t == tenant}
+
+    async def set_removed(self, tenant: str, module: str, removed: bool) -> None:
+        if removed:
+            self.removed.add((tenant, module))
+        else:
+            self.removed.discard((tenant, module))
+
+
+class _FakeDocker:
+    """In-memory stand-in for DockerController — records removals; never touches Docker."""
+
+    def __init__(self, *, count: int = 1, error: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self._count = count
+        self._error = error
+
+    def remove_module(self, name: str) -> int:
+        self.calls.append(name)
+        if self._error is not None:
+            raise self._error
+        return self._count
 
 
 def _echo_manifest() -> ModuleManifest:
@@ -110,7 +136,10 @@ class _StubRegistry(ModuleRegistry):
 
 
 def _registry(
-    *, healthy: bool = True, manifest: ModuleManifest | None = None
+    *,
+    healthy: bool = True,
+    manifest: ModuleManifest | None = None,
+    docker: _FakeDocker | None = None,
 ) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
     mcp, secrets = _FakeMcp(), _FakeSecrets()
     registry = _StubRegistry(  # type: ignore[arg-type]
@@ -120,6 +149,7 @@ def _registry(
         secrets=secrets,
         tenant="local",
         prefs=_FakeModulePrefs(),
+        docker=docker,
     )
     return registry, mcp, secrets
 
@@ -479,3 +509,54 @@ async def test_set_enabled_unknown_module_is_404() -> None:
     with pytest.raises(HTTPException) as err:
         await registry.set_enabled("ghost", False)
     assert err.value.status_code == 404
+
+
+# ── Removal (#127) ─────────────────────────────────────────────────────────────
+
+
+async def test_remove_tombstones_and_hides_module() -> None:
+    docker = _FakeDocker(count=1)
+    registry, _, _ = _registry(docker=docker)
+    result = await registry.remove("echo")
+    assert result == {"removed": "echo", "containers": 1}
+    assert docker.calls == ["echo"]
+    # Tombstoned: still 1:1 with bases (flagged), excluded from discovery, dropped by list.
+    snaps = await registry.snapshot()
+    assert snaps[0].removed is True
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_remove_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(docker=_FakeDocker())
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("ghost")
+    assert err.value.status_code == 404
+
+
+async def test_remove_without_docker_is_503() -> None:
+    registry, _, _ = _registry(docker=None)
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("echo")
+    assert err.value.status_code == 503
+
+
+async def test_remove_protected_propagates_as_403() -> None:
+    docker = _FakeDocker(error=DockerError("'echo' is protected and cannot be removed"))
+    registry, _, _ = _registry(docker=docker)
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("echo")
+    assert err.value.status_code == 403
+
+
+async def test_reconcile_tombstones_re_removes_resurrected() -> None:
+    docker = _FakeDocker(count=1)
+    registry, _, _ = _registry(docker=docker)
+    await registry.remove("echo")
+    docker.calls.clear()
+    await registry.reconcile_tombstones()
+    assert docker.calls == ["echo"]
+
+
+async def test_reconcile_without_docker_is_noop() -> None:
+    registry, _, _ = _registry(docker=None)
+    await registry.reconcile_tombstones()  # must not raise

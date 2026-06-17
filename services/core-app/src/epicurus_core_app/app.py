@@ -28,6 +28,7 @@ from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -99,6 +100,9 @@ def create_app() -> FastAPI:
         secrets=secrets,
         tenant=settings.default_tenant_id,
         prefs=module_prefs,
+        # Privileged, tightly-scoped Docker access for confirmed module removal (#127,
+        # ADR-0028); None when the socket isn't mounted, in which case removal returns 503.
+        docker=DockerController.from_env(),
     )
     # Agent tool discovery scans only enabled modules (#126); wired after the registry
     # exists (the host needs the registry and the registry needs the host).
@@ -128,6 +132,10 @@ def create_app() -> FastAPI:
             await module_prefs.init()
         except Exception as exc:
             log.error("module prefs init failed; enable/disable unavailable", error=str(exc))
+        try:
+            await registry.reconcile_tombstones()
+        except Exception as exc:  # best-effort — a Docker hiccup must never block startup
+            log.error("tombstone reconcile failed", error=str(exc))
         try:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades

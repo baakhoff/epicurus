@@ -66,3 +66,38 @@ async def test_repeated_updates_keep_one_row() -> None:
     await store.set_enabled("t1", "tasks", False)
     # A single (tenant, module) row, last write wins.
     assert await store.enabled_map("t1") == {"tasks": False}
+
+
+# ── Removal tombstone (#127) ───────────────────────────────────────────────────
+
+
+async def test_no_modules_removed_by_default() -> None:
+    store, _ = await _fresh_store()
+    assert await store.removed_modules("t1") == set()
+
+
+async def test_set_removed_tombstones_module() -> None:
+    store, _ = await _fresh_store()
+    await store.set_removed("t1", "tasks", True)
+    assert await store.removed_modules("t1") == {"tasks"}
+
+
+async def test_tombstone_is_tenant_scoped() -> None:
+    store, _ = await _fresh_store()
+    await store.set_removed("t1", "tasks", True)
+    assert await store.removed_modules("t2") == set()
+
+
+async def test_clear_tombstone() -> None:
+    store, _ = await _fresh_store()
+    await store.set_removed("t1", "tasks", True)
+    await store.set_removed("t1", "tasks", False)
+    assert await store.removed_modules("t1") == set()
+
+
+async def test_enabled_and_removed_coexist_on_one_row() -> None:
+    store, _ = await _fresh_store()
+    await store.set_enabled("t1", "tasks", False)
+    await store.set_removed("t1", "tasks", True)
+    assert await store.is_enabled("t1", "tasks") is False
+    assert await store.removed_modules("t1") == {"tasks"}

@@ -9,7 +9,8 @@ flag lives here in the core, never in the module. Auto-created on first use via
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, String, select
+from sqlalchemy import Boolean, String, inspect, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -27,6 +28,9 @@ class _ModulePrefRow(_ModulePrefBase):
     module: Mapped[str] = mapped_column(String(128), primary_key=True)
     # False hides the module from the agent + shell; the container keeps running (#126).
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # True tombstones the module after its container is removed (#127): it is hidden from
+    # every surface, and re-removed on startup if a reconcile has resurrected the container.
+    removed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ModulePrefsStore:
@@ -39,9 +43,27 @@ class ModulePrefsStore:
         )
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Create the schema, then add any columns introduced after first release."""
         async with self._engine.begin() as conn:
             await conn.run_sync(_ModulePrefBase.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
+
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Idempotently add columns introduced after the table's first release.
+
+        No migration framework (the store uses ``create_all``); on a deployment that
+        predates the ``removed`` column (#127) we add it in place, with a per-dialect type
+        so it is portable across Postgres and the tests' SQLite.
+        """
+        inspector = inspect(sync_conn)
+        existing = {col["name"] for col in inspector.get_columns(_ModulePrefRow.__tablename__)}
+        for name in ("removed",):
+            if name not in existing:
+                type_sql = _ModulePrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {_ModulePrefRow.__tablename__} ADD COLUMN {name} {type_sql}"
+                )
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         """Every stored enabled flag for ``tenant``.
@@ -69,4 +91,25 @@ class ModulePrefsStore:
                 session.add(_ModulePrefRow(tenant=tenant, module=module, enabled=enabled))
             else:
                 row.enabled = enabled
+            await session.commit()
+
+    async def removed_modules(self, tenant: str) -> set[str]:
+        """The set of modules tombstoned (container removed) for ``tenant`` (#127)."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_ModulePrefRow.module).where(
+                    _ModulePrefRow.tenant == tenant,
+                    _ModulePrefRow.removed.is_(True),
+                )
+            )
+            return set(rows)
+
+    async def set_removed(self, tenant: str, module: str, removed: bool) -> None:
+        """Tombstone (or clear the tombstone for) ``module`` after container removal (#127)."""
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                session.add(_ModulePrefRow(tenant=tenant, module=module, removed=removed))
+            else:
+                row.removed = removed
             await session.commit()

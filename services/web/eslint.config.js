@@ -18,7 +18,13 @@ export default tseslint.config(
       "react-refresh": reactRefresh,
     },
     rules: {
-      ...reactHooks.configs.recommended.rules,
+      // Enable the two long-standing hooks rules explicitly rather than spreading
+      // react-hooks 7's `recommended` preset: v7 folds in the new React Compiler
+      // rules (static-components, set-state-in-effect, …), and adopting those is a
+      // deliberate code cleanup, not part of this tooling bump. Keep enforcement
+      // behaviour-neutral across the eslint 9 → 10 upgrade.
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },
   },

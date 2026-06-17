@@ -27,6 +27,18 @@ from epicurus_core_app.module_prefs import ModulePrefsStore
 log = get_logger("epicurus_core_app.modules")
 
 
+def _safe_segment(value: str, *, label: str) -> str:
+    """A caller-supplied URL path segment, rejected if it could escape the module path.
+
+    ``ref_id`` / entity ``kind`` / ``page_id`` are interpolated straight into the
+    outbound module request path; a separator or ``..`` could redirect the request to
+    another path on the (trusted, internal) module host. Defense-in-depth (#175).
+    """
+    if not value or "/" in value or "\\" in value or ".." in value:
+        raise HTTPException(status_code=400, detail=f"invalid {label}: {value!r}")
+    return value
+
+
 class ModuleStatus(BaseModel):
     """Liveness as seen from the core right now."""
 
@@ -249,6 +261,7 @@ class ModuleRegistry:
         UI markup. Returns 404 if the module is unreachable or declares no such page.
         Query params (e.g. ``path``, ``q``) are forwarded to the module as-is.
         """
+        _safe_segment(page_id, label="page_id")
         base, manifest = await self._resolve(name)
         if page_id not in {p.id for p in manifest.pages}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
@@ -324,6 +337,8 @@ class ModuleRegistry:
         ``GET /resolve/{kind}/{ref_id}`` on the module and returns the hover-card
         envelope. 404 if the module is unreachable or declares no resolver.
         """
+        _safe_segment(kind, label="kind")
+        _safe_segment(ref_id, label="ref_id")
         base, manifest = await self._resolve(name)
         if not manifest.resolver:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no resolver")
@@ -354,6 +369,7 @@ class ModuleRegistry:
         Returns the entity's content/excerpt for the agent to inject into the turn. 404 if
         the module is unreachable or not attachable.
         """
+        _safe_segment(ref_id, label="ref_id")
         base, manifest = await self._resolve(name)
         if not manifest.attachable:
             raise HTTPException(status_code=404, detail=f"module {name!r} is not attachable")
@@ -370,6 +386,7 @@ class ModuleRegistry:
         EmailMessage envelope — subject, from, date, and body — consumed by the
         right-panel ``email-reader`` view. 404 if the module is unreachable.
         """
+        _safe_segment(ref_id, label="ref_id")
         base, _ = await self._resolve(name)
         async with httpx.AsyncClient(base_url=base, timeout=10) as client:
             resp = await client.get(f"/messages/{ref_id}")

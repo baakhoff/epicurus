@@ -560,3 +560,35 @@ async def test_reconcile_tombstones_re_removes_resurrected() -> None:
 async def test_reconcile_without_docker_is_noop() -> None:
     registry, _, _ = _registry(docker=None)
     await registry.reconcile_tombstones()  # must not raise
+
+
+# ── Path-segment hardening (#175): reject '/', '\', '..' in interpolated segments ──
+
+
+async def test_resolve_entity_rejects_unsafe_segment() -> None:
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+    for kind, ref_id in (("event", "../secret"), ("a/b", "e1"), ("event", "a/b")):
+        with pytest.raises(HTTPException) as err:
+            await registry.resolve_entity("calendar", kind, ref_id)
+        assert err.value.status_code == 400
+
+
+async def test_resolve_attachment_rejects_unsafe_ref() -> None:
+    registry, _, _ = _registry(manifest=_attachable_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.resolve_attachment("notes", "../n1")
+    assert err.value.status_code == 400
+
+
+async def test_read_message_rejects_unsafe_ref() -> None:
+    registry, _, _ = _registry()
+    with pytest.raises(HTTPException) as err:
+        await registry.read_message("echo", "a/b")
+    assert err.value.status_code == 400
+
+
+async def test_get_page_rejects_unsafe_page_id() -> None:
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("files", "..")
+    assert err.value.status_code == 400

@@ -42,6 +42,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
+| `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
@@ -81,6 +82,10 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 > that stops/removes **only a configured module's own container** — scoped to this Compose
 > project, and never core-app / web / a data-plane service. Drop the socket mount to disable
 > removal entirely (the endpoint then returns `503`).
+
+Caller-supplied path segments the registry interpolates into a module request —
+`ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a
+supplied id cannot redirect the outbound request on the module host (#175).
 
 ### Events (NATS)
 

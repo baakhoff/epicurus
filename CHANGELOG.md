@@ -48,6 +48,18 @@ images to GHCR.
   attach proxy and web attach menu render it unchanged — the module only supplies data
   (ADR-0019) (closes #139) (`tasks` → 0.3.0).
 
+### Security
+
+- **Bounded chat uploads + module-proxy path segments** (#175) — the attachment upload
+  route (`POST /platform/v1/agent/attachments`) now enforces a size cap (**413** above
+  `ATTACHMENT_MAX_BYTES`, 10 MiB default) and a content-type allowlist (**415**,
+  `ATTACHMENT_ALLOWED_TYPES`), and the web container's nginx caps `/platform/` request
+  bodies at the edge (`client_max_body_size 12m`) — previously the core endpoint was
+  unbounded on the internal network and silently limited to nginx's 1 MB default. The
+  module registry also rejects `/`, `\`, or `..` in the `ref_id` / entity `kind` /
+  `page_id` segments it interpolates into a module request (**400**, defense-in-depth).
+  (`core-app` → 0.5.1.)
+
 ## [0.2.0] — 2026-06-14
 
 **Phase 2 (knowledge & storage) and Phase 3 (web search + Google integrations),

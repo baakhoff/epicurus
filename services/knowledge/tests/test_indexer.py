@@ -25,9 +25,10 @@ def _fake_vectors(texts: list[str]) -> list[list[float]]:
     return [[float(i), 0.0, 0.0, 0.0] for i in range(len(texts))]
 
 
-def _make_mock_platform() -> Any:
+def _make_mock_platform(model: str | None = None) -> Any:
     platform = MagicMock()
     platform.embed = AsyncMock(side_effect=lambda texts, **_: _fake_vectors(texts))
+    platform.get_module_model = AsyncMock(return_value=model)
     return platform
 
 
@@ -183,6 +184,44 @@ async def test_tenant_isolation(tmp_path: Path) -> None:
     paths_b = await idx_a.list_paths(tenant="tenant-b")
     assert "shared.md" in paths_a
     assert "shared.md" not in paths_b
+
+
+async def test_run_uses_selected_embedding_model(note_index: NoteIndex, vault: Path) -> None:
+    """The operator's chosen embedding model is resolved and passed to every embed call (#128)."""
+    platform = _make_mock_platform(model="nomic-embed-text")
+    indexer = KnowledgeIndexer(
+        note_index, _make_mock_qdrant(), platform, vault_path=vault, tenant=TENANT
+    )
+    await indexer.run()
+    platform.get_module_model.assert_awaited_with("embedding")
+    assert platform.embed.await_args_list  # notes were embedded
+    assert all(
+        call.kwargs.get("model") == "nomic-embed-text" for call in platform.embed.await_args_list
+    )
+
+
+async def test_run_falls_back_to_core_default_when_unset(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """An unset slot resolves to None — embed receives ``model=None`` (the core default)."""
+    platform = _make_mock_platform(model=None)
+    indexer = KnowledgeIndexer(
+        note_index, _make_mock_qdrant(), platform, vault_path=vault, tenant=TENANT
+    )
+    await indexer.run()
+    assert platform.embed.await_args_list
+    assert all(call.kwargs.get("model") is None for call in platform.embed.await_args_list)
+
+
+async def test_search_uses_selected_embedding_model(note_index: NoteIndex, vault: Path) -> None:
+    """A query is embedded with the operator's chosen model so it matches the index (#128)."""
+    platform = _make_mock_platform(model="nomic-embed-text")
+    indexer = KnowledgeIndexer(
+        note_index, _make_mock_qdrant(), platform, vault_path=vault, tenant=TENANT
+    )
+    await indexer.search("hello")
+    platform.get_module_model.assert_awaited_with("embedding")
+    assert platform.embed.await_args.kwargs.get("model") == "nomic-embed-text"
 
 
 def _make_docs_indexer(tmp_path: Path) -> KnowledgeIndexer:

@@ -19,6 +19,7 @@ from starlette.applications import Starlette
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
     EventSpec,
+    ModelSlot,
     ModuleManifest,
     PageSpec,
     ToolSpec,
@@ -53,6 +54,7 @@ class EpicurusModule:
         pages: list[PageSpec] | None = None,
         resolver: bool = False,
         attachable: bool = False,
+        required_models: list[ModelSlot] | None = None,
     ) -> None:
         self._name = name
         self._version = version
@@ -64,6 +66,7 @@ class EpicurusModule:
         self._pages = list(pages or [])
         self._resolver = resolver
         self._attachable = attachable
+        self._required_models = list(required_models or [])
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -128,6 +131,7 @@ class EpicurusModule:
             pages=list(self._pages),
             resolver=self._resolver,
             attachable=self._attachable,
+            required_models=list(self._required_models),
         )
 
     def http_app(self) -> Starlette:

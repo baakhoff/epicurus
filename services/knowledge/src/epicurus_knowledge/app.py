@@ -49,6 +49,7 @@ def create_app() -> FastAPI:
     platform = PlatformClient(
         base_url=settings.platform_url,
         tenant_id=settings.default_tenant_id,
+        module=MODULE_NAME,  # so the indexer can resolve its embedding-model slot (#128)
     )
 
     vault_indexer = KnowledgeIndexer(

@@ -64,3 +64,12 @@ async def test_search_empty_returns_no_chips() -> None:
     env = _envelope(content)
     assert env.entity_refs == []
     assert "No matching content" in env.text
+
+
+async def test_manifest_declares_embedding_model_slot() -> None:
+    """Knowledge declares an 'embedding' slot so the operator can pick the model (#128)."""
+    manifest = await _module([], []).manifest()
+    slots = {s.key: s for s in manifest.required_models}
+    assert "embedding" in slots
+    assert slots["embedding"].role == "embedding"
+    assert slots["embedding"].label  # non-empty — shown on the Modules page

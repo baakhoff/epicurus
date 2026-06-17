@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Module removal — confirmed container delete** — the operator can delete a module's
+  **container** from the Modules screen ("Danger zone → Remove module"), behind a confirm
+  dialog. The core stops + removes the container through the Docker socket via a single,
+  tightly-scoped `DockerController` that touches **only a configured module's own container**
+  (matched by service **and** Compose-project label) and **never** core-app, web, or a
+  data-plane service. Removal **tombstones** the module (a `removed` flag on `module_prefs`)
+  and is re-enforced on startup, so a `compose up` / Watchtower pull can't silently resurrect
+  it. New `DELETE /platform/v1/modules/{name}` (403 protected · 503 no socket); the socket is
+  mounted read-write on `core-app` only and the feature degrades to 503 without it
+  (ADR-0028) (closes #127) (`core-app` → 0.7.0, `web` → 0.9.0).
 - **Modules page: enable/disable + browse by tags** — the operator can turn any module
   **on or off** from the Modules screen, and search modules by name, description, or tag.
   Disabling drops the module from the agent's tools, the left-nav pages, and the chat attach

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import ModuleManifest, SecretError, SecretStore, get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.docker_control import DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
 log = get_logger("epicurus_core_app.modules")
@@ -42,6 +43,10 @@ class ModuleSnapshot(BaseModel):
     # hidden from the agent's tools, the left-nav, and the chat surfaces; it still appears
     # here so the shell's Modules screen can show it with a re-enable toggle.
     enabled: bool = True
+    # Tombstoned after a confirmed container removal (#127). The registry hides it from
+    # every surface — the module list drops it before serialization — so it is always
+    # ``False`` on the snapshots the API returns; the flag is an internal gating signal.
+    removed: bool = False
 
 
 class EnabledUpdate(BaseModel):
@@ -75,24 +80,31 @@ class ModuleRegistry:
         secrets: SecretStore,
         tenant: str,
         prefs: ModulePrefsStore,
+        docker: DockerController | None = None,
     ) -> None:
         self._bases = list(base_urls)
         self._mcp = mcp
         self._secrets = secrets
         self._tenant = tenant
         self._prefs = prefs
+        self._docker = docker
 
     async def snapshot(self) -> list[ModuleSnapshot]:
         """Every configured module — reachable ones with their manifest, dead ones flagged.
 
-        Each snapshot carries the operator's ``enabled`` flag (#126); a module with no
-        stored preference defaults to enabled. The list includes disabled modules so the
-        shell can offer a re-enable toggle — gating happens at the agent / nav surfaces.
+        Each snapshot carries the operator's ``enabled`` flag (#126) and a ``removed``
+        tombstone (#127); unset defaults to enabled and not-removed. The list stays **1:1
+        with the configured bases** (``_resolve`` / ``enabled_mcp_urls`` zip it against them),
+        so disabled and removed modules are flagged in place, not dropped — disabled ones
+        are still shown so the shell can re-enable them, while removed ones are dropped by
+        the list endpoint.
         """
         probed = await asyncio.gather(*(self._probe(base) for base in self._bases))
         enabled = await self._prefs.enabled_map(self._tenant)
+        removed = await self._prefs.removed_modules(self._tenant)
         for snap in probed:
             snap.enabled = enabled.get(snap.manifest.name, True)
+            snap.removed = snap.manifest.name in removed
         return list(probed)
 
     async def _probe(self, base: str) -> ModuleSnapshot:
@@ -132,7 +144,7 @@ class ModuleRegistry:
         return [
             f"{base}/mcp"
             for snap, base in zip(snaps, self._bases, strict=True)
-            if snap.status.healthy and snap.enabled
+            if snap.status.healthy and snap.enabled and not snap.removed
         ]
 
     async def set_enabled(self, name: str, enabled: bool) -> None:
@@ -141,10 +153,50 @@ class ModuleRegistry:
         The container is untouched — only the core-side flag changes. 404 for a name that
         is not a configured module (reachable or not).
         """
-        names = {snap.manifest.name for snap in await self.snapshot()}
-        if name not in names:
+        live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
+        if name not in live:
             raise HTTPException(status_code=404, detail=f"no module named {name!r}")
         await self._prefs.set_enabled(self._tenant, name, enabled)
+
+    async def remove(self, name: str) -> dict[str, Any]:
+        """Stop + remove a module's container, then tombstone it (#127, ADR-0028).
+
+        Privileged and confirmed in the UI. 404 for an unknown module, 403 for a
+        protected/core service (also enforced in the Docker layer), 503 when the Docker
+        socket is unavailable. Idempotent: a module whose container is already gone still
+        tombstones. The tombstone hides the module everywhere and is re-enforced on the
+        next startup, so a ``compose up`` cannot silently resurrect it.
+        """
+        live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
+        if name not in live:
+            raise HTTPException(status_code=404, detail=f"no module named {name!r}")
+        if self._docker is None:
+            raise HTTPException(
+                status_code=503, detail="module removal unavailable: the core has no Docker access"
+            )
+        try:
+            containers = await asyncio.to_thread(self._docker.remove_module, name)
+        except DockerError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        await self._prefs.set_removed(self._tenant, name, True)
+        log.info("module removed", module=name, containers=containers)
+        return {"removed": name, "containers": containers}
+
+    async def reconcile_tombstones(self) -> None:
+        """Re-remove any tombstoned module whose container has reappeared (#127).
+
+        Run at startup so a removal survives a ``compose up`` / Watchtower pull. Best-effort
+        — a missing socket or a transient Docker error is logged, never fatal.
+        """
+        if self._docker is None:
+            return
+        for name in await self._prefs.removed_modules(self._tenant):
+            try:
+                containers = await asyncio.to_thread(self._docker.remove_module, name)
+                if containers:
+                    log.info("re-removed resurrected module", module=name, containers=containers)
+            except Exception as exc:
+                log.warning("tombstone reconcile failed", module=name, error=str(exc))
 
     async def invoke(self, name: str, tool: str, arguments: dict[str, Any]) -> str:
         """Run a module tool (a manifest-declared UI action) through the MCP host."""
@@ -332,7 +384,8 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
 
     @router.get("", response_model=list[ModuleSnapshot])
     async def list_modules() -> list[ModuleSnapshot]:
-        return await registry.snapshot()
+        # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
+        return [snap for snap in await registry.snapshot() if not snap.removed]
 
     @router.get("/{name}/config")
     async def get_config(name: str) -> dict[str, Any]:
@@ -348,6 +401,15 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         """Enable or disable a module (#126) — hides its tools/pages/UI; container stays up."""
         await registry.set_enabled(name, body.enabled)
         return {"status": "ok"}
+
+    @router.delete("/{name}")
+    async def remove_module(name: str) -> dict[str, Any]:
+        """Confirmed module removal (#127): stop + remove the container, then tombstone it.
+
+        Privileged — gated by a confirm dialog in the shell. 403 for a protected service,
+        503 when the core has no Docker access, 404 for an unknown module.
+        """
+        return await registry.remove(name)
 
     @router.post("/{name}/tools/{tool}", response_model=ToolResult)
     async def invoke_tool(name: str, tool: str, request: ToolInvocation) -> ToolResult:

@@ -310,3 +310,25 @@ is a separate, privileged action — see issue #127.)
   sees the tool in the first place.
 - **Tags** — `ModuleManifest.tags` feed the shell's search alongside the name and
   description.
+
+## Removing a module — confirmed container delete (#127, ADR-0028)
+
+Beyond disabling, the operator can **delete** a module's container from the Modules screen
+("Danger zone → Remove module"), gated by a confirm dialog. This is a **privileged** action:
+the core stops and removes the container through the Docker socket.
+
+- **Endpoint** — `DELETE /platform/v1/modules/{name}` stops + removes the module's container
+  and **tombstones** the module (a `removed` flag on `module_prefs`). **404** unknown module ·
+  **403** protected service · **503** when the core has no Docker access.
+- **Tightly scoped (security).** The core reaches Docker only through one `DockerController`,
+  which removes **only a configured module's own container** — matched by both its
+  `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
+  stack is never touched — and **never** core-app, web, or a data-plane / infra service (a
+  hard denylist on top of the configured-module guard). The read-write socket is mounted on
+  `core-app` only; drop that mount to disable removal entirely (the endpoint then 503s).
+- **It stays gone.** A removed module is dropped from the module list, agent tool discovery,
+  and the nav. Because a `compose up` / Watchtower pull could recreate the container, the core
+  **re-removes** any tombstoned module whose container reappears, on every startup. Bringing a
+  module back means redeploying it and clearing its tombstone.
+
+See ADR-0028 for the full rationale and security posture.

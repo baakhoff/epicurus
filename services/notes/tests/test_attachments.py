@@ -29,6 +29,18 @@ async def test_list_items_returns_notes_as_attachables() -> None:
     assert items[0].title == "Alpha"
 
 
+async def test_picker_lists_every_note() -> None:
+    # Attach is the *only* path a note reaches the agent, so the picker must offer
+    # every note — not a truncated subset. Pin membership independently of ordering
+    # (in-memory SQLite timestamps are second-granular, so newest-first can tie).
+    attach, store = await _attachments()
+    for slug in ("a", "b", "c"):
+        await store.upsert(tenant=TENANT, slug=slug, title=slug.upper(), content=f"body {slug}")
+    items = await attach.list_items()
+    assert {i.ref_id for i in items} == {"a", "b", "c"}
+    assert all(i.kind == "note" for i in items)
+
+
 async def test_resolve_returns_full_body() -> None:
     attach, store = await _attachments()
     await store.upsert(tenant=TENANT, slug="a", title="Alpha", content="the whole note body")

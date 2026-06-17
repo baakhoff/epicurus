@@ -206,23 +206,31 @@ export function SettingsScreen() {
     tone: "ok" | "error";
   } | null>(null);
 
-  // Read the oauth_connected / oauth_error query params that the backend sets
-  // after the consent callback, then clear them from the URL.
+  // Read the oauth_connected / oauth_error query params the backend sets after the
+  // consent callback. The notice is set during render (adjust-state-on-change, gated
+  // so it shows once per callback) rather than in an effect; the URL is cleared in an
+  // effect, where navigation is a genuine side effect (not a setState).
+  const params = new URLSearchParams(location.search);
+  const oauthConnected = params.get("oauth_connected");
+  const oauthParam = oauthConnected ?? params.get("oauth_error");
+  const [oauthHandled, setOauthHandled] = useState(false);
+  if (oauthParam && !oauthHandled) {
+    setOauthHandled(true);
+    setOauthNotice(
+      oauthConnected
+        ? {
+            message: `${oauthConnected.charAt(0).toUpperCase() + oauthConnected.slice(1)} connected successfully.`,
+            tone: "ok",
+          }
+        : { message: "Connection failed or was cancelled.", tone: "error" },
+    );
+  } else if (!oauthParam && oauthHandled) {
+    // The URL has been cleared — re-arm so a later callback shows its notice too.
+    setOauthHandled(false);
+  }
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const connected = params.get("oauth_connected");
-    const error = params.get("oauth_error");
-    if (connected) {
-      setOauthNotice({
-        message: `${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully.`,
-        tone: "ok",
-      });
-      navigate("/settings", { replace: true });
-    } else if (error) {
-      setOauthNotice({ message: "Connection failed or was cancelled.", tone: "error" });
-      navigate("/settings", { replace: true });
-    }
-  }, [location.search, navigate]);
+    if (oauthParam) navigate("/settings", { replace: true });
+  }, [oauthParam, navigate]);
 
   return (
     <div className="h-full overflow-y-auto">

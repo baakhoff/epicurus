@@ -23,6 +23,14 @@ images to GHCR.
   queryable `GET /platform/v1/readiness` and matching `readiness` events that **lead** the
   `POST /platform/v1/agent/chat/stream` SSE turn (best-effort and time-boxed, so a slow or
   booting module never delays the answer) (#121, #122) (`core-app` → 0.9.0, `web` → 0.11.0).
+- **Notes attach-to-chat — runtime-verified, `notes` → `0.2.0`** — attaching a note in
+  the chat composer injects its body into that turn (a note reaches the agent **only**
+  when attached; `attachable`, ADR-0019). The notes attach surface — the picker
+  (`GET /attachments`) and resolve (`GET /attachments/{ref_id}` → `{title, excerpt}`) —
+  shipped with the module; this promotes `notes` to its `0.2.0` milestone and adds the
+  first **runtime-smoke** coverage of the chat-attachment last mile: the gate now asserts
+  an attachable module's picker round-trips through the core (covering notes, knowledge,
+  and calendar) (#136) (`notes` → 0.2.0).
 - **Per-module model / embedding selection** — a module can declare model **slots** in its
   manifest (`required_models`: `{key, role: embedding|chat, label}`) and the operator picks
   which model fills each from a "Models" section in the module's card. The choice persists in

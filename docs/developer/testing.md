@@ -89,7 +89,8 @@ module, and asserts the integration last mile —
   vault restart;
 - the core discovers every module (the set is derived from the compose `include:`
   list, so a new module is gated the moment it is wired in);
-- each module is reachable through the core, and one MCP tool round-trips.
+- each module is reachable through the core, one MCP tool round-trips, and an
+  attachable module's chat-attachment picker round-trips through the core (ADR-0019).
 
 Run it locally, exactly as CI does:
 

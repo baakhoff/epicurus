@@ -13,7 +13,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { createElement, useMemo, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Button, Confirm, EmptyState, Sheet, Spinner, cn } from "@/components/ui";
@@ -86,7 +86,6 @@ function BoardActionControl({
     else invoke.mutate({ ...action.args });
   };
 
-  const Icon = action.icon ? moduleIcon(action.icon) : null;
   const compactTone =
     action.intent === "danger"
       ? "text-danger hover:bg-danger/10"
@@ -111,13 +110,13 @@ function BoardActionControl({
           {invoke.isPending ? (
             <Loader2 size={12} className="animate-spin" />
           ) : (
-            Icon && <Icon size={13} />
+            action.icon && createElement(moduleIcon(action.icon), { size: 13 })
           )}
           {action.label}
         </button>
       ) : (
         <Button variant={fullVariant} busy={invoke.isPending} onClick={onClick}>
-          {Icon && <Icon size={15} />}
+          {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
           {action.label}
         </Button>
       )}

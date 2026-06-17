@@ -6,6 +6,7 @@
 #   * core-app comes up healthy and discovers every module via module_urls     (#68)
 #   * each module's status_url is reachable THROUGH core                       (#92)
 #   * one MCP tool round-trips through core
+#   * an attachable module's chat-attachment picker round-trips through core    (#136)
 #
 # Every recent module PR passed CI green and then broke on first real boot for one
 # of these reasons (see #98). This gate boots the actual stack and fails if any of
@@ -174,6 +175,23 @@ ws="$(http -X POST "http://core-app:8080/platform/v1/modules/websearch/tools/web
   -H 'Content-Type: application/json' -d '{"arguments":{"query":"epicurus"}}' || true)"
 printf '%s' "$ws" | grep -q '"result"' || die "web_search tool did not round-trip: $ws"
 ok "web_search MCP tool round-tripped through core"
+
+# Every attachable module's chat-attachment picker (ADR-0019, #136) must round-trip
+# through the core — the only path a note/doc/event reaches the agent. The picker is
+# the attach surface the core exposes as a route; resolve runs in-process per turn.
+# Modules that declare no attach surface answer "not attachable" (fine); a healthy
+# attachable module returns a JSON array. At least one must, or the proxy is broken.
+attach_seen=0
+for m in $EXPECT_MODULES; do
+  a="$(http "http://core-app:8080/platform/v1/modules/$m/attachments" || true)"
+  case "$a" in
+    '['*) attach_seen=$((attach_seen + 1)) ;;   # a JSON array — an attachable picker
+    *'is not attachable'*) : ;;                 # module declares no attach surface — fine
+    *) die "module '$m' attachment picker returned an unexpected response: $a" ;;
+  esac
+done
+[ "$attach_seen" -gt 0 ] || die "no attachable module served a picker through core (attach proxy broken?)"
+ok "chat-attachment picker round-tripped through core ($attach_seen attachable module(s))"
 
 # OpenBao secret persistence across a vault (and core) restart.
 . "$SECRETS_FILE"

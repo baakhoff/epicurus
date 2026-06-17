@@ -17,7 +17,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, FileText, Plus } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -58,9 +58,13 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   // "Open in Knowledge" link, #143). Re-applies if the param changes while mounted.
   const [searchParams] = useSearchParams();
   const docParam = searchParams.get("doc");
-  useEffect(() => {
-    if (docParam) setSelectedPath(docParam);
-  }, [docParam]);
+  // Apply the `?doc=` deep-link when it changes — adjust state during render
+  // (the React-blessed alternative to a setState-in-effect).
+  const [appliedDoc, setAppliedDoc] = useState<string | null>(null);
+  if (docParam && docParam !== appliedDoc) {
+    setAppliedDoc(docParam);
+    setSelectedPath(docParam);
+  }
 
   const list = useQuery({
     queryKey: ["module-page", module, pageId],
@@ -74,14 +78,15 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   });
 
   // Seed the editor buffer when a document loads; track the saved baseline so we
-  // know when there are unsaved changes.
-  useEffect(() => {
-    if (doc.data) {
-      setDraft(doc.data.content);
-      setBaseline(doc.data.content);
-      setMode("edit");
-    }
-  }, [doc.data]);
+  // know when there are unsaved changes. Adjust state during render keyed on the
+  // loaded doc's identity (the React-blessed alternative to a setState-in-effect).
+  const [seededDoc, setSeededDoc] = useState<typeof doc.data>(undefined);
+  if (doc.data && doc.data !== seededDoc) {
+    setSeededDoc(doc.data);
+    setDraft(doc.data.content);
+    setBaseline(doc.data.content);
+    setMode("edit");
+  }
 
   const save = useMutation({
     mutationFn: () => api.saveModulePageDoc(module, pageId, selectedPath as string, draft),

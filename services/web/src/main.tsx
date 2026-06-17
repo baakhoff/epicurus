@@ -8,6 +8,11 @@ import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
 
 import App from "./App";
+import { usePrefs } from "./stores/prefs";
+
+// Apply the persisted theme before first paint so the shell never flashes the
+// default theme (App keeps it in sync on change).
+document.documentElement.setAttribute("data-theme", usePrefs.getState().theme);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

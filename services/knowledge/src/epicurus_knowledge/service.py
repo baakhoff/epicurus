@@ -12,6 +12,7 @@ from __future__ import annotations
 from epicurus_core import (
     EntityRef,
     EpicurusModule,
+    ModelSlot,
     PageSpec,
     UiAction,
     UiSection,
@@ -46,7 +47,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.6.0",
+        version="0.7.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
@@ -90,6 +91,18 @@ def build_module(
         attachable=True,
         # Cited documents resolve to a hover-card (#143) — see resolver.py.
         resolver=True,
+        # The operator picks the embedding model on the Modules page (#128); the indexer
+        # reads the choice via PlatformClient.get_module_model("embedding"), falling back
+        # to the core default when unset. Changing it requires a re-index (vectors are
+        # model-specific) — trigger "Re-index" after switching.
+        required_models=[
+            ModelSlot(
+                key="embedding",
+                role="embedding",
+                label="Embedding model",
+                description="Model used to embed vault notes and search queries.",
+            )
+        ],
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")

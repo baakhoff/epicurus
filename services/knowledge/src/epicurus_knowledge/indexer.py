@@ -116,14 +116,26 @@ class KnowledgeIndexer:
             ),
         )
 
-    async def _index_note(self, note_path: str, content: str) -> int:
-        """Chunk, embed, and upsert one note.  Returns the number of chunks indexed."""
+    async def _embedding_model(self) -> str | None:
+        """The operator's chosen embedding model for the knowledge module (#128).
+
+        ``None`` means no selection — :meth:`PlatformClient.embed` then falls back to the
+        core's default embedding model.
+        """
+        return await self._platform.get_module_model("embedding")
+
+    async def _index_note(self, note_path: str, content: str, *, model: str | None) -> int:
+        """Chunk, embed, and upsert one note.  Returns the number of chunks indexed.
+
+        ``model`` is the operator's chosen embedding model (resolve it once per run via
+        :meth:`_embedding_model` and thread it in), or ``None`` for the core default.
+        """
         chunks: list[Chunk] = chunk_note(content, self._max_chars)
         if not chunks:
             return 0
 
         texts = [c.text for c in chunks]
-        vectors = await self._platform.embed(texts)
+        vectors = await self._platform.embed(texts, model=model)
         await self._ensure_collection(len(vectors[0]))
 
         points = [
@@ -157,7 +169,8 @@ class KnowledgeIndexer:
         """
         if not await self._qdrant.collection_exists(self._collection):
             return []
-        [query_vec] = await self._platform.embed([query])
+        model = await self._embedding_model()
+        [query_vec] = await self._platform.embed([query], model=model)
         # qdrant-client 1.14 removed the legacy `search`; `query_points` is the
         # current API (mirrors core-app's memory recall). Results are on `.points`.
         response = await self._qdrant.query_points(
@@ -194,7 +207,7 @@ class KnowledgeIndexer:
         if await self._notes.get(tenant=self._tenant, note_path=rel) is not None:
             await self._delete_note_vectors(rel)
         content = raw.decode("utf-8", errors="replace")
-        chunk_count = await self._index_note(rel, content)
+        chunk_count = await self._index_note(rel, content, model=await self._embedding_model())
         await self._notes.upsert(
             tenant=self._tenant,
             note_path=rel,
@@ -223,6 +236,8 @@ class KnowledgeIndexer:
         if not self._vault.exists():
             log.warning("vault path does not exist", path=str(self._vault))
             return {"indexed": 0, "deleted": 0, "unchanged": 0}
+
+        model = await self._embedding_model()  # operator's choice, resolved once per run (#128)
 
         for dirpath, _dirs, filenames in os.walk(self._vault):
             dir_abs = Path(dirpath)
@@ -265,7 +280,7 @@ class KnowledgeIndexer:
                     await self._delete_note_vectors(rel)
 
                 content = raw.decode("utf-8", errors="replace")
-                chunk_count = await self._index_note(rel, content)
+                chunk_count = await self._index_note(rel, content, model=model)
                 await self._notes.upsert(
                     tenant=self._tenant,
                     note_path=rel,

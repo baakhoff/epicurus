@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **Knowledge picks its embedding model (first consumer of per-module models)** — the
+  knowledge module now **declares an `embedding` model slot** in its manifest, so the
+  operator can choose which embedding model indexes the vault from a "Models" section on the
+  knowledge card (#128, ADR-0029). The indexer resolves the choice via
+  `PlatformClient.get_module_model("embedding")` and passes it to every `embed` call (vault
+  indexing **and** search queries), falling back to the core default when unset. This makes
+  the per-module model mechanism (shipped in #204) end-to-end exercisable; `EpicurusModule`
+  gains a `required_models` argument so any module can declare slots through the builder
+  (the manifest field existed but had no way to populate it). Note: embeddings are
+  model-specific, so switching the model requires a **re-index** (use the card's "Re-index"
+  action after changing it) (`epicurus-core` → 0.7.0, `knowledge` → 0.7.0).
 - **Chat process display + readiness bar** — the chat surface now shows *what the agent is
   doing* instead of a bare streaming caret. Before the first token a **readiness bar**
   reports warming progress (module health + whether the turn's model is warm, tied to the

@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from epicurus_core.manifest import CONTRACT_VERSION
+from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot
 from epicurus_core.module import EpicurusModule, add_manifest_route
 
 
@@ -36,6 +36,21 @@ async def test_manifest_reflects_tools_and_events() -> None:
     assert manifest.events_emitted[0].subject == "greeting.sent"
     assert manifest.events_consumed[0].subject == "inbox.message"
     assert manifest.secrets == ["API_KEY"]
+
+
+async def test_manifest_carries_required_models() -> None:
+    # A module can declare model slots the operator fills on the Modules page (#128).
+    module = EpicurusModule(
+        "embedder",
+        required_models=[ModelSlot(key="embedding", role="embedding", label="Embedding model")],
+    )
+    manifest = await module.manifest()
+    assert [s.key for s in manifest.required_models] == ["embedding"]
+    assert manifest.required_models[0].role == "embedding"
+
+
+async def test_manifest_required_models_defaults_empty() -> None:
+    assert (await _greeter().manifest()).required_models == []
 
 
 async def test_tool_is_callable() -> None:

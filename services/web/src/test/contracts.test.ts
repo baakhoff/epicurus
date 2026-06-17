@@ -51,6 +51,23 @@ describe("contracts", () => {
     expect(snapshot.manifest.pages).toEqual([]);
   });
 
+  it("defaults a module snapshot to enabled with no tags, and round-trips both (#126)", () => {
+    const dflt = ModuleSnapshot.parse({
+      manifest: { name: "m", version: "1.0" },
+      status: { healthy: true },
+    });
+    expect(dflt.enabled).toBe(true);
+    expect(dflt.manifest.tags).toEqual([]);
+
+    const set = ModuleSnapshot.parse({
+      manifest: { name: "m", version: "1.0", tags: ["calendar", "google"] },
+      status: { healthy: true },
+      enabled: false,
+    });
+    expect(set.enabled).toBe(false);
+    expect(set.manifest.tags).toEqual(["calendar", "google"]);
+  });
+
   it("parses a module page spec with archetype defaults (ADR-0018)", () => {
     const page = PageSpec.parse({ id: "files", title: "Files", archetype: "browser" });
     expect(page.icon).toBe("puzzle");

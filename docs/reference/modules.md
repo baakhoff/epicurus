@@ -70,6 +70,7 @@ app = module.http_app()
 | `version` | `str` | — | module version |
 | `description` | `str` | `""` | one-line description |
 | `contract_version` | `str` | `CONTRACT_VERSION` | contract version targeted |
+| `tags` | `list[str]` | `[]` | free-text tags for browsing/filtering modules in the shell (#126); the core never routes on them |
 | `image` | `str \| None` | `None` | container image (for distribution) |
 | `tools` | `list[ToolSpec]` | `[]` | exposed tools |
 | `events_emitted` | `list[EventSpec]` | `[]` | published subjects |
@@ -287,3 +288,47 @@ upload. See [storage](../services/storage.md#the-chat-upload-sink-adr-0025).
 
 ### `CONTRACT_VERSION`
 `"0.1"` — the module↔core contract version this release targets.
+
+## Enabling, disabling & browsing modules (#126)
+
+The operator can turn a module **on or off** from the shell's Modules screen and find
+modules by name, description, or tag. The flag is a **core-side registry preference**
+(persisted per tenant in Postgres — the `module_prefs` table), so the module's
+**container keeps running**: disabling never touches Docker. (Removing the container
+is a separate, privileged action — see issue #127.)
+
+- **Disabling hides the module** from the agent's tools (it is dropped from MCP tool
+  discovery), the **left-nav pages**, and the chat attach menu — while it stays listed on
+  the Modules screen with a re-enable toggle. Re-enabling restores everything.
+- **Endpoint** — `POST /platform/v1/modules/{name}/enabled` with body `{ "enabled": bool }`
+  persists the choice (404 for an unknown module).
+- **The module list** (`GET /platform/v1/modules`) carries the flag on each snapshot —
+  `{manifest, status, enabled}` — and **includes disabled modules** so the shell can show
+  the toggle. The shell omits a disabled module's pages from the nav and its entities from
+  the attach menu.
+- **Invoking a disabled module's tool** through the core returns **403**; the agent never
+  sees the tool in the first place.
+- **Tags** — `ModuleManifest.tags` feed the shell's search alongside the name and
+  description.
+
+## Removing a module — confirmed container delete (#127, ADR-0028)
+
+Beyond disabling, the operator can **delete** a module's container from the Modules screen
+("Danger zone → Remove module"), gated by a confirm dialog. This is a **privileged** action:
+the core stops and removes the container through the Docker socket.
+
+- **Endpoint** — `DELETE /platform/v1/modules/{name}` stops + removes the module's container
+  and **tombstones** the module (a `removed` flag on `module_prefs`). **404** unknown module ·
+  **403** protected service · **503** when the core has no Docker access.
+- **Tightly scoped (security).** The core reaches Docker only through one `DockerController`,
+  which removes **only a configured module's own container** — matched by both its
+  `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
+  stack is never touched — and **never** core-app, web, or a data-plane / infra service (a
+  hard denylist on top of the configured-module guard). The read-write socket is mounted on
+  `core-app` only; drop that mount to disable removal entirely (the endpoint then 503s).
+- **It stays gone.** A removed module is dropped from the module list, agent tool discovery,
+  and the nav. Because a `compose up` / Watchtower pull could recreate the container, the core
+  **re-removes** any tombstoned module whose container reappears, on every startup. Bringing a
+  module back means redeploying it and clearing its tombstone.
+
+See ADR-0028 for the full rationale and security posture.

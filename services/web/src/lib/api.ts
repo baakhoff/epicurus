@@ -112,6 +112,19 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(values),
     }),
+  // Enable or disable a module (#126): hides its tools/pages/UI; the container keeps running.
+  setModuleEnabled: (name: string, enabled: boolean) =>
+    request(z.object({ status: z.string() }), `/platform/v1/modules/${encodeURIComponent(name)}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  // Confirmed module removal (#127): stop + remove the module's container, then tombstone it.
+  removeModule: (name: string) =>
+    request(
+      z.object({ removed: z.string(), containers: z.number() }),
+      `/platform/v1/modules/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
   invokeModuleTool: (name: string, tool: string, args: Record<string, unknown>) =>
     request(
       z.object({ result: z.string() }),

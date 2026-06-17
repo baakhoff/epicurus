@@ -166,6 +166,7 @@ export const ModuleManifest = z.object({
   version: z.string(),
   description: z.string().default(""),
   contract_version: z.string().default("0.1"),
+  tags: z.array(z.string()).default([]),
   tools: z.array(ToolSpec).default([]),
   events_emitted: z.array(EventSpec).default([]),
   events_consumed: z.array(EventSpec).default([]),
@@ -184,6 +185,9 @@ export const ModuleSnapshot = z.object({
     healthy: z.boolean(),
     version: z.string().nullish(),
   }),
+  // The operator's enable/disable choice (#126). A disabled module is hidden from the
+  // agent and the left-nav but still shown on the Modules screen with a re-enable toggle.
+  enabled: z.boolean().default(true),
 });
 export type ModuleSnapshot = z.infer<typeof ModuleSnapshot>;
 

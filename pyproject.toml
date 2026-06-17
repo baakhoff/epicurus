@@ -59,7 +59,7 @@ packages = ["epicurus_core", "epicurus_core_app", "epicurus_echo", "epicurus_sto
 
 # Third-party packages without a py.typed marker; don't fail strict on them.
 [[tool.mypy.overrides]]
-module = ["prometheus_client.*", "nats.*", "hvac.*", "litellm.*", "qdrant_client.*"]
+module = ["prometheus_client.*", "nats.*", "hvac.*", "litellm.*", "qdrant_client.*", "docker.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

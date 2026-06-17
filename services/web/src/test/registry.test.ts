@@ -7,6 +7,7 @@ function snapshot(
   name: string,
   healthy: boolean,
   pages: Array<{ id: string; title: string; nav_order?: number; archetype?: string }>,
+  enabled = true,
 ) {
   return ModuleSnapshot.parse({
     manifest: {
@@ -15,6 +16,7 @@ function snapshot(
       pages: pages.map((p) => ({ archetype: "browser", ...p })),
     },
     status: { healthy },
+    enabled,
   });
 }
 
@@ -31,6 +33,11 @@ describe("modulePageNavs", () => {
 
   it("omits pages from unreachable modules (they cannot serve data)", () => {
     const navs = modulePageNavs([snapshot("down", false, [{ id: "p", title: "Hidden" }])]);
+    expect(navs).toEqual([]);
+  });
+
+  it("omits pages from a disabled module — hidden from the nav (#126)", () => {
+    const navs = modulePageNavs([snapshot("off", true, [{ id: "p", title: "Hidden" }], false)]);
     expect(navs).toEqual([]);
   });
 

@@ -28,6 +28,7 @@ from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -35,6 +36,7 @@ from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
+from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import ModuleRegistry, create_modules_router
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
@@ -90,13 +92,21 @@ def create_app() -> FastAPI:
         if settings.attachment_sink_url.strip()
         else None
     )
+    module_prefs = ModulePrefsStore(engine)
     mcp_host = McpHost(settings.module_mcp_urls)
     registry = ModuleRegistry(
         settings.module_base_urls,
         mcp=mcp_host,
         secrets=secrets,
         tenant=settings.default_tenant_id,
+        prefs=module_prefs,
+        # Privileged, tightly-scoped Docker access for confirmed module removal (#127,
+        # ADR-0028); None when the socket isn't mounted, in which case removal returns 503.
+        docker=DockerController.from_env(),
     )
+    # Agent tool discovery scans only enabled modules (#126); wired after the registry
+    # exists (the host needs the registry and the registry needs the host).
+    mcp_host.set_url_provider(registry.enabled_mcp_urls)
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -118,6 +128,14 @@ def create_app() -> FastAPI:
             await prefs.init()
         except Exception as exc:
             log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
+        try:
+            await module_prefs.init()
+        except Exception as exc:
+            log.error("module prefs init failed; enable/disable unavailable", error=str(exc))
+        try:
+            await registry.reconcile_tombstones()
+        except Exception as exc:  # best-effort — a Docker hiccup must never block startup
+            log.error("tombstone reconcile failed", error=str(exc))
         try:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades

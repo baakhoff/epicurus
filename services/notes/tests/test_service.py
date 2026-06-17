@@ -12,7 +12,7 @@ from epicurus_notes.service import SAVED_SUBJECT, build_module
 async def test_manifest_identity() -> None:
     manifest = await build_module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.1.0"
+    assert manifest.version == "0.2.0"
 
 
 async def test_exposes_no_tools() -> None:

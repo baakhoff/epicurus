@@ -14,6 +14,15 @@ images to GHCR.
 
 ### Added
 
+- **Modules page: enable/disable + browse by tags** — the operator can turn any module
+  **on or off** from the Modules screen, and search modules by name, description, or tag.
+  Disabling drops the module from the agent's tools, the left-nav pages, and the chat attach
+  menu while its **container keeps running** — re-enabling restores everything. The flag is a
+  core-side registry preference (Postgres `module_prefs`, tenant-scoped), toggled via
+  `POST /platform/v1/modules/{name}/enabled`; the module list now carries each module's
+  `enabled` flag, and `ModuleManifest` gains free-text `tags`. Container *removal* stays a
+  separate, privileged action (#127) (closes #126) (`epicurus-core` → 0.4.0, `core-app` →
+  0.6.0, `web` → 0.8.0).
 - **Tasks — agent-referenced tasks get a hover-card** — `tasks_list` now returns its open
   tasks as **entity-reference chips** (ADR-0019): hover a chip for the task's **core hover-card**
   (due date, open/completed status) and click to open it in the right-panel `entity-detail` view.

@@ -34,6 +34,22 @@ class _FakeSecrets:
         self.stored[path] = data
 
 
+class _FakeModulePrefs:
+    """In-memory stand-in for ModulePrefsStore (no DB) — a module defaults to enabled."""
+
+    def __init__(self) -> None:
+        self.flags: dict[tuple[str, str], bool] = {}
+
+    async def enabled_map(self, tenant: str) -> dict[str, bool]:
+        return {m: e for (t, m), e in self.flags.items() if t == tenant}
+
+    async def is_enabled(self, tenant: str, module: str) -> bool:
+        return self.flags.get((tenant, module), True)
+
+    async def set_enabled(self, tenant: str, module: str, enabled: bool) -> None:
+        self.flags[(tenant, module)] = enabled
+
+
 def _echo_manifest() -> ModuleManifest:
     return ModuleManifest(
         name="echo",
@@ -98,7 +114,12 @@ def _registry(
 ) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
     mcp, secrets = _FakeMcp(), _FakeSecrets()
     registry = _StubRegistry(  # type: ignore[arg-type]
-        healthy=healthy, manifest=manifest, mcp=mcp, secrets=secrets, tenant="local"
+        healthy=healthy,
+        manifest=manifest,
+        mcp=mcp,
+        secrets=secrets,
+        tenant="local",
+        prefs=_FakeModulePrefs(),
     )
     return registry, mcp, secrets
 
@@ -403,4 +424,58 @@ async def test_resolve_attachment_404_when_not_attachable() -> None:
     registry, _, _ = _registry()
     with pytest.raises(HTTPException) as err:
         await registry.resolve_attachment("echo", "n1")
+    assert err.value.status_code == 404
+
+
+# ── Enable / disable (#126) ───────────────────────────────────────────────────
+
+
+async def test_snapshot_defaults_to_enabled() -> None:
+    registry, _, _ = _registry()
+    snaps = await registry.snapshot()
+    assert snaps[0].enabled is True
+
+
+async def test_snapshot_reflects_disabled_flag() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    snaps = await registry.snapshot()
+    assert snaps[0].enabled is False
+
+
+async def test_enabled_mcp_urls_includes_enabled_module() -> None:
+    registry, _, _ = _registry()
+    assert await registry.enabled_mcp_urls() == ["http://echo:8080/mcp"]
+
+
+async def test_enabled_mcp_urls_excludes_disabled_module() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_enabled_mcp_urls_excludes_unhealthy_module() -> None:
+    registry, _, _ = _registry(healthy=False)
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_invoke_disabled_module_is_403() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    with pytest.raises(HTTPException) as err:
+        await registry.invoke("echo", "echo", {"message": "hi"})
+    assert err.value.status_code == 403
+
+
+async def test_re_enable_restores_invoke() -> None:
+    registry, _, _ = _registry()
+    await registry.set_enabled("echo", False)
+    await registry.set_enabled("echo", True)
+    assert await registry.invoke("echo", "echo", {}) == "ran"
+
+
+async def test_set_enabled_unknown_module_is_404() -> None:
+    registry, _, _ = _registry()
+    with pytest.raises(HTTPException) as err:
+        await registry.set_enabled("ghost", False)
     assert err.value.status_code == 404

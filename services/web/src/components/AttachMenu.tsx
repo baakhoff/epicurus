@@ -126,7 +126,7 @@ function ModuleSection({
   const [moduleName, setModuleName] = useState<string | null>(null);
   const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, enabled });
   const attachable = (modules.data ?? []).filter(
-    (m) => m.status.healthy && m.manifest.attachable,
+    (m) => m.status.healthy && m.enabled && m.manifest.attachable,
   );
   const items = useQuery({
     queryKey: ["module-attachments", moduleName],

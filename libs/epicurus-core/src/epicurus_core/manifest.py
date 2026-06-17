@@ -136,6 +136,9 @@ class ModuleManifest(BaseModel):
     version: str
     description: str = ""
     contract_version: str = CONTRACT_VERSION
+    # Free-text tags for browsing/filtering modules in the shell (by name, description,
+    # or tag — #126). Purely descriptive; the core never routes on them.
+    tags: list[str] = Field(default_factory=list)
     # Container image — populated for distribution / the installer.
     image: str | None = None
     tools: list[ToolSpec] = Field(default_factory=list)

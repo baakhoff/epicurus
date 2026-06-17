@@ -112,6 +112,12 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(values),
     }),
+  // Enable or disable a module (#126): hides its tools/pages/UI; the container keeps running.
+  setModuleEnabled: (name: string, enabled: boolean) =>
+    request(z.object({ status: z.string() }), `/platform/v1/modules/${encodeURIComponent(name)}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   invokeModuleTool: (name: string, tool: string, args: Record<string, unknown>) =>
     request(
       z.object({ result: z.string() }),

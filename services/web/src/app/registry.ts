@@ -41,13 +41,14 @@ export function modulePagePath(moduleName: string, pageId: string): string {
 
 /**
  * Derive left-nav entries from modules' declared pages (ADR-0018). Only
- * **reachable** modules contribute — a page whose module is down can't serve its
- * data. Sorted by each page's nav_order, then label, for a stable order. When the
- * registry enable/disable flag lands (#126) it becomes an added filter here.
+ * **reachable, enabled** modules contribute — a page whose module is down can't
+ * serve its data, and a disabled module (#126) is hidden from the nav while its
+ * container keeps running. Sorted by each page's nav_order, then label, for a
+ * stable order.
  */
 export function modulePageNavs(modules: ModuleSnapshot[]): ModulePageNav[] {
   return modules
-    .filter((m) => m.status.healthy)
+    .filter((m) => m.status.healthy && m.enabled)
     .flatMap((m) =>
       m.manifest.pages.map((page) => ({
         path: modulePagePath(m.manifest.name, page.id),

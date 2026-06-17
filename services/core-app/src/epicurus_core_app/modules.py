@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import ModuleManifest, SecretError, SecretStore, get_logger
 from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.module_prefs import ModulePrefsStore
 
 log = get_logger("epicurus_core_app.modules")
 
@@ -33,10 +34,20 @@ class ModuleStatus(BaseModel):
 
 
 class ModuleSnapshot(BaseModel):
-    """One installed module: its manifest plus current status."""
+    """One installed module: its manifest, current status, and operator enable flag."""
 
     manifest: ModuleManifest
     status: ModuleStatus
+    # The operator's enable/disable choice (#126). A disabled module keeps running but is
+    # hidden from the agent's tools, the left-nav, and the chat surfaces; it still appears
+    # here so the shell's Modules screen can show it with a re-enable toggle.
+    enabled: bool = True
+
+
+class EnabledUpdate(BaseModel):
+    """The body of an enable/disable toggle (#126)."""
+
+    enabled: bool
 
 
 class ToolInvocation(BaseModel):
@@ -57,16 +68,32 @@ class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
     def __init__(
-        self, base_urls: list[str], *, mcp: McpHost, secrets: SecretStore, tenant: str
+        self,
+        base_urls: list[str],
+        *,
+        mcp: McpHost,
+        secrets: SecretStore,
+        tenant: str,
+        prefs: ModulePrefsStore,
     ) -> None:
         self._bases = list(base_urls)
         self._mcp = mcp
         self._secrets = secrets
         self._tenant = tenant
+        self._prefs = prefs
 
     async def snapshot(self) -> list[ModuleSnapshot]:
-        """Every configured module — reachable ones with their manifest, dead ones flagged."""
-        return list(await asyncio.gather(*(self._probe(base) for base in self._bases)))
+        """Every configured module — reachable ones with their manifest, dead ones flagged.
+
+        Each snapshot carries the operator's ``enabled`` flag (#126); a module with no
+        stored preference defaults to enabled. The list includes disabled modules so the
+        shell can offer a re-enable toggle — gating happens at the agent / nav surfaces.
+        """
+        probed = await asyncio.gather(*(self._probe(base) for base in self._bases))
+        enabled = await self._prefs.enabled_map(self._tenant)
+        for snap in probed:
+            snap.enabled = enabled.get(snap.manifest.name, True)
+        return list(probed)
 
     async def _probe(self, base: str) -> ModuleSnapshot:
         try:
@@ -95,9 +122,35 @@ class ModuleRegistry:
                 return base, snapshot.manifest
         raise HTTPException(status_code=404, detail=f"no reachable module named {name!r}")
 
+    async def enabled_mcp_urls(self) -> list[str]:
+        """The ``/mcp`` URLs of healthy, **enabled** modules — the agent's tool surface.
+
+        Backs ``McpHost.discover`` so a disabled module's tools are never offered to the
+        model (#126). Order follows ``self._bases`` (``snapshot`` preserves it).
+        """
+        snaps = await self.snapshot()
+        return [
+            f"{base}/mcp"
+            for snap, base in zip(snaps, self._bases, strict=True)
+            if snap.status.healthy and snap.enabled
+        ]
+
+    async def set_enabled(self, name: str, enabled: bool) -> None:
+        """Enable or disable a module, persisting the operator's choice (#126).
+
+        The container is untouched — only the core-side flag changes. 404 for a name that
+        is not a configured module (reachable or not).
+        """
+        names = {snap.manifest.name for snap in await self.snapshot()}
+        if name not in names:
+            raise HTTPException(status_code=404, detail=f"no module named {name!r}")
+        await self._prefs.set_enabled(self._tenant, name, enabled)
+
     async def invoke(self, name: str, tool: str, arguments: dict[str, Any]) -> str:
         """Run a module tool (a manifest-declared UI action) through the MCP host."""
         base, manifest = await self._resolve(name)
+        if not await self._prefs.is_enabled(self._tenant, name):
+            raise HTTPException(status_code=403, detail=f"module {name!r} is disabled")
         if tool not in {t.name for t in manifest.tools}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no tool {tool!r}")
         return await self._mcp.call(tool, arguments, f"{base}/mcp")
@@ -288,6 +341,12 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.put("/{name}/config")
     async def set_config(name: str, values: dict[str, Any]) -> dict[str, str]:
         await registry.set_config(name, values)
+        return {"status": "ok"}
+
+    @router.post("/{name}/enabled")
+    async def set_module_enabled(name: str, body: EnabledUpdate) -> dict[str, str]:
+        """Enable or disable a module (#126) — hides its tools/pages/UI; container stays up."""
+        await registry.set_enabled(name, body.enabled)
         return {"status": "ok"}
 
     @router.post("/{name}/tools/{tool}", response_model=ToolResult)

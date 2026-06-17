@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from epicurus_core import route_paths
+
 os.environ.setdefault("SEARXNG_URL", "http://localhost:8080")
 os.environ.setdefault("PLATFORM_URL", "http://localhost:8080")
 
@@ -12,7 +14,7 @@ def test_app_exposes_ops_mcp_manifest_and_status_routes() -> None:
     from epicurus_websearch.app import create_app
 
     app = create_app()
-    paths = [getattr(r, "path", "") for r in app.routes]
+    paths = route_paths(app)
     assert "/health" in paths
     assert "/metrics" in paths
     assert "/manifest" in paths

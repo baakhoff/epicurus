@@ -41,6 +41,7 @@ from epicurus_core.manifest import (
 from epicurus_core.module import EpicurusModule, add_manifest_route
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
 from epicurus_core.platform_client import PlatformClient
+from epicurus_core.routing import route_paths
 from epicurus_core.secret_store import SecretError, SecretStore
 from epicurus_core.tenancy import (
     TenantError,
@@ -101,6 +102,7 @@ __all__ = [
     "get_logger",
     "is_valid_tenant_id",
     "reset_current_tenant",
+    "route_paths",
     "scope_bucket",
     "scope_collection",
     "scope_secret_path",

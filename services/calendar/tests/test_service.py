@@ -467,10 +467,10 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
     assert manifest.ui.actions == []
 
 
-async def test_manifest_version_is_0_5_0(local_provider: LocalCalendarProvider) -> None:
+async def test_manifest_version_is_0_5_1(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.5.0"
+    assert manifest.version == "0.5.1"
 
 
 async def test_manifest_declares_collections_and_drops_provider_dropdown(
@@ -602,6 +602,31 @@ async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:
         tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
     )
     assert [e.title for e in events] == ["Survives"]
+
+
+async def test_router_skips_a_failing_source_on_overlay() -> None:
+    # One enabled calendar erroring (e.g. Google just disconnected) must not blank the
+    # whole overlay — the other sources still render (#209).
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    await local.create_event(tenant_id="t1", title="Local ok", start=_dt(9), end=_dt(10))
+
+    class _FailingGoogle(_MockGoogleProvider):
+        async def list_events(
+            self, *, tenant_id: str, time_range: DateTimeRange, calendar_id: str | None = None
+        ) -> list[Event]:
+            raise RuntimeError("google down")
+
+    prefs = CollectionPrefs(enabled=[CollectionRef(account="local"), _google_ref("primary")])
+    router = CollectionRouter(
+        local=local, external={"google": _FailingGoogle()}, prefs=_StaticPrefs(prefs)
+    )
+    events = await router.list_events(
+        tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
+    )
+    assert [e.title for e in events] == ["Local ok"]
 
 
 # ── calendar_page (the `calendar` archetype data, ADR-0018) ───────────────────

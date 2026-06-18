@@ -103,6 +103,12 @@ Caller-supplied path segments the registry interpolates into a module request �
 `ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a
 supplied id cannot redirect the outbound request on the module host (#175).
 
+Every module-proxy GET (status, docs, pages, resolve, attachments, accounts) maps an
+upstream failure to a **controlled** status, not an unhandled exception (#209): a module's
+client error (4xx) passes through as-is (e.g. a missing entity stays a `404`), while a 5xx,
+a timeout, or a connection failure becomes a `502` carrying the operation — so a slow or
+erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
+
 ### Events (NATS)
 
 Emits **`<tenant>.llm.usage`** after every inference call — model, token counts, latency.

@@ -153,3 +153,29 @@ class TestGetMessage:
             resp = local_client.get("/messages/msg1")
             assert resp.status_code == 200
             assert resp.json()["body"] == ""
+
+
+class TestStatus:
+    """/status reports connection from a fast token-presence check, not a live call (#209)."""
+
+    def _status_client(self, *, available: bool) -> TestClient:
+        provider = AsyncMock(spec=MailProvider)
+        provider.is_available = AsyncMock(return_value=available)
+        with (
+            patch("epicurus_mail.app.GmailProvider", return_value=provider),
+            patch("epicurus_mail.app.EventBus.from_settings", return_value=AsyncMock()),
+        ):
+            from epicurus_mail.app import create_app
+
+            app = create_app()
+        return TestClient(app, raise_server_exceptions=True)
+
+    def test_reports_connected(self) -> None:
+        resp = self._status_client(available=True).get("/status")
+        assert resp.status_code == 200
+        assert resp.json() == {"gmail_connected": True}
+
+    def test_reports_disconnected(self) -> None:
+        resp = self._status_client(available=False).get("/status")
+        assert resp.status_code == 200
+        assert resp.json() == {"gmail_connected": False}

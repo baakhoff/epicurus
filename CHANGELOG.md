@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Connecting Google auto-connects the modules that use it; settings no longer 502** —
+  connecting a Google account now **auto-enables** the calendar/task-list collections of
+  every module that uses it (and disconnecting clears them), so the operator connects once
+  and calendar/tasks work with no per-collection toggling (builds on ADR-0030). The mail
+  card's connection status is now accurate and fast — it reports whether a Google token is
+  present (`is_available`) rather than making a live Gmail API call that could exceed the
+  core's status-proxy timeout. And the core's module proxies (status, docs, pages, resolve,
+  attachments, accounts) now map an upstream failure to a controlled response — a module's
+  4xx passes through, a 5xx/timeout/connection failure becomes a clean `502` with a reason —
+  instead of an unhandled exception surfacing as an opaque **Bad Gateway** when the shell
+  polls a slow/erroring module. The calendar overlay also skips a single failing calendar
+  rather than blanking the page (closes #209) (`core-app` → 0.17.0, `mail` → 0.5.0,
+  `calendar` → 0.5.1).
 - **Account/collection model: `local` is the silent default; connect Google and toggle each
   calendar/list** — calendar and tasks drop the binary `local`/`google` **provider dropdown**
   (and the `CALENDAR_PROVIDER` / `TASKS_PROVIDER` env vars). `local` is now the zero-config

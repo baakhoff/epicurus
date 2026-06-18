@@ -6,6 +6,7 @@ import base64
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from epicurus_core import PlatformClient
@@ -145,6 +146,21 @@ async def test_health_check_returns_false_when_not_connected() -> None:
     platform.get_oauth_token = AsyncMock(side_effect=Exception("not connected"))
     provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
     assert await provider.health_check() is False
+
+
+async def test_is_available_true_when_token_present() -> None:
+    # A fast token-presence check (#209) — no live Gmail call.
+    platform = _make_platform("tok")
+    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    assert await provider.is_available() is True
+
+
+async def test_is_available_false_on_http_error() -> None:
+    # Not connected (4xx) or the core unreachable both read as "not available".
+    platform = MagicMock(spec=PlatformClient)
+    platform.get_oauth_token = AsyncMock(side_effect=httpx.ConnectError("core down"))
+    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    assert await provider.is_available() is False
 
 
 async def test_get_token_uses_platform_client() -> None:

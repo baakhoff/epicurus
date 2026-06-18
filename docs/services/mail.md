@@ -59,7 +59,7 @@ proxies them to the web shell (the shell never calls the module directly).
 | --- | --- | --- | --- |
 | `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date, and unread status (a `Status: Unread` row, only when unread). No `href` — the chip's click opens the reader. |
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body. |
-| `GET` | `/status` | `{"gmail_connected": bool}` | Liveness; proxied by the core. |
+| `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
 
 The core exposes these via:
 

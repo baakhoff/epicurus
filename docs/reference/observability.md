@@ -45,7 +45,7 @@ add_ops_routes(app, service_name="greeter")
 
 ---
 
-## Live log stream (ADR-0030)
+## Live log stream (ADR-0031)
 
 `core-app` exposes a real-time structured log stream via SSE at:
 

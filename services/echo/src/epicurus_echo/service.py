@@ -28,7 +28,7 @@ def build_module() -> EpicurusModule:
     """Build the echo module and register its tool and declared events."""
     module = EpicurusModule(
         "echo",
-        version="0.2.0",
+        version="0.2.2",
         description="Echoes messages — proves the MCP tool + NATS event contract.",
         config=["greeting"],
         ui=UiSection(
@@ -66,7 +66,7 @@ def build_module() -> EpicurusModule:
         # hover-card (ADR-0019) — the reference for the resolver contract.
         resolver=True,
         # Contribute module docs for auto-indexing by the knowledge module (#215).
-        docs_url="/docs",
+        docs_url="/module-docs",
     )
 
     @module.tool()

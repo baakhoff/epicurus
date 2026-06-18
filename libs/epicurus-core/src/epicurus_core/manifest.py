@@ -181,8 +181,9 @@ class ModuleManifest(BaseModel):
     # model with ``PlatformClient.get_module_model`` and passes it to embed/chat; an unset
     # slot falls back to the core default.
     required_models: list[ModelSlot] = Field(default_factory=list)
-    # A relative path on the module (e.g. ``/docs``) that returns documentation pages for the
-    # knowledge module to auto-index (#215). Response shape:
+    # A relative path on the module (e.g. ``/module-docs``) that returns documentation pages for
+    # the knowledge module to auto-index (#215). Response shape:
     # ``{"documents": [{"path": "usage.md", "content": "..."}]}``. The core proxies this at
-    # ``GET /platform/v1/modules/{name}/docs``. Omit when the module has no docs to contribute.
+    # ``GET /platform/v1/modules/{name}/docs``. Do NOT use ``/docs`` — it is FastAPI's built-in
+    # Swagger UI and would shadow the route. Omit when the module has no docs to contribute.
     docs_url: str | None = None

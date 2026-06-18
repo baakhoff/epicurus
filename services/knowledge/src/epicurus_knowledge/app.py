@@ -141,9 +141,13 @@ def create_app() -> FastAPI:
         )
     )
 
-    @app.get("/docs")
-    async def get_docs() -> dict[str, Any]:
-        """Return this module's documentation pages for auto-indexing (#215)."""
+    @app.get("/module-docs")
+    async def get_module_docs() -> dict[str, Any]:
+        """Return this module's documentation pages for auto-indexing (#215).
+
+        Served at ``/module-docs``, not ``/docs`` — the latter is FastAPI's built-in
+        Swagger UI, which would shadow this route and return HTML.
+        """
         return module_docs()
 
     @app.get("/status")

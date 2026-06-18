@@ -79,9 +79,13 @@ def create_app() -> FastAPI:
         """Resolve an entity reference to a hover-card (ADR-0019); the core proxies this."""
         return echo_hover_card(kind, ref_id)
 
-    @app.get("/docs")
-    async def docs() -> dict[str, Any]:
-        """Return this module's documentation pages for auto-indexing (#215)."""
+    @app.get("/module-docs")
+    async def module_docs() -> dict[str, Any]:
+        """Return this module's documentation pages for auto-indexing (#215).
+
+        Served at ``/module-docs``, not ``/docs`` — the latter is FastAPI's built-in
+        Swagger UI, which would shadow this route and return HTML.
+        """
         return echo_docs()
 
     app.mount("/mcp", mcp_app)

@@ -36,7 +36,7 @@ MODULE_NAME = "knowledge"
 
 INDEX_COMPLETE_SUBJECT = "knowledge.index.completed"
 
-# Usage documentation served at GET /docs (#215).
+# Usage documentation served at GET /module-docs (#215).
 _DOCS: list[dict[str, Any]] = [
     {
         "path": "usage.md",
@@ -127,7 +127,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.0",
+        version="0.8.1",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
@@ -184,7 +184,7 @@ def build_module(
             )
         ],
         # Contribute usage docs for the knowledge module itself (#215).
-        docs_url="/docs",
+        docs_url="/module-docs",
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")

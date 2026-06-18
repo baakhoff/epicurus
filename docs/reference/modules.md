@@ -83,7 +83,7 @@ app = module.http_app()
 | `resolver` | `bool` | `False` | module serves `GET /resolve/{kind}/{ref_id}` for hover-cards (ADR-0019) |
 | `attachable` | `bool` | `False` | module is a chat-attachment source: serves a picker + resolve (ADR-0019) |
 | `required_models` | `list[ModelSlot]` | `[]` | model "slots" the operator fills in the shell (#128); the module fetches its choice and passes it to embed/chat |
-| `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
+| `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/module-docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -384,11 +384,11 @@ A module can contribute usage documentation that the knowledge service auto-inde
 shared `<tenant>__docs` Qdrant collection, alongside the platform's own bundled docs. This
 means the agent can retrieve a module's how-to content with no operator action.
 
-**Declare `docs_url`** in the manifest (e.g. `docs_url="/docs"`). Serve a JSON response at
-that path:
+**Declare `docs_url`** in the manifest (e.g. `docs_url="/module-docs"` — not `/docs`, which is
+FastAPI's built-in Swagger UI). Serve a JSON response at that path:
 
 ```jsonc
-// GET /docs
+// GET /module-docs
 {
   "documents": [
     { "path": "usage.md",  "content": "# Using the Calendar\n…" },

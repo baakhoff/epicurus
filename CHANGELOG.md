@@ -109,6 +109,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Module docs are actually indexed (moved off the Swagger-reserved `/docs`)** — modules now
+  serve their contributed docs at **`/module-docs`**, not `/docs`. `/docs` is FastAPI's built-in
+  Swagger UI, which shadowed the route, so the core's docs proxy fetched HTML and the knowledge
+  indexer recorded **0** module docs (#215 was effectively a no-op at runtime). echo and
+  knowledge now declare `docs_url="/module-docs"` and serve it there; the manifest field doc
+  warns against `/docs`. Also realigns echo's manifest version, which had drifted behind its
+  package version (`echo` → 0.2.2, `knowledge` → 0.8.1).
 - **Existing deployments: `llm_prefs` gains its new columns in place** — `LlmPrefsStore.init()`
   now adds the `global_default` / `embed_default` columns to a pre-existing table (the same
   `create_all` + `_ensure_columns` pattern as `module_prefs` / the memory store). Without it, a

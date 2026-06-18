@@ -38,7 +38,7 @@ async def test_manifest_declares_editor_page() -> None:
     assert [p.id for p in manifest.pages] == ["vault"]
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
-    assert manifest.version == "0.8.0"
+    assert manifest.version == "0.8.1"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -48,7 +48,7 @@ async def test_manifest_declares_attachable_and_resolver() -> None:
     manifest = await module.manifest()
     assert manifest.attachable is True  # vault docs can be attached to a chat (#137)
     assert manifest.resolver is True  # cited docs resolve to a hover-card (#143)
-    assert manifest.docs_url == "/docs"  # contributes its own usage docs (#215)
+    assert manifest.docs_url == "/module-docs"  # contributes its own usage docs (#215)
 
 
 def _indexer_stub() -> object:

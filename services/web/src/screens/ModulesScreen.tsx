@@ -265,6 +265,7 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
           checked={enabled}
           onChange={(next) => toggleEnabled.mutate(next)}
           label={`${enabled ? "Disable" : "Enable"} ${manifest.name}`}
+          disabled={toggleEnabled.isPending}
         />
         <Dot tone={status.healthy ? "ok" : "danger"} />
         <button

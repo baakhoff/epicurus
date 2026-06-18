@@ -221,6 +221,20 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/move`,
       { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
     ),
+  // Approve a staged suggestion on a `review` page — applies + indexes it (#220).
+  approveSuggestion: (name: string, pageId: string, suggestionId: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/approve`,
+      { method: "POST" },
+    ),
+  // Reject a staged suggestion on a `review` page — discards it (#220).
+  rejectSuggestion: (name: string, pageId: string, suggestionId: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/reject`,
+      { method: "POST" },
+    ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(

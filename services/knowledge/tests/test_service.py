@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock
+
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EpicurusModule
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.refs import SOURCE_DOC, SOURCE_NOTE, decode_ref
 from epicurus_knowledge.service import build_module
+from epicurus_knowledge.suggestions import SuggestionStore
 
 
 def _hit(note_path: str, text: str, score: float, heading: str | None = None) -> SearchHit:
@@ -24,7 +28,11 @@ def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> Epicurus
     docs.search = AsyncMock(return_value=docs_hits)
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
     module_docs.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    return build_module(vault, docs, module_docs)
+    # The search tests never reach the suggestion store; an uninitialised one is fine.
+    suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    return build_module(
+        vault, docs, module_docs, suggestions, tenant="test", vault_path=Path("/vault")
+    )
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]

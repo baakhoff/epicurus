@@ -476,6 +476,41 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def _resolve_review_page(self, name: str, page_id: str) -> str:
+        """The base URL of *name*, asserting it declares a ``review`` page ``page_id`` (#220).
+
+        Only the ``review`` archetype owns the suggestion approve/reject surface — any
+        other page type 404s for it. Raises 404 if the module is unreachable, has no such
+        page, or the page isn't a review queue.
+        """
+        base, manifest = await self._resolve(name)
+        page = next((p for p in manifest.pages if p.id == page_id), None)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        if page.archetype != "review":
+            raise HTTPException(status_code=404, detail=f"page {page_id!r} is not a review page")
+        return base
+
+    async def review_action(
+        self, name: str, page_id: str, suggestion_id: str, action: str
+    ) -> dict[str, Any]:
+        """Proxy an operator's approve/reject of a staged suggestion to the module (#220).
+
+        ``POST /pages/{page_id}/suggestions/{suggestion_id}/{action}`` where *action* is
+        ``approve`` (apply + index) or ``reject`` (discard) — both operator-only; the
+        module never exposes them as agent tools. The timeout is generous because approve
+        triggers a write + embed round-trip back through the core. *action* is supplied by
+        the core's own route handlers (never the caller), so it needs no segment guard.
+        """
+        _safe_segment(page_id, label="page_id")
+        _safe_segment(suggestion_id, label="suggestion_id")
+        base = await self._resolve_review_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=60) as client:
+            resp = await client.post(f"/pages/{page_id}/suggestions/{suggestion_id}/{action}")
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
     async def download(self, name: str, path: str) -> httpx.Response:
         """Proxy a binary file download from a module's ``/download`` endpoint.
 
@@ -660,6 +695,16 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def move_module_item(name: str, page_id: str, body: MoveRequest) -> dict[str, Any]:
         """Move or rename a file or folder within an editor page's store (#216)."""
         return await registry.move_page_item(name, page_id, body.from_path, body.to_path)
+
+    @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/approve")
+    async def approve_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
+        """Approve a staged suggestion: the module applies + indexes it (#220, ADR-0033)."""
+        return await registry.review_action(name, page_id, suggestion_id, "approve")
+
+    @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/reject")
+    async def reject_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
+        """Reject a staged suggestion: the module discards it, vault untouched (#220)."""
+        return await registry.review_action(name, page_id, suggestion_id, "reject")
 
     @router.get("/{name}/download")
     async def download_module_file(name: str, path: str = Query(...)) -> StreamingResponse:

@@ -1,15 +1,19 @@
 """Knowledge module — MCP tool surface.
 
-Registers two tools the agent can call:
+Registers the tools the agent can call:
 
 * ``knowledge_search`` — embed a query and return the top-k matching chunks
   from the indexed vault **and** the bundled platform docs, merged by score.
 * ``knowledge_reindex`` — trigger an incremental re-scan of all sources: the
   operator vault, the bundled platform docs, and each enabled module's docs.
+* ``knowledge_propose_edit`` — stage a create/update/delete of a vault note for
+  operator review (ADR-0033, #220). The agent has **no** direct vault-write tool;
+  every agent-initiated change goes through the review queue and lands only on approval.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from epicurus_core import (
@@ -30,6 +34,12 @@ from epicurus_knowledge.refs import (
     SOURCE_NOTE,
     doc_title,
     encode_ref,
+    safe_relative,
+)
+from epicurus_knowledge.suggestions import (
+    REVIEW_PAGE_ID,
+    SuggestionStore,
+    validate_operation,
 )
 
 MODULE_NAME = "knowledge"
@@ -105,6 +115,21 @@ Incrementally re-index all sources: vault, platform docs, and module docs.
 
 **Returns** ``{"indexed": N, "deleted": M, "unchanged": K}`` summed across
 all sources.
+
+## knowledge_propose_edit
+
+Propose a create/update/delete of a vault note **for operator review** — the
+agent's only way to change the knowledge base. The edit is staged, never applied
+directly; the operator approves or rejects it under **Knowledge → Suggestions**.
+
+**Parameters**
+- ``path`` (string) — vault-relative ``.md`` path, e.g. ``projects/goals.md``.
+- ``content`` (string) — full proposed content (required for create/update).
+- ``operation`` (string) — ``create``, ``update``, or ``delete`` (default ``update``).
+- ``note`` (string, optional) — short rationale shown beside the diff.
+
+**Returns** a confirmation that the suggestion was queued. Nothing is written or
+indexed until the operator approves it (ADR-0033).
 """,
     },
 ]
@@ -114,6 +139,10 @@ def build_module(
     vault_indexer: KnowledgeIndexer,
     docs_indexer: KnowledgeIndexer,
     module_docs_indexer: ModuleDocsIndexer,
+    suggestions: SuggestionStore,
+    *,
+    tenant: str,
+    vault_path: Path,
 ) -> EpicurusModule:
     """Build the knowledge module and register its tools.
 
@@ -124,10 +153,13 @@ def build_module(
             (``<tenant>__docs`` collection).
         module_docs_indexer: Indexer for per-module documentation (#215),
             also written to ``<tenant>__docs`` under ``module/<name>/`` prefixes.
+        suggestions: Store for agent-proposed vault changes awaiting review (#220).
+        tenant: The tenant whose suggestion queue the propose tool writes to.
+        vault_path: Vault root, used to path-confine a proposed edit's target.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.12.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
@@ -139,7 +171,15 @@ def build_module(
                 archetype="editor",
                 icon="book",
                 nav_order=30,
-            )
+            ),
+            # The review queue for agent-proposed changes (ADR-0033, #220).
+            PageSpec(
+                id=REVIEW_PAGE_ID,
+                title="Suggestions",
+                archetype="review",
+                icon="inbox",
+                nav_order=31,
+            ),
         ],
         ui=UiSection(
             icon="book",
@@ -264,6 +304,57 @@ def build_module(
                 vault_result["unchanged"] + docs_result["unchanged"] + module_result["unchanged"]
             ),
         }
+
+    @module.tool()
+    async def knowledge_propose_edit(
+        path: str,
+        content: str = "",
+        operation: str = "update",
+        note: str = "",
+    ) -> str:
+        """Propose a change to a vault note for the operator to review (ADR-0033, #220).
+
+        This does **not** modify the vault. The change is staged as a suggestion the
+        operator approves or rejects in the **Knowledge → Suggestions** page; only on
+        approval is it written and indexed. Use this whenever you want to add, edit, or
+        remove a note — it is your only path to changing the knowledge base.
+
+        Args:
+            path: Vault-relative path of the note, e.g. ``projects/goals.md``. Must end
+                in ``.md`` and stay inside the vault (no ``..`` traversal).
+            content: The note's full proposed content. Required for ``create``/``update``;
+                ignored for ``delete``.
+            operation: ``create`` (new note), ``update`` (replace an existing note's
+                content), or ``delete`` (remove a note). Defaults to ``update``.
+            note: An optional short rationale shown to the operator alongside the diff.
+
+        Returns a confirmation that the suggestion was queued, or an error describing why
+        the path or operation was rejected.
+        """
+        try:
+            op = validate_operation(operation)
+        except ValueError as exc:
+            return tool_envelope(str(exc), [])
+        try:
+            # Path-confine to the vault (``.md`` only, no traversal) before staging it.
+            safe_relative(vault_path, path)
+        except Exception as exc:  # HTTPException(detail=...) from safe_relative
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose change to {path!r}: {detail}", [])
+        proposed = "" if op == "delete" else content
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=path,
+            operation=op,
+            proposed_content=proposed,
+            origin="agent",
+            note=note,
+        )
+        return tool_envelope(
+            f"Proposed {op} of '{path}' (suggestion {suggestion.sid[:8]}). It is pending"
+            " your review in Knowledge → Suggestions; nothing changes until you approve it.",
+            [],
+        )
 
     return module
 

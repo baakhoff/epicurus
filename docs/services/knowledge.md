@@ -150,6 +150,16 @@ backoff**, so a cold `compose up` that starts knowledge before core-app / qdrant
 reachable still ends with a populated index without any manual restart. `GET /status`
 exposes the live `index_phase` and `index_attempts`; counts climb as the run progresses.
 
+**Self-heal after a Qdrant reset (#229).** Qdrant vectors are derived data and may be
+wiped when the server is upgraded across an incompatible on-disk format (the `qdrant-init`
+guard — see [Qdrant](../infrastructure/qdrant.md)). When that happens the Postgres ledgers
+still list every file as indexed, so a plain incremental run would skip everything and
+leave the fresh collection empty. Each indexer therefore **reconciles** before indexing: if
+its collection is missing but its ledger is non-empty, it clears the ledger so the run
+re-embeds from scratch. The runner reconciles **all** sources up front — before any of them
+recreates the shared `<tenant>__docs` collection — so the vault, platform docs, and module
+docs all rebuild after a reset.
+
 **Module docs** use a variant of the same logic (`ModuleDocsIndexer`): each enabled module's
 `docs_url` is fetched via the core proxy, diffed by SHA-256 content hash (HTTP sources have no
 reliable mtime), and upserted into `<tenant>__docs` under a `module/<name>/` path prefix.
@@ -257,7 +267,7 @@ Package `epicurus_knowledge`:
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
 | `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save. |
-| `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`. |
+| `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
 | `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`) + manifest UI + the `editor` page spec. |
 | `pages.py` | The `editor` page surface (#130): document list, read, and save (with vault-path safety + re-index). |
 | `refs.py` | Opaque document refs (base64url `source:path`) + shared `.md` vault path-safety + vault walk. |

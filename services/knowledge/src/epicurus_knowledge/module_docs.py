@@ -182,6 +182,12 @@ class ModuleDocLedger:
             )
             return int(result) if result is not None else 0
 
+    async def clear(self, *, tenant: str) -> None:
+        """Delete every module-doc row for *tenant* (self-heal after a Qdrant reset, #229)."""
+        async with self._session() as session:
+            await session.execute(delete(_StoredModuleDoc).where(_StoredModuleDoc.tenant == tenant))
+            await session.commit()
+
 
 # ── Indexer ───────────────────────────────────────────────────────────────────
 
@@ -261,6 +267,28 @@ class ModuleDocsIndexer:
         ]
         await self._qdrant.upsert(collection_name=self._collection, points=points)
         return len(chunks)
+
+    async def reconcile(self) -> bool:
+        """Self-heal after a Qdrant reset (#229): clear the ledger if ``<tenant>__docs`` is gone.
+
+        Shares the ``<tenant>__docs`` collection with the platform-docs indexer, so this
+        must run **before** that indexer's ``run`` recreates the collection — otherwise the
+        collection would already exist and the unchanged-hash check would skip re-indexing
+        the module docs. The runner reconciles all sources up front to guarantee this order.
+        Returns ``True`` when it cleared the ledger.
+        """
+        if await self._qdrant.collection_exists(self._collection):
+            return False
+        known = await self._ledger.count(tenant=self._tenant)
+        if known == 0:
+            return False
+        _log.warning(
+            "qdrant docs collection missing but module-doc ledger non-empty; clearing to re-index",
+            collection=self._collection,
+            ledger_rows=known,
+        )
+        await self._ledger.clear(tenant=self._tenant)
+        return True
 
     async def run(self) -> dict[str, int]:
         """Sync module docs: index new/changed, purge disabled/removed modules.

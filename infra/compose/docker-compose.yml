@@ -74,16 +74,66 @@ services:
       - nats-data:/data
     networks: [epicurus]
 
+  # Guards the qdrant data volume across server upgrades (#229). qdrant panics on
+  # boot (exit 101) when its on-disk segment format predates the running server —
+  # e.g. the v1.12 → v1.18 jump — and a crash-looping qdrant drops out of Docker
+  # DNS, breaking every dependent. The vectors are *derived* data (knowledge
+  # re-embeds from the vault/docs; memory re-embeds from Postgres), so a reset is
+  # safe. This one-shot compares a version marker in the volume to QDRANT_TAG and
+  # wipes the store on a mismatch, so an upgrade auto-recovers (a background
+  # re-index repopulates) instead of stranding the deploy. See docs/infrastructure/qdrant.md.
+  qdrant-init:
+    image: alpine:3.21
+    restart: "no"
+    environment:
+      QDRANT_TAG: ${QDRANT_TAG:-v1.18.2}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        STORAGE=/qdrant/storage
+        MARKER="$$STORAGE/.epicurus_qdrant_version"
+        mkdir -p "$$STORAGE"
+        if [ -f "$$MARKER" ]; then
+          CURRENT="$$(cat "$$MARKER" 2>/dev/null || echo '')"
+          if [ "$$CURRENT" = "$$QDRANT_TAG" ]; then
+            echo "qdrant-init: on-disk version '$$CURRENT' matches '$$QDRANT_TAG'; no action"
+          else
+            echo "qdrant-init: on-disk version '$$CURRENT' != '$$QDRANT_TAG'; resetting derived vector store"
+            find "$$STORAGE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+            printf '%s' "$$QDRANT_TAG" > "$$MARKER"
+          fi
+        else
+          echo "qdrant-init: no version marker; stamping '$$QDRANT_TAG' (no reset)"
+          printf '%s' "$$QDRANT_TAG" > "$$MARKER"
+        fi
+    networks: [epicurus]
+
   qdrant:
     # Server minor must stay within 1 of the qdrant-client (1.18) or the client
-    # refuses to connect — keep this in lockstep with the pyproject pin.
-    image: qdrant/qdrant:v1.18.2
+    # refuses to connect — keep this in lockstep with the pyproject pin. QDRANT_TAG
+    # is the single source of truth (the init marker uses it too); bump both together.
+    image: qdrant/qdrant:${QDRANT_TAG:-v1.18.2}
     restart: unless-stopped
+    depends_on:
+      qdrant-init:
+        condition: service_completed_successfully
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
       - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-data:/qdrant/storage
+    # The image has no curl/wget, so probe the HTTP listener via /proc: a crash-looping
+    # qdrant never binds 6333 (0x18BD) and so reports unhealthy, surfacing the crash (#229).
+    healthcheck:
+      test: ["CMD-SHELL", "grep -Eq ':18BD [0-9A-F:]+ 0A' /proc/net/tcp /proc/net/tcp6 2>/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     networks: [epicurus]
 
   openbao:

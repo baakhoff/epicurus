@@ -43,6 +43,7 @@
 - [Secrets (OpenBao)](infrastructure/secrets.md)
 - [Startup and recovery](infrastructure/startup-and-recovery.md)
 - [Backup and restore](infrastructure/backup-and-restore.md)
+- [Qdrant (vector store + upgrades)](infrastructure/qdrant.md)
 
 **Developer Guide**
 

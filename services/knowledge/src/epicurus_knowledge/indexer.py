@@ -273,6 +273,33 @@ class KnowledgeIndexer:
         log.debug("re-indexed single note", path=rel, chunks=chunk_count)
         return chunk_count
 
+    async def reconcile(self) -> bool:
+        """Self-heal after a Qdrant reset (#229): drop a stale ledger so ``run`` re-indexes.
+
+        qdrant vectors are derived data and may be wiped on a server upgrade (see the
+        ``qdrant-init`` guard). If our collection is gone but the Postgres ledger still
+        lists files as indexed, the incremental walk would skip every file and leave the
+        collection empty. Detect that drift and clear the ledger so the next ``run``
+        re-embeds from scratch. Returns ``True`` when it cleared the ledger.
+
+        Must run for *all* sources before any ``run`` recreates a collection — the vault
+        and module-docs share ``<tenant>__docs`` with the platform docs, so the runner
+        reconciles every source up front (see :class:`runner.IndexRunner`).
+        """
+        if await self._qdrant.collection_exists(self._collection):
+            return False
+        known = await self._notes.count(tenant=self._tenant)
+        if known == 0:
+            return False
+        log.warning(
+            "qdrant collection missing but ledger non-empty; clearing ledger to re-index",
+            collection=self._collection,
+            ledger_rows=known,
+        )
+        await self._notes.clear(tenant=self._tenant)
+        self._ensured = False
+        return True
+
     async def run(self) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.
 

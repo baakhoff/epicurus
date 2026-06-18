@@ -284,3 +284,37 @@ async def test_indexer_doc_count(ledger: ModuleDocLedger) -> None:
     )
     await indexer.run()
     assert await indexer.doc_count() == 2
+
+
+# ── Qdrant-reset self-heal (#229) ─────────────────────────────────────────────
+
+
+async def test_ledger_clear(ledger: ModuleDocLedger) -> None:
+    await ledger.upsert(
+        tenant=TENANT, module_name="echo", doc_path="a.md", content_hash="h1", chunk_count=1
+    )
+    await ledger.upsert(
+        tenant=TENANT, module_name="other", doc_path="b.md", content_hash="h2", chunk_count=1
+    )
+    await ledger.clear(tenant=TENANT)
+    assert await ledger.count(tenant=TENANT) == 0
+
+
+async def test_reconcile_clears_when_docs_collection_missing(ledger: ModuleDocLedger) -> None:
+    indexer = _make_indexer(ledger, snapshots=[], module_docs={})
+    indexer._qdrant.collection_exists = AsyncMock(return_value=False)  # __docs wiped
+    await ledger.upsert(
+        tenant=TENANT, module_name="echo", doc_path="a.md", content_hash="h1", chunk_count=1
+    )
+    assert await indexer.reconcile() is True
+    assert await ledger.count(tenant=TENANT) == 0
+
+
+async def test_reconcile_noop_when_collection_exists(ledger: ModuleDocLedger) -> None:
+    indexer = _make_indexer(ledger, snapshots=[], module_docs={})
+    indexer._qdrant.collection_exists = AsyncMock(return_value=True)
+    await ledger.upsert(
+        tenant=TENANT, module_name="echo", doc_path="a.md", content_hash="h1", chunk_count=1
+    )
+    assert await indexer.reconcile() is False
+    assert await ledger.count(tenant=TENANT) == 1

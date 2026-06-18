@@ -38,6 +38,10 @@ class McpHost:
         # disabled module's tools are never offered to the model (#126). Without it, the
         # static configured list is scanned (back-compatible default).
         self._url_provider = url_provider
+        # When set, discovery calls this to get the flat set of per-tool disabled names
+        # across all enabled modules (#213). Tools in the set are skipped regardless of
+        # whether their module URL is included.
+        self._tool_filter: Callable[[], Awaitable[set[str]]] | None = None
 
     def set_url_provider(self, provider: Callable[[], Awaitable[list[str]]]) -> None:
         """Wire the live enabled-modules URL source.
@@ -47,12 +51,23 @@ class McpHost:
         """
         self._url_provider = provider
 
+    def set_tool_filter(self, provider: Callable[[], Awaitable[set[str]]]) -> None:
+        """Wire the per-tool disabled-names source (#213).
+
+        A setter (rather than a constructor arg) avoids the same construction cycle as
+        ``set_url_provider``. The provider returns the flat set of tool names the operator
+        has disabled; ``discover`` skips any tool whose name is in that set.
+        """
+        self._tool_filter = provider
+
     async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
         """Return ``(OpenAI tool specs, tool-name -> module-URL route)``.
 
         Only **enabled** modules are scanned when a ``url_provider`` is wired (#126).
+        Individually disabled tools are skipped when a ``tool_filter`` is wired (#213).
         """
         urls = await self._url_provider() if self._url_provider is not None else self._module_urls
+        disabled = await self._tool_filter() if self._tool_filter is not None else set()
         specs: list[dict[str, Any]] = []
         route: dict[str, str] = {}
         for url in urls:
@@ -64,6 +79,8 @@ class McpHost:
                     await session.initialize()
                     listing = await session.list_tools()
                     for tool in listing.tools:
+                        if tool.name in disabled:
+                            continue
                         specs.append(
                             {
                                 "type": "function",

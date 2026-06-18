@@ -129,10 +129,12 @@ export function Switch({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -140,16 +142,20 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-6 w-11 rounded-full border transition-colors",
-        checked ? "border-accent bg-accent/70" : "border-edge-strong bg-surface-2",
+        "relative h-6 w-11 cursor-pointer rounded-full border transition-colors",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        checked
+          ? "border-accent bg-accent hover:opacity-90"
+          : "border-edge-strong bg-surface-2 hover:border-accent",
       )}
     >
       <span
         className={cn(
-          "absolute top-0.5 size-4.5 rounded-full bg-ink transition-transform",
-          checked ? "translate-x-5.5" : "translate-x-0.5",
+          "absolute top-0.5 size-4.5 rounded-full transition-transform",
+          checked ? "translate-x-6 bg-canvas" : "translate-x-0.5 bg-ink-dim",
         )}
       />
     </button>

@@ -108,7 +108,7 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver (#143): a cited doc → a `HoverCard`. `kind` is `knowledge`. Proxied at `GET /platform/v1/modules/knowledge/resolve/{kind}/{ref_id}`. |
-| `GET /docs` | Module docs endpoint — `{"documents": [{"path": "…", "content": "…"}]}`; the knowledge indexer fetches this via the core proxy (#215). |
+| `GET /module-docs` | Module docs endpoint — `{"documents": [{"path": "…", "content": "…"}]}`; the knowledge indexer fetches this via the core proxy (#215). Not `/docs` (FastAPI Swagger UI). |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ## How search works
@@ -175,7 +175,7 @@ This means a fresh install ships with both platform docs *and* every module's us
 already indexed — no operator action required. The `knowledge_search` tool returns module docs
 alongside platform docs seamlessly because they share the `<tenant>__docs` collection.
 
-To contribute docs from a new module, declare `docs_url="/docs"` in its `EpicurusModule(...)`
+To contribute docs from a new module, declare `docs_url="/module-docs"` in its `EpicurusModule(...)`
 constructor and serve the JSON shape `{"documents": [{"path": "…", "content": "…"}]}` at
 that path. The platform-client helper (`PlatformClient.get_module_docs()`) lets other
 platform services read these docs if needed.
@@ -245,5 +245,5 @@ Package `epicurus_knowledge`:
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |
-| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` + `/docs` routers, initial index of all three sources on startup. |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` + `/module-docs` routers, initial index of all three sources on startup. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

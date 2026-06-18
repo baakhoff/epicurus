@@ -146,7 +146,9 @@ def _make_indexer(
     )
 
 
-def _snap(name: str, *, enabled: bool = True, docs_url: str | None = "/docs") -> dict[str, Any]:
+def _snap(
+    name: str, *, enabled: bool = True, docs_url: str | None = "/module-docs"
+) -> dict[str, Any]:
     return {
         "enabled": enabled,
         "removed": False,

@@ -670,7 +670,7 @@ async def test_get_models_unknown_module_is_404() -> None:
 
 
 def _docs_manifest() -> ModuleManifest:
-    return ModuleManifest(name="echo", version="0.2.1", docs_url="/docs")
+    return ModuleManifest(name="echo", version="0.2.1", docs_url="/module-docs")
 
 
 async def test_get_docs_proxies_module_docs_url() -> None:
@@ -691,7 +691,7 @@ async def test_get_docs_proxies_module_docs_url() -> None:
         result = await registry.get_docs("echo")
 
     assert result == docs_payload
-    mock_client.get.assert_called_once_with("/docs")
+    mock_client.get.assert_called_once_with("/module-docs")
 
 
 async def test_get_docs_404_when_no_docs_url() -> None:

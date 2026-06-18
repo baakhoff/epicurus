@@ -17,6 +17,11 @@ epicurus.
 - **[Versioning](versioning.md)** — per-component SemVer and the bundled-stack tag.
 - **[Releases](releases.md)** — how a release is cut and published.
 
+## Research & spikes
+
+- **[Obsidian Sync spike](obsidian-sync-spike.md)** — feasibility of syncing the
+  knowledge vault with the user's Obsidian Sync vault, and the recommended path (#219).
+
 ## Tech stack
 
 - **Python 3.11+**, async throughout; FastAPI + Pydantic v2.

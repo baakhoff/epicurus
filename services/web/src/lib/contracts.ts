@@ -435,4 +435,16 @@ export const OAuthClientStatus = z.object({
   provider: z.string(),
   configured: z.boolean(),
 });
+
+/* ── Log stream (ADR-0031) ───────────────────────────────────────────────── */
+
+/** One structured log entry emitted by the core (ADR-0031). */
+export const LogEntry = z.object({
+  ts: z.string(),
+  level: z.enum(["debug", "info", "warning", "error", "critical"]),
+  service: z.string().default(""),
+  message: z.string(),
+  context: z.record(z.string(), z.unknown()).default({}),
+});
+export type LogEntry = z.infer<typeof LogEntry>;
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;

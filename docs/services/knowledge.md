@@ -39,7 +39,7 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 
 | Panel | What it shows / does |
 | --- | --- |
-| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at`. Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
+| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at` · `index_phase` / `index_attempts` (background-index progress, #230). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
 | **Settings** | Vault path (`VAULT_PATH`) — editable in the shell. |
 | **Actions** | **Re-index** — triggers `knowledge_reindex` (both sources) through the core. |
 
@@ -109,7 +109,7 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
-| `GET /status` | Live index stats: `{note_count, doc_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
 | `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files}` (page id `vault`). `type` is `"file"` or `"dir"`. `can_manage_files: true` enables folder CRUD in the shell. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
 | `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. |
@@ -141,12 +141,36 @@ The same incremental logic applies to the vault and platform-docs sources:
 1. **Hash** the file (sha-256) and compare with the DB record — skip unchanged files.
 2. **Chunk** new/changed files heading-aware, hard-splitting at paragraph boundaries past
    `CHUNK_MAX_CHARS`.
-3. **Embed** each chunk via the core's [`PlatformClient`](../reference/platform-client.md)
-   (`POST /platform/v1/embed`) — **no model key lives in this module**.
-4. **Upsert** the vectors into Qdrant (deterministic UUID5 point ids) and record the
-   file's hash/mtime/chunk-count in Postgres.
+3. **Embed** chunks in **batches across files** via the core's
+   [`PlatformClient`](../reference/platform-client.md) (`POST /platform/v1/embed`) — the
+   indexer accumulates chunks until `EMBED_BATCH_SIZE` are queued, then embeds them in one
+   round-trip, so the bundled docs index in a handful of calls rather than one per file
+   (#230). **No model key lives in this module.**
+4. **Upsert** the vectors into Qdrant (deterministic UUID5 point ids) and record each
+   file's hash/mtime/chunk-count in Postgres only after its vectors land, so an interrupted
+   run leaves the ledger consistent.
 
 Deleted files are purged from both stores on the next index run.
+
+### Resilient startup (#230)
+
+The initial index runs as a **background task**: the service serves `GET /health`
+immediately rather than blocking until the (potentially multi-minute) first index over a
+real vault completes, so the healthcheck never flaps and orchestration won't trip restart
+loops. The background runner (`runner.IndexRunner`) **retries with capped exponential
+backoff**, so a cold `compose up` that starts knowledge before core-app / qdrant are
+reachable still ends with a populated index without any manual restart. `GET /status`
+exposes the live `index_phase` and `index_attempts`; counts climb as the run progresses.
+
+**Self-heal after a Qdrant reset (#229).** Qdrant vectors are derived data and may be
+wiped when the server is upgraded across an incompatible on-disk format (the `qdrant-init`
+guard — see [Qdrant](../infrastructure/qdrant.md)). When that happens the Postgres ledgers
+still list every file as indexed, so a plain incremental run would skip everything and
+leave the fresh collection empty. Each indexer therefore **reconciles** before indexing: if
+its collection is missing but its ledger is non-empty, it clears the ledger so the run
+re-embeds from scratch. The runner reconciles **all** sources up front — before any of them
+recreates the shared `<tenant>__docs` collection — so the vault, platform docs, and module
+docs all rebuild after a reset.
 
 **Module docs** use a variant of the same logic (`ModuleDocsIndexer`): each enabled module's
 `docs_url` is fetched via the core proxy, diffed by SHA-256 content hash (HTTP sources have no
@@ -204,6 +228,10 @@ platform services read these docs if needed.
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | File hash/mtime tracking. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
+| `EMBED_BATCH_SIZE` | `64` | Chunk texts embedded per `/embed` round-trip — the indexer flushes a batch once this many chunks are queued (#230). |
+| `INDEX_RETRY_MAX_ATTEMPTS` | `30` | Background-index retry cap before giving up (#230). |
+| `INDEX_RETRY_BASE_DELAY_SECONDS` | `1.0` | First retry backoff; doubles each attempt. |
+| `INDEX_RETRY_MAX_DELAY_SECONDS` | `30.0` | Upper bound on the retry backoff. |
 
 The vault is bound to `/vault` **read-write** via `KNOWLEDGE_HOST_VAULT`, which
 defaults to an **empty named volume** (point it at your vault to index real notes).
@@ -250,12 +278,13 @@ Package `epicurus_knowledge`:
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
-| `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); `index_path` re-indexes a single file for the editor save. |
+| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save. |
+| `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
 | `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`) + manifest UI + the `editor` page spec. |
 | `pages.py` | The `editor` page surface (#130): document/folder tree, read, save, and folder CRUD (create, delete, move — #216). `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. |
 | `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories) + vault walks (`iter_md_files`, `iter_tree_nodes`). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |
-| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` + `/module-docs` routers, initial index of all three sources on startup. |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` + `/module-docs` routers; launches the background `IndexRunner` (#230) so startup never blocks on the first index. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

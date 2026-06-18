@@ -19,7 +19,20 @@ images to GHCR.
   rename/move/delete — all path-confined to the vault (no traversal) and re-indexed on change.
   The `editor` archetype now carries an `EditorDoc.type` (`file`/`dir`) and a
   `can_manage_files` flag; the core proxies folder-create, file/folder-delete, and move CRUD
-  to the module (closes #216) (`knowledge` → 0.9.0, `core-app` → 0.13.0, `web` → 0.15.0).
+  to the module (closes #216) (`knowledge` → 0.11.0, `core-app` → 0.14.0, `web` → 0.16.0).
+- **Observability page with live log console** — the web shell gains an
+  `/observability` screen that streams structured logs from core-app in real time,
+  without `docker logs`. The page replays up to 200 buffered history entries on
+  connect, then trickles live entries as they arrive. Filters by minimum log level
+  and service prefix apply server-side (no wasted bytes). Each entry shows
+  timestamp, level badge, service, and message; context fields are collapsible.
+  A health summary (`GET /platform/v1/readiness`) sits at the top. The stream
+  reconnects automatically on disconnect (3 s back-off). Backed by a structlog
+  processor injected into the chain before the renderer via the new
+  `configure_logging(extra_processors=[...])` parameter (ADR-0031); secret-looking
+  keys (`token`, `key`, `secret`, `password`, `credential`, `auth`) are stripped
+  before any entry enters the ring buffer (#217)
+  (`epicurus-core` → 0.9.0, `core-app` → 0.13.0, `web` → 0.15.0).
 
 - **Modules ship their own docs, auto-indexed into the knowledge base** — a module can declare
   `docs_url` in its manifest and serve `GET /docs`; the core proxies it

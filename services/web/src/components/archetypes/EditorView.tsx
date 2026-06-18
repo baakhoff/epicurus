@@ -647,8 +647,10 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
 
         {data.docs.filter((d) => d.type === "file").length === 0 &&
         data.docs.filter((d) => d.type === "dir").length === 0 ? (
-          data.can_create || data.can_manage_files ? (
+          data.can_manage_files ? (
             <EmptyState quote="No documents yet — create a folder or add files." />
+          ) : data.can_create ? (
+            <EmptyState quote="No notes yet — create one with New note." />
           ) : (
             <EmptyState quote="An empty vault. Add notes in Obsidian and they appear here." />
           )

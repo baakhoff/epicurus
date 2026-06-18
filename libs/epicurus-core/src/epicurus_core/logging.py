@@ -18,8 +18,16 @@ from epicurus_core.config import CoreSettings
 __all__ = ["configure_logging", "get_logger"]
 
 
-def configure_logging(settings: CoreSettings) -> None:
-    """Configure structlog for the process. Safe to call once at startup."""
+def configure_logging(
+    settings: CoreSettings,
+    extra_processors: list[structlog.typing.Processor] | None = None,
+) -> None:
+    """Configure structlog for the process. Safe to call once at startup.
+
+    ``extra_processors`` are inserted after the standard shared chain and
+    **before** the renderer. Use this to inject sinks (e.g. a ring-buffer
+    processor for the log-stream SSE endpoint) without duplicating the chain.
+    """
     level = logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO)
 
     shared: list[structlog.typing.Processor] = [
@@ -36,8 +44,13 @@ def configure_logging(settings: CoreSettings) -> None:
         else structlog.dev.ConsoleRenderer(colors=False)
     )
 
+    processors: list[structlog.typing.Processor] = [*shared]
+    if extra_processors:
+        processors.extend(extra_processors)
+    processors.append(renderer)
+
     structlog.configure(
-        processors=[*shared, renderer],
+        processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,

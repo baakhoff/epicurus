@@ -129,6 +129,16 @@ class NoteIndex:
             )
             await session.commit()
 
+    async def clear(self, *, tenant: str) -> None:
+        """Delete every record for *tenant*.
+
+        Used to self-heal after the Qdrant vectors are reset (#229): the ledger must
+        forget what it thinks is indexed so the next run re-embeds from scratch.
+        """
+        async with self._session() as session:
+            await session.execute(delete(_StoredNote).where(_StoredNote.tenant == tenant))
+            await session.commit()
+
     async def list_paths(self, *, tenant: str) -> list[str]:
         """Return all indexed note paths for *tenant*."""
         async with self._session() as session:
@@ -256,6 +266,12 @@ class DocIndex:
                     _StoredDoc.note_path == note_path,
                 )
             )
+            await session.commit()
+
+    async def clear(self, *, tenant: str) -> None:
+        """Delete every record for *tenant* (self-heal after a Qdrant reset, #229)."""
+        async with self._session() as session:
+            await session.execute(delete(_StoredDoc).where(_StoredDoc.tenant == tenant))
             await session.commit()
 
     async def list_paths(self, *, tenant: str) -> list[str]:

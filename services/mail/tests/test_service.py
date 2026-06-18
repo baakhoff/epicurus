@@ -152,8 +152,8 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_4_0() -> None:
+async def test_manifest_version_is_0_5_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.4.0"
+    assert manifest.version == "0.5.0"

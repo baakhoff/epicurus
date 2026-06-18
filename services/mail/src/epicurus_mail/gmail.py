@@ -110,6 +110,20 @@ class GmailProvider(MailProvider):
         except Exception:
             return False
 
+    async def is_available(self) -> bool:
+        """True when a Google token is available for this tenant (#209).
+
+        A token-presence check — a fast core round-trip via the OAuth vault, not a live
+        Gmail API call — so the polled status panel can't stall the core's status proxy
+        into a Bad Gateway. Any HTTP failure (not connected, or the core unreachable)
+        reads as not available.
+        """
+        try:
+            await self._get_token()
+            return True
+        except httpx.HTTPError:
+            return False
+
 
 def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
     """Convert a Gmail API message object to a ``MailMessage``."""

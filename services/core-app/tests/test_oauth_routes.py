@@ -266,6 +266,77 @@ async def test_get_token_not_connected_returns_400() -> None:
     assert resp.status_code == 400
 
 
+# ── Auto-connect hook on connect / disconnect (#209) ──────────────────────────
+
+
+class _FakeCollections:
+    """Records the collection-sync hooks the OAuth flow fires (satisfies CollectionSync)."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.autoconnected: list[str] = []
+        self.disconnected: list[str] = []
+        self._fail = fail
+
+    async def autoconnect_collections(self, provider: str) -> list[str]:
+        if self._fail:
+            raise RuntimeError("registry unavailable")
+        self.autoconnected.append(provider)
+        return ["calendar"]
+
+    async def disconnect_collections(self, provider: str) -> list[str]:
+        if self._fail:
+            raise RuntimeError("registry unavailable")
+        self.disconnected.append(provider)
+        return ["calendar"]
+
+
+def _app_with(fake: _FakeOAuthService, collections: _FakeCollections) -> FastAPI:
+    app = FastAPI()
+    app.include_router(
+        create_oauth_router(fake, default_tenant=DEFAULT_TENANT, collections=collections)  # type: ignore[arg-type]
+    )
+    return app
+
+
+async def test_callback_triggers_autoconnect() -> None:
+    fake = _FakeOAuthService(callback_result=(PROVIDER_GOOGLE, DEFAULT_TENANT))
+    collections = _FakeCollections()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app_with(fake, collections)),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as client:
+        resp = await client.get("/platform/v1/oauth/callback?code=c&state=s")
+    assert resp.status_code == 302
+    assert collections.autoconnected == [PROVIDER_GOOGLE]
+
+
+async def test_callback_autoconnect_failure_still_redirects_ok() -> None:
+    # A registry hiccup must not turn a successful grant into an error redirect.
+    fake = _FakeOAuthService(callback_result=(PROVIDER_GOOGLE, DEFAULT_TENANT))
+    collections = _FakeCollections(fail=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app_with(fake, collections)),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as client:
+        resp = await client.get("/platform/v1/oauth/callback?code=c&state=s")
+    assert resp.status_code == 302
+    assert f"oauth_connected={PROVIDER_GOOGLE}" in resp.headers["location"]
+
+
+async def test_disconnect_triggers_collection_cleanup() -> None:
+    fake = _FakeOAuthService()
+    collections = _FakeCollections()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app_with(fake, collections)),
+        base_url="http://test",
+    ) as client:
+        resp = await client.delete(f"/platform/v1/oauth/{PROVIDER_GOOGLE}")
+    assert resp.status_code == 200
+    assert collections.disconnected == [PROVIDER_GOOGLE]
+
+
 # ── PUT /{provider}/client ────────────────────────────────────────────────────
 
 

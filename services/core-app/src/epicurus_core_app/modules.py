@@ -281,10 +281,9 @@ class ModuleRegistry:
         base, manifest = await self._resolve(name)
         if manifest.collections is None:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no collections")
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get("/accounts")
-            resp.raise_for_status()
-            view = AccountsView.model_validate(resp.json())
+        view = AccountsView.model_validate(
+            await self._get_json(base, "/accounts", op=f"{name} accounts")
+        )
         prefs = await self._prefs.get_collections(self._tenant, name)
         enabled = {(ref.account, ref.collection) for ref in prefs.enabled}
         active = (prefs.active.account, prefs.active.collection) if prefs.active else None
@@ -324,6 +323,74 @@ class ModuleRegistry:
         unset module yields empty prefs → the module falls back to its local default.
         """
         return await self._prefs.get_collections(self._tenant, name)
+
+    async def autoconnect_collections(self, provider: str) -> list[str]:
+        """Seed empty collection selections for modules using *provider*, on connect (#209).
+
+        For each configured module that declares ``collections`` listing *provider*, if the
+        operator has made no selection yet, enable all of that provider's discovered
+        collections and make the first writable one active — so connecting an account once
+        makes the module use it without manual toggling (ADR-0030). An existing selection is
+        never overridden. Best-effort: a module that is down or errors is skipped, never
+        fatal. Returns the names of the modules that were seeded.
+        """
+        seeded: list[str] = []
+        for snap in await self.snapshot():
+            spec = snap.manifest.collections
+            name = snap.manifest.name
+            if (
+                spec is None
+                or provider not in spec.providers
+                or snap.removed
+                or not snap.status.healthy
+            ):
+                continue
+            existing = await self._prefs.get_collections(self._tenant, name)
+            if existing.enabled or existing.active is not None:
+                continue  # the operator already chose — don't override
+            try:
+                view = await self.accounts_view(name)
+            except Exception as exc:
+                log.warning("autoconnect: accounts unavailable", module=name, error=str(exc))
+                continue
+            account = next(
+                (a for a in view.accounts if a.account == provider and a.connected), None
+            )
+            if account is None or not account.collections:
+                continue
+            writable = [c for c in account.collections if c.writable]
+            active = (writable[0] if writable else account.collections[0]).ref()
+            prefs = CollectionPrefs(enabled=[c.ref() for c in account.collections], active=active)
+            await self._prefs.set_collections(self._tenant, name, prefs)
+            seeded.append(name)
+            log.info("autoconnected module to provider", module=name, provider=provider)
+        return seeded
+
+    async def disconnect_collections(self, provider: str) -> list[str]:
+        """Drop *provider* from every module's stored selection on disconnect (#209).
+
+        Symmetric with :meth:`autoconnect_collections`: once the account is gone its
+        collections vanish from ``/accounts``, so remove their refs from the stored
+        selection — a selection that empties falls back to the local default, and an
+        ``active`` on the dropped provider clears to local. Returns the modules changed.
+        """
+        cleared: list[str] = []
+        for snap in await self.snapshot():
+            spec = snap.manifest.collections
+            name = snap.manifest.name
+            if spec is None or provider not in spec.providers:
+                continue
+            prefs = await self._prefs.get_collections(self._tenant, name)
+            new_enabled = [ref for ref in prefs.enabled if ref.account != provider]
+            keep_active = (
+                prefs.active if (prefs.active and prefs.active.account != provider) else None
+            )
+            if len(new_enabled) != len(prefs.enabled) or keep_active != prefs.active:
+                await self._prefs.set_collections(
+                    self._tenant, name, CollectionPrefs(enabled=new_enabled, active=keep_active)
+                )
+                cleared.append(name)
+        return cleared
 
     async def disabled_tools_set(self) -> set[str]:
         """All explicitly disabled tool names across every enabled module (#213).
@@ -383,22 +450,57 @@ class ModuleRegistry:
         await self._resolve(name)  # only known modules
         await self._secrets.set(f"modules/{name}/config", values, self._tenant)
 
+    async def _get_json(
+        self,
+        base: str,
+        path: str,
+        *,
+        params: Mapping[str, str] | None = None,
+        timeout: float = 10,
+        op: str,
+    ) -> Any:
+        """GET JSON from a module, mapping any failure to a clean HTTP error (#209).
+
+        A module being slow, down, or returning an error must never surface as an
+        unhandled exception — which a gateway (nginx) turns into an opaque **502 Bad
+        Gateway**. Upstream client errors (4xx) pass through as-is (e.g. a module's 404
+        for a missing entity); a 5xx, a timeout, or a connection failure becomes a
+        controlled ``502`` carrying *op*, so the shell shows a reason rather than a bare
+        Bad Gateway. ``op`` is a short human label (e.g. ``"calendar status"``).
+        """
+        try:
+            async with httpx.AsyncClient(base_url=base, timeout=timeout) as client:
+                if params:
+                    resp = await client.get(path, params=dict(params))
+                else:
+                    resp = await client.get(path)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            raise HTTPException(
+                status_code=code if 400 <= code < 500 else 502,
+                detail=f"{op} failed: module returned {code}",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"{op} failed: module unreachable") from exc
+
     async def get_status(self, name: str) -> dict[str, Any]:
         """Proxy the module's declared ``status_url`` endpoint to the caller.
 
         The module's manifest must declare ``ui.status_url`` (e.g. ``/status``);
         the core fetches that path on the module and returns the JSON body.
-        Returns 404 if the module is unreachable or has no ``status_url``.
+        Returns 404 if the module is unreachable or has no ``status_url``; a slow or
+        erroring status endpoint is a controlled ``502`` rather than a raw Bad Gateway (#209).
         """
         base, manifest = await self._resolve(name)
         status_url = manifest.ui.status_url if manifest.ui else None
         if not status_url:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no status_url")
-        async with httpx.AsyncClient(base_url=base, timeout=5) as client:
-            resp = await client.get(status_url)
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(
+            base, status_url, timeout=5, op=f"{name} status"
+        )
+        return data
 
     async def get_docs(self, name: str) -> dict[str, Any]:
         """Proxy the module's declared ``docs_url`` endpoint to the caller (#215).
@@ -411,11 +513,8 @@ class ModuleRegistry:
         base, manifest = await self._resolve(name)
         if not manifest.docs_url:
             raise HTTPException(status_code=404, detail=f"module {name!r} declares no docs_url")
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(manifest.docs_url)
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(base, manifest.docs_url, op=f"{name} docs")
+        return data
 
     async def get_page(
         self, name: str, page_id: str, *, params: Mapping[str, str] | None = None
@@ -434,11 +533,10 @@ class ModuleRegistry:
         base, manifest = await self._resolve(name)
         if page_id not in {p.id for p in manifest.pages}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/pages/{page_id}", params=dict(params or {}))
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(
+            base, f"/pages/{page_id}", params=params, op=f"{name} page {page_id!r}"
+        )
+        return data
 
     async def _resolve_editor_page(self, name: str, page_id: str) -> str:
         """The base URL of *name*, asserting it declares an ``editor`` page ``page_id``.
@@ -463,11 +561,10 @@ class ModuleRegistry:
         module is responsible for confining it (no traversal out of its store).
         """
         base = await self._resolve_editor_page(name, page_id)
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/pages/{page_id}/doc", params={"path": path})
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(
+            base, f"/pages/{page_id}/doc", params={"path": path}, op=f"{name} doc"
+        )
+        return data
 
     async def save_page_doc(
         self, name: str, page_id: str, path: str, content: str
@@ -479,13 +576,24 @@ class ModuleRegistry:
         because saving may trigger an embed round-trip back through the core.
         """
         base = await self._resolve_editor_page(name, page_id)
-        async with httpx.AsyncClient(base_url=base, timeout=60) as client:
-            resp = await client.put(
-                f"/pages/{page_id}/doc", params={"path": path}, json={"content": content}
-            )
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        try:
+            async with httpx.AsyncClient(base_url=base, timeout=60) as client:
+                resp = await client.put(
+                    f"/pages/{page_id}/doc", params={"path": path}, json={"content": content}
+                )
+                resp.raise_for_status()
+                data: dict[str, Any] = resp.json()
+                return data
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            raise HTTPException(
+                status_code=code if 400 <= code < 500 else 502,
+                detail=f"{name} doc save failed: module returned {code}",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"{name} doc save failed: module unreachable"
+            ) from exc
 
     async def create_page_folder(self, name: str, page_id: str, path: str) -> dict[str, Any]:
         """Proxy ``POST /pages/{page_id}/folder`` to the module (#216).
@@ -581,8 +689,21 @@ class ModuleRegistry:
         """
         base, _ = await self._resolve(name)
         client = httpx.AsyncClient(base_url=base, timeout=60)
-        resp = await client.get("/download", params={"path": path})
-        resp.raise_for_status()
+        try:
+            resp = await client.get("/download", params={"path": path})
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            await client.aclose()
+            code = exc.response.status_code
+            raise HTTPException(
+                status_code=code if 400 <= code < 500 else 502,
+                detail=f"{name} download failed: module returned {code}",
+            ) from exc
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise HTTPException(
+                status_code=502, detail=f"{name} download failed: module unreachable"
+            ) from exc
         return resp
 
     async def resolve_entity(self, name: str, kind: str, ref_id: str) -> dict[str, Any]:
@@ -597,11 +718,10 @@ class ModuleRegistry:
         base, manifest = await self._resolve(name)
         if not manifest.resolver:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no resolver")
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/resolve/{kind}/{ref_id}")
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(
+            base, f"/resolve/{kind}/{ref_id}", op=f"{name} resolve {kind}"
+        )
+        return data
 
     async def list_attachments(self, name: str) -> list[dict[str, Any]]:
         """Proxy a module's attachment picker (ADR-0019): ``GET /attachments``.
@@ -612,11 +732,10 @@ class ModuleRegistry:
         base, manifest = await self._resolve(name)
         if not manifest.attachable:
             raise HTTPException(status_code=404, detail=f"module {name!r} is not attachable")
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get("/attachments")
-            resp.raise_for_status()
-            items: list[dict[str, Any]] = resp.json()
-            return items
+        items: list[dict[str, Any]] = await self._get_json(
+            base, "/attachments", op=f"{name} attachments"
+        )
+        return items
 
     async def resolve_attachment(self, name: str, ref_id: str) -> dict[str, Any]:
         """Proxy a module's attachment resolve (ADR-0019): ``GET /attachments/{ref_id}``.
@@ -628,11 +747,10 @@ class ModuleRegistry:
         base, manifest = await self._resolve(name)
         if not manifest.attachable:
             raise HTTPException(status_code=404, detail=f"module {name!r} is not attachable")
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/attachments/{ref_id}")
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(
+            base, f"/attachments/{ref_id}", op=f"{name} attachment resolve"
+        )
+        return data
 
     async def read_message(self, name: str, ref_id: str) -> dict[str, Any]:
         """Proxy a module's full-message endpoint to the panel (ADR-0019).
@@ -643,11 +761,10 @@ class ModuleRegistry:
         """
         _safe_segment(ref_id, label="ref_id")
         base, _ = await self._resolve(name)
-        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
-            resp = await client.get(f"/messages/{ref_id}")
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return data
+        data: dict[str, Any] = await self._get_json(
+            base, f"/messages/{ref_id}", op=f"{name} message"
+        )
+        return data
 
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:

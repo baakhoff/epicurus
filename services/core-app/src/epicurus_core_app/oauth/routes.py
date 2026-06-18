@@ -14,7 +14,7 @@ Module-facing (module → core, via the platform API):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -33,8 +33,29 @@ from .service import OAuthError, OAuthService
 log = get_logger("epicurus_core_app.oauth")
 
 
-def create_oauth_router(service: OAuthService, *, default_tenant: str) -> APIRouter:
-    """Build the ``/platform/v1/oauth`` router."""
+class CollectionSync(Protocol):
+    """The module-registry hooks the OAuth flow calls on connect / disconnect (#209).
+
+    Satisfied by :class:`~epicurus_core_app.modules.ModuleRegistry`; kept a Protocol so the
+    OAuth router doesn't depend on the registry's concrete type and is easy to fake in tests.
+    """
+
+    async def autoconnect_collections(self, provider: str) -> list[str]: ...
+    async def disconnect_collections(self, provider: str) -> list[str]: ...
+
+
+def create_oauth_router(
+    service: OAuthService,
+    *,
+    default_tenant: str,
+    collections: CollectionSync | None = None,
+) -> APIRouter:
+    """Build the ``/platform/v1/oauth`` router.
+
+    When *collections* is supplied, connecting a provider auto-seeds the collection
+    selection of every module that uses it, and disconnecting clears it (#209) — so the
+    operator doesn't hand-wire each module after connecting an account.
+    """
     router = APIRouter(prefix="/platform/v1/oauth", tags=["oauth"])
 
     @router.put("/{provider}/client", response_model=dict)
@@ -103,10 +124,19 @@ def create_oauth_router(service: OAuthService, *, default_tenant: str) -> APIRou
             return RedirectResponse(url="/settings?oauth_error=1", status_code=302)
         try:
             provider, _tenant = await service.handle_callback(code, state)
-            return RedirectResponse(url=f"/settings?oauth_connected={provider}", status_code=302)
         except OAuthError as exc:
             log.error("oauth callback failed", error=str(exc))
             return RedirectResponse(url="/settings?oauth_error=1", status_code=302)
+        # Auto-connect the modules that use this provider (#209) — best-effort, so a
+        # module hiccup never turns a successful grant into an error redirect.
+        if collections is not None:
+            try:
+                seeded = await collections.autoconnect_collections(provider)
+                if seeded:
+                    log.info("oauth autoconnect seeded modules", provider=provider, modules=seeded)
+            except Exception as exc:
+                log.warning("oauth autoconnect failed", provider=provider, error=str(exc))
+        return RedirectResponse(url=f"/settings?oauth_connected={provider}", status_code=302)
 
     @router.get("/{provider}/status", response_model=OAuthStatus)
     async def status(
@@ -134,6 +164,14 @@ def create_oauth_router(service: OAuthService, *, default_tenant: str) -> APIRou
             await service.disconnect(provider, tenant_id)
         except OAuthError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Clear the now-gone provider from every module's selection (#209) — best-effort.
+        if collections is not None:
+            try:
+                cleared = await collections.disconnect_collections(provider)
+                if cleared:
+                    log.info("oauth disconnect cleared modules", provider=provider, modules=cleared)
+            except Exception as exc:
+                log.warning("oauth disconnect cleanup failed", provider=provider, error=str(exc))
         return {"status": "ok"}
 
     @router.get("/{provider}/token", response_model=OAuthTokenResponse)

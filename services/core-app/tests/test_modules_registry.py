@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -286,7 +287,8 @@ async def test_get_page_proxies_declared_page() -> None:
         result = await registry.get_page("files", "browse")
 
     assert result["items"][0]["id"] == "a"
-    mock_client.get.assert_called_once_with("/pages/browse", params={})
+    # No query params → the proxy GET carries no params kwarg (#209 helper).
+    mock_client.get.assert_called_once_with("/pages/browse")
 
 
 async def test_get_page_forwards_params() -> None:
@@ -894,3 +896,106 @@ async def test_disabled_tools_set_excludes_disabled_module() -> None:
     # also appear in the flat disabled set (the set is only for enabled modules).
     disabled = await registry.disabled_tools_set()
     assert disabled == set()
+
+
+# ── Proxy hardening: a module error is a controlled status, not a raw 500 (#209) ──
+
+
+def _patch_get(*, response: Any = None, error: Exception | None = None) -> Any:
+    """A context manager patching the registry's httpx client GET (response or error)."""
+    cls = patch("epicurus_core_app.modules.httpx.AsyncClient")
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=error) if error else AsyncMock(return_value=response)
+    return cls, client
+
+
+def _erroring_response(status: int) -> MagicMock:
+    """A mock httpx response whose ``raise_for_status`` raises for *status*."""
+    req = httpx.Request("GET", "http://module:8080/x")
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            str(status), request=req, response=httpx.Response(status, request=req)
+        )
+    )
+    return resp
+
+
+async def test_get_status_unreachable_module_is_clean_502() -> None:
+    registry, _, _ = _registry(manifest=_knowledge_manifest())
+    cls, client = _patch_get(error=httpx.ConnectError("connection refused"))
+    with cls as mock_cls:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(HTTPException) as err:
+            await registry.get_status("knowledge")
+    assert err.value.status_code == 502
+
+
+async def test_get_status_module_5xx_is_502() -> None:
+    registry, _, _ = _registry(manifest=_knowledge_manifest())
+    cls, client = _patch_get(response=_erroring_response(500))
+    with cls as mock_cls:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(HTTPException) as err:
+            await registry.get_status("knowledge")
+    assert err.value.status_code == 502
+
+
+async def test_resolve_entity_passes_module_404_through() -> None:
+    # A module's client-error (4xx) surfaces as-is — a missing entity stays a 404.
+    registry, _, _ = _registry(manifest=_resolver_manifest())
+    cls, client = _patch_get(response=_erroring_response(404))
+    with cls as mock_cls:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(HTTPException) as err:
+            await registry.resolve_entity("calendar", "event", "missing")
+    assert err.value.status_code == 404
+
+
+# ── Auto-connect / disconnect on OAuth (#209) ──────────────────────────────────
+
+
+async def test_autoconnect_seeds_empty_selection() -> None:
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    resp = MagicMock()
+    resp.json.return_value = _accounts_payload()  # google connected: primary + work
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_cls:
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        seeded = await registry.autoconnect_collections("google")
+    assert seeded == ["calendar"]
+    prefs = await registry.collection_prefs("calendar")
+    assert [r.collection for r in prefs.enabled] == ["primary", "work"]
+    assert prefs.active is not None
+    assert prefs.active.collection == "primary"  # first writable becomes active
+
+
+async def test_autoconnect_never_overrides_existing_selection() -> None:
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    ref = CollectionRef(account="google", collection="work")
+    await registry.set_collections("calendar", CollectionPrefs(enabled=[ref], active=ref))
+    # No httpx mock: it must short-circuit before fetching /accounts.
+    assert await registry.autoconnect_collections("google") == []
+    prefs = await registry.collection_prefs("calendar")
+    assert prefs.active is not None
+    assert prefs.active.collection == "work"
+
+
+async def test_autoconnect_ignores_modules_not_using_provider() -> None:
+    registry, _, _ = _registry()  # echo declares no collections
+    assert await registry.autoconnect_collections("google") == []
+
+
+async def test_disconnect_clears_provider_selection() -> None:
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    g = CollectionRef(account="google", collection="primary")
+    await registry.set_collections("calendar", CollectionPrefs(enabled=[g], active=g))
+    assert await registry.disconnect_collections("google") == ["calendar"]
+    prefs = await registry.collection_prefs("calendar")
+    assert prefs.enabled == []
+    assert prefs.active is None

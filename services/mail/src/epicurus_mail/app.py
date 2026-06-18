@@ -61,9 +61,14 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
-        """Gmail reachability status for the manifest-driven UI status panel."""
-        healthy = await provider.health_check()
-        return {"gmail_connected": healthy}
+        """Gmail connection status for the manifest-driven UI status panel.
+
+        Reports whether a Google token is available — a fast credential check via the core
+        (``is_available``), not a live Gmail API call. The old live ``/users/me/profile``
+        probe could exceed the core's status-proxy timeout and surface as a Bad Gateway when
+        the panel polled it (#209).
+        """
+        return {"gmail_connected": await provider.is_available()}
 
     @app.get("/resolve/message/{ref_id}")
     async def resolve_message(ref_id: str) -> dict[str, Any]:

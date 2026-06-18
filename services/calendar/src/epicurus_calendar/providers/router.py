@@ -72,13 +72,21 @@ class CollectionRouter(CalendarProvider):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue  # an unknown / disconnected account is skipped, not fatal
-            events.extend(
-                await provider.list_events(
-                    tenant_id=tenant_id,
-                    time_range=time_range,
-                    calendar_id=ref.collection or None,
+            try:
+                events.extend(
+                    await provider.list_events(
+                        tenant_id=tenant_id,
+                        time_range=time_range,
+                        calendar_id=ref.collection or None,
+                    )
                 )
-            )
+            except Exception as exc:
+                log.warning(
+                    "calendar read failed; skipping this source (#209)",
+                    account=ref.account,
+                    collection=ref.collection,
+                    error=str(exc),
+                )
         events.sort(key=lambda e: e.start)
         return events
 
@@ -102,9 +110,18 @@ class CollectionRouter(CalendarProvider):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue
-            event = await provider.get_event(
-                tenant_id=tenant_id, event_id=event_id, calendar_id=ref.collection or None
-            )
+            try:
+                event = await provider.get_event(
+                    tenant_id=tenant_id, event_id=event_id, calendar_id=ref.collection or None
+                )
+            except Exception as exc:
+                log.warning(
+                    "calendar lookup failed; trying next source (#209)",
+                    account=ref.account,
+                    collection=ref.collection,
+                    error=str(exc),
+                )
+                continue
             if event is not None:
                 return event
         return None

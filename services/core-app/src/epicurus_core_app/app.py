@@ -189,7 +189,15 @@ def create_app() -> FastAPI:
     )
     app.include_router(create_readiness_router(readiness))
     app.include_router(create_modules_router(registry))
-    app.include_router(create_oauth_router(oauth, default_tenant=settings.default_tenant_id))
+    app.include_router(
+        create_oauth_router(
+            oauth,
+            default_tenant=settings.default_tenant_id,
+            # Connecting/disconnecting a provider auto-seeds/clears the collection
+            # selection of the modules that use it (#209).
+            collections=registry,
+        )
+    )
     app.include_router(create_log_stream_router(log_buffer))
 
     @app.exception_handler(GatewayPausedError)

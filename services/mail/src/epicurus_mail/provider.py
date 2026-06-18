@@ -45,4 +45,17 @@ class MailProvider(ABC):
 
     @abstractmethod
     async def health_check(self) -> bool:
-        """Return True when the provider is reachable and the account is connected."""
+        """Return True when the provider is reachable and the account is connected.
+
+        A deep check — it may make a live provider API call. Prefer :meth:`is_available`
+        for the polled status panel.
+        """
+
+    @abstractmethod
+    async def is_available(self) -> bool:
+        """Return True when an account is connected — a cheap credential check (#209).
+
+        Unlike :meth:`health_check`, this must NOT make a live provider API call: it backs
+        the status panel, which is polled, so a slow upstream can't stall the core's status
+        proxy into a Bad Gateway. For Google providers it is a token-presence check.
+        """

@@ -166,6 +166,14 @@ On success the stored scope is the **union** of any previously-granted scopes
 and the scopes returned by this grant — connecting Calendar then Gmail leaves a
 single Google token valid for both.
 
+After the tokens are stored, the core **auto-connects the modules that use this
+provider** (#209): every module that declares an account/collection capability
+(ADR-0030) listing the provider gets its discovered collections enabled and a
+default active one — so connecting once makes calendar/tasks use the account with no
+manual per-collection toggling. An existing operator selection is never overridden,
+and the step is best-effort: a module that is down or slow is skipped and never turns
+a successful grant into an error.
+
 ---
 
 ## `GET /platform/v1/oauth/{provider}/status`
@@ -213,7 +221,10 @@ client credentials are unaffected.
 { "status": "ok" }
 ```
 
-Idempotent — returns `ok` even if the provider was not connected.
+Idempotent — returns `ok` even if the provider was not connected. After the token is
+removed the core **clears the provider from each module's collection selection** (#209,
+symmetric with the connect-time auto-connect): a calendar/task list it can no longer reach
+is dropped from the stored selection, falling the module back to its local default.
 
 ---
 

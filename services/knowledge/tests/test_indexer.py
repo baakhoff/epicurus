@@ -482,3 +482,65 @@ async def test_reindex_sums_both_sources(
     # vault has 2 notes, docs has 1 → total indexed >= 3 on first run
     assert isinstance(payload.get("indexed"), int)
     assert payload["indexed"] >= 3  # type: ignore[operator]
+
+
+# ── Batched embedding (#230) ──────────────────────────────────────────────────
+
+
+async def test_run_batches_embeds_across_files(note_index: NoteIndex, tmp_path: Path) -> None:
+    """A large batch size embeds every file's chunks in a single platform round-trip."""
+    for i in range(5):
+        (tmp_path / f"n{i}.md").write_text(f"# Note {i}\n\nBody {i}.")
+    platform = _make_mock_platform()
+    indexer = KnowledgeIndexer(
+        note_index,
+        _make_mock_qdrant(),
+        platform,
+        vault_path=tmp_path,
+        tenant=TENANT,
+        embed_batch_size=64,
+    )
+    result = await indexer.run()
+    assert result["indexed"] == 5
+    # Five files, but one batched embed call — not one call per file.
+    assert platform.embed.call_count == 1
+
+
+async def test_run_one_flush_per_file_when_batch_size_one(
+    note_index: NoteIndex, tmp_path: Path
+) -> None:
+    """A batch size of 1 flushes after each file, so every note triggers its own call."""
+    for i in range(5):
+        (tmp_path / f"n{i}.md").write_text(f"# Note {i}\n\nBody {i}.")
+    platform = _make_mock_platform()
+    indexer = KnowledgeIndexer(
+        note_index,
+        _make_mock_qdrant(),
+        platform,
+        vault_path=tmp_path,
+        tenant=TENANT,
+        embed_batch_size=1,
+    )
+    result = await indexer.run()
+    assert result["indexed"] == 5
+    assert platform.embed.call_count == 5
+
+
+async def test_run_persists_every_batched_file(note_index: NoteIndex, tmp_path: Path) -> None:
+    """Batched files are all recorded in the ledger and searchable on the next run."""
+    for i in range(3):
+        (tmp_path / f"n{i}.md").write_text(f"# Note {i}\n\nBody {i}.")
+    indexer = KnowledgeIndexer(
+        note_index,
+        _make_mock_qdrant(),
+        _make_mock_platform(),
+        vault_path=tmp_path,
+        tenant=TENANT,
+        embed_batch_size=2,  # forces a mid-walk flush plus a final flush
+    )
+    await indexer.run()
+    assert await note_index.count(tenant=TENANT) == 3
+    # A second run sees everything as unchanged — the ledger captured each file.
+    second = await indexer.run()
+    assert second["unchanged"] == 3
+    assert second["indexed"] == 0

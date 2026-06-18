@@ -28,6 +28,11 @@ from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
 from epicurus_knowledge.service import MODULE_NAME, build_module, module_docs
 from epicurus_knowledge.settings import KnowledgeSettings
+from epicurus_knowledge.suggestions import (
+    SuggestionReview,
+    SuggestionStore,
+    create_review_router,
+)
 
 
 def _service_version() -> str:
@@ -47,6 +52,7 @@ def create_app() -> FastAPI:
     note_index = NoteIndex(engine)
     doc_index = DocIndex(engine)
     module_doc_ledger = ModuleDocLedger(engine)
+    suggestion_store = SuggestionStore(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
     platform = PlatformClient(
         base_url=settings.platform_url,
@@ -83,8 +89,23 @@ def create_app() -> FastAPI:
     )
 
     bus = EventBus.from_settings(settings)
-    module = build_module(vault_indexer, docs_indexer, module_docs_indexer)
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        module_docs_indexer,
+        suggestion_store,
+        tenant=settings.default_tenant_id,
+        vault_path=settings.vault_path,
+    )
     mcp_app = module.http_app()
+    vault_pages = VaultPages(settings.vault_path, vault_indexer)
+    suggestion_review = SuggestionReview(
+        suggestion_store,
+        vault_pages,
+        vault_indexer,
+        vault_path=settings.vault_path,
+        tenant=settings.default_tenant_id,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -92,6 +113,7 @@ def create_app() -> FastAPI:
             await note_index.init()
             await doc_index.init()
             await module_doc_ledger.init()
+            await suggestion_store.init()
             await bus.connect()
             log.info(
                 "knowledge service ready",
@@ -122,8 +144,12 @@ def create_app() -> FastAPI:
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
 
+    # The review page (#220): registered BEFORE the editor pages router so its literal
+    # GET /pages/review route wins over the editor's GET /pages/{page_id} path param.
+    app.include_router(create_review_router(suggestion_review))
+
     # The editor page (#130): the shell renders it; this module supplies vault docs.
-    app.include_router(create_pages_router(VaultPages(settings.vault_path, vault_indexer)))
+    app.include_router(create_pages_router(vault_pages))
 
     # Attachment source (#137): pick a vault doc to attach to a chat turn as context.
     app.include_router(create_attachments_router(VaultAttachments(settings.vault_path)))

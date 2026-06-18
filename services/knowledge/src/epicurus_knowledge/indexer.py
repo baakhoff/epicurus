@@ -193,6 +193,18 @@ class KnowledgeIndexer:
             )
         return results
 
+    async def remove_path(self, rel: str) -> None:
+        """De-index a single file by its vault-relative path (the file was deleted).
+
+        Drops the file's Qdrant vectors and its ledger row so a deleted document
+        stops surfacing in search immediately, rather than lingering until the next
+        full ``run`` reconciles the filesystem. Idempotent: removing an unknown path
+        is a no-op. Used when approving a delete suggestion (#220).
+        """
+        await self._delete_note_vectors(rel)
+        await self._notes.delete(tenant=self._tenant, note_path=rel)
+        log.debug("de-indexed single note", path=rel)
+
     async def index_path(self, rel: str) -> int:
         """Re-index a single file by its vault-relative path; returns the chunk count.
 

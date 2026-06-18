@@ -140,8 +140,8 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
 `browser` (tree/list + detail), `calendar` (month / week / agenda), `editor`
-(Obsidian-like doc), `board` (lists/cards). The shell ships one first-party screen per
-archetype; `browser`, `calendar`, `editor`, and `board` are all implemented today.
+(Obsidian-like doc), `board` (lists/cards), `review` (diff approve/reject queue). The
+shell ships one first-party screen per archetype; all five are implemented today.
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
@@ -264,6 +264,47 @@ document so it stays agent-retrievable.
 `true`; Notes sets it `false` and uses `can_create` instead for its own authoring flow).
 `EditorDoc.type` distinguishes `"file"` entries from `"dir"` entries; the shell builds
 the nested visual tree from the flat list using the path structure.
+
+**The `review` archetype (suggested-changes queue, #220).** A queue of agent-proposed
+changes the operator approves or rejects, each with a server-computed unified diff. Its
+`GET /pages/{id}` returns the pending queue, and it owns two **operator-only** mutation
+endpoints the core proxies (they are deliberately *not* MCP tools — the agent could
+otherwise approve its own proposals):
+
+```jsonc
+// GET /pages/{id}  →  the pending queue
+{
+  "title": "Suggestions",
+  "suggestions": [
+    { "id": "9f2c…",                 // opaque suggestion id
+      "title": "goals",
+      "path": "projects/goals.md",
+      "operation": "update",          // create | update | delete
+      "origin": "agent",
+      "note": "add Q3 targets",       // optional rationale
+      "created_at": "2026-06-18T21:30:00+00:00",
+      "diff": "--- a/…\n+++ b/…\n@@ …" // unified diff: current vault → proposed
+    }
+  ]
+}
+// POST /pages/{id}/suggestions/{sid}/approve  →  applies + indexes, drops the row
+{ "id": "9f2c…", "status": "approved", "path": "projects/goals.md",
+  "operation": "update", "indexed": true }
+// POST /pages/{id}/suggestions/{sid}/reject   →  discards the row, vault untouched
+{ "id": "9f2c…", "status": "rejected", "path": "projects/goals.md", "operation": "update" }
+```
+
+Proxied at:
+
+- `GET  /platform/v1/modules/{name}/pages/{id}` (the queue — same proxy as any page)
+- `POST /platform/v1/modules/{name}/pages/{id}/suggestions/{sid}/approve`
+- `POST /platform/v1/modules/{name}/pages/{id}/suggestions/{sid}/reject`
+
+The trust boundary is the **author**: agent-initiated changes (the knowledge
+`knowledge_propose_edit` tool) stage a suggestion and land only on approval; direct
+*operator* edits (the editor save, the file-tree CRUD above) stay immediate, since the
+operator is the approver. Knowledge is the first user (ADR-0033); see
+[knowledge](../services/knowledge.md).
 
 The `calendar` archetype's data shape is a window of events (the shell renders the month /
 week / agenda views and re-fetches as the user navigates):

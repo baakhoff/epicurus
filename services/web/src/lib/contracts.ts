@@ -167,7 +167,7 @@ export type UiSection = z.infer<typeof UiSection>;
 /* ── module-contributed pages (ADR-0018) ─────────────────────────────────── */
 
 /** The bounded vocabulary of core-rendered left-nav view shapes. */
-export const PageArchetype = z.enum(["browser", "calendar", "editor", "board"]);
+export const PageArchetype = z.enum(["browser", "calendar", "editor", "board", "review"]);
 export type PageArchetype = z.infer<typeof PageArchetype>;
 
 export const PageSpec = z.object({
@@ -380,6 +380,33 @@ export const EditorSaveResult = z.object({
   chunk_count: z.number().default(0),
 });
 export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
+
+/* ── review queue (ADR-0033, #220) ───────────────────────────────────────── */
+
+/**
+ * One pending agent-proposed change in a `review` page. The module supplies a
+ * server-computed unified `diff` (current vault content → proposed); the shell
+ * renders it and the approve/reject controls. Approve applies + indexes; reject
+ * discards — nothing the agent proposes lands without the operator's approval.
+ */
+export const ReviewSuggestion = z.object({
+  id: z.string(),
+  title: z.string(),
+  path: z.string(),
+  operation: z.enum(["create", "update", "delete"]),
+  origin: z.string().default("agent"),
+  note: z.string().default(""),
+  created_at: z.string(),
+  diff: z.string().default(""),
+});
+export type ReviewSuggestion = z.infer<typeof ReviewSuggestion>;
+
+/** The `review` archetype's data contract: the queue of pending suggestions. */
+export const ReviewData = z.object({
+  title: z.string().default("Suggestions"),
+  suggestions: z.array(ReviewSuggestion).default([]),
+});
+export type ReviewData = z.infer<typeof ReviewData>;
 
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 

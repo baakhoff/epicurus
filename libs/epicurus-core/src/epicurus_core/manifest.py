@@ -28,7 +28,7 @@ __all__ = [
     "UiSection",
 ]
 
-PageArchetype = Literal["browser", "calendar", "editor", "board"]
+PageArchetype = Literal["browser", "calendar", "editor", "board", "review"]
 """The bounded set of left-nav view shapes the shell can render (ADR-0018).
 
 Core-owned and core-rendered: ``browser`` (tree/list + detail), ``calendar``,

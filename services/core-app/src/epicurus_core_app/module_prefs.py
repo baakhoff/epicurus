@@ -37,6 +37,9 @@ class _ModulePrefRow(_ModulePrefBase):
     # JSON ``{slot_key: model_id}`` — the operator's per-slot model choices (#128). A slot
     # absent here falls back to the core default model.
     models: Mapped[str] = mapped_column(Text, default="{}", server_default="'{}'")
+    # JSON list of tool names the operator has explicitly disabled (#213). An absent tool
+    # (not in the list) is enabled by default; the agent never receives a listed tool.
+    disabled_tools: Mapped[str] = mapped_column(Text, default="[]", server_default="'[]'")
 
 
 class ModulePrefsStore:
@@ -64,7 +67,7 @@ class ModulePrefsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_ModulePrefRow.__tablename__)}
-        for name in ("removed", "models"):
+        for name in ("removed", "models", "disabled_tools"):
             if name not in existing:
                 type_sql = _ModulePrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -137,4 +140,38 @@ class ModulePrefsStore:
                 session.add(_ModulePrefRow(tenant=tenant, module=module, models=encoded))
             else:
                 row.models = encoded
+            await session.commit()
+
+    async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:
+        """The set of tool names explicitly disabled for ``module`` (#213).
+
+        An absent tool (not in the set) is enabled by default; the set only carries
+        names the operator has explicitly disabled.
+        """
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                return set()
+            return set(cast("list[str]", json.loads(row.disabled_tools or "[]")))
+
+    async def set_tool_enabled(self, tenant: str, module: str, tool: str, enabled: bool) -> None:
+        """Enable or disable a single tool for ``module`` (upsert, set-based) (#213).
+
+        Disabled tool names are stored in a JSON list; enabling removes a name from the
+        list, disabling adds it. The list only ever contains explicitly disabled tools —
+        an absent name is implicitly enabled.
+        """
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                disabled: set[str] = set()
+                row = _ModulePrefRow(tenant=tenant, module=module)
+                session.add(row)
+            else:
+                disabled = set(cast("list[str]", json.loads(row.disabled_tools or "[]")))
+            if enabled:
+                disabled.discard(tool)
+            else:
+                disabled.add(tool)
+            row.disabled_tools = json.dumps(sorted(disabled))
             await session.commit()

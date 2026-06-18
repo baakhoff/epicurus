@@ -59,10 +59,19 @@ class ModuleSnapshot(BaseModel):
     # every surface — the module list drops it before serialization — so it is always
     # ``False`` on the snapshots the API returns; the flag is an internal gating signal.
     removed: bool = False
+    # Tool names the operator has explicitly disabled for this module (#213). The agent
+    # never receives a disabled tool; the shell renders each as a toggleable row.
+    disabled_tools: list[str] = Field(default_factory=list)
 
 
 class EnabledUpdate(BaseModel):
     """The body of an enable/disable toggle (#126)."""
+
+    enabled: bool
+
+
+class ToolEnabledUpdate(BaseModel):
+    """The body of a per-tool enable/disable toggle (#213)."""
 
     enabled: bool
 
@@ -123,6 +132,9 @@ class ModuleRegistry:
         for snap in probed:
             snap.enabled = enabled.get(snap.manifest.name, True)
             snap.removed = snap.manifest.name in removed
+            snap.disabled_tools = sorted(
+                await self._prefs.get_disabled_tools(self._tenant, snap.manifest.name)
+            )
         return list(probed)
 
     async def _probe(self, base: str) -> ModuleSnapshot:
@@ -243,6 +255,43 @@ class ModuleRegistry:
         """
         models = await self._prefs.get_models(self._tenant, name)
         return models.get(slot)
+
+    async def disabled_tools_set(self) -> set[str]:
+        """All explicitly disabled tool names across every enabled module (#213).
+
+        Backs ``McpHost.discover`` so disabled tools are never offered to the model even
+        when their module is enabled. Only tools from enabled, non-removed modules are
+        considered; tools from a disabled module are excluded anyway by the URL filter.
+        """
+        result: set[str] = set()
+        for snap in await self.snapshot():
+            if snap.enabled and not snap.removed:
+                result |= set(snap.disabled_tools)
+        return result
+
+    async def get_tool_enabled(self, name: str, tool: str) -> bool:
+        """Whether ``tool`` is enabled for module ``name`` (default ``True``) (#213).
+
+        404 if the module is unknown or unreachable; 404 if the tool is not declared
+        by the module's manifest.
+        """
+        _, manifest = await self._resolve(name)
+        if tool not in {t.name for t in manifest.tools}:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no tool {tool!r}")
+        disabled = await self._prefs.get_disabled_tools(self._tenant, name)
+        return tool not in disabled
+
+    async def set_tool_enabled(self, name: str, tool: str, enabled: bool) -> None:
+        """Enable or disable a single tool for module ``name`` (#213).
+
+        The tool is removed from (or added to) the disabled set; the module keeps running
+        and all other tools are unaffected. 404 if the module is unknown or unreachable,
+        or if the tool is not declared by the module's manifest.
+        """
+        _, manifest = await self._resolve(name)
+        if tool not in {t.name for t in manifest.tools}:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no tool {tool!r}")
+        await self._prefs.set_tool_enabled(self._tenant, name, tool, enabled)
 
     async def invoke(self, name: str, tool: str, arguments: dict[str, Any]) -> str:
         """Run a module tool (a manifest-declared UI action) through the MCP host."""
@@ -477,6 +526,12 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
         """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
         return {"model": await registry.model_for_slot(name, slot)}
+
+    @router.post("/{name}/tools/{tool}/enabled")
+    async def set_tool_enabled(name: str, tool: str, body: ToolEnabledUpdate) -> dict[str, str]:
+        """Enable or disable one tool (#213); the module keeps running, others unaffected."""
+        await registry.set_tool_enabled(name, tool, body.enabled)
+        return {"status": "ok"}
 
     @router.post("/{name}/tools/{tool}", response_model=ToolResult)
     async def invoke_tool(name: str, tool: str, request: ToolInvocation) -> ToolResult:

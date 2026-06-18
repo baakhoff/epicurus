@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
@@ -54,6 +55,16 @@ def _content_hash(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+@dataclass(slots=True)
+class _PendingNote:
+    """A new/changed note awaiting batched embedding during a ``run`` (#230)."""
+
+    rel: str
+    mtime_ns: int
+    content_hash: str
+    chunks: list[Chunk]
+
+
 class KnowledgeIndexer:
     """Walks a markdown directory and maintains a Qdrant collection incrementally.
 
@@ -71,6 +82,10 @@ class KnowledgeIndexer:
             ``<tenant>__<base>`` in Qdrant.  Defaults to ``"knowledge"`` for
             the vault; use ``"docs"`` for the platform-docs source.
         chunk_max_chars: Upper-bound on characters per chunk.
+        embed_batch_size: How many chunk texts to embed per platform-API call.
+            ``run`` accumulates chunks across files and flushes a batch once this
+            many are pending, so the bundled docs index in a handful of round-trips
+            instead of one per file (#230).
     """
 
     def __init__(
@@ -83,6 +98,7 @@ class KnowledgeIndexer:
         tenant: str,
         collection_base: str = "knowledge",
         chunk_max_chars: int = 2000,
+        embed_batch_size: int = 64,
     ) -> None:
         self._notes = note_index
         self._qdrant = qdrant
@@ -90,6 +106,7 @@ class KnowledgeIndexer:
         self._vault = vault_path
         self._tenant = tenant
         self._max_chars = chunk_max_chars
+        self._batch_size = max(1, embed_batch_size)
         self._collection = scope_collection(collection_base, tenant)
         self._ensured = False
 
@@ -154,6 +171,44 @@ class KnowledgeIndexer:
         await self._qdrant.upsert(collection_name=self._collection, points=points)
         return len(chunks)
 
+    async def _flush_batch(self, pending: list[_PendingNote], *, model: str | None) -> None:
+        """Embed every pending note's chunks in one platform call, then upsert + record.
+
+        Batches the embedding across files (#230): one ``/embed`` round-trip covers
+        all chunks in *pending*, after which each note's vectors are upserted and its
+        ledger row written. The ledger is updated only after a note's vectors land, so
+        an interrupted run leaves the ledger consistent (the note re-indexes next time).
+        """
+        if not pending:
+            return
+        texts = [c.text for note in pending for c in note.chunks]
+        vectors = await self._platform.embed(texts, model=model)
+        await self._ensure_collection(len(vectors[0]))
+        offset = 0
+        for note in pending:
+            points = [
+                PointStruct(
+                    id=_chunk_point_id(note.rel, c.index),
+                    vector=vectors[offset + i],
+                    payload={
+                        "note_path": note.rel,
+                        "chunk_index": c.index,
+                        "heading": c.heading,
+                        "text": c.text,
+                    },
+                )
+                for i, c in enumerate(note.chunks)
+            ]
+            offset += len(note.chunks)
+            await self._qdrant.upsert(collection_name=self._collection, points=points)
+            await self._notes.upsert(
+                tenant=self._tenant,
+                note_path=note.rel,
+                mtime_ns=note.mtime_ns,
+                content_hash=note.content_hash,
+                chunk_count=len(note.chunks),
+            )
+
     async def search(self, query: str, k: int = 5) -> list[SearchHit]:
         """Return the top-*k* chunks most semantically similar to *query*.
 
@@ -193,6 +248,18 @@ class KnowledgeIndexer:
             )
         return results
 
+    async def remove_path(self, rel: str) -> None:
+        """De-index a single file by its vault-relative path (the file was deleted).
+
+        Drops the file's Qdrant vectors and its ledger row so a deleted document
+        stops surfacing in search immediately, rather than lingering until the next
+        full ``run`` reconciles the filesystem. Idempotent: removing an unknown path
+        is a no-op. Used when approving a delete suggestion (#220).
+        """
+        await self._delete_note_vectors(rel)
+        await self._notes.delete(tenant=self._tenant, note_path=rel)
+        log.debug("de-indexed single note", path=rel)
+
     async def index_path(self, rel: str) -> int:
         """Re-index a single file by its vault-relative path; returns the chunk count.
 
@@ -218,6 +285,33 @@ class KnowledgeIndexer:
         log.debug("re-indexed single note", path=rel, chunks=chunk_count)
         return chunk_count
 
+    async def reconcile(self) -> bool:
+        """Self-heal after a Qdrant reset (#229): drop a stale ledger so ``run`` re-indexes.
+
+        qdrant vectors are derived data and may be wiped on a server upgrade (see the
+        ``qdrant-init`` guard). If our collection is gone but the Postgres ledger still
+        lists files as indexed, the incremental walk would skip every file and leave the
+        collection empty. Detect that drift and clear the ledger so the next ``run``
+        re-embeds from scratch. Returns ``True`` when it cleared the ledger.
+
+        Must run for *all* sources before any ``run`` recreates a collection — the vault
+        and module-docs share ``<tenant>__docs`` with the platform docs, so the runner
+        reconciles every source up front (see :class:`runner.IndexRunner`).
+        """
+        if await self._qdrant.collection_exists(self._collection):
+            return False
+        known = await self._notes.count(tenant=self._tenant)
+        if known == 0:
+            return False
+        log.warning(
+            "qdrant collection missing but ledger non-empty; clearing ledger to re-index",
+            collection=self._collection,
+            ledger_rows=known,
+        )
+        await self._notes.clear(tenant=self._tenant)
+        self._ensured = False
+        return True
+
     async def run(self) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.
 
@@ -227,11 +321,17 @@ class KnowledgeIndexer:
 
         where *N* notes were re-indexed, *M* were removed, and *K* were skipped
         because their content hash was unchanged.
+
+        New/changed notes are embedded in batches across files (#230): their chunks
+        accumulate into ``pending`` and flush once ``embed_batch_size`` chunks are
+        queued, so the index completes in a handful of round-trips, not one per file.
         """
         indexed = 0
         unchanged = 0
 
         seen_paths: set[str] = set()
+        pending: list[_PendingNote] = []
+        pending_chunks = 0
 
         if not self._vault.exists():
             log.warning("vault path does not exist", path=str(self._vault))
@@ -280,16 +380,31 @@ class KnowledgeIndexer:
                     await self._delete_note_vectors(rel)
 
                 content = raw.decode("utf-8", errors="replace")
-                chunk_count = await self._index_note(rel, content, model=model)
-                await self._notes.upsert(
-                    tenant=self._tenant,
-                    note_path=rel,
-                    mtime_ns=mtime_ns,
-                    content_hash=content_hash,
-                    chunk_count=chunk_count,
-                )
+                chunks = chunk_note(content, self._max_chars)
                 indexed += 1
-                log.debug("indexed note", path=rel, chunks=chunk_count)
+                if not chunks:
+                    # No embeddable content, but record the file so it isn't re-read
+                    # every run (mirrors _index_note returning 0).
+                    await self._notes.upsert(
+                        tenant=self._tenant,
+                        note_path=rel,
+                        mtime_ns=mtime_ns,
+                        content_hash=content_hash,
+                        chunk_count=0,
+                    )
+                    continue
+
+                pending.append(_PendingNote(rel, mtime_ns, content_hash, chunks))
+                pending_chunks += len(chunks)
+                log.debug("queued note", path=rel, chunks=len(chunks))
+                if pending_chunks >= self._batch_size:
+                    await self._flush_batch(pending, model=model)
+                    pending.clear()
+                    pending_chunks = 0
+
+        # Embed and persist any notes still queued below the batch threshold.
+        await self._flush_batch(pending, model=model)
+        pending.clear()
 
         # Delete notes that were removed from the vault since the last run.
         known_paths = set(await self._notes.list_paths(tenant=self._tenant))

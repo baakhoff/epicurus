@@ -21,6 +21,7 @@ tenant-scoped Qdrant collections. Host port **8085**.
 | --- | --- | --- |
 | `knowledge_search(query, k=5)` | `query`: search phrase; `k`: max results | A `ToolEnvelope`: the top-`k` matching chunks as readable text **plus** one entity-reference chip per cited document (ADR-0019). |
 | `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over all three sources (vault + platform docs + module docs). |
+| `knowledge_propose_edit(path, content="", operation="update", note="")` | `path`: vault-relative `.md` path; `content`: proposed full content; `operation`: `create`/`update`/`delete`; `note`: optional rationale | A confirmation that the change was **staged for operator review** (ADR-0033, #220). Never writes the vault directly — the operator approves or rejects it in the Suggestions page. This is the agent's only write path. |
 
 `knowledge_search` merges results from the vault (`<tenant>__knowledge`) and the
 platform-docs (`<tenant>__docs`) collections, re-ranked by cosine similarity score, so the
@@ -39,7 +40,7 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 
 | Panel | What it shows / does |
 | --- | --- |
-| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at`. Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
+| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at` · `index_phase` / `index_attempts` (background-index progress, #230). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
 | **Settings** | Vault path (`VAULT_PATH`) — editable in the shell. |
 | **Actions** | **Re-index** — triggers `knowledge_reindex` (both sources) through the core. |
 
@@ -48,20 +49,50 @@ No module code runs in the shell; all data flows through the core.
 ### Knowledge page (`editor` archetype, ADR-0018)
 
 The module contributes a **Knowledge** left-nav page — an Obsidian-style browse-and-edit
-view over the vault, declared as a `pages` entry `{id: "vault", archetype: "editor"}`.
-The **core renders** the editor from its bounded vocabulary (a document list, a markdown
-source/preview editor, a save button); the module ships **no markup** and only supplies
-data over three endpoints the core proxies (`GET /pages/{id}`, `GET/PUT /pages/{id}/doc`).
+view over the vault with nested folder management, declared as a `pages` entry
+`{id: "vault", archetype: "editor"}`. The **core renders** the editor from its bounded
+vocabulary (a document/folder tree, a markdown source/preview editor, a save button,
+CRUD controls); the module ships **no markup** and only supplies data over the endpoints
+the core proxies.
 
 Saving a document writes it back to the vault and **re-indexes just that file** into
 `<tenant>__knowledge`, so an edit made in the shell is immediately retrievable by the
-agent (the vault is agent-retrievable by default — contrast a future Notes module). The
+agent (the vault is agent-retrievable by default — contrast the Notes module). The
 editor component is **core-owned and shared**; Notes reuses it. The bundled platform docs
 are *not* exposed as an editor page (they are read-only, image-bundled self-documentation).
 
-The vault must be mounted **read-write** for saving to work (see Configuration); the
-default empty named volume is writable, and an operator binding their Obsidian vault should
-mount it writable by the container user (uid 10001).
+The vault must be mounted **read-write** for saving and folder management to work (see
+Configuration); the default empty named volume is writable, and an operator binding their
+Obsidian vault should mount it writable by the container user (uid 10001).
+
+**File-tree management (#216).** The Knowledge page sets `can_manage_files: true` in its
+`EditorData` response; the shell then shows CRUD controls over the tree — creating nested
+folders, creating documents inside any folder, deleting files or empty folders, and
+renaming documents. Operations are gated by path-safety validation in `refs.py` (same
+`..`-traversal and symlink-escape checks as the document editor). Notes sets this flag
+`false` — it uses the separate `can_create` authoring flow instead.
+
+### Suggestions page (`review` archetype, ADR-0033, #220)
+
+Agent-initiated vault changes are **staged for review, never applied directly**. The agent's
+only write path is the `knowledge_propose_edit` tool, which stages a suggestion; the module
+contributes a second left-nav page — **Suggestions** — declared as
+`{id: "review", archetype: "review"}`, where the operator reviews a diff and approves or
+rejects each pending change. Only an approved change is written to the vault and indexed.
+
+The **trust boundary is the author**: agent edits route through review; direct *operator*
+edits (the editor save, the file-tree CRUD) stay immediate, since the operator is already the
+approver. Approve/reject are operator-only endpoints the core proxies — deliberately **not**
+MCP tools, so the agent cannot approve its own proposals.
+
+- `GET /pages/review` — the pending queue: each suggestion as `{id, title, path, operation,
+  origin, note, created_at, diff}`, where `diff` is a server-computed unified diff of the
+  current vault content against the proposal.
+- `POST /pages/review/suggestions/{id}/approve` — apply the change (create/update writes +
+  re-indexes; delete unlinks + de-indexes) and drop it from the queue.
+- `POST /pages/review/suggestions/{id}/reject` — discard the suggestion; the vault is untouched.
+
+Pending suggestions are stored in `knowledge_suggestions` (tenant-scoped — see *Data model*).
 
 ### Attachments (chat-context source, #137)
 
@@ -101,10 +132,17 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
-| `GET /status` | Live index stats: `{note_count, doc_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
-| `GET /pages/{page_id}` | Editor document list `{title, docs:[{id, title, path}]}` (page id `vault`). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
+| `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files}` (page id `vault`). `type` is `"file"` or `"dir"`. `can_manage_files: true` enables folder CRUD in the shell. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
 | `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. |
+| `POST /pages/{page_id}/folder?path=<rel>` | Create a directory at `path` → `{path}`. 409 if the directory already exists. Path goes through `safe_dir_relative` (no `..`, no absolute). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
+| `DELETE /pages/{page_id}/doc?path=<rel>` | Delete a `.md` file. 404 if absent. 400 for path-safety violations. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/doc`. |
+| `DELETE /pages/{page_id}/folder?path=<rel>` | Delete an **empty** directory. 409 if not empty, 404 if absent. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
+| `POST /pages/{page_id}/move` | Move or rename a file or folder. Body: `{from_path, to_path}` → `{path}`. 404 if source absent, 409 if destination exists. Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/move`. |
+| `GET /pages/review` | Pending suggestion queue (#220): `{title, suggestions:[{id, title, path, operation, origin, note, created_at, diff}]}`. Proxied at `GET /platform/v1/modules/knowledge/pages/review`. Registered before the editor pages router so it isn't shadowed by `/pages/{page_id}`. |
+| `POST /pages/review/suggestions/{sid}/approve` | Apply a staged change + index it, drop the row → `{id, status, path, operation, indexed}`. 404 if unknown. Proxied at `POST /platform/v1/modules/knowledge/pages/review/suggestions/{sid}/approve`. Operator-only (not an MCP tool). |
+| `POST /pages/review/suggestions/{sid}/reject` | Discard a staged change, vault untouched → `{id, status, path, operation}`. 404 if unknown. Proxied likewise. Operator-only. |
 | `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver (#143): a cited doc → a `HoverCard`. `kind` is `knowledge`. Proxied at `GET /platform/v1/modules/knowledge/resolve/{kind}/{ref_id}`. |
@@ -129,12 +167,36 @@ The same incremental logic applies to the vault and platform-docs sources:
 1. **Hash** the file (sha-256) and compare with the DB record — skip unchanged files.
 2. **Chunk** new/changed files heading-aware, hard-splitting at paragraph boundaries past
    `CHUNK_MAX_CHARS`.
-3. **Embed** each chunk via the core's [`PlatformClient`](../reference/platform-client.md)
-   (`POST /platform/v1/embed`) — **no model key lives in this module**.
-4. **Upsert** the vectors into Qdrant (deterministic UUID5 point ids) and record the
-   file's hash/mtime/chunk-count in Postgres.
+3. **Embed** chunks in **batches across files** via the core's
+   [`PlatformClient`](../reference/platform-client.md) (`POST /platform/v1/embed`) — the
+   indexer accumulates chunks until `EMBED_BATCH_SIZE` are queued, then embeds them in one
+   round-trip, so the bundled docs index in a handful of calls rather than one per file
+   (#230). **No model key lives in this module.**
+4. **Upsert** the vectors into Qdrant (deterministic UUID5 point ids) and record each
+   file's hash/mtime/chunk-count in Postgres only after its vectors land, so an interrupted
+   run leaves the ledger consistent.
 
 Deleted files are purged from both stores on the next index run.
+
+### Resilient startup (#230)
+
+The initial index runs as a **background task**: the service serves `GET /health`
+immediately rather than blocking until the (potentially multi-minute) first index over a
+real vault completes, so the healthcheck never flaps and orchestration won't trip restart
+loops. The background runner (`runner.IndexRunner`) **retries with capped exponential
+backoff**, so a cold `compose up` that starts knowledge before core-app / qdrant are
+reachable still ends with a populated index without any manual restart. `GET /status`
+exposes the live `index_phase` and `index_attempts`; counts climb as the run progresses.
+
+**Self-heal after a Qdrant reset (#229).** Qdrant vectors are derived data and may be
+wiped when the server is upgraded across an incompatible on-disk format (the `qdrant-init`
+guard — see [Qdrant](../infrastructure/qdrant.md)). When that happens the Postgres ledgers
+still list every file as indexed, so a plain incremental run would skip everything and
+leave the fresh collection empty. Each indexer therefore **reconciles** before indexing: if
+its collection is missing but its ledger is non-empty, it clears the ledger so the run
+re-embeds from scratch. The runner reconciles **all** sources up front — before any of them
+recreates the shared `<tenant>__docs` collection — so the vault, platform docs, and module
+docs all rebuild after a reset.
 
 **Module docs** use a variant of the same logic (`ModuleDocsIndexer`): each enabled module's
 `docs_url` is fetched via the core proxy, diffed by SHA-256 content hash (HTTP sources have no
@@ -192,6 +254,10 @@ platform services read these docs if needed.
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | File hash/mtime tracking. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
+| `EMBED_BATCH_SIZE` | `64` | Chunk texts embedded per `/embed` round-trip — the indexer flushes a batch once this many chunks are queued (#230). |
+| `INDEX_RETRY_MAX_ATTEMPTS` | `30` | Background-index retry cap before giving up (#230). |
+| `INDEX_RETRY_BASE_DELAY_SECONDS` | `1.0` | First retry backoff; doubles each attempt. |
+| `INDEX_RETRY_MAX_DELAY_SECONDS` | `30.0` | Upper bound on the retry backoff. |
 
 The vault is bound to `/vault` **read-write** via `KNOWLEDGE_HOST_VAULT`, which
 defaults to an **empty named volume** (point it at your vault to index real notes).
@@ -210,6 +276,10 @@ always present — bundled at image build time, and are not editable from the sh
   `module_name`, `doc_path`, `content_hash` (SHA-256), `chunk_count`, `indexed_at`;
   unique on `(tenant, module_name, doc_path)`. Records are purged when a module is
   disabled or removed.
+- **Postgres `knowledge_suggestions`** — pending agent-proposed changes (#220, ADR-0033):
+  `id`, `tenant`, `sid` (opaque uuid), `path`, `operation` (`create`/`update`/`delete`),
+  `proposed_content`, `origin`, `note`, `created_at`. A row is removed on approve (after the
+  change is applied) or reject; the table only ever holds pending suggestions.
 - **Qdrant `<tenant>__knowledge`** — vault chunk embeddings (cosine), one collection per tenant.
 - **Qdrant `<tenant>__docs`** — platform-docs + module-docs chunk embeddings (cosine), one
   collection per tenant. Module-doc points use a distinct UUID namespace from platform-doc
@@ -238,12 +308,14 @@ Package `epicurus_knowledge`:
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
-| `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); `index_path` re-indexes a single file for the editor save. |
-| `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`) + manifest UI + the `editor` page spec. |
-| `pages.py` | The `editor` page surface (#130): document list, read, and save (with vault-path safety + re-index). |
-| `refs.py` | Opaque document refs (base64url `source:path`) + shared `.md` vault path-safety + vault walk. |
+| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save. |
+| `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
+| `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`, `knowledge_propose_edit` → staged review #220) + manifest UI + the `editor` and `review` page specs. |
+| `pages.py` | The `editor` page surface (#130): document/folder tree, read, save, and folder CRUD (create, delete, move — #216). `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. |
+| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store, `SuggestionReview` (diff + apply on approve / discard on reject), and `create_review_router`. Approve/reject are operator-only — never MCP tools. |
+| `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories) + vault walks (`iter_md_files`, `iter_tree_nodes`). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |
-| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` + `/module-docs` routers, initial index of all three sources on startup. |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` (review router first, then editor) + `/attachments/*` + `/resolve/*` + `/module-docs` routers; launches the background `IndexRunner` (#230) so startup never blocks on the first index. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

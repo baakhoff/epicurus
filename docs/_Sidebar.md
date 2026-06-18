@@ -29,7 +29,7 @@
 - [tenancy](reference/tenancy.md)
 - [events](reference/events.md)
 - [secrets](reference/secrets.md)
-- [observability](reference/observability.md)
+- [observability & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)
 - [platform API](reference/platform-api.md)
 - [OAuth 2.0](reference/oauth.md)
@@ -43,6 +43,7 @@
 - [Secrets (OpenBao)](infrastructure/secrets.md)
 - [Startup and recovery](infrastructure/startup-and-recovery.md)
 - [Backup and restore](infrastructure/backup-and-restore.md)
+- [Qdrant (vector store + upgrades)](infrastructure/qdrant.md)
 
 **Developer Guide**
 
@@ -53,3 +54,4 @@
 - [Contributing](developer/contributing.md)
 - [Versioning](developer/versioning.md)
 - [Releases](developer/releases.md)
+- [Obsidian Sync spike (#219)](developer/obsidian-sync-spike.md)

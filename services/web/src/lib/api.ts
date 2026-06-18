@@ -13,6 +13,7 @@ import {
   EmailMessage,
   HoverCard,
   LlmPrefs,
+  LogEntry,
   MessageRecord,
   ModelInfo,
   ModuleAttachmentItem,
@@ -23,9 +24,11 @@ import {
   PlatformInfo,
   PowerStatus,
   ProviderInfo,
+  Readiness,
   SessionSummary,
   type PowerState,
 } from "@/lib/contracts";
+import { parseFrame } from "@/lib/sse";
 
 export class ApiError extends Error {
   constructor(
@@ -191,6 +194,59 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
+  // Create a folder inside an editor page's store (#216).
+  createModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {
+    await request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/folder?path=${encodeURIComponent(path)}`,
+      { method: "POST" },
+    );
+  },
+  // Delete a document from an editor page's store (#216).
+  deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
+    const response = await fetch(
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail ?? detail; } catch { /* non-JSON */ }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  // Delete an empty folder from an editor page's store (#216).
+  deleteModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {
+    const response = await fetch(
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/folder?path=${encodeURIComponent(path)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail ?? detail; } catch { /* non-JSON */ }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  // Move or rename a file or folder within an editor page's store (#216).
+  moveModuleItem: (name: string, pageId: string, fromPath: string, toPath: string) =>
+    request(
+      z.object({ path: z.string() }),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/move`,
+      { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
+    ),
+  // Approve a staged suggestion on a `review` page — applies + indexes it (#220).
+  approveSuggestion: (name: string, pageId: string, suggestionId: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/approve`,
+      { method: "POST" },
+    ),
+  // Reject a staged suggestion on a `review` page — discards it (#220).
+  rejectSuggestion: (name: string, pageId: string, suggestionId: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/reject`,
+      { method: "POST" },
+    ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(
@@ -230,6 +286,11 @@ export const api = {
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
 
+  readiness: (model?: string) => {
+    const q = model ? `?model=${encodeURIComponent(model)}` : "";
+    return request(Readiness, `/platform/v1/readiness${q}`);
+  },
+
   oauthClientStatus: (provider: string) =>
     request(OAuthClientStatus, `/platform/v1/oauth/${encodeURIComponent(provider)}/client`),
   oauthSetClient: (provider: string, clientId: string, clientSecret: string) =>
@@ -246,3 +307,69 @@ export const api = {
       method: "DELETE",
     }),
 };
+
+/**
+ * Stream structured log entries from the core as an async generator.
+ *
+ * The core replays up to 200 buffered history entries first, then trickles live
+ * entries as they are emitted. The caller is responsible for aborting the stream
+ * via ``signal``.
+ *
+ * @param level    Minimum log level to receive ("debug" | "info" | "warning" | "error" | "critical").
+ * @param service  Optional service-name prefix filter.
+ * @param signal   AbortSignal used to stop the stream.
+ */
+export async function* logStream(
+  level?: string,
+  service?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<LogEntry> {
+  const params = new URLSearchParams();
+  if (level) params.set("level", level);
+  if (service) params.set("service", service);
+  const query = params.size ? `?${params}` : "";
+  const url = `/platform/v1/logs/stream${query}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    let detail = response.statusText;
+    try {
+      detail = (await response.json()).detail ?? detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw Object.assign(new Error(detail), { status: response.status });
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index: number;
+      while ((index = buffer.search(/\n\n|\r\n\r\n/)) >= 0) {
+        const block = buffer.slice(0, index).replace(/\r\n/g, "\n");
+        buffer = buffer.slice(index + (buffer[index] === "\r" ? 4 : 2));
+        const msg = parseFrame(block);
+        if (msg?.event === "log") {
+          try {
+            yield LogEntry.parse(JSON.parse(msg.data));
+          } catch {
+            /* malformed frame — skip */
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

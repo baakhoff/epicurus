@@ -26,8 +26,37 @@ images to GHCR.
   it (merged) at `GET·PUT /platform/v1/modules/{name}/collections` (+ a Postgres-only
   `…/collections/prefs` the module reads via `PlatformClient.get_collections`). The router falls
   back to local if the core is unreachable (local-first). ADR-0030; foundation for auto-connect
-  (#209) and the editable calendar (#208) (closes #211) (`epicurus-core` → 0.9.0,
-  `core-app` → 0.13.0, `calendar` → 0.5.0, `tasks` → 0.6.0, `web` → 0.15.0).
+  (#209) and the editable calendar (#208) (closes #211) (`epicurus-core` → 0.11.0,
+  `core-app` → 0.16.0, `calendar` → 0.5.0, `tasks` → 0.6.0, `web` → 0.18.0).
+- **User-managed knowledge base: nested folders + add anything (file tree)** — the Knowledge
+  editor page gains a file tree: create nested folders, add documents into any folder, and
+  rename/move/delete — all path-confined to the vault (no traversal) and re-indexed on change.
+  The `editor` archetype now carries an `EditorDoc.type` (`file`/`dir`) and a
+  `can_manage_files` flag; the core proxies folder-create, file/folder-delete, and move CRUD
+  to the module (closes #216) (`knowledge` → 0.11.0, `core-app` → 0.14.0, `web` → 0.16.0).
+- **Observability page with live log console** — the web shell gains an
+  `/observability` screen that streams structured logs from core-app in real time,
+  without `docker logs`. The page replays up to 200 buffered history entries on
+  connect, then trickles live entries as they arrive. Filters by minimum log level
+  and service prefix apply server-side (no wasted bytes). Each entry shows
+  timestamp, level badge, service, and message; context fields are collapsible.
+  A health summary (`GET /platform/v1/readiness`) sits at the top. The stream
+  reconnects automatically on disconnect (3 s back-off). Backed by a structlog
+  processor injected into the chain before the renderer via the new
+  `configure_logging(extra_processors=[...])` parameter (ADR-0031); secret-looking
+  keys (`token`, `key`, `secret`, `password`, `credential`, `auth`) are stripped
+  before any entry enters the ring buffer (#217)
+  (`epicurus-core` → 0.9.0, `core-app` → 0.13.0, `web` → 0.15.0).
+
+- **Knowledge changes are suggested for review, not pushed directly** — the agent's only
+  way to change the vault is the new `knowledge_propose_edit` tool, which **stages** a
+  create/update/delete instead of writing it. A new **Suggestions** page (the first `review`
+  archetype) shows each pending change as a diff; the operator approves (apply + index) or
+  rejects (discard) it. Direct *operator* edits (the editor save, the file-tree CRUD) stay
+  immediate — the trust boundary is the author, not the action. Approve/reject are
+  operator-only endpoints, never agent tools, so the agent can't approve its own proposals
+  (closes #220, ADR-0033) (`epicurus-core` → 0.10.0, `core-app` → 0.15.0, `knowledge` → 0.12.0,
+  `web` → 0.17.0).
 - **Modules ship their own docs, auto-indexed into the knowledge base** — a module can declare
   `docs_url` in its manifest and serve `GET /docs`; the core proxies it
   (`GET /platform/v1/modules/{name}/docs`) and the **knowledge** module indexes every enabled

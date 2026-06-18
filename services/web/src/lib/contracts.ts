@@ -167,7 +167,7 @@ export type UiSection = z.infer<typeof UiSection>;
 /* ── module-contributed pages (ADR-0018) ─────────────────────────────────── */
 
 /** The bounded vocabulary of core-rendered left-nav view shapes. */
-export const PageArchetype = z.enum(["browser", "calendar", "editor", "board"]);
+export const PageArchetype = z.enum(["browser", "calendar", "editor", "board", "review"]);
 export type PageArchetype = z.infer<typeof PageArchetype>;
 
 export const PageSpec = z.object({
@@ -392,15 +392,17 @@ export const CalendarData = z.object({
 });
 export type CalendarData = z.infer<typeof CalendarData>;
 
-/** One document in an `editor` page's list (content fetched lazily on open). */
+/** One document or folder in an `editor` page's tree (content fetched lazily on open). */
 export const EditorDoc = z.object({
   id: z.string(),
   title: z.string(),
   path: z.string(),
+  /** Whether this entry is a file or a directory (#216). */
+  type: z.enum(["file", "dir"]).default("file"),
 });
 export type EditorDoc = z.infer<typeof EditorDoc>;
 
-/** The `editor` archetype's list contract: the browsable set of documents. */
+/** The `editor` archetype's list contract: the browsable document/folder tree. */
 export const EditorData = z.object({
   title: z.string().default("Knowledge"),
   docs: z.array(EditorDoc).default([]),
@@ -410,6 +412,12 @@ export const EditorData = z.object({
    * leaves it false (its documents are authored externally in Obsidian).
    */
   can_create: z.boolean().default(false),
+  /**
+   * Opt into tree management (#216): when true the shell shows folder CRUD
+   * controls — create/delete folders, delete files, rename. Knowledge sets this;
+   * notes does not (notes has its own `can_create` flow).
+   */
+  can_manage_files: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 
@@ -428,6 +436,33 @@ export const EditorSaveResult = z.object({
   chunk_count: z.number().default(0),
 });
 export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
+
+/* ── review queue (ADR-0033, #220) ───────────────────────────────────────── */
+
+/**
+ * One pending agent-proposed change in a `review` page. The module supplies a
+ * server-computed unified `diff` (current vault content → proposed); the shell
+ * renders it and the approve/reject controls. Approve applies + indexes; reject
+ * discards — nothing the agent proposes lands without the operator's approval.
+ */
+export const ReviewSuggestion = z.object({
+  id: z.string(),
+  title: z.string(),
+  path: z.string(),
+  operation: z.enum(["create", "update", "delete"]),
+  origin: z.string().default("agent"),
+  note: z.string().default(""),
+  created_at: z.string(),
+  diff: z.string().default(""),
+});
+export type ReviewSuggestion = z.infer<typeof ReviewSuggestion>;
+
+/** The `review` archetype's data contract: the queue of pending suggestions. */
+export const ReviewData = z.object({
+  title: z.string().default("Suggestions"),
+  suggestions: z.array(ReviewSuggestion).default([]),
+});
+export type ReviewData = z.infer<typeof ReviewData>;
 
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 
@@ -483,4 +518,16 @@ export const OAuthClientStatus = z.object({
   provider: z.string(),
   configured: z.boolean(),
 });
+
+/* ── Log stream (ADR-0031) ───────────────────────────────────────────────── */
+
+/** One structured log entry emitted by the core (ADR-0031). */
+export const LogEntry = z.object({
+  ts: z.string(),
+  level: z.enum(["debug", "info", "warning", "error", "critical"]),
+  service: z.string().default(""),
+  message: z.string(),
+  context: z.record(z.string(), z.unknown()).default({}),
+});
+export type LogEntry = z.infer<typeof LogEntry>;
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;

@@ -21,6 +21,13 @@ TENANT = "test"
 EMBED_DIM = 4
 
 
+def _suggestions() -> Any:
+    """A fresh in-memory suggestion store for build_module (#220); never exercised here."""
+    from epicurus_knowledge.suggestions import SuggestionStore
+
+    return SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+
+
 def _fake_vectors(texts: list[str]) -> list[list[float]]:
     return [[float(i), 0.0, 0.0, 0.0] for i in range(len(texts))]
 
@@ -250,7 +257,14 @@ async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Pa
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    module = build_module(vault_indexer, docs_indexer, module_docs_stub)
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        module_docs_stub,
+        _suggestions(),
+        tenant=TENANT,
+        vault_path=vault,
+    )
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
@@ -265,7 +279,14 @@ async def test_manifest_declares_tool_and_event(
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(vault_indexer, docs_indexer, MagicMock())
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        MagicMock(),
+        _suggestions(),
+        tenant=TENANT,
+        vault_path=vault,
+    )
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert "knowledge_reindex" in tool_names
@@ -359,7 +380,14 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Pat
     )
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(vault_indexer, docs_indexer, MagicMock())
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        MagicMock(),
+        _suggestions(),
+        tenant=TENANT,
+        vault_path=vault,
+    )
     _content, structured = await module.mcp.call_tool("knowledge_search", {"query": "B", "k": 1})
     assert structured is not None
 
@@ -433,7 +461,14 @@ async def test_merged_search_returns_hits_from_both_sources(
 
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    module = build_module(vault_indexer, docs_indexer, module_docs_stub)
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        module_docs_stub,
+        _suggestions(),
+        tenant=TENANT,
+        vault_path=vault,
+    )
     from epicurus_core.contracts import ToolEnvelope
 
     content, _ = await module.mcp.call_tool("knowledge_search", {"query": "platform", "k": 5})
@@ -475,10 +510,141 @@ async def test_reindex_sums_both_sources(
 
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    module = build_module(vault_indexer, docs_indexer, module_docs_stub)
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        module_docs_stub,
+        _suggestions(),
+        tenant=TENANT,
+        vault_path=vault,
+    )
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
     # vault has 2 notes, docs has 1 → total indexed >= 3 on first run
     assert isinstance(payload.get("indexed"), int)
     assert payload["indexed"] >= 3  # type: ignore[operator]
+
+
+# ── Batched embedding (#230) ──────────────────────────────────────────────────
+
+
+async def test_run_batches_embeds_across_files(note_index: NoteIndex, tmp_path: Path) -> None:
+    """A large batch size embeds every file's chunks in a single platform round-trip."""
+    for i in range(5):
+        (tmp_path / f"n{i}.md").write_text(f"# Note {i}\n\nBody {i}.")
+    platform = _make_mock_platform()
+    indexer = KnowledgeIndexer(
+        note_index,
+        _make_mock_qdrant(),
+        platform,
+        vault_path=tmp_path,
+        tenant=TENANT,
+        embed_batch_size=64,
+    )
+    result = await indexer.run()
+    assert result["indexed"] == 5
+    # Five files, but one batched embed call — not one call per file.
+    assert platform.embed.call_count == 1
+
+
+async def test_run_one_flush_per_file_when_batch_size_one(
+    note_index: NoteIndex, tmp_path: Path
+) -> None:
+    """A batch size of 1 flushes after each file, so every note triggers its own call."""
+    for i in range(5):
+        (tmp_path / f"n{i}.md").write_text(f"# Note {i}\n\nBody {i}.")
+    platform = _make_mock_platform()
+    indexer = KnowledgeIndexer(
+        note_index,
+        _make_mock_qdrant(),
+        platform,
+        vault_path=tmp_path,
+        tenant=TENANT,
+        embed_batch_size=1,
+    )
+    result = await indexer.run()
+    assert result["indexed"] == 5
+    assert platform.embed.call_count == 5
+
+
+async def test_run_persists_every_batched_file(note_index: NoteIndex, tmp_path: Path) -> None:
+    """Batched files are all recorded in the ledger and searchable on the next run."""
+    for i in range(3):
+        (tmp_path / f"n{i}.md").write_text(f"# Note {i}\n\nBody {i}.")
+    indexer = KnowledgeIndexer(
+        note_index,
+        _make_mock_qdrant(),
+        _make_mock_platform(),
+        vault_path=tmp_path,
+        tenant=TENANT,
+        embed_batch_size=2,  # forces a mid-walk flush plus a final flush
+    )
+    await indexer.run()
+    assert await note_index.count(tenant=TENANT) == 3
+    # A second run sees everything as unchanged — the ledger captured each file.
+    second = await indexer.run()
+    assert second["unchanged"] == 3
+    assert second["indexed"] == 0
+
+
+# ── Qdrant-reset self-heal (#229) ─────────────────────────────────────────────
+
+
+def _missing_collection_indexer(note_index: NoteIndex, vault: Path) -> KnowledgeIndexer:
+    qdrant = _make_mock_qdrant()
+    qdrant.collection_exists = AsyncMock(return_value=False)  # vectors wiped
+    return KnowledgeIndexer(
+        note_index, qdrant, _make_mock_platform(), vault_path=vault, tenant=TENANT
+    )
+
+
+async def test_reconcile_clears_ledger_when_collection_missing(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    indexer = _missing_collection_indexer(note_index, vault)
+    await note_index.upsert(
+        tenant=TENANT, note_path="note_a.md", mtime_ns=1, content_hash="h", chunk_count=1
+    )
+    assert await note_index.count(tenant=TENANT) == 1
+    assert await indexer.reconcile() is True
+    assert await note_index.count(tenant=TENANT) == 0
+
+
+async def test_reconcile_noop_when_collection_exists(note_index: NoteIndex, vault: Path) -> None:
+    indexer = _make_indexer(note_index, vault)  # collection_exists → True
+    await note_index.upsert(
+        tenant=TENANT, note_path="note_a.md", mtime_ns=1, content_hash="h", chunk_count=1
+    )
+    assert await indexer.reconcile() is False
+    assert await note_index.count(tenant=TENANT) == 1  # ledger untouched
+
+
+async def test_reconcile_noop_when_ledger_empty(note_index: NoteIndex, vault: Path) -> None:
+    indexer = _missing_collection_indexer(note_index, vault)
+    assert await indexer.reconcile() is False
+
+
+async def test_reindexes_from_scratch_after_qdrant_reset(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """After a wipe, reconcile + run rebuilds the index even though files are unchanged."""
+    indexer = _missing_collection_indexer(note_index, vault)
+    await indexer.run()
+    assert await note_index.count(tenant=TENANT) == 2  # two seed notes
+    # Simulate the qdrant volume being reset out from under us.
+    assert await indexer.reconcile() is True
+    assert await note_index.count(tenant=TENANT) == 0
+    result = await indexer.run()
+    assert result["indexed"] == 2  # full re-embed, not skipped as "unchanged"
+
+
+async def test_clear_removes_all_rows(note_index: NoteIndex) -> None:
+    await note_index.upsert(
+        tenant=TENANT, note_path="a.md", mtime_ns=1, content_hash="h1", chunk_count=1
+    )
+    await note_index.upsert(
+        tenant=TENANT, note_path="b.md", mtime_ns=2, content_hash="h2", chunk_count=1
+    )
+    await note_index.clear(tenant=TENANT)
+    assert await note_index.count(tenant=TENANT) == 0

@@ -4,7 +4,7 @@
  * entries here without restructuring the shell.
  */
 import type { LucideIcon } from "lucide-react";
-import { Blocks, Cpu, MessageCircle, Settings } from "lucide-react";
+import { Activity, Blocks, Cpu, MessageCircle, Settings } from "lucide-react";
 
 import type { ModuleSnapshot, PageArchetype } from "@/lib/contracts";
 
@@ -19,6 +19,7 @@ export const SURFACES: Surface[] = [
   { path: "/models", label: "Models", icon: Cpu },
   { path: "/modules", label: "Modules", icon: Blocks },
   { path: "/settings", label: "Settings", icon: Settings },
+  { path: "/observability", label: "Observability", icon: Activity },
 ];
 
 /* ── module-contributed pages (ADR-0018) ─────────────────────────────────── */

@@ -141,8 +141,8 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
 `browser` (tree/list + detail), `calendar` (month / week / agenda), `editor`
-(Obsidian-like doc), `board` (lists/cards). The shell ships one first-party screen per
-archetype; `browser`, `calendar`, `editor`, and `board` are all implemented today.
+(Obsidian-like doc), `board` (lists/cards), `review` (diff approve/reject queue). The
+shell ships one first-party screen per archetype; all five are implemented today.
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
@@ -216,25 +216,96 @@ After a successful call the shell refetches the page.
 ```
 
 **The `editor` archetype (Obsidian-like docs).** Its `GET /pages/{id}` returns a
-document *list* (content is fetched lazily per document), and it owns two extra,
-**editor-only** doc endpoints the core proxies (a non-`editor` page 404s on them):
+document/folder tree (content is fetched lazily per document), and it owns several
+**editor-only** endpoints the core proxies (a non-`editor` page 404s on them):
 
 ```jsonc
-// GET /pages/{id}  →  the browsable document list
-{ "title": "Knowledge", "docs": [ { "id": "a.md", "title": "a", "path": "a.md" } ] }
+// GET /pages/{id}  →  the browsable document/folder tree
+{
+  "title": "Knowledge",
+  "docs": [
+    { "id": "projects", "title": "projects", "path": "projects", "type": "dir" },
+    { "id": "projects/a.md", "title": "a", "path": "projects/a.md", "type": "file" },
+    { "id": "b.md", "title": "b", "path": "b.md", "type": "file" }
+  ],
+  "can_create": false,        // true → shell shows "New note" (Notes module)
+  "can_manage_files": true    // true → shell shows folder CRUD (Knowledge module, #216)
+}
 // GET /pages/{id}/doc?path=<rel>  →  one document's content
-{ "path": "a.md", "title": "a", "content": "# A\n…" }
+{ "path": "projects/a.md", "title": "a", "content": "# A\n…" }
 // PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save
-{ "path": "a.md", "indexed": true, "chunk_count": 3 }
+{ "path": "projects/a.md", "indexed": true, "chunk_count": 3 }
 ```
 
-Proxied at `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`. `path` is
-module-relative and the module **must** confine it to its own store (reject `..`,
-absolute paths, and non-document files) — the editor writes real files, so this is the
-trust boundary. The shared core editor component (knowledge's vault page is the first
-user, #130) provides the list + markdown source/preview + save; a module supplies only
-the data above. The first knowledge implementation re-indexes a saved document so it
-stays agent-retrievable.
+The following additional endpoints are available when `can_manage_files` is true (#216):
+
+```
+POST   /pages/{id}/folder?path=<rel>          →  { "path": "…" }   (201 if created, 409 if exists)
+DELETE /pages/{id}/doc?path=<rel>             →  204               (404 if absent)
+DELETE /pages/{id}/folder?path=<rel>          →  204               (409 if not empty, 404 if absent)
+POST   /pages/{id}/move  { from_path, to_path } →  { "path": "…" }  (404 source absent, 409 dest exists)
+```
+
+Proxied at:
+
+- `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
+- `POST /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
+- `DELETE /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
+- `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
+- `POST /platform/v1/modules/{name}/pages/{id}/move`
+
+`path` is module-relative and the module **must** confine it to its own store (reject
+`..`, absolute paths, and — for doc paths — non-``.md`` files) — the editor writes real
+files, so this is the trust boundary. The shared core editor component (knowledge's vault
+page is the first user, #130) provides the tree + markdown source/preview + save; a
+module supplies only the data above. The knowledge implementation re-indexes a saved
+document so it stays agent-retrievable.
+
+`can_manage_files` tells the shell to show folder CRUD controls (Knowledge sets this
+`true`; Notes sets it `false` and uses `can_create` instead for its own authoring flow).
+`EditorDoc.type` distinguishes `"file"` entries from `"dir"` entries; the shell builds
+the nested visual tree from the flat list using the path structure.
+
+**The `review` archetype (suggested-changes queue, #220).** A queue of agent-proposed
+changes the operator approves or rejects, each with a server-computed unified diff. Its
+`GET /pages/{id}` returns the pending queue, and it owns two **operator-only** mutation
+endpoints the core proxies (they are deliberately *not* MCP tools — the agent could
+otherwise approve its own proposals):
+
+```jsonc
+// GET /pages/{id}  →  the pending queue
+{
+  "title": "Suggestions",
+  "suggestions": [
+    { "id": "9f2c…",                 // opaque suggestion id
+      "title": "goals",
+      "path": "projects/goals.md",
+      "operation": "update",          // create | update | delete
+      "origin": "agent",
+      "note": "add Q3 targets",       // optional rationale
+      "created_at": "2026-06-18T21:30:00+00:00",
+      "diff": "--- a/…\n+++ b/…\n@@ …" // unified diff: current vault → proposed
+    }
+  ]
+}
+// POST /pages/{id}/suggestions/{sid}/approve  →  applies + indexes, drops the row
+{ "id": "9f2c…", "status": "approved", "path": "projects/goals.md",
+  "operation": "update", "indexed": true }
+// POST /pages/{id}/suggestions/{sid}/reject   →  discards the row, vault untouched
+{ "id": "9f2c…", "status": "rejected", "path": "projects/goals.md", "operation": "update" }
+```
+
+Proxied at:
+
+- `GET  /platform/v1/modules/{name}/pages/{id}` (the queue — same proxy as any page)
+- `POST /platform/v1/modules/{name}/pages/{id}/suggestions/{sid}/approve`
+- `POST /platform/v1/modules/{name}/pages/{id}/suggestions/{sid}/reject`
+
+The trust boundary is the **author**: agent-initiated changes (the knowledge
+`knowledge_propose_edit` tool) stage a suggestion and land only on approval; direct
+*operator* edits (the editor save, the file-tree CRUD above) stay immediate, since the
+operator is the approver. Knowledge is the first user (ADR-0033); see
+[knowledge](../services/knowledge.md).
 
 The `calendar` archetype's data shape is a window of events (the shell renders the month /
 week / agenda views and re-fetches as the user navigates):

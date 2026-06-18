@@ -41,9 +41,26 @@ def _vault(tmp_path: Path) -> Path:
 def test_list_docs_returns_sorted_md_only(tmp_path: Path) -> None:
     pages = VaultPages(_vault(tmp_path), _FakeIndexer())
     data = pages.list_docs()
-    assert [d.path for d in data.docs] == ["alpha.md", "projects/beta.md"]
-    assert data.docs[1].title == "beta"
+    # Dirs come before files at each level; the tree is depth-first.
+    # Vault fixture: projects/ (dir), projects/beta.md (file), alpha.md (root file).
+    paths = [d.path for d in data.docs]
+    assert "projects" in paths
+    assert "alpha.md" in paths
+    assert "projects/beta.md" in paths
+    # Dirs must appear before same-level files.
+    assert paths.index("projects") < paths.index("alpha.md")
+    # The dir entry must appear before its own files.
+    assert paths.index("projects") < paths.index("projects/beta.md")
+    # Type fields are set correctly.
+    types = {d.path: d.type for d in data.docs}
+    assert types["projects"] == "dir"
+    assert types["alpha.md"] == "file"
+    assert types["projects/beta.md"] == "file"
+    # Title and metadata
+    beta = next(d for d in data.docs if d.path == "projects/beta.md")
+    assert beta.title == "beta"
     assert data.title == "Knowledge"
+    assert data.can_manage_files is True
 
 
 def test_list_docs_empty_when_no_vault(tmp_path: Path) -> None:
@@ -126,7 +143,18 @@ def _client(tmp_path: Path, indexer: _FakeIndexer | None = None) -> TestClient:
 def test_router_lists_documents(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/pages/vault")
     assert resp.status_code == 200
-    assert [d["path"] for d in resp.json()["docs"]] == ["alpha.md", "projects/beta.md"]
+    docs = resp.json()["docs"]
+    paths = [d["path"] for d in docs]
+    # Dirs appear in the list alongside files.
+    assert "projects" in paths
+    assert "alpha.md" in paths
+    assert "projects/beta.md" in paths
+    # Dirs precede same-level files.
+    assert paths.index("projects") < paths.index("alpha.md")
+    # Type field is present.
+    by_path = {d["path"]: d for d in docs}
+    assert by_path["projects"]["type"] == "dir"
+    assert by_path["alpha.md"]["type"] == "file"
 
 
 def test_router_reads_a_document(tmp_path: Path) -> None:

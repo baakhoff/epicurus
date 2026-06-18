@@ -336,15 +336,17 @@ export const CalendarData = z.object({
 });
 export type CalendarData = z.infer<typeof CalendarData>;
 
-/** One document in an `editor` page's list (content fetched lazily on open). */
+/** One document or folder in an `editor` page's tree (content fetched lazily on open). */
 export const EditorDoc = z.object({
   id: z.string(),
   title: z.string(),
   path: z.string(),
+  /** Whether this entry is a file or a directory (#216). */
+  type: z.enum(["file", "dir"]).default("file"),
 });
 export type EditorDoc = z.infer<typeof EditorDoc>;
 
-/** The `editor` archetype's list contract: the browsable set of documents. */
+/** The `editor` archetype's list contract: the browsable document/folder tree. */
 export const EditorData = z.object({
   title: z.string().default("Knowledge"),
   docs: z.array(EditorDoc).default([]),
@@ -354,6 +356,12 @@ export const EditorData = z.object({
    * leaves it false (its documents are authored externally in Obsidian).
    */
   can_create: z.boolean().default(false),
+  /**
+   * Opt into tree management (#216): when true the shell shows folder CRUD
+   * controls — create/delete folders, delete files, rename. Knowledge sets this;
+   * notes does not (notes has its own `can_create` flow).
+   */
+  can_manage_files: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 

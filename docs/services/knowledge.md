@@ -48,20 +48,28 @@ No module code runs in the shell; all data flows through the core.
 ### Knowledge page (`editor` archetype, ADR-0018)
 
 The module contributes a **Knowledge** left-nav page — an Obsidian-style browse-and-edit
-view over the vault, declared as a `pages` entry `{id: "vault", archetype: "editor"}`.
-The **core renders** the editor from its bounded vocabulary (a document list, a markdown
-source/preview editor, a save button); the module ships **no markup** and only supplies
-data over three endpoints the core proxies (`GET /pages/{id}`, `GET/PUT /pages/{id}/doc`).
+view over the vault with nested folder management, declared as a `pages` entry
+`{id: "vault", archetype: "editor"}`. The **core renders** the editor from its bounded
+vocabulary (a document/folder tree, a markdown source/preview editor, a save button,
+CRUD controls); the module ships **no markup** and only supplies data over the endpoints
+the core proxies.
 
 Saving a document writes it back to the vault and **re-indexes just that file** into
 `<tenant>__knowledge`, so an edit made in the shell is immediately retrievable by the
-agent (the vault is agent-retrievable by default — contrast a future Notes module). The
+agent (the vault is agent-retrievable by default — contrast the Notes module). The
 editor component is **core-owned and shared**; Notes reuses it. The bundled platform docs
 are *not* exposed as an editor page (they are read-only, image-bundled self-documentation).
 
-The vault must be mounted **read-write** for saving to work (see Configuration); the
-default empty named volume is writable, and an operator binding their Obsidian vault should
-mount it writable by the container user (uid 10001).
+The vault must be mounted **read-write** for saving and folder management to work (see
+Configuration); the default empty named volume is writable, and an operator binding their
+Obsidian vault should mount it writable by the container user (uid 10001).
+
+**File-tree management (#216).** The Knowledge page sets `can_manage_files: true` in its
+`EditorData` response; the shell then shows CRUD controls over the tree — creating nested
+folders, creating documents inside any folder, deleting files or empty folders, and
+renaming documents. Operations are gated by path-safety validation in `refs.py` (same
+`..`-traversal and symlink-escape checks as the document editor). Notes sets this flag
+`false` — it uses the separate `can_create` authoring flow instead.
 
 ### Attachments (chat-context source, #137)
 
@@ -102,9 +110,13 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, last_indexed_at}`. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
-| `GET /pages/{page_id}` | Editor document list `{title, docs:[{id, title, path}]}` (page id `vault`). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
+| `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files}` (page id `vault`). `type` is `"file"` or `"dir"`. `can_manage_files: true` enables folder CRUD in the shell. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
 | `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. |
+| `POST /pages/{page_id}/folder?path=<rel>` | Create a directory at `path` → `{path}`. 409 if the directory already exists. Path goes through `safe_dir_relative` (no `..`, no absolute). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
+| `DELETE /pages/{page_id}/doc?path=<rel>` | Delete a `.md` file. 404 if absent. 400 for path-safety violations. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/doc`. |
+| `DELETE /pages/{page_id}/folder?path=<rel>` | Delete an **empty** directory. 409 if not empty, 404 if absent. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
+| `POST /pages/{page_id}/move` | Move or rename a file or folder. Body: `{from_path, to_path}` → `{path}`. 404 if source absent, 409 if destination exists. Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/move`. |
 | `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver (#143): a cited doc → a `HoverCard`. `kind` is `knowledge`. Proxied at `GET /platform/v1/modules/knowledge/resolve/{kind}/{ref_id}`. |
@@ -240,8 +252,8 @@ Package `epicurus_knowledge`:
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
 | `indexer.py` | Diff + embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); `index_path` re-indexes a single file for the editor save. |
 | `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`) + manifest UI + the `editor` page spec. |
-| `pages.py` | The `editor` page surface (#130): document list, read, and save (with vault-path safety + re-index). |
-| `refs.py` | Opaque document refs (base64url `source:path`) + shared `.md` vault path-safety + vault walk. |
+| `pages.py` | The `editor` page surface (#130): document/folder tree, read, save, and folder CRUD (create, delete, move — #216). `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. |
+| `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories) + vault walks (`iter_md_files`, `iter_tree_nodes`). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |

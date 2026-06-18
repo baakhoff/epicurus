@@ -1,14 +1,18 @@
 /**
  * The `editor` archetype (ADR-0018): an Obsidian-like document editor, core-rendered
  * and **shared** — knowledge is the first user (#130), notes the second (#134). The
- * module supplies only data through the core proxy: a document list (`GET /pages/{id}`),
- * one document's content (`GET …/doc`), and a save (`PUT …/doc`). No module markup runs
- * here.
+ * module supplies only data through the core proxy: a document/folder tree
+ * (`GET /pages/{id}`), one document's content (`GET …/doc`), and a save (`PUT …/doc`).
+ * No module markup runs here.
  *
  * Authoring (ADR-0026): when the page's data sets `can_create`, the editor shows a
  * "New note" control that opens a blank buffer at a fresh slug; the first save creates
  * the document (knowledge leaves `can_create` false — its notes are authored in
  * Obsidian). The shell derives the slug; the module derives the title from the body.
+ *
+ * File tree management (#216): when the page's data sets `can_manage_files`, the shell
+ * shows folder CRUD controls — create/delete folders, delete files, and rename files.
+ * Knowledge sets this flag; notes does not.
  *
  * Layout mirrors the browser archetype: list + detail side-by-side on wide screens; on
  * phones the list fills the view and opening a document slides to the editor with a
@@ -16,14 +20,26 @@
  * prose styler. Saving persists through the core, which (for knowledge/notes) re-indexes.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, FileText, Plus } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  FileText,
+  Folder,
+  FolderOpen,
+  MoreHorizontal,
+  Plus,
+} from "lucide-react";
+import { useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
 import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/components/ui";
+import { ApiError } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
+import type { EditorDoc } from "@/lib/contracts";
 
 /** A filesystem-safe, readable slug for a note title (the editor `path`). */
 function slugify(name: string): string {
@@ -42,6 +58,261 @@ function uniqueSlug(base: string, taken: Set<string>): string {
   return `${base}-${n}`;
 }
 
+// ── Tree builder ───────────────────────────────────────────────────────────────
+
+interface TreeNode {
+  path: string;
+  title: string;
+  type: "file" | "dir";
+  children: TreeNode[];
+  depth: number;
+}
+
+/**
+ * Build a nested tree from the flat list returned by the module. Folders come
+ * before files at each level; within each type nodes are sorted alphabetically.
+ */
+function buildTree(docs: EditorDoc[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  // Map from dir-path → its children array in the tree, for O(1) lookup.
+  const dirMap = new Map<string, TreeNode[]>();
+
+  for (const doc of docs) {
+    const parts = doc.path.split("/");
+    const depth = parts.length - 1;
+    const parentPath = parts.slice(0, -1).join("/");
+    const siblings = parentPath ? (dirMap.get(parentPath) ?? root) : root;
+
+    const node: TreeNode = {
+      path: doc.path,
+      title: doc.title,
+      type: doc.type,
+      children: [],
+      depth,
+    };
+    siblings.push(node);
+    if (doc.type === "dir") {
+      dirMap.set(doc.path, node.children);
+    }
+  }
+
+  // Sort each level: dirs before files, then alphabetically within each group.
+  function sortLevel(nodes: TreeNode[]): void {
+    nodes.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+      return a.title.localeCompare(b.title);
+    });
+    for (const node of nodes) sortLevel(node.children);
+  }
+  sortLevel(root);
+  return root;
+}
+
+// ── TreeItem component ─────────────────────────────────────────────────────────
+
+interface TreeItemProps {
+  node: TreeNode;
+  selectedPath: string | null;
+  collapsed: Set<string>;
+  hoveredPath: string | null;
+  renamingPath: string | null;
+  renameValue: string;
+  module: string;
+  pageId: string;
+  canManageFiles: boolean;
+  onSelect: (path: string) => void;
+  onToggleCollapse: (path: string) => void;
+  onSetHovered: (path: string | null) => void;
+  onStartNewFileInFolder: (folderPath: string) => void;
+  onDeleteFile: (path: string) => void;
+  onDeleteFolder: (path: string) => void;
+  onStartRename: (path: string, currentTitle: string) => void;
+  onRenameChange: (value: string) => void;
+  onRenameSubmit: (oldPath: string) => void;
+  onRenameDismiss: () => void;
+}
+
+function TreeItem({
+  node,
+  selectedPath,
+  collapsed,
+  hoveredPath,
+  renamingPath,
+  renameValue,
+  module,
+  pageId,
+  canManageFiles,
+  onSelect,
+  onToggleCollapse,
+  onSetHovered,
+  onStartNewFileInFolder,
+  onDeleteFile,
+  onDeleteFolder,
+  onStartRename,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameDismiss,
+}: TreeItemProps) {
+  const isDir = node.type === "dir";
+  const isCollapsed = collapsed.has(node.path);
+  const isSelected = node.path === selectedPath;
+  const isHovered = hoveredPath === node.path;
+  const isRenaming = renamingPath === node.path;
+  const indent = node.depth * 12;
+
+  return (
+    <>
+      <li>
+        <div
+          className={cn(
+            "group flex w-full items-center gap-1.5 rounded-(--radius-field) px-2 py-1.5 text-left transition-colors",
+            isSelected && !isDir
+              ? "bg-accent-dim text-accent-strong"
+              : "text-ink hover:bg-surface-2",
+          )}
+          style={{ paddingLeft: `${8 + indent}px` }}
+          onMouseEnter={() => onSetHovered(node.path)}
+          onMouseLeave={() => onSetHovered(null)}
+        >
+          {/* collapse toggle for dirs */}
+          {isDir && (
+            <button
+              onClick={() => onToggleCollapse(node.path)}
+              className="shrink-0 text-ink-faint hover:text-ink"
+              aria-label={isCollapsed ? "Expand folder" : "Collapse folder"}
+            >
+              {isCollapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            </button>
+          )}
+
+          {/* icon */}
+          {isDir ? (
+            isCollapsed ? (
+              <Folder size={14} className="shrink-0 text-ink-faint" />
+            ) : (
+              <FolderOpen size={14} className="shrink-0 text-ink-faint" />
+            )
+          ) : (
+            <FileText size={14} className="shrink-0 text-ink-faint" />
+          )}
+
+          {/* name / rename input */}
+          {isRenaming && !isDir ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                onRenameSubmit(node.path);
+              }}
+              className="flex flex-1 items-center gap-1"
+            >
+              <TextInput
+                autoFocus
+                value={renameValue}
+                onChange={(e) => onRenameChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") onRenameDismiss();
+                }}
+                className="h-6 py-0 text-xs"
+                aria-label="Rename file"
+              />
+              <Button type="submit" variant="primary" className="h-6 px-2 py-0 text-xs">
+                OK
+              </Button>
+            </form>
+          ) : (
+            <button
+              onClick={() => {
+                if (isDir) {
+                  onToggleCollapse(node.path);
+                } else {
+                  onSelect(node.path);
+                }
+              }}
+              className="min-w-0 flex-1 text-left"
+            >
+              <span className="block truncate text-sm">{node.title}</span>
+            </button>
+          )}
+
+          {/* per-item actions (shown on hover when can_manage_files) */}
+          {canManageFiles && isHovered && !isRenaming && (
+            <div className="ml-auto flex shrink-0 items-center gap-0.5">
+              {isDir && (
+                <button
+                  title="New file in folder"
+                  onClick={() => onStartNewFileInFolder(node.path)}
+                  className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
+                >
+                  <Plus size={12} />
+                </button>
+              )}
+              <button
+                title={isDir ? "Delete folder" : "Delete file"}
+                onClick={() => {
+                  if (isDir) {
+                    onDeleteFolder(node.path);
+                  } else {
+                    onDeleteFile(node.path);
+                  }
+                }}
+                className="rounded p-0.5 text-ink-faint hover:text-danger hover:bg-surface-3"
+              >
+                <MoreHorizontal size={12} />
+              </button>
+              {!isDir && (
+                <button
+                  title="Rename file"
+                  onClick={() => onStartRename(node.path, node.title)}
+                  className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
+                >
+                  <ChevronRight size={12} />
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* mobile chevron for files */}
+          {!isDir && !canManageFiles && (
+            <ChevronRight size={15} className="ml-auto shrink-0 text-ink-faint sm:hidden" />
+          )}
+        </div>
+      </li>
+
+      {/* children (rendered when not collapsed) */}
+      {isDir && !isCollapsed && node.children.length > 0 && (
+        <>
+          {node.children.map((child) => (
+            <TreeItem
+              key={child.path}
+              node={child}
+              selectedPath={selectedPath}
+              collapsed={collapsed}
+              hoveredPath={hoveredPath}
+              renamingPath={renamingPath}
+              renameValue={renameValue}
+              module={module}
+              pageId={pageId}
+              canManageFiles={canManageFiles}
+              onSelect={onSelect}
+              onToggleCollapse={onToggleCollapse}
+              onSetHovered={onSetHovered}
+              onStartNewFileInFolder={onStartNewFileInFolder}
+              onDeleteFile={onDeleteFile}
+              onDeleteFolder={onDeleteFolder}
+              onStartRename={onStartRename}
+              onRenameChange={onRenameChange}
+              onRenameSubmit={onRenameSubmit}
+              onRenameDismiss={onRenameDismiss}
+            />
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
 export function EditorView({ module, pageId }: { module: string; pageId: string }) {
   const qc = useQueryClient();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -53,6 +324,17 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [draft, setDraft] = useState("");
   const [baseline, setBaseline] = useState("");
+
+  // File tree state
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [newFolderCreating, setNewFolderCreating] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  // The folder inside which a new file is being created (null = root)
+  const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
+  const newFolderInputRef = useRef<HTMLInputElement>(null);
 
   // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's
   // "Open in Knowledge" link, #143). Re-applies if the param changes while mounted.
@@ -92,14 +374,69 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     mutationFn: () => api.saveModulePageDoc(module, pageId, selectedPath as string, draft),
     onSuccess: () => {
       setBaseline(draft);
-      // The note now exists — let the doc fetch take over on re-select…
       setIsNew(false);
-      // …and the newly created note joins the list; refresh it.
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
     },
   });
 
   const dirty = draft !== baseline;
+
+  // ── Folder / file tree mutations ──────────────────────────────────────────
+
+  const invalidateList = () =>
+    void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+
+  const createFolder = useMutation({
+    mutationFn: (path: string) => api.createModuleFolder(module, pageId, path),
+    onSuccess: () => {
+      setNewFolderCreating(false);
+      setNewFolderName("");
+      invalidateList();
+    },
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.detail : String(err);
+      window.alert(`Could not create folder: ${msg}`);
+    },
+  });
+
+  const deleteDoc = useMutation({
+    mutationFn: (path: string) => api.deleteModuleDoc(module, pageId, path),
+    onSuccess: (_, path) => {
+      if (selectedPath === path) {
+        setSelectedPath(null);
+        setIsNew(false);
+      }
+      invalidateList();
+    },
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.detail : String(err);
+      window.alert(`Could not delete file: ${msg}`);
+    },
+  });
+
+  const deleteFolder = useMutation({
+    mutationFn: (path: string) => api.deleteModuleFolder(module, pageId, path),
+    onSuccess: invalidateList,
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.detail : String(err);
+      window.alert(`Could not delete folder: ${msg}`);
+    },
+  });
+
+  const moveItem = useMutation({
+    mutationFn: ({ from, to }: { from: string; to: string }) =>
+      api.moveModuleItem(module, pageId, from, to),
+    onSuccess: (result, { from }) => {
+      if (selectedPath === from) setSelectedPath(result.path);
+      setRenamingPath(null);
+      setRenameValue("");
+      invalidateList();
+    },
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.detail : String(err);
+      window.alert(`Could not rename: ${msg}`);
+    },
+  });
 
   if (list.isLoading) {
     return (
@@ -119,25 +456,112 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   }
 
   const data = EditorData.parse(list.data ?? {});
+  const tree = buildTree(data.docs);
 
   const openDoc = (path: string) => {
     setIsNew(false);
     setSelectedPath(path);
   };
 
+  // can_create: the existing "New note" flow (used by Notes module)
   const startNewNote = (event: FormEvent) => {
     event.preventDefault();
     const name = newName.trim();
     if (!name) return;
+    const folderPrefix = newFileInFolder ? `${newFileInFolder}/` : "";
     const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug(slugify(name), taken);
+    const slug = uniqueSlug(folderPrefix + slugify(name), taken);
     setIsNew(true);
     setSelectedPath(slug);
-    setDraft(`# ${name}\n\n`); // module derives the title from this first heading
-    setBaseline(""); // differs from the seed → Save is enabled immediately
+    setDraft(`# ${name}\n\n`);
+    setBaseline("");
     setMode("edit");
     setCreating(false);
     setNewName("");
+    setNewFileInFolder(null);
+  };
+
+  // can_manage_files: start a new file inside a folder
+  const handleStartNewFileInFolder = (folderPath: string) => {
+    setNewFileInFolder(folderPath);
+    const taken = new Set(data.docs.map((d) => d.path));
+    const slug = uniqueSlug(`${folderPath}/new-note.md`, taken);
+    setIsNew(true);
+    setSelectedPath(slug);
+    setDraft("");
+    setBaseline("");
+    setMode("edit");
+  };
+
+  const handleDeleteFile = (path: string) => {
+    if (!window.confirm(`Delete "${path}"? This cannot be undone.`)) return;
+    deleteDoc.mutate(path);
+  };
+
+  const handleDeleteFolder = (path: string) => {
+    if (!window.confirm(`Delete folder "${path}"? It must be empty.`)) return;
+    deleteFolder.mutate(path);
+  };
+
+  const handleStartRename = (path: string, currentTitle: string) => {
+    setRenamingPath(path);
+    setRenameValue(currentTitle);
+  };
+
+  const handleRenameSubmit = (oldPath: string) => {
+    const name = renameValue.trim();
+    if (!name) return;
+    const parts = oldPath.split("/");
+    parts[parts.length - 1] = name.endsWith(".md") ? name : `${slugify(name)}.md`;
+    const newPath = parts.join("/");
+    if (newPath === oldPath) {
+      setRenamingPath(null);
+      return;
+    }
+    moveItem.mutate({ from: oldPath, to: newPath });
+  };
+
+  const handleCreateFolder = (event: FormEvent) => {
+    event.preventDefault();
+    const name = newFolderName.trim();
+    if (!name) return;
+    createFolder.mutate(slugify(name));
+  };
+
+  const toggleCollapse = (path: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  const commonTreeProps = {
+    selectedPath,
+    collapsed,
+    hoveredPath,
+    renamingPath,
+    renameValue,
+    module,
+    pageId,
+    canManageFiles: data.can_manage_files,
+    onSelect: openDoc,
+    onToggleCollapse: toggleCollapse,
+    onSetHovered: setHoveredPath,
+    onStartNewFileInFolder: handleStartNewFileInFolder,
+    onDeleteFile: handleDeleteFile,
+    onDeleteFolder: handleDeleteFolder,
+    onStartRename: handleStartRename,
+    onRenameChange: setRenameValue,
+    onRenameSubmit: handleRenameSubmit,
+    onRenameDismiss: () => {
+      setRenamingPath(null);
+      setRenameValue("");
+    },
   };
 
   return (
@@ -149,6 +573,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           selectedPath && "hidden sm:flex",
         )}
       >
+        {/* can_create toolbar (Notes module) */}
         {data.can_create && (
           <div className="border-b border-edge p-2">
             {creating ? (
@@ -181,35 +606,58 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
             )}
           </div>
         )}
-        {data.docs.length === 0 ? (
-          data.can_create ? (
-            <EmptyState quote="No notes yet — create one to begin." />
+
+        {/* can_manage_files toolbar (Knowledge module) */}
+        {data.can_manage_files && (
+          <div className="border-b border-edge p-2">
+            {newFolderCreating ? (
+              <form onSubmit={handleCreateFolder} className="flex items-center gap-2">
+                <TextInput
+                  ref={newFolderInputRef}
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setNewFolderCreating(false);
+                      setNewFolderName("");
+                    }
+                  }}
+                  placeholder="Folder name…"
+                  aria-label="New folder name"
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={!newFolderName.trim()}
+                  busy={createFolder.isPending}
+                >
+                  Create
+                </Button>
+              </form>
+            ) : (
+              <Button
+                variant="ghost"
+                className="w-full justify-start"
+                onClick={() => setNewFolderCreating(true)}
+              >
+                <Folder size={15} /> New folder
+              </Button>
+            )}
+          </div>
+        )}
+
+        {data.docs.filter((d) => d.type === "file").length === 0 &&
+        data.docs.filter((d) => d.type === "dir").length === 0 ? (
+          data.can_create || data.can_manage_files ? (
+            <EmptyState quote="No documents yet — create a folder or add files." />
           ) : (
             <EmptyState quote="An empty vault. Add notes in Obsidian and they appear here." />
           )
         ) : (
           <ul className="flex flex-col p-2">
-            {data.docs.map((d) => (
-              <li key={d.id}>
-                <button
-                  onClick={() => openDoc(d.path)}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
-                    d.path === selectedPath
-                      ? "bg-accent-dim text-accent-strong"
-                      : "text-ink hover:bg-surface-2",
-                  )}
-                >
-                  <FileText size={15} className="shrink-0 text-ink-faint" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">{d.title}</span>
-                    {d.path !== d.title && (
-                      <span className="block truncate text-xs text-ink-faint">{d.path}</span>
-                    )}
-                  </span>
-                  <ChevronRight size={15} className="shrink-0 text-ink-faint sm:hidden" />
-                </button>
-              </li>
+            {tree.map((node) => (
+              <TreeItem key={node.path} node={node} {...commonTreeProps} />
             ))}
           </ul>
         )}
@@ -221,7 +669,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           <div className="hidden h-full items-center justify-center sm:flex">
             <EmptyState quote="Select a document to read or edit it." />
           </div>
-        ) : doc.isLoading ? (
+        ) : doc.isLoading && !isNew ? (
           <div className="flex h-full items-center justify-center">
             <Spinner />
           </div>

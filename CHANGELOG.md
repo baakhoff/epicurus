@@ -109,6 +109,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Existing deployments: `llm_prefs` gains its new columns in place** — `LlmPrefsStore.init()`
+  now adds the `global_default` / `embed_default` columns to a pre-existing table (the same
+  `create_all` + `_ensure_columns` pattern as `module_prefs` / the memory store). Without it, a
+  database created before the global-embedding default (#214) 500s on every prefs and embedding
+  read (`column llm_prefs.embed_default does not exist`), which also broke module-docs indexing
+  (knowledge embeds → resolves the embedding default → 500). Fresh installs were unaffected, so
+  CI didn't catch it (`core-app` → 0.12.1).
 - **Modules page: clearer enable/disable toggle** — the module on/off control no longer
   renders as an ambiguous half-set slider; enabled vs disabled is now visually unmistakable
   (#212) (`web` → 0.11.1).

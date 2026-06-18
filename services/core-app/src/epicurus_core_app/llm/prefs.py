@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from sqlalchemy import String, Text
+from sqlalchemy import String, Text, inspect
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -44,9 +45,29 @@ class LlmPrefsStore:
         )
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Create the schema, then add any columns introduced after first release."""
         async with self._engine.begin() as conn:
             await conn.run_sync(_PrefBase.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
+
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Idempotently add columns introduced after the table's first release.
+
+        No migration framework (the store uses ``create_all``); on a deployment that
+        predates ``global_default`` / ``embed_default`` (#214) we add them in place, with a
+        per-dialect type so it is portable across Postgres and the tests' SQLite. Without
+        this, an existing ``llm_prefs`` table 500s on every prefs/embedding read with
+        ``column llm_prefs.embed_default does not exist``.
+        """
+        inspector = inspect(sync_conn)
+        existing = {col["name"] for col in inspector.get_columns(_LlmPrefRow.__tablename__)}
+        for name in ("global_default", "embed_default"):
+            if name not in existing:
+                type_sql = _LlmPrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {_LlmPrefRow.__tablename__} ADD COLUMN {name} {type_sql}"
+                )
 
     async def _get_or_create(self, session: AsyncSession, tenant: str) -> _LlmPrefRow:
         row = await session.get(_LlmPrefRow, tenant)

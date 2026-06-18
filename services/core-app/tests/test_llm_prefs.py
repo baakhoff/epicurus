@@ -111,3 +111,32 @@ async def test_embed_default_and_chat_default_coexist() -> None:
     await store.set_embed_default("t1", "nomic-embed-text")
     assert await store.get_default("t1") == "qwen2.5:7b"
     assert await store.get_embed_default("t1") == "nomic-embed-text"
+
+
+async def test_init_migrates_legacy_table_missing_embed_default() -> None:
+    """A pre-#214 ``llm_prefs`` table (no ``embed_default``) is migrated in place.
+
+    Without the column-add migration, ``create_all`` is a no-op on the existing table and
+    every prefs/embedding read 500s with ``column llm_prefs.embed_default does not exist``.
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    # Simulate an old-schema table created before the embedding-default column existed.
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "CREATE TABLE llm_prefs ("
+            "tenant VARCHAR(63) PRIMARY KEY, "
+            "hidden_models TEXT DEFAULT '[]', "
+            "global_default VARCHAR(256))"
+        )
+        await conn.exec_driver_sql("INSERT INTO llm_prefs (tenant) VALUES ('t1')")
+
+    store = LlmPrefsStore(engine)
+    await store.init()  # must ADD COLUMN embed_default rather than fail
+
+    assert await store.get_embed_default("t1") is None  # the read that previously 500'd
+    await store.set_embed_default("t1", "nomic-embed-text")
+    assert await store.get_embed_default("t1") == "nomic-embed-text"

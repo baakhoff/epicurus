@@ -29,7 +29,7 @@
 - [tenancy](reference/tenancy.md)
 - [events](reference/events.md)
 - [secrets](reference/secrets.md)
-- [observability](reference/observability.md)
+- [observability & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)
 - [platform API](reference/platform-api.md)
 - [OAuth 2.0](reference/oauth.md)

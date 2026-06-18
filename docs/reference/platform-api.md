@@ -34,16 +34,24 @@ Discovery — what core version and contract are running.
 
 ## `POST /platform/v1/embed`
 
-Embed one or more texts via the core's LLM gateway.  The core chooses the
-embedding model (default: `memory_embed_model` from settings) and emits a usage
-event on NATS.  No provider key ever leaves the core.
+Embed one or more texts via the core's LLM gateway.  The core resolves the
+embedding model using this priority chain and emits a usage event on NATS.
+No provider key ever leaves the core.
+
+**Embedding model resolution order**
+
+1. `model` in the request body (per-module override — the module passes the value
+   from its `required_models` slot via `PlatformClient.get_module_model`).
+2. Tenant's `global_embed_default` pref (set via `PUT /platform/v1/llm/prefs/embed-default`,
+   persisted in `llm_prefs`; #214).
+3. `MEMORY_EMBED_MODEL` env setting (`nomic-embed-text` by default).
 
 **Request body**
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `texts` | `list[str]` | Yes | Texts to embed.  One vector returned per item. |
-| `model` | `str \| null` | No | Override the embedding model.  Omit to use the core default. |
+| `model` | `str \| null` | No | Per-module override.  Omit to use the global embed default or env default. |
 | `tenant_id` | `str \| null` | No | Tenant scope.  Defaults to the core's configured tenant. |
 
 **Response**

@@ -19,6 +19,7 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
+  global_embed_default: z.string().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;

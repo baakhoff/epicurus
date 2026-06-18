@@ -79,6 +79,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  setGlobalEmbedDefault: (model: string | null) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/embed-default", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",

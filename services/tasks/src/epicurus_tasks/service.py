@@ -21,7 +21,7 @@ from epicurus_core import (
     tool_envelope,
 )
 from epicurus_tasks.google_provider import GoogleTasksError
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import VALID_PRIORITIES, VALID_STATUSES, Task
 from epicurus_tasks.providers import TasksProvider
 
 MODULE_NAME = "tasks"
@@ -35,6 +35,25 @@ TASK_KIND = "task"
 # the cap keeps the menu manageable for a long backlog.
 _ATTACH_LIMIT = 50
 
+_STATUS_LABEL: dict[str, str] = {
+    "open": "Open",
+    "in_progress": "In Progress",
+    "done": "Completed",
+}
+
+_PRIORITY_TONE: dict[str, str] = {
+    "high": "danger",
+    "medium": "warn",
+    "low": "dim",
+}
+
+
+def _parse_tags(raw: str | None) -> list[str]:
+    """Split a comma-separated tags string into a cleaned list."""
+    if not raw:
+        return []
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
 
 def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """Register the provider-agnostic task tools and the Tasks page on the module.
@@ -44,7 +63,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.5.0",
         description=(
             f"Task management via the {provider.provider_name()!r} provider: "
             "list, add, edit, and complete tasks."
@@ -57,13 +76,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 "TASKS_PROVIDER in .env without changing these tools."
             ),
             status_url="/status",
-            # No manifest actions: `tasks_list` now returns an entity-reference envelope
-            # (chips), which the module card's plain-text result panel can't render — tasks
-            # are surfaced through chat and the Tasks board page instead (mirrors calendar /
-            # mail, ADR-0019).
         ),
-        # The Tasks left-nav page (ADR-0018): a core-rendered board of open tasks
-        # grouped by due date. The module supplies data via GET /pages/{id}.
         pages=[
             PageSpec(
                 id=TASKS_PAGE_ID,
@@ -73,9 +86,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 nav_order=40,
             )
         ],
-        # Resolve a referenced task to a hover-card at GET /resolve/task/{id} (ADR-0019).
         resolver=True,
-        # Be a chat-attachment source: GET /attachments (picker) + /attachments/{id} (ADR-0019).
         attachable=True,
     )
 
@@ -110,6 +121,9 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         title: str,
         notes: str | None = None,
         due: str | None = None,
+        priority: str | None = None,
+        tags: str | None = None,
+        status: str = "open",
         list_id: str | None = None,
     ) -> Task:
         """Create a new task.
@@ -118,12 +132,37 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
             title: Task title (required).
             notes: Optional free-text notes or description.
             due: Optional due date as an ISO date string, e.g. ``"2025-01-15"``.
+            priority: Optional priority level — ``"low"``, ``"medium"``, or ``"high"``.
+                Google Tasks ignores this field.
+            tags: Optional comma-separated labels, e.g. ``"work, urgent"``.
+                Google Tasks ignores this field.
+            status: Initial status — ``"open"`` (default), ``"in_progress"``, or
+                ``"done"``.  Google Tasks maps ``"done"`` to completed;
+                ``"in_progress"`` is local-only and reads back as ``"open"`` from Google.
             list_id: Target list identifier.  Omit for the default list.
 
         Returns the created :class:`Task`.
         """
+        if priority is not None and priority not in VALID_PRIORITIES:
+            raise RuntimeError(
+                f"invalid priority {priority!r}; must be one of {sorted(VALID_PRIORITIES)}"
+            )
+        if status not in VALID_STATUSES:
+            raise RuntimeError(
+                f"invalid status {status!r}; must be one of {sorted(VALID_STATUSES)}"
+            )
+        tag_list = _parse_tags(tags)
         try:
-            return await provider.add_task(tenant_id, title, notes=notes, due=due, list_id=list_id)
+            return await provider.add_task(
+                tenant_id,
+                title,
+                notes=notes,
+                due=due,
+                status=status,
+                priority=priority,
+                tags=tag_list,
+                list_id=list_id,
+            )
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -148,9 +187,12 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         title: str | None = None,
         notes: str | None = None,
         due: str | None = None,
+        priority: str | None = None,
+        tags: str | None = None,
+        status: str | None = None,
         list_id: str | None = None,
     ) -> Task:
-        """Edit an existing task's title, notes, or due date.
+        """Edit an existing task's title, notes, due date, priority, tags, or status.
 
         Only the fields you pass are changed; omitted fields keep their current
         value. To mark a task done use ``tasks_complete`` — this tool edits content.
@@ -161,13 +203,36 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
             notes: New free-text notes.  Omit to leave them unchanged.
             due: New due date as an ISO date string, e.g. ``"2025-01-15"``.  Omit
                 to leave it unchanged.
+            priority: New priority (``"low"``/``"medium"``/``"high"``).  Omit to
+                leave unchanged.  Google Tasks ignores this field.
+            tags: New comma-separated tags, e.g. ``"work, urgent"``.  Omit to leave
+                unchanged.  Google Tasks ignores this field.
+            status: New status (``"open"``/``"in_progress"``/``"done"``).  Omit to
+                leave unchanged.
             list_id: The list containing the task.  Omit for the default list.
 
         Returns the updated :class:`Task`.
         """
+        if priority is not None and priority not in VALID_PRIORITIES:
+            raise RuntimeError(
+                f"invalid priority {priority!r}; must be one of {sorted(VALID_PRIORITIES)}"
+            )
+        if status is not None and status not in VALID_STATUSES:
+            raise RuntimeError(
+                f"invalid status {status!r}; must be one of {sorted(VALID_STATUSES)}"
+            )
+        tag_list = _parse_tags(tags) if tags is not None else None
         try:
             return await provider.update_task(
-                tenant_id, task_id, title=title, notes=notes, due=due, list_id=list_id
+                tenant_id,
+                task_id,
+                title=title,
+                notes=notes,
+                due=due,
+                status=status,
+                priority=priority,
+                tags=tag_list,
+                list_id=list_id,
             )
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
@@ -184,6 +249,14 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
 
 _BUCKET_ORDER = ("Overdue", "Today", "Upcoming", "No date")
 _BUCKET_TONE = {"Overdue": "danger", "Today": "accent"}
+
+# field_options teaches the shell's SchemaForm which values are valid for enum-like
+# string fields.  The shell overlays these onto the tool's raw JSON schema so it
+# can render a <select> instead of a free-text input (ADR-0018 board extension).
+_TASK_FIELD_OPTIONS: dict[str, list[str]] = {
+    "priority": ["low", "medium", "high"],
+    "status": ["open", "in_progress", "done"],
+}
 
 
 def _bucket_for(task: Task, today: str) -> str:
@@ -206,6 +279,11 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
     badges: list[dict[str, str]] = []
     if task.due:
         badges.append({"label": task.due[:10], "tone": _BUCKET_TONE.get(bucket, "dim")})
+    if task.priority:
+        badges.append({"label": task.priority.capitalize(), "tone": _PRIORITY_TONE[task.priority]})
+    for tag in task.tags:
+        badges.append({"label": tag, "tone": "accent"})
+
     return {
         "id": task.id,
         "title": task.title,
@@ -223,12 +301,16 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
                 "label": "Edit",
                 "icon": "pencil",
                 "form": True,
-                "fields": ["title", "notes", "due"],
+                "fields": ["title", "notes", "due", "priority", "tags", "status"],
+                "field_options": _TASK_FIELD_OPTIONS,
                 "args": {"task_id": task.id},
                 "form_values": {
                     "title": task.title,
                     "notes": task.notes or "",
                     "due": task.due or "",
+                    "priority": task.priority or "",
+                    "tags": ", ".join(task.tags),
+                    "status": task.status,
                 },
             },
         ],
@@ -266,7 +348,8 @@ def build_tasks_board(tasks: list[Task], *, today: str) -> dict[str, Any]:
                 "intent": "primary",
                 "icon": "plus",
                 "form": True,
-                "fields": ["title", "notes", "due"],
+                "fields": ["title", "notes", "due", "priority", "tags"],
+                "field_options": _TASK_FIELD_OPTIONS,
             }
         ],
     }
@@ -288,8 +371,9 @@ class TaskNotFound(Exception):
 def _task_summary(task: Task) -> str:
     """A compact one-line summary for a task chip (due date, then status)."""
     parts = [f"Due {task.due[:10]}" if task.due else "No due date"]
-    if task.completed:
-        parts.append("Completed")
+    status_label = _STATUS_LABEL.get(task.status, task.status)
+    if task.status != "open":
+        parts.append(status_label)
     return " · ".join(parts)
 
 
@@ -308,13 +392,18 @@ def task_hover_card(task: Task) -> dict[str, Any]:
     """The core hover-card / entity-detail envelope for a task (ADR-0019).
 
     Core-owned, uniform shape: the module supplies the data, the shell renders the
-    inline hover-card and the panel's entity-detail view from it. Details are the
-    task's due date (when set) and its open/completed status.
+    inline hover-card and the panel's entity-detail view from it.
     """
     details: list[HoverCardDetail] = []
     if task.due:
         details.append(HoverCardDetail(label="Due", value=task.due[:10]))
-    details.append(HoverCardDetail(label="Status", value="Completed" if task.completed else "Open"))
+    details.append(
+        HoverCardDetail(label="Status", value=_STATUS_LABEL.get(task.status, task.status))
+    )
+    if task.priority:
+        details.append(HoverCardDetail(label="Priority", value=task.priority.capitalize()))
+    if task.tags:
+        details.append(HoverCardDetail(label="Tags", value=", ".join(task.tags)))
     return HoverCard(
         title=task.title,
         description=task.notes or "",
@@ -327,7 +416,11 @@ def task_excerpt(task: Task) -> str:
     lines = [task.title]
     if task.due:
         lines.append(f"Due {task.due[:10]}")
-    lines.append("Completed" if task.completed else "Open")
+    lines.append(_STATUS_LABEL.get(task.status, task.status))
+    if task.priority:
+        lines.append(f"Priority: {task.priority}")
+    if task.tags:
+        lines.append(f"Tags: {', '.join(task.tags)}")
     if task.notes:
         lines.extend(["", task.notes])
     return "\n".join(lines)
@@ -360,13 +453,7 @@ async def tasks_attachments(
     """Picker for the chat-attachment composer (ADR-0019): open tasks as items.
 
     Returns up to *limit* open tasks from the active provider's default list as
-    ``{ref_id, kind, title}`` rows. The agent later resolves the chosen one through
-    ``GET /attachments/{ref_id}`` into the turn's context.
-
-    Args:
-        provider: The active tasks backend.
-        tenant_id: Tenant whose tasks to offer.
-        limit: Maximum number of items returned.
+    ``{ref_id, kind, title}`` rows.
     """
     tasks = await provider.list_tasks(tenant_id)
     return [task_attachment_item(t) for t in tasks[:limit]]

@@ -3,11 +3,17 @@
 OAuth tokens are fetched from the core via ``PlatformClient.get_oauth_token``
 (which calls ``GET /platform/v1/oauth/google/token``) — no client secret or
 refresh token ever leaves the core (ADR-0020 / non-negotiable #8).
+
+Field mapping / provider limits (documented per ADR-0016 / issue #218):
+- title, notes, due → mapped bidirectionally.
+- status "done" ↔ Google "completed"; "open"/"in_progress" ↔ Google "needsAction".
+  On read-back "in_progress" degrades to "open" because Google has no such state.
+- priority, tags → local-only; silently ignored when writing; always None/[] on read.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -56,14 +62,19 @@ class GoogleTasksProvider:
         if due_raw:
             due = due_raw[:10]  # "2025-01-15T00:00:00.000Z" → "2025-01-15"
 
+        google_status = item.get("status", "needsAction")
+        # Google only has needsAction / completed — "in_progress" isn't stored there.
+        status: Literal["open", "done"] = "done" if google_status == "completed" else "open"
+
         completed_raw: str | None = item.get("completed")
         return Task(
             id=item["id"],
             title=item.get("title", ""),
             notes=item.get("notes") or None,
             due=due,
-            completed=item.get("status") == "completed",
+            status=status,
             completed_at=completed_raw,
+            # priority and tags are local-only; Google has no equivalent fields.
         )
 
     async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
@@ -91,9 +102,16 @@ class GoogleTasksProvider:
         *,
         notes: str | None = None,
         due: str | None = None,
+        status: str = "open",
+        priority: str | None = None,
+        tags: list[str] | None = None,
         list_id: str | None = None,
     ) -> Task:
-        """Create a task in the specified (or default) Google task list."""
+        """Create a task in the specified (or default) Google task list.
+
+        ``priority`` and ``tags`` are silently ignored — Google Tasks has no
+        equivalent fields. ``"in_progress"`` status is sent as ``"needsAction"``.
+        """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
         body: dict[str, Any] = {"title": title}
@@ -102,6 +120,8 @@ class GoogleTasksProvider:
         if due:
             # Google Tasks expects RFC 3339 UTC midnight for due dates.
             body["due"] = f"{due[:10]}T00:00:00.000Z"
+        if status == "done":
+            body["status"] = "completed"
         async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
             resp = await client.post(
                 f"/lists/{tasklist}/tasks",
@@ -168,12 +188,16 @@ class GoogleTasksProvider:
         title: str | None = None,
         notes: str | None = None,
         due: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        tags: list[str] | None = None,
         list_id: str | None = None,
     ) -> Task:
-        """Edit a task's title/notes/due via a PATCH to the Google Tasks API.
+        """Edit a task's title/notes/due/status via a PATCH to the Google Tasks API.
 
-        Only the supplied fields are sent. With nothing to change it GETs and
-        returns the current task, so the call is always a clean read-or-edit.
+        ``priority`` and ``tags`` are silently ignored. ``"in_progress"`` status is
+        sent as ``"needsAction"`` and will read back as ``"open"``. With nothing
+        Google-mappable to change, GETs and returns the current task.
         """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
@@ -185,6 +209,8 @@ class GoogleTasksProvider:
         if due:
             # Google Tasks expects RFC 3339 UTC midnight for due dates.
             body["due"] = f"{due[:10]}T00:00:00.000Z"
+        if status is not None:
+            body["status"] = "completed" if status == "done" else "needsAction"
 
         async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
             if body:

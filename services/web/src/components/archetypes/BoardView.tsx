@@ -39,6 +39,7 @@ function pickSchema(
   schema: ObjectSchema | undefined,
   fields: string[] | undefined,
   args: Record<string, unknown>,
+  fieldOptions?: Record<string, string[]>,
 ): ObjectSchema {
   const properties: NonNullable<ObjectSchema["properties"]> = schema?.properties ?? {};
   const argKeys = new Set(Object.keys(args));
@@ -47,7 +48,11 @@ function pickSchema(
       ? fields.filter((key) => key in properties)
       : Object.keys(properties).filter((key) => !argKeys.has(key));
   const picked: NonNullable<ObjectSchema["properties"]> = {};
-  for (const key of keys) picked[key] = properties[key];
+  for (const key of keys) {
+    // Overlay field_options as an enum so SchemaForm renders a <select>.
+    const opts = fieldOptions?.[key];
+    picked[key] = opts ? { ...(properties[key] ?? {}), enum: opts } : properties[key];
+  }
   const required = (schema?.required ?? []).filter((key) => keys.includes(key));
   return { type: "object", properties: picked, required };
 }
@@ -76,8 +81,8 @@ function BoardActionControl({
   });
   const schema = useToolSchema(module, action.tool);
   const formSchema = useMemo(
-    () => pickSchema(schema, action.fields ?? undefined, action.args),
-    [schema, action.fields, action.args],
+    () => pickSchema(schema, action.fields ?? undefined, action.args, action.field_options),
+    [schema, action.fields, action.args, action.field_options],
   );
 
   const onClick = () => {

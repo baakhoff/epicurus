@@ -272,6 +272,8 @@ export const BoardAction = z
     form: z.boolean().default(false),
     fields: z.array(z.string()).nullish(),
     form_values: z.record(z.string(), z.unknown()).default({}),
+    /** Per-field enum options: the shell renders a <select> for any field listed here. */
+    field_options: z.record(z.string(), z.array(z.string())).optional(),
     confirm: z.string().nullish(),
   })
   .superRefine((action, ctx) => {

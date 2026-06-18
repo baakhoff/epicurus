@@ -46,7 +46,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.4.0"
+    assert manifest.version == "0.5.0"
     assert manifest.contract_version == CONTRACT_VERSION
     tool_names = {t.name for t in manifest.tools}
     assert tool_names == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
@@ -153,7 +153,6 @@ def _task(**kw: Any) -> Task:
         "title": "Write report",
         "notes": None,
         "due": None,
-        "completed": False,
         "completed_at": None,
     }
     base.update(kw)
@@ -186,7 +185,7 @@ def test_task_hover_card_full() -> None:
 
 
 def test_task_hover_card_omits_due_when_absent_and_marks_completed() -> None:
-    card = task_hover_card(_task(completed=True))
+    card = task_hover_card(_task(status="done"))
     labels = {d["label"]: d["value"] for d in card["details"]}
     assert "Due" not in labels
     assert labels["Status"] == "Completed"
@@ -202,7 +201,7 @@ def test_task_excerpt_includes_due_status_and_notes() -> None:
 
 
 def test_task_excerpt_marks_completed() -> None:
-    assert "Completed" in task_excerpt(_task(completed=True))
+    assert "Completed" in task_excerpt(_task(status="done"))
 
 
 def test_task_attachment_item_shape() -> None:
@@ -247,3 +246,79 @@ async def test_tasks_attachments_respects_limit(local_provider: LocalTasksProvid
         await local_provider.add_task(TENANT, f"T{n}")
     items = await tasks_attachments(local_provider, tenant_id=TENANT, limit=3)
     assert len(items) == 3
+
+
+# ── Richer fields: priority, tags, status (issue #218) ───────────────────────
+
+
+def test_hover_card_shows_priority_and_tags() -> None:
+    card = task_hover_card(_task(priority="high", tags=["work", "q3"], due="2026-06-20"))
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Priority"] == "High"
+    assert labels["Tags"] == "work, q3"
+
+
+def test_hover_card_omits_priority_when_absent() -> None:
+    card = task_hover_card(_task())
+    labels = {d["label"] for d in card["details"]}
+    assert "Priority" not in labels
+    assert "Tags" not in labels
+
+
+def test_hover_card_shows_in_progress_status() -> None:
+    card = task_hover_card(_task(status="in_progress"))
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Status"] == "In Progress"
+
+
+def test_task_summary_shows_in_progress() -> None:
+    ref = task_entity_ref(_task(status="in_progress"))
+    assert "In Progress" in ref.summary
+
+
+def test_task_excerpt_includes_priority_and_tags() -> None:
+    excerpt = task_excerpt(_task(priority="medium", tags=["work"]))
+    assert "medium" in excerpt
+    assert "work" in excerpt
+
+
+async def test_add_task_with_rich_fields(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add",
+        {
+            "title": "Rich task",
+            "priority": "high",
+            "tags": "work, urgent",
+            "status": "in_progress",
+        },
+    )
+    assert task["priority"] == "high"
+    assert task["tags"] == ["work", "urgent"]
+    assert task["status"] == "in_progress"
+    assert not task["completed"]
+
+
+async def test_update_task_rich_fields(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool("tasks_add", {"title": "Plain"})  # type: ignore[attr-defined]
+    task_id = task["id"]
+
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update",
+        {"task_id": task_id, "priority": "medium", "tags": "home, weekend"},
+    )
+    assert updated["priority"] == "medium"
+    assert updated["tags"] == ["home", "weekend"]
+
+
+async def test_add_task_invalid_priority_raises(module_fixture: object) -> None:
+    mod = module_fixture
+    with pytest.raises(Exception, match="invalid priority"):
+        await mod.mcp.call_tool("tasks_add", {"title": "Bad", "priority": "critical"})  # type: ignore[attr-defined]
+
+
+async def test_add_task_invalid_status_raises(module_fixture: object) -> None:
+    mod = module_fixture
+    with pytest.raises(Exception, match="invalid status"):
+        await mod.mcp.call_tool("tasks_add", {"title": "Bad", "status": "pending"})  # type: ignore[attr-defined]

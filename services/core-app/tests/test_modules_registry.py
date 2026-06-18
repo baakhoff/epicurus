@@ -50,6 +50,7 @@ class _FakeModulePrefs:
         self.flags: dict[tuple[str, str], bool] = {}
         self.removed: set[tuple[str, str]] = set()
         self.models: dict[tuple[str, str], dict[str, str]] = {}
+        self.disabled: dict[tuple[str, str], set[str]] = {}
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         return {m: e for (t, m), e in self.flags.items() if t == tenant}
@@ -74,6 +75,18 @@ class _FakeModulePrefs:
 
     async def set_models(self, tenant: str, module: str, models: dict[str, str]) -> None:
         self.models[(tenant, module)] = dict(models)
+
+    async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:
+        return set(self.disabled.get((tenant, module), set()))
+
+    async def set_tool_enabled(self, tenant: str, module: str, tool: str, enabled: bool) -> None:
+        key = (tenant, module)
+        s = set(self.disabled.get(key, set()))
+        if enabled:
+            s.discard(tool)
+        else:
+            s.add(tool)
+        self.disabled[key] = s
 
 
 class _FakeDocker:
@@ -651,3 +664,87 @@ async def test_get_models_unknown_module_is_404() -> None:
     with pytest.raises(HTTPException) as err:
         await registry.get_models("ghost")
     assert err.value.status_code == 404
+
+
+# ── Per-tool enable/disable (#213) ────────────────────────────────────────────
+
+
+def _tools_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="echo",
+        version="0.1.0",
+        tools=[
+            ToolSpec(name="echo", input_schema={"type": "object"}),
+            ToolSpec(name="echo_loud", input_schema={"type": "object"}),
+        ],
+    )
+
+
+async def test_get_tool_enabled_defaults_true() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    assert await registry.get_tool_enabled("echo", "echo") is True
+
+
+async def test_set_tool_enabled_false_and_re_read() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    await registry.set_tool_enabled("echo", "echo", False)
+    assert await registry.get_tool_enabled("echo", "echo") is False
+    assert await registry.get_tool_enabled("echo", "echo_loud") is True
+
+
+async def test_re_enable_tool_restores() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    await registry.set_tool_enabled("echo", "echo", False)
+    await registry.set_tool_enabled("echo", "echo", True)
+    assert await registry.get_tool_enabled("echo", "echo") is True
+
+
+async def test_set_tool_enabled_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_tool_enabled("ghost", "echo", False)
+    assert err.value.status_code == 404
+
+
+async def test_set_tool_enabled_unknown_tool_is_404() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_tool_enabled("echo", "rm_rf", False)
+    assert err.value.status_code == 404
+
+
+async def test_get_tool_enabled_unknown_tool_is_404() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_tool_enabled("echo", "rm_rf")
+    assert err.value.status_code == 404
+
+
+async def test_snapshot_includes_disabled_tools() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    await registry.set_tool_enabled("echo", "echo", False)
+    snaps = await registry.snapshot()
+    assert snaps[0].disabled_tools == ["echo"]
+
+
+async def test_disabled_tools_set_returns_flat_union() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    await registry.set_tool_enabled("echo", "echo", False)
+    disabled = await registry.disabled_tools_set()
+    assert "echo" in disabled
+    assert "echo_loud" not in disabled
+
+
+async def test_disabled_tools_set_empty_when_all_enabled() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    assert await registry.disabled_tools_set() == set()
+
+
+async def test_disabled_tools_set_excludes_disabled_module() -> None:
+    registry, _, _ = _registry(manifest=_tools_manifest())
+    await registry.set_tool_enabled("echo", "echo", False)
+    await registry.set_enabled("echo", False)
+    # A disabled module's tools are already excluded by the URL filter; they must not
+    # also appear in the flat disabled set (the set is only for enabled modules).
+    disabled = await registry.disabled_tools_set()
+    assert disabled == set()

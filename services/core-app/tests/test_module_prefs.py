@@ -137,3 +137,53 @@ async def test_models_coexist_with_enabled_and_removed() -> None:
     await store.set_models("t1", "knowledge", {"embedding": "a"})
     assert await store.is_enabled("t1", "knowledge") is False
     assert await store.get_models("t1", "knowledge") == {"embedding": "a"}
+
+
+# ── Per-tool enable/disable (#213) ────────────────────────────────────────────
+
+
+async def test_disabled_tools_default_to_empty() -> None:
+    store, _ = await _fresh_store()
+    assert await store.get_disabled_tools("t1", "calendar") == set()
+
+
+async def test_disable_tool_adds_to_set() -> None:
+    store, _ = await _fresh_store()
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", False)
+    assert await store.get_disabled_tools("t1", "calendar") == {"calendar_create_event"}
+
+
+async def test_enable_tool_removes_from_set() -> None:
+    store, _ = await _fresh_store()
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", False)
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", True)
+    assert await store.get_disabled_tools("t1", "calendar") == set()
+
+
+async def test_multiple_tools_disabled_independently() -> None:
+    store, _ = await _fresh_store()
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", False)
+    await store.set_tool_enabled("t1", "calendar", "calendar_delete_event", False)
+    assert await store.get_disabled_tools("t1", "calendar") == {
+        "calendar_create_event",
+        "calendar_delete_event",
+    }
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", True)
+    assert await store.get_disabled_tools("t1", "calendar") == {"calendar_delete_event"}
+
+
+async def test_disabled_tools_are_tenant_and_module_scoped() -> None:
+    store, _ = await _fresh_store()
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", False)
+    assert await store.get_disabled_tools("t2", "calendar") == set()
+    assert await store.get_disabled_tools("t1", "tasks") == set()
+
+
+async def test_disabled_tools_coexist_with_enabled_and_models() -> None:
+    store, _ = await _fresh_store()
+    await store.set_enabled("t1", "calendar", False)
+    await store.set_models("t1", "calendar", {"embedding": "a"})
+    await store.set_tool_enabled("t1", "calendar", "calendar_create_event", False)
+    assert await store.is_enabled("t1", "calendar") is False
+    assert await store.get_models("t1", "calendar") == {"embedding": "a"}
+    assert await store.get_disabled_tools("t1", "calendar") == {"calendar_create_event"}

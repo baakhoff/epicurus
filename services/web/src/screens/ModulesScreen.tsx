@@ -190,10 +190,30 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
   );
 }
 
+function ToolRow({ module, tool, disabled }: { module: string; tool: string; disabled: boolean }) {
+  const queryClient = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) => api.setToolEnabled(module, tool, enabled),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
+  });
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-(--radius-field) border border-edge px-3 py-2">
+      <span className={cn("font-mono text-xs", disabled ? "text-ink-faint line-through" : "text-ink")}>
+        {tool}
+      </span>
+      <Switch
+        checked={!disabled}
+        onChange={(next) => toggle.mutate(next)}
+        label={`${disabled ? "Enable" : "Disable"} ${tool}`}
+      />
+    </div>
+  );
+}
+
 function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
-  const { manifest, status, enabled } = snapshot;
+  const { manifest, status, enabled, disabled_tools } = snapshot;
   const ui = manifest.ui;
   const known = ui == null || ui.ui_version === "1";
 
@@ -299,11 +319,14 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
               <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
                 Tools the agent can use
               </h4>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-col gap-1.5">
                 {manifest.tools.map((tool) => (
-                  <Badge key={tool.name} tone="dim" className="font-mono">
-                    {tool.name}
-                  </Badge>
+                  <ToolRow
+                    key={tool.name}
+                    module={manifest.name}
+                    tool={tool.name}
+                    disabled={disabled_tools.includes(tool.name)}
+                  />
                 ))}
               </div>
             </div>

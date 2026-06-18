@@ -171,6 +171,16 @@ printf '%s' "$rdy" | grep -q '"components"' || die "readiness endpoint returned 
 printf '%s' "$rdy" | grep -q '"power"' || die "readiness snapshot missing power state: $rdy"
 ok "readiness endpoint serves a warming snapshot (ADR-0027)"
 
+# qdrant upgrade-recovery guard (#229): the one-shot must complete cleanly, and the
+# new /proc-based healthcheck must report healthy (a crash-looping qdrant binds no port
+# and would be unhealthy). compose-validate can't see either — only a live boot can.
+qi_cid="$($DC ps -aq qdrant-init 2>/dev/null || true)"
+[ -n "$qi_cid" ] || die "qdrant-init container not found — the volume guard is not wired"
+qi_rc="$(docker inspect -f '{{.State.ExitCode}}' "$qi_cid" 2>/dev/null || echo 1)"
+[ "$qi_rc" = "0" ] || die "qdrant-init exited $qi_rc (volume guard failed)"
+wait_state qdrant
+ok "qdrant-init completed and qdrant is healthy via the /proc HTTP-listener check (#229)"
+
 ws="$(http -X POST "http://core-app:8080/platform/v1/modules/websearch/tools/web_search" \
   -H 'Content-Type: application/json' -d '{"arguments":{"query":"epicurus"}}' || true)"
 printf '%s' "$ws" | grep -q '"result"' || die "web_search tool did not round-trip: $ws"

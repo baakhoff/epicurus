@@ -26,6 +26,10 @@ _COUNT_KEYS = ("indexed", "deleted", "unchanged")
 class SourceIndexer(Protocol):
     """Anything the runner can drive — vault, platform-docs, and module-docs indexers."""
 
+    async def reconcile(self) -> bool:
+        """Self-heal stale state before indexing (#229); ``True`` if it changed anything."""
+        ...
+
     async def run(self) -> dict[str, int]: ...
 
 
@@ -80,7 +84,19 @@ class IndexRunner:
         self.state = IndexState()
 
     async def run_once(self) -> Counts:
-        """Run every indexer once and return the summed ``{indexed, deleted, unchanged}``."""
+        """Run every indexer once and return the summed ``{indexed, deleted, unchanged}``.
+
+        A reconcile pre-pass runs across *all* sources first (#229), so any that share a
+        Qdrant collection (the vault/platform-docs/module-docs all touch ``<tenant>__docs``)
+        clear their stale ledgers before the first ``run`` recreates the collection.
+        """
+        reconciled = 0
+        for indexer in self._indexers:
+            if await indexer.reconcile():
+                reconciled += 1
+        if reconciled:
+            _log.warning("reconciled sources after a qdrant reset; re-indexing", sources=reconciled)
+
         total: Counts = dict.fromkeys(_COUNT_KEYS, 0)
         for indexer in self._indexers:
             result = await indexer.run()

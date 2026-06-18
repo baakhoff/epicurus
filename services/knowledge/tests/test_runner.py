@@ -18,14 +18,29 @@ class _FakeIndexer:
         *,
         fail_times: int = 0,
         exc: Exception | None = None,
+        reconcile_returns: bool = False,
+        order_log: list[str] | None = None,
+        name: str = "fake",
     ) -> None:
         self._counts = counts or {"indexed": 0, "deleted": 0, "unchanged": 0}
         self._fail_times = fail_times
         self._exc = exc or RuntimeError("dep not ready")
+        self._reconcile_returns = reconcile_returns
+        self._order_log = order_log
+        self._name = name
         self.calls = 0
+        self.reconciled = 0
+
+    async def reconcile(self) -> bool:
+        self.reconciled += 1
+        if self._order_log is not None:
+            self._order_log.append(f"reconcile:{self._name}")
+        return self._reconcile_returns
 
     async def run(self) -> dict[str, int]:
         self.calls += 1
+        if self._order_log is not None:
+            self._order_log.append(f"run:{self._name}")
         if self.calls <= self._fail_times:
             raise self._exc
         return dict(self._counts)
@@ -118,6 +133,9 @@ async def test_cancellation_propagates() -> None:
     started = asyncio.Event()
 
     class _Hang:
+        async def reconcile(self) -> bool:
+            return False
+
         async def run(self) -> dict[str, int]:
             started.set()
             await asyncio.sleep(3600)
@@ -129,3 +147,28 @@ async def test_cancellation_propagates() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# ── Reconcile pre-pass (#229) ─────────────────────────────────────────────────
+
+
+async def test_reconcile_runs_for_every_source_before_any_run() -> None:
+    """All sources reconcile up front, before the first run recreates a collection."""
+    order: list[str] = []
+    a = _FakeIndexer(order_log=order, name="a")
+    b = _FakeIndexer(order_log=order, name="b")
+    runner = IndexRunner([a, b])
+    await runner.run_once()
+    # Every reconcile precedes every run — critical for sources sharing a collection.
+    assert order == ["reconcile:a", "reconcile:b", "run:a", "run:b"]
+    assert a.reconciled == 1
+    assert b.reconciled == 1
+
+
+async def test_run_with_retry_reconciles_each_attempt() -> None:
+    indexer = _FakeIndexer({"indexed": 1, "deleted": 0, "unchanged": 0}, fail_times=1)
+    runner = IndexRunner([indexer], base_delay_seconds=0.0, max_delay_seconds=0.0)
+    await runner.run_with_retry()
+    # Reconcile is idempotent, so running it on each attempt (here, twice) is safe.
+    assert indexer.reconciled == 2
+    assert runner.state.phase == "ready"

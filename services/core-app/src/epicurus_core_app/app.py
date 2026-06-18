@@ -108,6 +108,9 @@ def create_app() -> FastAPI:
     # Agent tool discovery scans only enabled modules (#126); wired after the registry
     # exists (the host needs the registry and the registry needs the host).
     mcp_host.set_url_provider(registry.enabled_mcp_urls)
+    # Per-tool disable filter (#213): tools the operator has individually turned off are
+    # skipped in discover even when their module's URL is included.
+    mcp_host.set_tool_filter(registry.disabled_tools_set)
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -157,7 +160,14 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="epicurus core", lifespan=lifespan)
     add_ops_routes(app, service_name=SERVICE_NAME, version=_service_version())
-    app.include_router(create_platform_router(settings, gateway))
+    app.include_router(
+        create_platform_router(
+            settings,
+            gateway,
+            prefs=prefs,
+            default_tenant=settings.default_tenant_id,
+        )
+    )
     app.include_router(
         create_llm_router(gateway, prefs=prefs, default_tenant=settings.default_tenant_id)
     )

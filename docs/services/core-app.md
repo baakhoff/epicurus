@@ -27,7 +27,7 @@ plus the shared ops endpoints. All of it is internal/local-only by default.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/embed` | Embed texts (returns float vectors). Defaults to `MEMORY_EMBED_MODEL`. |
+| `POST /platform/v1/embed` | Embed texts (returns float vectors). Resolution order: per-module override → global embed default pref → `MEMORY_EMBED_MODEL`. |
 | `POST /platform/v1/chat` | Chat completion — **the single module-facing chat path** (ADR-0021). Module supplies messages; the core owns model/keys/fallback. Returns the shared `ChatResult`. |
 
 Modules never hold model keys — all AI goes through here (ADR-0010). See
@@ -59,6 +59,10 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
+| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `hidden` (model list). |
+| `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
+| `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
+| `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
 
 ### Power (ADR-0005)
 
@@ -82,6 +86,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, ADR-0028): stop + remove the module's container via the Docker socket, then tombstone it. Refuses core-app / web / data-plane, scoped to the core's own Compose project. **403** protected · **503** no Docker access · **404** unknown. |
 | `GET` · `PUT /platform/v1/modules/{name}/models` | Per-module model-slot selections (#128, ADR-0029): `{slot_key: model_id}`. `PUT` validates each key against the manifest's `required_models` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
 | `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). |
+| `POST /platform/v1/modules/{name}/tools/{tool}/enabled` | Enable or disable one tool (#213): `{enabled: bool}`. Hides the named tool from the agent while the module keeps running and other tools remain unaffected. **404** unknown module or undeclared tool. Persisted in Postgres (`module_prefs`). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 
@@ -126,10 +131,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 
 - **Postgres `agent_messages`** — append-only conversation history: `id`, `tenant`,
   `session_id`, `role`, `content`, `created_at`. Tenant-scoped.
+- **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
+  `global_embed_default` (embedding model, #214), `hidden_models` (JSON list). A missing row
+  means all defaults are `null` (fall back to env settings).
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
-  deleted (#127), `models` holds per-slot model choices (#128). A module with no row defaults
-  to enabled, not-removed, and core-default models.
+  deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON
+  list of tool names the operator has toggled off (#213). A module with no row defaults to
+  enabled, not-removed, core-default models, and all tools on.
 - **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
   (768-dim, cosine), one collection per tenant.
 

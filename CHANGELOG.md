@@ -14,6 +14,20 @@ images to GHCR.
 
 ### Added
 
+- **Tasks: richer fields** — tasks gain **priority, tags, and status** beyond the title/notes/
+  due basics, on both the local store and (where the backend supports it) Google Tasks; the
+  board view renders and edits them (#218) (`tasks` → 0.5.0, `web` → 0.14.0).
+- **Global default embedding model in Settings** — the model manager gains an **embedding**
+  section: pick a global default embedding model alongside the chat-model controls. Modules
+  with no per-module choice use it; the per-module picker (#128) still overrides. Resolution
+  order is per-module → global default → core fallback (#214) (`core-app` → 0.11.0,
+  `web` → 0.13.0).
+- **Per-tool enable/disable in the Modules UI** — each module card can now turn individual
+  **tools** on or off, not just the whole module (#126): a disabled tool is hidden from the
+  agent (it can't call it) while the module keeps running. The flag is a tenant-scoped core
+  registry preference (`POST /platform/v1/modules/{name}/tools/{tool}/enabled`) and the core's
+  tool exposure filters disabled tools out of the agent's tool list (#213) (`core-app` →
+  0.10.0, `web` → 0.12.0).
 - **Knowledge picks its embedding model (first consumer of per-module models)** — the
   knowledge module now **declares an `embedding` model slot** in its manifest, so the
   operator can choose which embedding model indexes the vault from a "Models" section on the
@@ -84,6 +98,12 @@ images to GHCR.
   provider `get_task` backs them for both the local and Google backends. The existing core
   attach proxy and web attach menu render it unchanged — the module only supplies data
   (ADR-0019) (closes #139) (`tasks` → 0.3.0).
+
+### Fixed
+
+- **Modules page: clearer enable/disable toggle** — the module on/off control no longer
+  renders as an ambiguous half-set slider; enabled vs disabled is now visually unmistakable
+  (#212) (`web` → 0.11.1).
 
 ### Security
 

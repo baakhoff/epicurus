@@ -1,13 +1,14 @@
-"""Unit tests for McpHost discovery URL selection (#126).
+"""Unit tests for McpHost discovery URL and tool filtering (#126, #213).
 
 The MCP connection itself is stubbed: ``streamablehttp_client`` is patched to record
-the URL it is asked to open and then raise, so ``discover`` exercises exactly which
-modules it scans (enabled-only when a ``url_provider`` is wired) without a live server.
+the URL it is asked to open and then raise (URL-filter tests), or replaced with a mock
+session that returns a canned tool listing (tool-filter tests), so ``discover``
+exercises filtering logic without a live server.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from epicurus_core_app.agent.mcp_host import McpHost
 
@@ -56,3 +57,94 @@ async def test_discover_provider_returning_empty_scans_nothing() -> None:
         specs, _ = await host.discover()
     assert seen == []
     assert specs == []
+
+
+# ── Per-tool filter (#213) ────────────────────────────────────────────────────
+# These tests replace the full MCP transport with a mock session that returns a
+# known tool listing, so we can assert which names appear in specs / route.
+
+
+def _mock_transport(tool_names: list[str]) -> tuple[object, object]:
+    """Return (transport_cm, session_cm) mocks that advertise the given tool names."""
+    tool_objs = []
+    for name in tool_names:
+        t = MagicMock()
+        t.name = name
+        t.description = ""
+        t.inputSchema = {}
+        tool_objs.append(t)
+
+    listing = MagicMock()
+    listing.tools = tool_objs
+
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    session.list_tools = AsyncMock(return_value=listing)
+
+    transport_cm = MagicMock()
+    transport_cm.__aenter__ = AsyncMock(return_value=(None, None, None))
+    transport_cm.__aexit__ = AsyncMock(return_value=False)
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    return transport_cm, session_cm
+
+
+async def test_discover_without_filter_includes_all_tools() -> None:
+    host = McpHost(["http://a:8080/mcp"])
+    transport_cm, session_cm = _mock_transport(["tool_a", "tool_b"])
+
+    with (
+        patch(
+            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
+            return_value=transport_cm,
+        ),
+        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+    ):
+        specs, _route = await host.discover()
+
+    assert {s["function"]["name"] for s in specs} == {"tool_a", "tool_b"}
+    assert set(_route) == {"tool_a", "tool_b"}
+
+
+async def test_discover_with_tool_filter_excludes_disabled_tools() -> None:
+    async def tool_filter() -> set[str]:
+        return {"tool_b"}
+
+    host = McpHost(["http://a:8080/mcp"])
+    host.set_tool_filter(tool_filter)
+    transport_cm, session_cm = _mock_transport(["tool_a", "tool_b"])
+
+    with (
+        patch(
+            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
+            return_value=transport_cm,
+        ),
+        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+    ):
+        specs, route = await host.discover()
+
+    assert {s["function"]["name"] for s in specs} == {"tool_a"}
+    assert set(route) == {"tool_a"}
+
+
+async def test_discover_with_empty_filter_includes_all_tools() -> None:
+    async def tool_filter() -> set[str]:
+        return set()
+
+    host = McpHost(["http://a:8080/mcp"])
+    host.set_tool_filter(tool_filter)
+    transport_cm, session_cm = _mock_transport(["tool_a", "tool_b"])
+
+    with (
+        patch(
+            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
+            return_value=transport_cm,
+        ),
+        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+    ):
+        specs, _ = await host.discover()
+
+    assert {s["function"]["name"] for s in specs} == {"tool_a", "tool_b"}

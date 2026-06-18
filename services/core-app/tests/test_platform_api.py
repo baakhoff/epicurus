@@ -10,9 +10,12 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.power import GatewayPausedError
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.settings import CoreAppSettings
 
@@ -62,9 +65,27 @@ def _settings(*, embed_model: str = "nomic-embed-text") -> CoreAppSettings:
     )
 
 
-def _app(gw: _FakeGateway, *, embed_model: str = "nomic-embed-text") -> FastAPI:
+async def _fresh_prefs() -> LlmPrefsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = LlmPrefsStore(engine)
+    await store.init()
+    return store
+
+
+def _app(
+    gw: _FakeGateway,
+    *,
+    embed_model: str = "nomic-embed-text",
+    prefs: LlmPrefsStore | None = None,
+) -> FastAPI:
     app = FastAPI()
-    app.include_router(create_platform_router(_settings(embed_model=embed_model), gw))  # type: ignore[arg-type]
+    app.include_router(  # type: ignore[arg-type]
+        create_platform_router(_settings(embed_model=embed_model), gw, prefs=prefs)
+    )
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:
@@ -130,6 +151,42 @@ async def test_embed_passes_all_texts_to_gateway() -> None:
     ) as client:
         await client.post("/platform/v1/embed", json={"texts": texts})
     assert gw.embed_calls[0]["texts"] == texts
+
+
+async def test_embed_uses_global_embed_default_when_no_model_given() -> None:
+    prefs = await _fresh_prefs()
+    await prefs.set_embed_default("local", "mxbai-embed-large")
+    gw = _FakeGateway(embed_result=[[0.0]])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw, prefs=prefs)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/embed", json={"texts": ["hi"]})
+    assert gw.embed_calls[0]["model"] == "mxbai-embed-large"
+
+
+async def test_embed_per_module_override_wins_over_global_embed_default() -> None:
+    prefs = await _fresh_prefs()
+    await prefs.set_embed_default("local", "mxbai-embed-large")
+    gw = _FakeGateway(embed_result=[[0.0]])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw, prefs=prefs)), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/platform/v1/embed",
+            json={"texts": ["hi"], "model": "nomic-embed-text"},
+        )
+    assert gw.embed_calls[0]["model"] == "nomic-embed-text"
+
+
+async def test_embed_falls_back_to_env_default_when_global_embed_default_unset() -> None:
+    prefs = await _fresh_prefs()
+    gw = _FakeGateway(embed_result=[[0.0]])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw, embed_model="nomic-embed-text", prefs=prefs)),
+        base_url="http://test",
+    ) as client:
+        await client.post("/platform/v1/embed", json={"texts": ["hi"]})
+    assert gw.embed_calls[0]["model"] == "nomic-embed-text"
 
 
 # ── /chat ──────────────────────────────────────────────────────────────────────

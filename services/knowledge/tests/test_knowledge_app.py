@@ -38,7 +38,7 @@ async def test_manifest_declares_editor_page() -> None:
     assert [p.id for p in manifest.pages] == ["vault"]
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
-    assert manifest.version == "0.8.1"
+    assert manifest.version == "0.9.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:

@@ -31,7 +31,7 @@ import {
   MoreHorizontal,
   Plus,
 } from "lucide-react";
-import { useRef, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -334,7 +334,6 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [newFolderName, setNewFolderName] = useState("");
   // The folder inside which a new file is being created (null = root)
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
-  const newFolderInputRef = useRef<HTMLInputElement>(null);
 
   // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's
   // "Open in Knowledge" link, #143). Re-applies if the param changes while mounted.
@@ -613,7 +612,6 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
             {newFolderCreating ? (
               <form onSubmit={handleCreateFolder} className="flex items-center gap-2">
                 <TextInput
-                  ref={newFolderInputRef}
                   autoFocus
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value)}

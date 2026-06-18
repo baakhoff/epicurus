@@ -14,6 +14,13 @@ images to GHCR.
 
 ### Added
 
+- **User-managed knowledge base: nested folders + add anything (file tree)** — the Knowledge
+  editor page gains a file tree: create nested folders, add documents into any folder, and
+  rename/move/delete — all path-confined to the vault (no traversal) and re-indexed on change.
+  The `editor` archetype now carries an `EditorDoc.type` (`file`/`dir`) and a
+  `can_manage_files` flag; the core proxies folder-create, file/folder-delete, and move CRUD
+  to the module (closes #216) (`knowledge` → 0.9.0, `core-app` → 0.13.0, `web` → 0.15.0).
+
 - **Modules ship their own docs, auto-indexed into the knowledge base** — a module can declare
   `docs_url` in its manifest and serve `GET /docs`; the core proxies it
   (`GET /platform/v1/modules/{name}/docs`) and the **knowledge** module indexes every enabled

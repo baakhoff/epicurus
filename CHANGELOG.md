@@ -34,6 +34,15 @@ images to GHCR.
   before any entry enters the ring buffer (#217)
   (`epicurus-core` → 0.9.0, `core-app` → 0.13.0, `web` → 0.15.0).
 
+- **Knowledge changes are suggested for review, not pushed directly** — the agent's only
+  way to change the vault is the new `knowledge_propose_edit` tool, which **stages** a
+  create/update/delete instead of writing it. A new **Suggestions** page (the first `review`
+  archetype) shows each pending change as a diff; the operator approves (apply + index) or
+  rejects (discard) it. Direct *operator* edits (the editor save, the file-tree CRUD) stay
+  immediate — the trust boundary is the author, not the action. Approve/reject are
+  operator-only endpoints, never agent tools, so the agent can't approve its own proposals
+  (closes #220, ADR-0033) (`epicurus-core` → 0.10.0, `core-app` → 0.15.0, `knowledge` → 0.12.0,
+  `web` → 0.17.0).
 - **Modules ship their own docs, auto-indexed into the knowledge base** — a module can declare
   `docs_url` in its manifest and serve `GET /docs`; the core proxies it
   (`GET /platform/v1/modules/{name}/docs`) and the **knowledge** module indexes every enabled

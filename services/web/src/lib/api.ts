@@ -11,6 +11,7 @@ import {
   EmailMessage,
   HoverCard,
   LlmPrefs,
+  LogEntry,
   MessageRecord,
   ModelInfo,
   ModuleAttachmentItem,
@@ -21,9 +22,11 @@ import {
   PlatformInfo,
   PowerStatus,
   ProviderInfo,
+  Readiness,
   SessionSummary,
   type PowerState,
 } from "@/lib/contracts";
+import { parseFrame } from "@/lib/sse";
 
 export class ApiError extends Error {
   constructor(
@@ -218,6 +221,11 @@ export const api = {
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
 
+  readiness: (model?: string) => {
+    const q = model ? `?model=${encodeURIComponent(model)}` : "";
+    return request(Readiness, `/platform/v1/readiness${q}`);
+  },
+
   oauthClientStatus: (provider: string) =>
     request(OAuthClientStatus, `/platform/v1/oauth/${encodeURIComponent(provider)}/client`),
   oauthSetClient: (provider: string, clientId: string, clientSecret: string) =>
@@ -234,3 +242,69 @@ export const api = {
       method: "DELETE",
     }),
 };
+
+/**
+ * Stream structured log entries from the core as an async generator.
+ *
+ * The core replays up to 200 buffered history entries first, then trickles live
+ * entries as they are emitted. The caller is responsible for aborting the stream
+ * via ``signal``.
+ *
+ * @param level    Minimum log level to receive ("debug" | "info" | "warning" | "error" | "critical").
+ * @param service  Optional service-name prefix filter.
+ * @param signal   AbortSignal used to stop the stream.
+ */
+export async function* logStream(
+  level?: string,
+  service?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<LogEntry> {
+  const params = new URLSearchParams();
+  if (level) params.set("level", level);
+  if (service) params.set("service", service);
+  const query = params.size ? `?${params}` : "";
+  const url = `/platform/v1/logs/stream${query}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    let detail = response.statusText;
+    try {
+      detail = (await response.json()).detail ?? detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw Object.assign(new Error(detail), { status: response.status });
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index: number;
+      while ((index = buffer.search(/\n\n|\r\n\r\n/)) >= 0) {
+        const block = buffer.slice(0, index).replace(/\r\n/g, "\n");
+        buffer = buffer.slice(index + (buffer[index] === "\r" ? 4 : 2));
+        const msg = parseFrame(block);
+        if (msg?.event === "log") {
+          try {
+            yield LogEntry.parse(JSON.parse(msg.data));
+          } catch {
+            /* malformed frame — skip */
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

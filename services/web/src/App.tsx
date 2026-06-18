@@ -16,6 +16,7 @@ import { ChatScreen } from "@/screens/ChatScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
 import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
+import { ObservabilityScreen } from "@/screens/ObservabilityScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 
 /** Shared NavLink class logic so core surfaces + module pages render identically. */
@@ -141,6 +142,7 @@ function Shell() {
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />
+            <Route path="/observability" element={<ObservabilityScreen />} />
             <Route path="/m/:moduleName/:pageId" element={<ModulePageScreen />} />
           </Routes>
         </main>

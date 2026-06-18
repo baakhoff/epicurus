@@ -33,6 +33,8 @@ from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
+from epicurus_core_app.log_stream import LogBuffer
+from epicurus_core_app.log_stream_routes import create_log_stream_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
@@ -58,7 +60,8 @@ def _service_version() -> str:
 def create_app() -> FastAPI:
     """Build the core runtime ASGI app (connects to NATS on startup)."""
     settings = CoreAppSettings(service_name=SERVICE_NAME)
-    configure_logging(settings)
+    log_buffer = LogBuffer()
+    configure_logging(settings, extra_processors=[log_buffer.processor])
     log = get_logger(SERVICE_NAME)
     bus = EventBus.from_settings(settings)
     power = PowerController()
@@ -187,6 +190,7 @@ def create_app() -> FastAPI:
     app.include_router(create_readiness_router(readiness))
     app.include_router(create_modules_router(registry))
     app.include_router(create_oauth_router(oauth, default_tenant=settings.default_tenant_id))
+    app.include_router(create_log_stream_router(log_buffer))
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:

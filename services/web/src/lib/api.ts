@@ -5,7 +5,9 @@
 import { z } from "zod";
 
 import {
+  AccountsView,
   AttachmentUploaded,
+  type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
   EmailMessage,
@@ -141,6 +143,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ models }),
     }),
+  // The module's connected accounts + collections, merged with the operator's selection
+  // (ADR-0030): the shell renders per-collection toggles + an active switcher from this.
+  getModuleCollections: (name: string) =>
+    request(AccountsView, `/platform/v1/modules/${encodeURIComponent(name)}/collections`),
+  saveModuleCollections: (name: string, prefs: CollectionPrefs) =>
+    request(
+      z.object({ status: z.string() }),
+      `/platform/v1/modules/${encodeURIComponent(name)}/collections`,
+      { method: "PUT", body: JSON.stringify(prefs) },
+    ),
   // Enable or disable a single tool (#213); the module keeps running, other tools unaffected.
   setToolEnabled: (name: string, tool: string, enabled: boolean) =>
     request(

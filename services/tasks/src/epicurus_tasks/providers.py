@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from epicurus_core import Collection
 from epicurus_tasks.models import Task
 
 
@@ -120,5 +121,21 @@ class TasksProvider(Protocol):
             tenant_id: Tenant scope.
             task_id: Provider-specific task identifier.
             list_id: List containing the task; ``None`` means the default list.
+        """
+        ...
+
+    async def is_available(self, tenant_id: str) -> bool:
+        """True when the provider is configured and reachable for *tenant_id* (ADR-0030).
+
+        The local store is always available; an external provider reports its live
+        connection state (e.g. whether Google is connected).
+        """
+        ...
+
+    async def list_collections(self, tenant_id: str) -> list[Collection]:
+        """The collections (task lists) this provider exposes for *tenant_id* (ADR-0030).
+
+        Drives the connected-accounts picker. The local store returns an empty list — it
+        is the silent default, never a selectable account.
         """
         ...

@@ -220,3 +220,45 @@ async def test_get_module_model_requires_module_name() -> None:
     client = PlatformClient(base_url="http://core:8080", tenant_id="local")
     with pytest.raises(ValueError, match="module must be set"):
         await client.get_module_model("embedding")
+
+
+# ── get_collections (ADR-0030) ────────────────────────────────────────────────────
+
+
+async def test_get_collections_parses_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    resp = _Resp(
+        body={
+            "enabled": [{"account": "google", "collection": "primary"}],
+            "active": {"account": "google", "collection": "primary"},
+        }
+    )
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture=captured),
+    )
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local", module="calendar")
+    prefs = await client.get_collections()
+    assert captured["url"] == "/platform/v1/modules/calendar/collections/prefs"
+    assert captured["params"] == {"tenant_id": "local"}
+    assert prefs.active is not None
+    assert prefs.active.collection == "primary"
+    assert prefs.enabled[0].account == "google"
+
+
+async def test_get_collections_empty_means_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    resp = _Resp(body={"enabled": [], "active": None})
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture={}),
+    )
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local", module="calendar")
+    prefs = await client.get_collections()
+    assert prefs.enabled == []
+    assert prefs.active is None
+
+
+async def test_get_collections_requires_module_name() -> None:
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local")
+    with pytest.raises(ValueError, match="module must be set"):
+        await client.get_collections()

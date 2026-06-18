@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from epicurus_core import EventBus
 from epicurus_tasks.db import TaskStore
+from epicurus_tasks.google_provider import GoogleTasksProvider
 
 
 @pytest.fixture()
@@ -25,7 +27,6 @@ async def local_store() -> TaskStore:
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """TestClient pointing at the tasks app using the local provider + in-memory SQLite."""
-    monkeypatch.setenv("TASKS_PROVIDER", "local")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("NATS_URL", "nats://localhost:4222")
 
@@ -44,7 +45,6 @@ def booted_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     tests, so the EventBus connect/close are stubbed to no-ops (the existing tests
     skip lifespan for exactly this reason).
     """
-    monkeypatch.setenv("TASKS_PROVIDER", "local")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("NATS_URL", "nats://localhost:4222")
 
@@ -68,11 +68,14 @@ def test_health(client: TestClient) -> None:
     assert data["service"] == "tasks"
 
 
-def test_status(client: TestClient) -> None:
+def test_status(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # /status reports the live Google connection (ADR-0030); stub it so the unit test
+    # makes no network call to the core.
+    monkeypatch.setattr(GoogleTasksProvider, "is_available", AsyncMock(return_value=False))
     resp = client.get("/status")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider"] == "local"
+    assert data["google_connected"] is False
 
 
 def test_manifest(client: TestClient) -> None:
@@ -80,12 +83,24 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.5.0"
+    assert data["version"] == "0.6.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
     # Tasks references tasks (resolver) and is a chat-attachment source (ADR-0019).
     assert data["resolver"] is True
     assert data["attachable"] is True
+    # Account/collection model (ADR-0030): a single-active task-list picker, no dropdown.
+    assert data["collections"]["noun"] == "list"
+    assert data["collections"]["multi"] is False
+    assert data["collections"]["providers"] == ["google"]
+    assert data["ui"]["config_schema"] is None
+
+
+def test_app_exposes_accounts_route(client: TestClient) -> None:
+    """The connected-accounts source the core proxies for the picker (ADR-0030)."""
+    from epicurus_core import route_paths
+
+    assert "/accounts" in route_paths(client.app)  # type: ignore[arg-type]
 
 
 def test_manifest_declares_tasks_board_page(client: TestClient) -> None:

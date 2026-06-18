@@ -9,9 +9,13 @@ shell renders it. No markup ever leaves this module.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from epicurus_core import (
+    Account,
+    AccountsView,
+    CollectionsSpec,
     EntityRef,
     EpicurusModule,
     HoverCard,
@@ -27,6 +31,10 @@ from epicurus_tasks.providers import TasksProvider
 MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
 """The id of the Tasks left-nav page; forms its nav route and data path."""
+
+# The external providers the tasks module can connect (ADR-0030); ``local`` is the
+# implicit default and is never listed. Maps the account id to its shell display label.
+PROVIDER_LABELS = {"google": "Google"}
 
 # The kind every task entity-reference and attachment carries (ADR-0019).
 TASK_KIND = "task"
@@ -63,18 +71,20 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.5.0",
+        version="0.6.0",
         description=(
-            f"Task management via the {provider.provider_name()!r} provider: "
-            "list, add, edit, and complete tasks."
+            "Task management: list, add, edit, and complete tasks. Backed by a local"
+            " store (no account needed) plus any Google task lists the operator connects."
         ),
         ui=UiSection(
             icon="check-square",
             summary=(
-                "Manage your tasks. The active provider is "
-                f"{provider.provider_name()!r}; switch providers via "
-                "TASKS_PROVIDER in .env without changing these tools."
+                "Manage your tasks in a built-in local list (no account needed) or in a"
+                " **Google** task list you connect. Choose the active list below; the agent"
+                " can list, add, edit, and complete tasks on it."
             ),
+            # No config_schema: there is no provider dropdown any more (ADR-0030). Accounts
+            # and the active list are managed in the connected-accounts section.
             status_url="/status",
         ),
         pages=[
@@ -88,6 +98,10 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         ],
         resolver=True,
         attachable=True,
+        # Account/collection model (ADR-0030): a silent local default plus connectable
+        # Google task lists. Tasks is single-active (not multi): the board and tools act on
+        # the active list. Serves GET /accounts.
+        collections=CollectionsSpec(noun="list", multi=False, providers=["google"]),
     )
 
     @module.tool()
@@ -238,6 +252,29 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
             raise RuntimeError(str(exc)) from exc
 
     return module
+
+
+async def tasks_accounts(external: Mapping[str, TasksProvider], *, tenant_id: str) -> AccountsView:
+    """The connected-accounts view backing ``GET /accounts`` (ADR-0030).
+
+    One :class:`Account` per supported external provider, ``connected`` from the live
+    OAuth check and ``collections`` (task lists) listed only when connected. ``local`` is
+    the silent default and is never included. Tasks is single-active (``multi=False``).
+    """
+    accounts: list[Account] = []
+    for account_id, provider in external.items():
+        connected = await provider.is_available(tenant_id)
+        collections = await provider.list_collections(tenant_id) if connected else []
+        accounts.append(
+            Account(
+                account=account_id,
+                provider=account_id,
+                label=PROVIDER_LABELS.get(account_id, account_id.title()),
+                connected=connected,
+                collections=collections,
+            )
+        )
+    return AccountsView(noun="list", multi=False, accounts=accounts)
 
 
 # ── Tasks page: the `board` archetype data (ADR-0018) ───────────────────────────

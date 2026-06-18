@@ -26,6 +26,13 @@ returns its tasks as chips, hovering one shows the core **hover-card** (due date
 clicking opens it in the right-panel `entity-detail` view. The module declares `resolver` and
 serves `GET /resolve/task/{id}`; the core renders the chip, the hover-card, and the panel.
 
+**v0.6.0** adopts the **account/collection model** (ADR-0030): there is no `TASKS_PROVIDER`
+dropdown any more. The module holds both backends at once — the silent **local** default plus
+**Google** — and routes to the **active** task list the operator selects in the core-rendered
+connected-accounts section. Tasks is *single-active* (`multi: false`): the board and tools act
+on the one active list (or local when none is set). A `TasksRouter` (`router.py`) resolves the
+active list from the core's stored selection and falls back to local if the core is unreachable.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -37,8 +44,9 @@ serves `GET /resolve/task/{id}`; the core renders the chip, the hover-card, and 
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
 | `tasks_update(task_id, title?, notes?, due?, list_id?)` | `task_id`: provider task ID; only the fields passed change, the rest are left intact | The updated `Task`. |
 
-All four tools are **provider-agnostic** — `list_id` maps to `@default` (Google)
-or is silently ignored (local). `tasks_update` edits content (title/notes/due);
+All four tools are **provider-agnostic** and route to the operator's **active** list
+(ADR-0030); an explicit `list_id` overrides it within the active account, mapping to a
+Google task list or being ignored by local. `tasks_update` edits content (title/notes/due);
 `tasks_complete` flips the done flag — distinct operations. The `Task` domain model is:
 
 ```python
@@ -57,8 +65,9 @@ class Task(BaseModel):
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, UI declaration). |
-| `GET /status` | Active provider name: `{"provider": "local" \| "google"}`. |
+| `GET /manifest` | Module manifest (tools, UI declaration, `collections` spec). |
+| `GET /status` | `{"google_connected": bool}` (best-effort live OAuth check). |
+| `GET /accounts` | Connected accounts + their task lists for the picker (ADR-0030). The core proxies + merges this at `GET /platform/v1/modules/tasks/collections`. |
 | `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). 404 for an unknown id. |
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
@@ -69,7 +78,8 @@ class Task(BaseModel):
 
 | Panel | What it shows / does |
 | --- | --- |
-| **Status** | Active provider name (polled from `GET /status`). |
+| **Status** | Whether Google is connected (polled from `GET /status`). |
+| **Lists** | Connected accounts + their task lists: on/off toggles and the active-list picker (ADR-0030). |
 | **Actions** | None — `tasks_list` returns entity-reference chips (surfaced in chat), so it is not a card-action button. |
 | **Tasks page** | A left-nav `board` page (see below). |
 
@@ -88,6 +98,20 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card);
   the board offers **Add task** (`tasks_add`, a form). The board never carries credentials
   or business logic — it is data plus tool references.
+
+### Connected accounts & collections (ADR-0030)
+
+The module declares `collections = {noun: "list", multi: false, providers: ["google"]}` and
+serves **`GET /accounts`**: one account per supported provider, `connected` from the live OAuth
+state and, when connected, its task lists (`{account, collection, title, writable}`). `local`
+is never listed — it is the silent default.
+
+The core merges this with the stored selection at
+`GET /platform/v1/modules/tasks/collections`; the shell renders per-list on/off toggles plus an
+active picker, and `PUT …/collections` persists `{enabled, active}`. The module reads it via
+`PlatformClient.get_collections()` (a Postgres-only read at `GET …/collections/prefs`) and,
+being *single-active*, routes the board and every tool to the **active** list — or to local
+when none is active. If the core is unreachable it degrades to local (local-first).
 
 ### Entity references & hover-cards (ADR-0019)
 
@@ -141,13 +165,15 @@ attach proxy forwards no list selector).
 
 ## Configuration
 
-`TasksSettings` extends [`CoreSettings`](../reference/config.md):
+`TasksSettings` extends [`CoreSettings`](../reference/config.md). There is **no
+`TASKS_PROVIDER`** any more (ADR-0030): the module always backs itself with the local store
+and routes to the connected Google list the operator selects, which lives in the core
+(`module_prefs`), not in service config.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `TASKS_PROVIDER` | `local` | Active provider: `"local"` or `"google"`. |
-| `PLATFORM_URL` | `http://core-app:8080` | Core service URL for OAuth token and future platform API calls. |
-| `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Postgres DSN. Used only by the `local` provider. |
+| `PLATFORM_URL` | `http://core-app:8080` | Core service URL for OAuth token, collection prefs, and platform API calls. |
+| `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for the local default store. |
 
 ## Data model
 
@@ -183,26 +209,28 @@ core-app (OAuth token endpoint) · Postgres (`local` provider only) · NATS.
 ## Run & extend
 
 ```bash
-# Local provider (default — no Google account needed):
+# One container backs both local + Google; the operator picks the active list in the UI:
 docker compose up -d tasks
-
-# Google provider (requires a connected Google account):
-TASKS_PROVIDER=google docker compose up -d tasks
 ```
 
-**Adding a new provider** — implement the `TasksProvider` Protocol in a new file,
-set it in `app.py`'s provider-selection block, and add the provider name to
-`TASKS_PROVIDER`. No tool or model changes are needed.
+To use Google: connect the account and pick a list in **Modules → Tasks → Lists** (or connect
+from **Settings**). No restart or env change is needed (ADR-0030).
+
+**Adding a new provider** — implement the `TasksProvider` Protocol (including `is_available`
+and `list_collections`) in a new file, add it to the `external` map in `app.py` (keyed by its
+account id), and add it to `PROVIDER_LABELS` + `collections.providers` in `service.py`. No
+tool or model changes are needed.
 
 Package `epicurus_tasks`:
 
 | Module | Responsibility |
 | --- | --- |
 | `models.py` | `Task` domain model (provider-neutral). |
-| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update + `get_task`). |
-| `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store. |
-| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API. |
+| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update + `get_task` + `is_available`/`list_collections`). |
+| `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default). |
+| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030). |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + entity-reference, hover-card & chat-attachment helpers (`task_entity_ref`/`task_hover_card`/`tasks_attachments`/`task_attachment`/`fetch_task`). |
-| `app.py` | Lifespan, provider selection, `GET /status`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
-| `settings.py` | `TasksSettings` (adds `tasks_provider`, `platform_url`, `database_url`). |
+| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
+| `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

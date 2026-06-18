@@ -6,6 +6,7 @@ Works with no external account.  Proves the provider seam alongside
 
 from __future__ import annotations
 
+from epicurus_core import Collection
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.models import Task
 
@@ -14,7 +15,8 @@ class LocalTasksProvider:
     """Stores tasks in the module's tenant-scoped Postgres table.
 
     ``list_id`` is ignored — the local store has a single, flat list per tenant.
-    All richer fields (status, priority, tags) are fully persisted.
+    All richer fields (status, priority, tags) are fully persisted. It is the silent
+    default (ADR-0030): always available, and never a selectable account.
     """
 
     def __init__(self, store: TaskStore) -> None:
@@ -87,3 +89,10 @@ class LocalTasksProvider:
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
     ) -> Task | None:
         return await self._store.get_task(tenant_id=tenant_id, task_id=task_id)
+
+    async def is_available(self, tenant_id: str) -> bool:
+        return True
+
+    async def list_collections(self, tenant_id: str) -> list[Collection]:
+        # Local is the silent default, not a selectable account (ADR-0030).
+        return []

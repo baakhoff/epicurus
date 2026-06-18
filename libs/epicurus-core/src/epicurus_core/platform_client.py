@@ -29,7 +29,7 @@ import httpx
 # ``PlatformChatResponse`` are backward-compatible aliases of ``ChatMessage`` /
 # ``ChatResult`` — re-exported here so existing
 # ``from epicurus_core.platform_client import PlatformChatResponse`` keeps resolving.
-from epicurus_core.contracts import PlatformChatResponse, PlatformMessage
+from epicurus_core.contracts import CollectionPrefs, PlatformChatResponse, PlatformMessage
 
 __all__ = ["PlatformChatResponse", "PlatformClient", "PlatformMessage"]
 
@@ -154,6 +154,24 @@ class PlatformClient:
             resp.raise_for_status()
             model = resp.json().get("model")
             return str(model) if model else None
+
+    async def get_collections(self) -> CollectionPrefs:
+        """The operator's collection selection for this module (ADR-0030).
+
+        Returns the stored ``{enabled, active}`` read straight from the core's Postgres —
+        **no module round-trip** — which the module uses to route reads/writes: an empty
+        ``enabled`` and a null ``active`` both mean "use the local default". Requires the
+        client to know its module name (``PlatformClient(..., module=...)``).
+        """
+        if self._module is None:
+            raise ValueError("PlatformClient.module must be set to resolve collections")
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                f"/platform/v1/modules/{self._module}/collections/prefs",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            return CollectionPrefs.model_validate(resp.json())
 
     async def list_modules(self) -> list[dict[str, Any]]:
         """List all modules with their manifests and enabled states (#215).

@@ -12,10 +12,17 @@ from datetime import datetime, timedelta
 from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_core import Collection
 
 
 class LocalCalendarProvider(CalendarProvider):
-    """Postgres-backed calendar provider — no external account required."""
+    """Postgres-backed calendar provider — no external account required.
+
+    The single local store has no notion of multiple collections, so ``calendar_id``
+    is accepted (to satisfy the provider contract) but ignored, and
+    ``list_collections`` returns nothing — local is the silent default (ADR-0030),
+    never a selectable account.
+    """
 
     name = "local"
 
@@ -27,6 +34,7 @@ class LocalCalendarProvider(CalendarProvider):
         *,
         tenant_id: str,
         time_range: DateTimeRange,
+        calendar_id: str | None = None,
     ) -> list[Event]:
         return await self._store.list_events(
             tenant=tenant_id,
@@ -34,7 +42,9 @@ class LocalCalendarProvider(CalendarProvider):
             end=time_range.end,
         )
 
-    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+    async def get_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> Event | None:
         return await self._store.get_event(tenant=tenant_id, event_id=event_id)
 
     async def create_event(
@@ -46,6 +56,7 @@ class LocalCalendarProvider(CalendarProvider):
         end: datetime,
         description: str | None = None,
         location: str | None = None,
+        calendar_id: str | None = None,
     ) -> Event:
         return await self._store.create_event(
             tenant=tenant_id,
@@ -62,6 +73,7 @@ class LocalCalendarProvider(CalendarProvider):
         tenant_id: str,
         time_range: DateTimeRange,
         duration_minutes: int,
+        calendar_id: str | None = None,
     ) -> list[DateTimeRange]:
         """Return contiguous gaps of at least *duration_minutes* in *time_range*.
 
@@ -82,6 +94,10 @@ class LocalCalendarProvider(CalendarProvider):
 
     async def is_available(self, *, tenant_id: str) -> bool:
         return True
+
+    async def list_collections(self, *, tenant_id: str) -> list[Collection]:
+        # Local is the silent default, not a selectable account (ADR-0030).
+        return []
 
 
 def _compute_free_slots(

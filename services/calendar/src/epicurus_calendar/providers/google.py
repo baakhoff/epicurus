@@ -18,9 +18,12 @@ import httpx
 
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
-from epicurus_core import PlatformClient
+from epicurus_core import Collection, PlatformClient
 
 _CALENDAR_API = "https://www.googleapis.com/calendar/v3"
+
+# Google calendarList access roles that permit creating/editing events.
+_WRITABLE_ROLES = {"writer", "owner"}
 
 
 class GoogleCalendarProvider(CalendarProvider):
@@ -37,6 +40,9 @@ class GoogleCalendarProvider(CalendarProvider):
 
     def __init__(self, platform: PlatformClient, calendar_id: str = "primary") -> None:
         self._platform = platform
+        # The fallback calendar when a call passes no explicit ``calendar_id`` (e.g. the
+        # local-only unit tests). With the account/collection model the router supplies the
+        # operator-selected calendar per call (ADR-0030).
         self._calendar_id = calendar_id
 
     async def _auth_headers(self) -> dict[str, str]:
@@ -48,11 +54,13 @@ class GoogleCalendarProvider(CalendarProvider):
         *,
         tenant_id: str,
         time_range: DateTimeRange,
+        calendar_id: str | None = None,
     ) -> list[Event]:
+        cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.get(
-                f"{_CALENDAR_API}/calendars/{self._calendar_id}/events",
+                f"{_CALENDAR_API}/calendars/{cal}/events",
                 headers=headers,
                 params={
                     "timeMin": _to_rfc3339(time_range.start),
@@ -64,12 +72,15 @@ class GoogleCalendarProvider(CalendarProvider):
             resp.raise_for_status()
         return [_google_item_to_event(item) for item in resp.json().get("items", [])]
 
-    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+    async def get_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> Event | None:
         """Fetch a single event by id; ``None`` when Google reports it gone (404)."""
+        cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.get(
-                f"{_CALENDAR_API}/calendars/{self._calendar_id}/events/{event_id}",
+                f"{_CALENDAR_API}/calendars/{cal}/events/{event_id}",
                 headers=headers,
             )
         if resp.status_code == httpx.codes.NOT_FOUND:
@@ -86,7 +97,9 @@ class GoogleCalendarProvider(CalendarProvider):
         end: datetime,
         description: str | None = None,
         location: str | None = None,
+        calendar_id: str | None = None,
     ) -> Event:
+        cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
         body: dict[str, object] = {
             "summary": title,
@@ -99,7 +112,7 @@ class GoogleCalendarProvider(CalendarProvider):
             body["location"] = location
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.post(
-                f"{_CALENDAR_API}/calendars/{self._calendar_id}/events",
+                f"{_CALENDAR_API}/calendars/{cal}/events",
                 headers=headers,
                 json=body,
             )
@@ -112,8 +125,10 @@ class GoogleCalendarProvider(CalendarProvider):
         tenant_id: str,
         time_range: DateTimeRange,
         duration_minutes: int,
+        calendar_id: str | None = None,
     ) -> list[DateTimeRange]:
         """Query the Google Free/Busy API and return open slots."""
+        cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.post(
@@ -122,11 +137,11 @@ class GoogleCalendarProvider(CalendarProvider):
                 json={
                     "timeMin": _to_rfc3339(time_range.start),
                     "timeMax": _to_rfc3339(time_range.end),
-                    "items": [{"id": self._calendar_id}],
+                    "items": [{"id": cal}],
                 },
             )
             resp.raise_for_status()
-        busy_raw = resp.json().get("calendars", {}).get(self._calendar_id, {}).get("busy", [])
+        busy_raw = resp.json().get("calendars", {}).get(cal, {}).get("busy", [])
         busy = [
             (
                 _parse_rfc3339(b["start"]),
@@ -144,12 +159,41 @@ class GoogleCalendarProvider(CalendarProvider):
         )
 
     async def is_available(self, *, tenant_id: str) -> bool:
-        """True when a Google token is stored for this tenant."""
+        """True when a Google token is stored for this tenant.
+
+        Any HTTP failure — not connected (4xx) or the core being unreachable — means
+        "not available" rather than an error, so a status check never raises.
+        """
         try:
             await self._platform.get_oauth_token("google")
             return True
-        except httpx.HTTPStatusError:
+        except httpx.HTTPError:
             return False
+
+    async def list_collections(self, *, tenant_id: str) -> list[Collection]:
+        """Every calendar in the account's calendarList (ADR-0030).
+
+        Each becomes a toggleable collection in the shell; ``writable`` reflects the
+        Google access role so a read-only (subscribed) calendar can be kept out of the
+        active/write picker.
+        """
+        headers = await self._auth_headers()
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.get(
+                f"{_CALENDAR_API}/users/me/calendarList",
+                headers=headers,
+            )
+            resp.raise_for_status()
+        items = resp.json().get("items", [])
+        return [
+            Collection(
+                account="google",
+                collection=str(item.get("id", "")),
+                title=str(item.get("summaryOverride") or item.get("summary") or item.get("id", "")),
+                writable=str(item.get("accessRole", "")) in _WRITABLE_ROLES,
+            )
+            for item in items
+        ]
 
 
 def _to_rfc3339(dt: datetime) -> str:

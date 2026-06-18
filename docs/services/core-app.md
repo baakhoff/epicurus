@@ -86,6 +86,9 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, ADR-0028): stop + remove the module's container via the Docker socket, then tombstone it. Refuses core-app / web / data-plane, scoped to the core's own Compose project. **403** protected · **503** no Docker access · **404** unknown. |
 | `GET` · `PUT /platform/v1/modules/{name}/models` | Per-module model-slot selections (#128, ADR-0029): `{slot_key: model_id}`. `PUT` validates each key against the manifest's `required_models` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
 | `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). |
+| `GET /platform/v1/modules/{name}/collections` | The module's connected accounts + collections (ADR-0030), proxied from its `GET /accounts` and **merged** with the operator's stored selection (each collection annotated `enabled`/`active`). **404** if the module declares no `collections`. |
+| `PUT /platform/v1/modules/{name}/collections` | Persist the selection: `{enabled: [CollectionRef], active: CollectionRef \| null}`. Store-through (refs are not live-validated); `active` must be in `enabled` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
+| `GET /platform/v1/modules/{name}/collections/prefs` | The raw stored `{enabled, active}` (Postgres only, no module round-trip) — backs `PlatformClient.get_collections` so a module resolves its own routing (ADR-0030). |
 | `POST /platform/v1/modules/{name}/tools/{tool}/enabled` | Enable or disable one tool (#213): `{enabled: bool}`. Hides the named tool from the agent while the module keeps running and other tools remain unaffected. **404** unknown module or undeclared tool. Persisted in Postgres (`module_prefs`). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
@@ -137,8 +140,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
   deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON
-  list of tool names the operator has toggled off (#213). A module with no row defaults to
-  enabled, not-removed, core-default models, and all tools on.
+  list of tool names the operator has toggled off (#213), and `collections` holds the
+  account/collection selection (`{enabled, active}` JSON, ADR-0030). A module with no row
+  defaults to enabled, not-removed, core-default models, all tools on, and the local default
+  collection. Post-release columns are added in place at startup (no migration framework).
 - **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
   (768-dim, cosine), one collection per tenant.
 

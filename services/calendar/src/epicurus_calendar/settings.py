@@ -6,18 +6,14 @@ from epicurus_core import CoreSettings
 
 
 class CalendarSettings(CoreSettings):
-    """Adds provider selection and storage endpoints to shared settings."""
+    """Adds storage endpoints to shared settings.
 
-    # Which backing provider to use: "local" (Postgres, default) or "google".
-    # The local provider works with no external account; google requires the
-    # tenant to have completed the Google OAuth connect flow via the core.
-    calendar_provider: str = "local"
+    There is no provider selection any more (ADR-0030): the module always backs itself
+    with the local store and routes to connected Google calendars per the operator's
+    selection, which lives in the core (``module_prefs``), not in service config.
+    """
 
-    # Google Calendar ID (used by the Google provider only).
-    # "primary" resolves to the authenticated user's default calendar.
-    calendar_google_id: str = "primary"
-
-    # Async Postgres DSN for the local provider's event store.
+    # Async Postgres DSN for the local default store.
     database_url: str = "postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus"
 
     # Core service base URL (platform API). On the Docker network: http://core-app:8080.

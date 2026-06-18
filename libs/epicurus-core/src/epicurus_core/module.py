@@ -18,6 +18,7 @@ from starlette.applications import Starlette
 
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
+    CollectionsSpec,
     EventSpec,
     ModelSlot,
     ModuleManifest,
@@ -55,6 +56,7 @@ class EpicurusModule:
         resolver: bool = False,
         attachable: bool = False,
         required_models: list[ModelSlot] | None = None,
+        collections: CollectionsSpec | None = None,
         docs_url: str | None = None,
     ) -> None:
         self._name = name
@@ -68,6 +70,7 @@ class EpicurusModule:
         self._resolver = resolver
         self._attachable = attachable
         self._required_models = list(required_models or [])
+        self._collections = collections
         self._docs_url = docs_url
         self._mcp = FastMCP(
             name,
@@ -134,6 +137,7 @@ class EpicurusModule:
             resolver=self._resolver,
             attachable=self._attachable,
             required_models=list(self._required_models),
+            collections=self._collections,
             docs_url=self._docs_url,
         )
 

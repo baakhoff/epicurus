@@ -6,9 +6,15 @@ import json
 
 import epicurus_core
 from epicurus_core import (
+    LOCAL_ACCOUNT,
+    Account,
+    AccountsView,
     Attachment,
     ChatMessage,
     ChatResult,
+    Collection,
+    CollectionPrefs,
+    CollectionRef,
     EntityRef,
     HoverCard,
     PlatformChatResponse,
@@ -100,3 +106,70 @@ def test_chat_result_round_trips() -> None:
     assert dumped["model"] == "ollama_chat/llama3.2"
     assert dumped["content"] == "hello"
     assert dumped["completion_tokens"] == 2
+
+
+# ── account / collection model (ADR-0030) ────────────────────────────────────────
+
+
+def test_account_collection_types_are_exported() -> None:
+    names = {"Account", "AccountsView", "Collection", "CollectionPrefs", "CollectionRef"}
+    assert names <= set(epicurus_core.__all__)
+    assert "LOCAL_ACCOUNT" in epicurus_core.__all__
+    assert LOCAL_ACCOUNT == "local"
+
+
+def test_collection_ref_defaults_collection_to_empty() -> None:
+    # The local default ref carries no collection id.
+    assert CollectionRef(account=LOCAL_ACCOUNT).collection == ""
+
+
+def test_collection_discovery_leaves_state_unset() -> None:
+    # A module returns collections from /accounts without enabled/active — the core fills them.
+    col = Collection(account="google", collection="primary", title="me@example.com")
+    assert col.writable is True
+    assert col.enabled is None
+    assert col.active is None
+    assert col.ref() == CollectionRef(account="google", collection="primary")
+
+
+def test_account_defaults() -> None:
+    acc = Account(account="google", provider="google", label="Google")
+    assert acc.connected is False
+    assert acc.collections == []
+
+
+def test_accounts_view_round_trips() -> None:
+    view = AccountsView(
+        noun="calendar",
+        multi=True,
+        accounts=[
+            Account(
+                account="google",
+                provider="google",
+                label="Google",
+                connected=True,
+                collections=[Collection(account="google", collection="primary", title="Primary")],
+            )
+        ],
+    )
+    restored = AccountsView.model_validate(view.model_dump())
+    assert restored == view
+    assert restored.accounts[0].collections[0].collection == "primary"
+
+
+def test_collection_prefs_default_to_local() -> None:
+    # Empty enabled + null active is "use the local default".
+    prefs = CollectionPrefs()
+    assert prefs.enabled == []
+    assert prefs.active is None
+
+
+def test_collection_prefs_round_trip() -> None:
+    prefs = CollectionPrefs(
+        enabled=[CollectionRef(account="google", collection="primary")],
+        active=CollectionRef(account="google", collection="primary"),
+    )
+    restored = CollectionPrefs.model_validate(prefs.model_dump())
+    assert restored == prefs
+    assert restored.active is not None
+    assert restored.active.account == "google"

@@ -6,11 +6,14 @@ from epicurus_core import CoreSettings
 
 
 class TasksSettings(CoreSettings):
-    """Extends shared settings with tasks-specific configuration."""
+    """Extends shared settings with tasks-specific configuration.
 
-    # Which provider to activate: "local" or "google".
-    tasks_provider: str = "local"
+    There is no provider selection any more (ADR-0030): the module always backs itself
+    with the local store and routes to a connected Google task list per the operator's
+    selection, which lives in the core (``module_prefs``), not in service config.
+    """
+
     # Core service base URL (platform API).  On the Docker network: http://core-app:8080.
     platform_url: str = "http://localhost:8080"
-    # Postgres DSN — only used by the local provider.
+    # Postgres DSN for the local default store.
     database_url: str = "postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus"

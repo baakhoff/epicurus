@@ -25,6 +25,7 @@ from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
 from epicurus_tasks.providers import TasksProvider
+from epicurus_tasks.router import TasksRouter
 from epicurus_tasks.service import (
     MODULE_NAME,
     TASK_KIND,
@@ -35,6 +36,7 @@ from epicurus_tasks.service import (
     fetch_task,
     task_attachment,
     task_hover_card,
+    tasks_accounts,
     tasks_attachments,
 )
 from epicurus_tasks.settings import TasksSettings
@@ -53,22 +55,21 @@ def create_app() -> FastAPI:
     configure_logging(settings)
     log = get_logger(MODULE_NAME)
 
-    # Resolve the active provider from settings.
-    provider: TasksProvider
-    store: TaskStore | None = None
-    engine = None
+    platform = PlatformClient(
+        base_url=settings.platform_url,
+        tenant_id=settings.default_tenant_id,
+        module=MODULE_NAME,
+    )
 
-    if settings.tasks_provider == "google":
-        platform = PlatformClient(
-            base_url=settings.platform_url, tenant_id=settings.default_tenant_id
-        )
-        provider = GoogleTasksProvider(platform=platform)
-        log.info("tasks provider: google")
-    else:
-        engine = create_async_engine(settings.database_url)
-        store = TaskStore(engine)
-        provider = LocalTasksProvider(store)
-        log.info("tasks provider: local")
+    engine = create_async_engine(settings.database_url)
+    store = TaskStore(engine)
+
+    # Hold every backend at once and route to the active list per the operator's selection
+    # (ADR-0030): the silent local default plus each connectable external provider. There
+    # is no longer a single provider chosen at startup.
+    local_provider = LocalTasksProvider(store)
+    external: dict[str, TasksProvider] = {"google": GoogleTasksProvider(platform=platform)}
+    provider: TasksProvider = TasksRouter(local=local_provider, external=external, prefs=platform)
 
     bus = EventBus.from_settings(settings)
     module = build_module(provider, tenant_id=settings.default_tenant_id)
@@ -77,20 +78,15 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            if store is not None:
-                await store.init()
+            # The local store always backs the module now (it is the silent default).
+            await store.init()
             await bus.connect()
-            log.info(
-                "tasks service ready",
-                provider=provider.provider_name(),
-                tenant=settings.default_tenant_id,
-            )
+            log.info("tasks service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
                 await bus.close()
-                if engine is not None:
-                    await engine.dispose()
+                await engine.dispose()
 
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
@@ -98,10 +94,24 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
-        """Provider and connection status for the manifest UI status panel."""
+        """Connection status for the manifest UI status panel.
+
+        Reports whether Google is connected (best-effort); the operator's active task
+        list is shown in the connected-accounts section rather than here (ADR-0030).
+        """
         return {
-            "provider": provider.provider_name(),
+            "google_connected": await external["google"].is_available(settings.default_tenant_id),
         }
+
+    @app.get("/accounts")
+    async def get_accounts() -> dict[str, Any]:
+        """Connected accounts + their task lists for the operator's picker (ADR-0030).
+
+        The core proxies this at ``GET /platform/v1/modules/tasks/collections`` and folds
+        in the stored enabled/active selection before the shell renders it.
+        """
+        view = await tasks_accounts(external, tenant_id=settings.default_tenant_id)
+        return view.model_dump()
 
     @app.get("/pages/{page_id}")
     async def page(page_id: str) -> dict[str, Any]:

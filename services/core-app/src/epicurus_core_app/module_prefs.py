@@ -17,6 +17,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from epicurus_core import CollectionPrefs
+
 
 class _ModulePrefBase(DeclarativeBase):
     pass
@@ -40,6 +42,10 @@ class _ModulePrefRow(_ModulePrefBase):
     # JSON list of tool names the operator has explicitly disabled (#213). An absent tool
     # (not in the list) is enabled by default; the agent never receives a listed tool.
     disabled_tools: Mapped[str] = mapped_column(Text, default="[]", server_default="'[]'")
+    # JSON ``CollectionPrefs`` — the operator's enabled collections + active view for an
+    # account/collection module (calendar, tasks) (ADR-0030). Empty (``{}``) means "use the
+    # silent local default": no enabled external collection, no active view.
+    collections: Mapped[str] = mapped_column(Text, default="{}", server_default="'{}'")
 
 
 class ModulePrefsStore:
@@ -67,7 +73,7 @@ class ModulePrefsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_ModulePrefRow.__tablename__)}
-        for name in ("removed", "models", "disabled_tools"):
+        for name in ("removed", "models", "disabled_tools", "collections"):
             if name not in existing:
                 type_sql = _ModulePrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -140,6 +146,29 @@ class ModulePrefsStore:
                 session.add(_ModulePrefRow(tenant=tenant, module=module, models=encoded))
             else:
                 row.models = encoded
+            await session.commit()
+
+    async def get_collections(self, tenant: str, module: str) -> CollectionPrefs:
+        """The operator's collection selection for ``module`` (ADR-0030).
+
+        Returns empty prefs (``enabled=[]``, ``active=None`` — "use the local default")
+        when the module has no stored selection.
+        """
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                return CollectionPrefs()
+            return CollectionPrefs.model_validate_json(row.collections or "{}")
+
+    async def set_collections(self, tenant: str, module: str, prefs: CollectionPrefs) -> None:
+        """Replace ``module``'s collection selection (upsert) (ADR-0030)."""
+        encoded = prefs.model_dump_json()
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                session.add(_ModulePrefRow(tenant=tenant, module=module, collections=encoded))
+            else:
+                row.collections = encoded
             await session.commit()
 
     async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:

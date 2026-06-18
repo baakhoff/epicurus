@@ -9,6 +9,9 @@ import pytest
 from fastapi import HTTPException
 
 from epicurus_core import (
+    CollectionPrefs,
+    CollectionRef,
+    CollectionsSpec,
     ModelSlot,
     ModuleManifest,
     PageSpec,
@@ -51,6 +54,7 @@ class _FakeModulePrefs:
         self.removed: set[tuple[str, str]] = set()
         self.models: dict[tuple[str, str], dict[str, str]] = {}
         self.disabled: dict[tuple[str, str], set[str]] = {}
+        self.collections: dict[tuple[str, str], CollectionPrefs] = {}
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         return {m: e for (t, m), e in self.flags.items() if t == tenant}
@@ -75,6 +79,12 @@ class _FakeModulePrefs:
 
     async def set_models(self, tenant: str, module: str, models: dict[str, str]) -> None:
         self.models[(tenant, module)] = dict(models)
+
+    async def get_collections(self, tenant: str, module: str) -> CollectionPrefs:
+        return self.collections.get((tenant, module), CollectionPrefs())
+
+    async def set_collections(self, tenant: str, module: str, prefs: CollectionPrefs) -> None:
+        self.collections[(tenant, module)] = prefs
 
     async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:
         return set(self.disabled.get((tenant, module), set()))
@@ -664,6 +674,100 @@ async def test_get_models_unknown_module_is_404() -> None:
     with pytest.raises(HTTPException) as err:
         await registry.get_models("ghost")
     assert err.value.status_code == 404
+
+
+# ── Account/collection model (ADR-0030) ───────────────────────────────────────
+
+
+def _collections_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="calendar",
+        version="0.5.0",
+        collections=CollectionsSpec(noun="calendar", multi=True, providers=["google"]),
+    )
+
+
+def _accounts_payload() -> dict[str, Any]:
+    return {
+        "noun": "calendar",
+        "multi": True,
+        "accounts": [
+            {
+                "account": "google",
+                "provider": "google",
+                "label": "Google",
+                "connected": True,
+                "collections": [
+                    {"account": "google", "collection": "primary", "title": "Primary"},
+                    {"account": "google", "collection": "work", "title": "Work"},
+                ],
+            }
+        ],
+    }
+
+
+async def test_accounts_view_proxies_and_merges_prefs() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    ref = CollectionRef(account="google", collection="primary")
+    await registry.set_collections("calendar", CollectionPrefs(enabled=[ref], active=ref))
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = _accounts_payload()
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        view = await registry.accounts_view("calendar")
+
+    mock_client.get.assert_called_once_with("/accounts")
+    cols = view.accounts[0].collections
+    # The active+enabled collection is flagged; the untouched one is off.
+    assert (cols[0].collection, cols[0].enabled, cols[0].active) == ("primary", True, True)
+    assert (cols[1].collection, cols[1].enabled, cols[1].active) == ("work", False, False)
+
+
+async def test_accounts_view_404_without_collections_spec() -> None:
+    registry, _, _ = _registry()  # echo manifest declares no collections
+    with pytest.raises(HTTPException) as err:
+        await registry.accounts_view("echo")
+    assert err.value.status_code == 404
+
+
+async def test_set_collections_persists() -> None:
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    ref = CollectionRef(account="google", collection="primary")
+    await registry.set_collections("calendar", CollectionPrefs(enabled=[ref], active=ref))
+    stored = await registry.collection_prefs("calendar")
+    assert stored.active is not None
+    assert stored.active.collection == "primary"
+
+
+async def test_set_collections_rejects_active_not_enabled() -> None:
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_collections(
+            "calendar",
+            CollectionPrefs(enabled=[], active=CollectionRef(account="google", collection="x")),
+        )
+    assert err.value.status_code == 400
+
+
+async def test_set_collections_404_without_spec() -> None:
+    registry, _, _ = _registry()  # echo, no collections
+    with pytest.raises(HTTPException) as err:
+        await registry.set_collections("echo", CollectionPrefs())
+    assert err.value.status_code == 404
+
+
+async def test_collection_prefs_default_empty_means_local() -> None:
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    prefs = await registry.collection_prefs("calendar")
+    assert prefs.enabled == []
+    assert prefs.active is None
 
 
 # ── Module docs proxy (#215) ──────────────────────────────────────────────────

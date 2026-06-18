@@ -19,12 +19,16 @@ resolves a referenced event to a core **hover-card**, and it is a
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_core import (
+    Account,
+    AccountsView,
+    CollectionsSpec,
     EntityRef,
     EpicurusModule,
     HoverCard,
@@ -36,6 +40,10 @@ from epicurus_core import (
 
 MODULE_NAME = "calendar"
 CALENDAR_PAGE_ID = "calendar"
+
+# The external providers the calendar module can connect (ADR-0030); ``local`` is the
+# implicit default and is never listed. Maps the account id to its shell display label.
+PROVIDER_LABELS = {"google": "Google"}
 
 # The kind every calendar entity-reference and attachment carries (ADR-0019).
 EVENT_KIND = "event"
@@ -55,49 +63,31 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     """Build the calendar module and register its MCP tools.
 
     Args:
-        provider: The active calendar backend (local or Google).
+        provider: The calendar backend the tools read/write through — in the running
+            service a :class:`~epicurus_calendar.providers.router.CollectionRouter`
+            that fans across the operator's enabled/active collections (ADR-0030); a
+            single provider in unit tests.
         tenant_id: Default tenant for all tool calls.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.5.0",
         description=(
             "Provider-neutral calendar: list events, create events, and find"
-            " free time slots. Supports a local store (no account needed) and"
-            " Google Calendar."
+            " free time slots. Backed by a local store (no account needed) plus"
+            " any Google calendars the operator connects and enables."
         ),
         ui=UiSection(
             icon="calendar",
             summary=(
-                f"Calendar access via the **{provider.name}** provider."
-                " List upcoming events, create new ones, or ask the agent to"
-                " find a free slot — all from natural language."
+                "Calendar with a built-in local store (no account needed) plus any"
+                " **Google** calendars you connect. Choose which calendars to show and"
+                " which one new events land on below; the agent can list events, create"
+                " them, and find a free slot — all from natural language."
             ),
-            config_schema={
-                "type": "object",
-                "properties": {
-                    "calendar_provider": {
-                        "type": "string",
-                        "title": "Provider",
-                        "description": (
-                            '"local" for the built-in Postgres store (no account'
-                            ' needed) or "google" to use Google Calendar'
-                            " (requires OAuth connection)."
-                        ),
-                        "enum": ["local", "google"],
-                        "default": "local",
-                    },
-                    "calendar_google_id": {
-                        "type": "string",
-                        "title": "Google Calendar ID",
-                        "description": (
-                            'Google Calendar to use. "primary" is the default'
-                            " calendar. Only relevant when provider is google."
-                        ),
-                        "default": "primary",
-                    },
-                },
-            },
+            # No config_schema: there is no provider dropdown any more (ADR-0030). The
+            # operator connects accounts and toggles calendars in the connected-accounts
+            # section the shell renders from `collections`.
             status_url="/status",
             # No manifest actions: the one read tool (`calendar_list_events`) now returns
             # an entity-reference envelope (chips), which the module card's plain-text
@@ -119,6 +109,10 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
         resolver=True,
         # Be a chat-attachment source: GET /attachments (picker) + /attachments/{id} (ADR-0019).
         attachable=True,
+        # Account/collection model (ADR-0030): a silent local default plus connectable
+        # Google calendars the operator toggles/switches. Calendar overlays every enabled
+        # calendar on read (multi) and writes to the active one. Serves GET /accounts.
+        collections=CollectionsSpec(noun="calendar", multi=True, providers=["google"]),
     )
 
     @module.tool()
@@ -340,15 +334,44 @@ async def calendar_page(
     """
     time_range = _resolve_range(start, end, now=now or datetime.now(tz=UTC))
     events = await provider.list_events(tenant_id=tenant_id, time_range=time_range)
+    # With the account/collection model a page can overlay several calendars, so the
+    # "provider" label reflects the sources actually present (ADR-0030) rather than a
+    # single backend name; it defaults to the local store when the window is empty.
+    sources = sorted({e.provider for e in events})
     return {
         "title": "Calendar",
-        "provider": provider.name,
+        "provider": ", ".join(sources) if sources else "local",
         "range": {
             "start": time_range.start.isoformat(),
             "end": time_range.end.isoformat(),
         },
         "events": [e.model_dump(mode="json") for e in events],
     }
+
+
+async def calendar_accounts(
+    external: Mapping[str, CalendarProvider], *, tenant_id: str
+) -> AccountsView:
+    """The connected-accounts view backing ``GET /accounts`` (ADR-0030).
+
+    One :class:`Account` per supported external provider, ``connected`` from the live
+    OAuth check and ``collections`` listed only when connected. ``local`` is the silent
+    default and is never included.
+    """
+    accounts: list[Account] = []
+    for account_id, provider in external.items():
+        connected = await provider.is_available(tenant_id=tenant_id)
+        collections = await provider.list_collections(tenant_id=tenant_id) if connected else []
+        accounts.append(
+            Account(
+                account=account_id,
+                provider=account_id,
+                label=PROVIDER_LABELS.get(account_id, account_id.title()),
+                connected=connected,
+                collections=collections,
+            )
+        )
+    return AccountsView(noun="calendar", multi=True, accounts=accounts)
 
 
 def _resolve_range(start: str | None, end: str | None, *, now: datetime) -> DateTimeRange:

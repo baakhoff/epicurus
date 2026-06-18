@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
+from typing import Literal, cast
 
 from sqlalchemy import (
     Boolean,
@@ -20,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_tasks.models import Task
+
+_TaskStatus = Literal["open", "in_progress", "done"]
 
 
 class _Base(DeclarativeBase):
@@ -41,16 +45,29 @@ class _StoredTask(_Base):
     completed: Mapped[bool] = mapped_column(Boolean, default=False)
     completed_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Richer fields (added in v0.5.0)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    priority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
 
 
 def _row_to_task(row: _StoredTask) -> Task:
+    raw_tags: list[str] = json.loads(row.tags) if row.tags else []
+    # status column takes precedence; fall back to the legacy completed bool for rows
+    # written before v0.5.0 that have no status column value yet.
+    if row.status in ("open", "in_progress", "done"):
+        status: _TaskStatus = cast(_TaskStatus, row.status)
+    else:
+        status = "done" if row.completed else "open"
     return Task(
         id=row.id,
         title=row.title,
         notes=row.notes,
         due=row.due,
-        completed=row.completed,
+        status=status,
         completed_at=row.completed_at,
+        priority=row.priority,  # type: ignore[arg-type]
+        tags=raw_tags,
     )
 
 
@@ -67,11 +84,17 @@ class TaskStore:
             await conn.run_sync(_Base.metadata.create_all)
 
     async def list_tasks(self, *, tenant_id: str) -> list[Task]:
-        """Return all tasks for *tenant_id*, newest first."""
+        """Return all open tasks for *tenant_id*, newest first."""
         async with self._session() as session:
             rows = await session.scalars(
                 select(_StoredTask)
-                .where(_StoredTask.tenant_id == tenant_id, _StoredTask.completed.is_(False))
+                .where(
+                    _StoredTask.tenant_id == tenant_id,
+                    # A task is open when the legacy completed flag is False (the status
+                    # column is nullable and can't be used as the primary filter without
+                    # a full backfill migration).
+                    _StoredTask.completed.is_(False),
+                )
                 .order_by(_StoredTask.created_at.desc())
             )
             return [_row_to_task(r) for r in rows]
@@ -83,6 +106,9 @@ class TaskStore:
         title: str,
         notes: str | None,
         due: str | None,
+        status: str = "open",
+        priority: str | None = None,
+        tags: list[str] | None = None,
     ) -> Task:
         """Insert a new task and return it."""
         task_id = str(uuid.uuid4())
@@ -92,7 +118,10 @@ class TaskStore:
             title=title,
             notes=notes,
             due=due,
-            completed=False,
+            completed=status == "done",
+            status=status,
+            priority=priority,
+            tags=json.dumps(tags or []),
         )
         async with self._session() as session:
             session.add(row)
@@ -110,7 +139,7 @@ class TaskStore:
             result = await session.execute(
                 update(_StoredTask)
                 .where(_StoredTask.tenant_id == tenant_id, _StoredTask.id == task_id)
-                .values(completed=True, completed_at=now)
+                .values(completed=True, completed_at=now, status="done")
                 .returning(_StoredTask)
             )
             row = result.scalar_one_or_none()
@@ -127,21 +156,32 @@ class TaskStore:
         title: str | None = None,
         notes: str | None = None,
         due: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        tags: list[str] | None = None,
     ) -> Task:
         """Patch a task's editable fields and return it.
 
         Only the fields passed (non-``None``) are changed; the rest keep their
-        current value. With nothing to change it is a clean no-op that still
-        returns the current task. Raises :exc:`KeyError` if the task does not
-        exist for this tenant.
+        current value. Raises :exc:`KeyError` if the task does not exist.
         """
-        values: dict[str, str | None] = {}
+        values: dict[str, object] = {}
         if title is not None:
             values["title"] = title
         if notes is not None:
             values["notes"] = notes
         if due is not None:
             values["due"] = due
+        if status is not None:
+            values["status"] = status
+            # Keep the legacy completed flag in sync so list_tasks still works.
+            values["completed"] = status == "done"
+            if status == "done":
+                values.setdefault("completed_at", datetime.now(UTC).isoformat())
+        if priority is not None:
+            values["priority"] = priority
+        if tags is not None:
+            values["tags"] = json.dumps(tags)
 
         if not values:
             current = await self.get_task(tenant_id=tenant_id, task_id=task_id)

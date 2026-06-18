@@ -60,9 +60,12 @@ def test_card_carries_complete_and_edit_actions() -> None:
 
     assert edit["form"] is True
     assert edit["args"] == {"task_id": "t1"}
-    assert edit["fields"] == ["title", "notes", "due"]
+    assert edit["fields"] == ["title", "notes", "due", "priority", "tags", "status"]
+    assert edit["field_options"]["priority"] == ["low", "medium", "high"]
+    assert edit["field_options"]["status"] == ["open", "in_progress", "done"]
     assert edit["form_values"]["title"] == "Buy milk"
     assert edit["form_values"]["notes"] == "2 litres"
+    assert edit["form_values"]["status"] == "open"
 
 
 def test_due_badge_tone_tracks_bucket() -> None:
@@ -80,6 +83,31 @@ def test_no_due_card_has_no_badge() -> None:
     assert board["columns"][0]["cards"][0]["badges"] == []
 
 
+def test_priority_badge_added_and_toned() -> None:
+    high = Task(id="h", title="Urgent", priority="high")
+    med = Task(id="m", title="Moderate", priority="medium")
+    low = Task(id="l", title="Someday", priority="low")
+    board_h = build_tasks_board([high], today=TODAY)
+    board_m = build_tasks_board([med], today=TODAY)
+    board_l = build_tasks_board([low], today=TODAY)
+
+    badges_h = board_h["columns"][0]["cards"][0]["badges"]
+    badges_m = board_m["columns"][0]["cards"][0]["badges"]
+    badges_l = board_l["columns"][0]["cards"][0]["badges"]
+
+    assert badges_h == [{"label": "High", "tone": "danger"}]
+    assert badges_m == [{"label": "Medium", "tone": "warn"}]
+    assert badges_l == [{"label": "Low", "tone": "dim"}]
+
+
+def test_tags_rendered_as_accent_badges() -> None:
+    task = Task(id="t", title="Tagged", tags=["work", "q3"])
+    board = build_tasks_board([task], today=TODAY)
+    badges = board["columns"][0]["cards"][0]["badges"]
+    assert {"label": "work", "tone": "accent"} in badges
+    assert {"label": "q3", "tone": "accent"} in badges
+
+
 def test_board_offers_add_action_even_when_empty() -> None:
     board = build_tasks_board([], today=TODAY)
     assert board["title"] == "Tasks"
@@ -88,4 +116,5 @@ def test_board_offers_add_action_even_when_empty() -> None:
     assert add["tool"] == "tasks_add"
     assert add["intent"] == "primary"
     assert add["form"] is True
-    assert add["fields"] == ["title", "notes", "due"]
+    assert add["fields"] == ["title", "notes", "due", "priority", "tags"]
+    assert add["field_options"]["priority"] == ["low", "medium", "high"]

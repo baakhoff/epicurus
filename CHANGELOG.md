@@ -14,6 +14,9 @@ images to GHCR.
 
 ### Added
 
+- **Tasks: richer fields** — tasks gain **priority, tags, and status** beyond the title/notes/
+  due basics, on both the local store and (where the backend supports it) Google Tasks; the
+  board view renders and edits them (#218) (`tasks` → 0.5.0, `web` → 0.14.0).
 - **Global default embedding model in Settings** — the model manager gains an **embedding**
   section: pick a global default embedding model alongside the chat-model controls. Modules
   with no per-module choice use it; the per-module picker (#128) still overrides. Resolution

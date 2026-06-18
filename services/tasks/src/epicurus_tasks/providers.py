@@ -14,6 +14,11 @@ class TasksProvider(Protocol):
     Implementations: :class:`GoogleTasksProvider`, :class:`LocalTasksProvider`.
     Adding a new provider (Todoist, Microsoft To Do, …) requires only a new
     class implementing this Protocol — the MCP tool surface is unchanged.
+
+    Provider field support:
+    - title, notes, due, status ("open"/"done"): all providers.
+    - status "in_progress": local-only; Google degrades it to "open" on read-back.
+    - priority, tags: local-only; Google silently ignores them.
     """
 
     def provider_name(self) -> str:
@@ -37,6 +42,9 @@ class TasksProvider(Protocol):
         *,
         notes: str | None = None,
         due: str | None = None,
+        status: str = "open",
+        priority: str | None = None,
+        tags: list[str] | None = None,
         list_id: str | None = None,
     ) -> Task:
         """Create and return a new task.
@@ -46,6 +54,10 @@ class TasksProvider(Protocol):
             title: Task title (required).
             notes: Optional free-text notes.
             due: Optional ISO date string, e.g. ``"2025-01-15"``.
+            status: Initial status (``"open"``/``"in_progress"``/``"done"``).
+            priority: Optional priority (``"low"``/``"medium"``/``"high"``).
+                Google Tasks silently ignores this field.
+            tags: Optional list of string labels. Google Tasks silently ignores them.
             list_id: Target list; ``None`` means the default list.
         """
         ...
@@ -70,20 +82,28 @@ class TasksProvider(Protocol):
         title: str | None = None,
         notes: str | None = None,
         due: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        tags: list[str] | None = None,
         list_id: str | None = None,
     ) -> Task:
         """Edit a task's content and return the updated task.
 
         Only the fields passed (non-``None``) are changed; omitted fields keep
         their current value. Distinct from :meth:`complete_task`, which flips the
-        done flag — this edits title/notes/due.
+        done flag — this edits content. Google Tasks silently ignores priority/tags;
+        ``"in_progress"`` status is mapped to ``"open"`` by Google on read-back.
 
         Args:
             tenant_id: Tenant scope.
             task_id: Provider-specific task identifier.
             title: New title; ``None`` leaves it unchanged.
             notes: New notes; ``None`` leaves them unchanged.
-            due: New ISO date string, e.g. ``"2025-01-15"``; ``None`` leaves it unchanged.
+            due: New ISO date string; ``None`` leaves it unchanged.
+            status: New status (``"open"``/``"in_progress"``/``"done"``); ``None``
+                leaves it unchanged.
+            priority: New priority; ``None`` leaves it unchanged.
+            tags: New tags list; ``None`` leaves it unchanged.
             list_id: List containing the task; ``None`` means the default list.
         """
         ...

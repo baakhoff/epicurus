@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-tasks"
-version = "0.4.0"
+version = "0.5.0"
 description = "Tasks module — provider-neutral task management (Google Tasks + local store)."
 requires-python = ">=3.11"
 dependencies = [

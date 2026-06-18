@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from epicurus_core import CollectionPrefs
 from epicurus_tasks.models import Task
 
 
@@ -49,13 +50,17 @@ def _sample_task() -> Task:
 
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setenv("TASKS_PROVIDER", "local")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("NATS_URL", "nats://localhost:4222")
     fake = _FakeProvider([_sample_task()])
     with (
         patch("epicurus_tasks.app.LocalTasksProvider", return_value=fake),
         patch("epicurus_tasks.app.EventBus.from_settings") as mock_bus_factory,
+        # No active selection → the router routes to the local fake, with no core round-trip.
+        patch(
+            "epicurus_tasks.router.TasksRouter._load_prefs",
+            new=AsyncMock(return_value=CollectionPrefs()),
+        ),
     ):
         mock_bus_factory.return_value = AsyncMock()
         from epicurus_tasks.app import create_app

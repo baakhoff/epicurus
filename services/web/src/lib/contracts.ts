@@ -188,6 +188,59 @@ export const ModelSlot = z.object({
 });
 export type ModelSlot = z.infer<typeof ModelSlot>;
 
+/* ── account/collection model (ADR-0030) ─────────────────────────────────── */
+
+/** A module's account/collection capability: a connected-accounts picker, not a dropdown. */
+export const CollectionsSpec = z.object({
+  noun: z.string(),
+  multi: z.boolean().default(false),
+  providers: z.array(z.string()).default([]),
+});
+export type CollectionsSpec = z.infer<typeof CollectionsSpec>;
+
+/** A pointer to one collection within an account (``local`` is the silent default). */
+export const CollectionRef = z.object({
+  account: z.string(),
+  collection: z.string().default(""),
+});
+export type CollectionRef = z.infer<typeof CollectionRef>;
+
+/** A collection (calendar / task list); `enabled`/`active` are filled by the core's merge. */
+export const Collection = z.object({
+  account: z.string(),
+  collection: z.string(),
+  title: z.string(),
+  writable: z.boolean().default(true),
+  enabled: z.boolean().nullish(),
+  active: z.boolean().nullish(),
+});
+export type Collection = z.infer<typeof Collection>;
+
+/** One external account a module can draw collections from. */
+export const Account = z.object({
+  account: z.string(),
+  provider: z.string(),
+  label: z.string(),
+  connected: z.boolean().default(false),
+  collections: z.array(Collection).default([]),
+});
+export type Account = z.infer<typeof Account>;
+
+/** A module's `GET /accounts` (merged) view — accounts + collections + selection. */
+export const AccountsView = z.object({
+  noun: z.string(),
+  multi: z.boolean(),
+  accounts: z.array(Account).default([]),
+});
+export type AccountsView = z.infer<typeof AccountsView>;
+
+/** The operator's stored selection: enabled collections + the single active one. */
+export const CollectionPrefs = z.object({
+  enabled: z.array(CollectionRef).default([]),
+  active: CollectionRef.nullish(),
+});
+export type CollectionPrefs = z.infer<typeof CollectionPrefs>;
+
 export const ModuleManifest = z.object({
   name: z.string(),
   version: z.string(),
@@ -206,6 +259,9 @@ export const ModuleManifest = z.object({
   // Model slots the operator fills per module (#128); the module fetches its choice and
   // passes it to embed/chat, falling back to the core default when unset.
   required_models: z.array(ModelSlot).default([]),
+  // Account/collection model (ADR-0030): the module's connectable accounts + collections,
+  // rendered as a connected-accounts section. Null when the module doesn't use the model.
+  collections: CollectionsSpec.nullish(),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 

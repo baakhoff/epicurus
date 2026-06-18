@@ -8,6 +8,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core import CollectionPrefs, CollectionRef
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
 
@@ -187,3 +188,57 @@ async def test_disabled_tools_coexist_with_enabled_and_models() -> None:
     assert await store.is_enabled("t1", "calendar") is False
     assert await store.get_models("t1", "calendar") == {"embedding": "a"}
     assert await store.get_disabled_tools("t1", "calendar") == {"calendar_create_event"}
+
+
+# ── Account/collection selection (ADR-0030) ────────────────────────────────────
+
+
+async def test_collections_default_to_empty() -> None:
+    store, _ = await _fresh_store()
+    prefs = await store.get_collections("t1", "calendar")
+    assert prefs.enabled == []
+    assert prefs.active is None
+
+
+async def test_set_and_get_collections_round_trip() -> None:
+    store, _ = await _fresh_store()
+    prefs = CollectionPrefs(
+        enabled=[CollectionRef(account="google", collection="primary")],
+        active=CollectionRef(account="google", collection="primary"),
+    )
+    await store.set_collections("t1", "calendar", prefs)
+    assert await store.get_collections("t1", "calendar") == prefs
+
+
+async def test_set_collections_replaces() -> None:
+    store, _ = await _fresh_store()
+    await store.set_collections(
+        "t1", "calendar", CollectionPrefs(enabled=[CollectionRef(account="google", collection="a")])
+    )
+    await store.set_collections(
+        "t1", "calendar", CollectionPrefs(enabled=[CollectionRef(account="google", collection="b")])
+    )
+    got = await store.get_collections("t1", "calendar")
+    assert [r.collection for r in got.enabled] == ["b"]
+
+
+async def test_collections_are_tenant_and_module_scoped() -> None:
+    store, _ = await _fresh_store()
+    ref = CollectionRef(account="google", collection="primary")
+    await store.set_collections("t1", "calendar", CollectionPrefs(enabled=[ref], active=ref))
+    assert (await store.get_collections("t2", "calendar")).active is None
+    assert (await store.get_collections("t1", "tasks")).active is None
+
+
+async def test_collections_coexist_with_enabled_and_models() -> None:
+    store, _ = await _fresh_store()
+    await store.set_enabled("t1", "calendar", False)
+    await store.set_models("t1", "calendar", {"embedding": "a"})
+    await store.set_collections(
+        "t1",
+        "calendar",
+        CollectionPrefs(enabled=[CollectionRef(account="google", collection="primary")]),
+    )
+    assert await store.is_enabled("t1", "calendar") is False
+    assert await store.get_models("t1", "calendar") == {"embedding": "a"}
+    assert len((await store.get_collections("t1", "calendar")).enabled) == 1

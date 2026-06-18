@@ -19,7 +19,14 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from epicurus_core import ModuleManifest, SecretError, SecretStore, get_logger
+from epicurus_core import (
+    AccountsView,
+    CollectionPrefs,
+    ModuleManifest,
+    SecretError,
+    SecretStore,
+    get_logger,
+)
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.docker_control import DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
@@ -262,6 +269,61 @@ class ModuleRegistry:
         """
         models = await self._prefs.get_models(self._tenant, name)
         return models.get(slot)
+
+    async def accounts_view(self, name: str) -> AccountsView:
+        """The module's connected accounts + collections, merged with the operator's prefs.
+
+        Proxies the module's ``GET /accounts`` (live discovery) and folds the stored
+        ``enabled`` / ``active`` selection onto each collection so the shell can render the
+        connected-accounts section (ADR-0030). 404 if the module is unreachable or does not
+        declare ``collections``. ``local`` is the silent default and never appears here.
+        """
+        base, manifest = await self._resolve(name)
+        if manifest.collections is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no collections")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get("/accounts")
+            resp.raise_for_status()
+            view = AccountsView.model_validate(resp.json())
+        prefs = await self._prefs.get_collections(self._tenant, name)
+        enabled = {(ref.account, ref.collection) for ref in prefs.enabled}
+        active = (prefs.active.account, prefs.active.collection) if prefs.active else None
+        for account in view.accounts:
+            for col in account.collections:
+                key = (col.account, col.collection)
+                col.enabled = key in enabled
+                col.active = key == active
+        return view
+
+    async def set_collections(self, name: str, prefs: CollectionPrefs) -> None:
+        """Persist the operator's enabled collections + active view for ``name`` (ADR-0030).
+
+        Store-through: the refs are **not** live-validated against the module's ``/accounts``
+        (a save must not depend on the module being reachable — the module ignores refs that
+        no longer resolve). The only invariant enforced is that ``active`` — when set — is one
+        of the ``enabled`` collections; a null ``active`` means "use the local default".
+        404 if the module is unknown/unreachable or declares no ``collections``; 400 if
+        ``active`` is not enabled.
+        """
+        _, manifest = await self._resolve(name)
+        if manifest.collections is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no collections")
+        if prefs.active is not None:
+            enabled = {(ref.account, ref.collection) for ref in prefs.enabled}
+            if (prefs.active.account, prefs.active.collection) not in enabled:
+                raise HTTPException(
+                    status_code=400, detail="active must be one of the enabled collections"
+                )
+        await self._prefs.set_collections(self._tenant, name, prefs)
+
+    async def collection_prefs(self, name: str) -> CollectionPrefs:
+        """The stored ``{enabled, active}`` a module reads to route its own ops (ADR-0030).
+
+        Read directly from Postgres (no manifest round-trip, like ``model_for_slot``) so a
+        module can resolve its selection cheaply via ``PlatformClient.get_collections``; an
+        unset module yields empty prefs → the module falls back to its local default.
+        """
+        return await self._prefs.get_collections(self._tenant, name)
 
     async def disabled_tools_set(self) -> set[str]:
         """All explicitly disabled tool names across every enabled module (#213).
@@ -636,6 +698,22 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
         """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
         return {"model": await registry.model_for_slot(name, slot)}
+
+    @router.get("/{name}/collections", response_model=AccountsView)
+    async def get_module_collections(name: str) -> AccountsView:
+        """Connected accounts + collections, merged with the operator's selection (ADR-0030)."""
+        return await registry.accounts_view(name)
+
+    @router.put("/{name}/collections")
+    async def set_module_collections(name: str, prefs: CollectionPrefs) -> dict[str, str]:
+        """Persist the operator's enabled collections + active view (ADR-0030)."""
+        await registry.set_collections(name, prefs)
+        return {"status": "ok"}
+
+    @router.get("/{name}/collections/prefs", response_model=CollectionPrefs)
+    async def get_module_collection_prefs(name: str) -> CollectionPrefs:
+        """The stored {enabled, active} a module reads to route its own ops (ADR-0030)."""
+        return await registry.collection_prefs(name)
 
     @router.post("/{name}/tools/{tool}/enabled")
     async def set_tool_enabled(name: str, tool: str, body: ToolEnabledUpdate) -> dict[str, str]:

@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import httpx
 
-from epicurus_core import PlatformClient
+from epicurus_core import Collection, PlatformClient
 from epicurus_tasks.models import Task
 
 _TASKS_BASE = "https://tasks.googleapis.com/tasks/v1"
@@ -41,6 +41,46 @@ class GoogleTasksProvider:
 
     def provider_name(self) -> str:
         return "google"
+
+    async def is_available(self, tenant_id: str) -> bool:
+        """True when a Google token is stored for this tenant (ADR-0030).
+
+        Any HTTP failure — not connected (4xx) or the core being unreachable — means
+        "not available" rather than an error, so a status check never raises.
+        """
+        try:
+            await self._platform.get_oauth_token("google")
+            return True
+        except httpx.HTTPError:
+            return False
+
+    async def list_collections(self, tenant_id: str) -> list[Collection]:
+        """Every Google task list in the account (ADR-0030).
+
+        Each becomes a switchable collection in the shell; task lists are always
+        writable, so ``writable`` is True.
+        """
+        token = await self._access_token()
+        async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
+            resp = await client.get(
+                "/users/@me/lists",
+                headers=self._auth_headers(token),
+            )
+            if resp.status_code == 401:
+                raise GoogleTasksError(
+                    "Google token is invalid or revoked — reconnect via Settings"
+                )
+            resp.raise_for_status()
+            items: list[dict[str, Any]] = resp.json().get("items", [])
+        return [
+            Collection(
+                account="google",
+                collection=str(item.get("id", "")),
+                title=str(item.get("title") or item.get("id", "")),
+                writable=True,
+            )
+            for item in items
+        ]
 
     async def _access_token(self) -> str:
         """Fetch a valid Google access token from the core via PlatformClient."""

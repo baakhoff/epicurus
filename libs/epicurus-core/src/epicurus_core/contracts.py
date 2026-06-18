@@ -147,3 +147,90 @@ class ChatResult(BaseModel):
 # definitions, so there is still one source of truth.
 PlatformMessage = ChatMessage
 PlatformChatResponse = ChatResult
+
+
+# ── Account / collection model (ADR-0030) ────────────────────────────────────────
+# A domain module (calendar, tasks) backs itself with a silent ``local`` store and,
+# when connected, 0+ external accounts (Google). Each account exposes collections
+# (calendars / task-lists) the operator toggles on/off and switches between. ``local``
+# is the default and is never surfaced as a selectable account.
+
+LOCAL_ACCOUNT = "local"
+"""The implicit, zero-config default account every domain module always has (ADR-0030).
+
+Never returned from a module's ``/accounts`` and never shown in the shell — it is the
+fallback used for reads and writes when no external collection is enabled or active.
+"""
+
+
+class CollectionRef(BaseModel):
+    """A pointer to one collection within an account (ADR-0030).
+
+    ``account`` is a provider/account id (e.g. ``"google"``) or :data:`LOCAL_ACCOUNT`;
+    ``collection`` is the id within it (a Google calendar id / task-list id), empty for
+    the local default. Refs compare by value, so they round-trip through stored prefs.
+    """
+
+    account: str
+    collection: str = ""
+
+
+class Collection(BaseModel):
+    """A collection a connected account exposes — a calendar or a task-list (ADR-0030).
+
+    A module returns these from ``/accounts`` (discovery) with ``enabled`` / ``active``
+    unset; the core fills them when it merges the operator's stored prefs for the shell.
+    ``writable`` is False for a read-only collection (e.g. a subscribed Google calendar)
+    so the shell can keep it out of the active/write picker.
+    """
+
+    account: str
+    collection: str
+    title: str
+    writable: bool = True
+    # Filled by the core's merged view (GET …/collections); left unset in module discovery.
+    enabled: bool | None = None
+    active: bool | None = None
+
+    def ref(self) -> CollectionRef:
+        """The :class:`CollectionRef` addressing this collection."""
+        return CollectionRef(account=self.account, collection=self.collection)
+
+
+class Account(BaseModel):
+    """One external account a domain module can draw collections from (ADR-0030).
+
+    ``connected`` reflects the live OAuth state; ``collections`` is populated only when
+    connected. ``local`` is never represented as an Account.
+    """
+
+    account: str
+    provider: str
+    label: str
+    connected: bool = False
+    collections: list[Collection] = Field(default_factory=list)
+
+
+class AccountsView(BaseModel):
+    """A module's ``GET /accounts`` response — its connected accounts + collections (ADR-0030).
+
+    ``noun`` / ``multi`` echo the module's :class:`~epicurus_core.manifest.CollectionsSpec`
+    so the shell can label and shape the picker; the core re-uses this same shape for the
+    merged ``GET …/collections`` view, filling each collection's ``enabled`` / ``active``.
+    """
+
+    noun: str
+    multi: bool
+    accounts: list[Account] = Field(default_factory=list)
+
+
+class CollectionPrefs(BaseModel):
+    """The operator's stored selection for a module (ADR-0030).
+
+    ``enabled`` are the external collections turned on; ``active`` is the single write
+    target / single-view source. Both default to "use ``local``": an empty ``enabled``
+    means reads fall back to local, and a null ``active`` means writes go to local.
+    """
+
+    enabled: list[CollectionRef] = Field(default_factory=list)
+    active: CollectionRef | None = None

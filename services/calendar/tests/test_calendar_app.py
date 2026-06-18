@@ -13,6 +13,8 @@ def test_app_exposes_ops_status_and_page_routes() -> None:
     assert "/metrics" in paths
     assert "/status" in paths
     assert "/pages/{page_id}" in paths
+    # The connected-accounts source the core proxies for the picker (ADR-0030).
+    assert "/accounts" in paths
     assert any(p.startswith("/mcp") for p in paths)
 
 

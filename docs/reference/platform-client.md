@@ -78,6 +78,22 @@ model = await client.get_module_model("embedding")   # chosen id, or None
 vectors = await client.embed(texts, model=model)      # None -> core default
 ```
 
+### `await client.get_collections() -> CollectionPrefs`
+
+The operator's account/collection selection for this module (ADR-0030): `CollectionPrefs`
+= `{enabled: list[CollectionRef], active: CollectionRef | None}`, where an empty `enabled`
+and a `None` `active` both mean "use the local default". Construct the client with
+`module=<name>`. Backed by `GET /platform/v1/modules/{module}/collections/prefs` — a
+Postgres-only read in the core, so the module never calls back into itself. A module that
+declares `collections` reads this to route its own reads/writes (overlay the enabled
+collections, write to the active one).
+
+```python
+client = PlatformClient(base_url=..., tenant_id=..., module="calendar")
+prefs = await client.get_collections()
+targets = prefs.enabled or [CollectionRef(account="local")]   # overlay, or local default
+```
+
 ## Errors
 
 Both methods raise `httpx.HTTPStatusError` on a non-2xx response — notably **`503`** when

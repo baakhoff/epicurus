@@ -23,11 +23,13 @@ from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
+from epicurus_calendar.providers.router import CollectionRouter
 from epicurus_calendar.service import (
     CALENDAR_PAGE_ID,
     EVENT_KIND,
     EventNotFound,
     build_module,
+    calendar_accounts,
     calendar_attachments,
     calendar_page,
     event_attachment,
@@ -37,6 +39,7 @@ from epicurus_calendar.service import (
     event_hover_card,
     fetch_event,
 )
+from epicurus_core import Collection, CollectionPrefs, CollectionRef
 from epicurus_core.contracts import ToolEnvelope
 
 
@@ -302,10 +305,14 @@ class _MockGoogleProvider(CalendarProvider):
     def __init__(self) -> None:
         self.events: list[Event] = []
 
-    async def list_events(self, *, tenant_id: str, time_range: DateTimeRange) -> list[Event]:
+    async def list_events(
+        self, *, tenant_id: str, time_range: DateTimeRange, calendar_id: str | None = None
+    ) -> list[Event]:
         return [e for e in self.events if e.start < time_range.end and e.end > time_range.start]
 
-    async def get_event(self, *, tenant_id: str, event_id: str) -> Event | None:
+    async def get_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> Event | None:
         return next((e for e in self.events if e.id == event_id), None)
 
     async def create_event(
@@ -317,6 +324,7 @@ class _MockGoogleProvider(CalendarProvider):
         end: datetime,
         description: str | None = None,
         location: str | None = None,
+        calendar_id: str | None = None,
     ) -> Event:
         event = Event(
             id="g-1",
@@ -331,12 +339,23 @@ class _MockGoogleProvider(CalendarProvider):
         return event
 
     async def find_free_slots(
-        self, *, tenant_id: str, time_range: DateTimeRange, duration_minutes: int
+        self,
+        *,
+        tenant_id: str,
+        time_range: DateTimeRange,
+        duration_minutes: int,
+        calendar_id: str | None = None,
     ) -> list[DateTimeRange]:
         return []
 
     async def is_available(self, *, tenant_id: str) -> bool:
         return True
+
+    async def list_collections(self, *, tenant_id: str) -> list[Collection]:
+        return [
+            Collection(account="google", collection="primary", title="me@example.com"),
+            Collection(account="google", collection="team@x.com", title="Team", writable=False),
+        ]
 
 
 async def test_google_mock_provider_creates_event() -> None:
@@ -448,10 +467,141 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
     assert manifest.ui.actions == []
 
 
-async def test_manifest_version_is_0_4_0(local_provider: LocalCalendarProvider) -> None:
+async def test_manifest_version_is_0_5_0(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.4.0"
+    assert manifest.version == "0.5.0"
+
+
+async def test_manifest_declares_collections_and_drops_provider_dropdown(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # The account/collection model (ADR-0030): a collections spec replaces the old
+    # local/google provider dropdown (config_schema is gone).
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    assert manifest.collections is not None
+    assert manifest.collections.noun == "calendar"
+    assert manifest.collections.multi is True
+    assert manifest.collections.providers == ["google"]
+    assert manifest.ui is not None
+    assert manifest.ui.config_schema is None
+
+
+# ── Connected accounts (ADR-0030) ─────────────────────────────────────────────
+
+
+async def test_calendar_accounts_lists_connected_google_with_collections() -> None:
+    view = await calendar_accounts({"google": _MockGoogleProvider()}, tenant_id="t1")
+    assert view.noun == "calendar"
+    assert view.multi is True
+    assert len(view.accounts) == 1
+    account = view.accounts[0]
+    assert account.account == "google"
+    assert account.label == "Google"
+    assert account.connected is True
+    assert [c.collection for c in account.collections] == ["primary", "team@x.com"]
+
+
+class _DisconnectedGoogle(_MockGoogleProvider):
+    async def is_available(self, *, tenant_id: str) -> bool:
+        return False
+
+
+async def test_calendar_accounts_omits_collections_when_disconnected() -> None:
+    view = await calendar_accounts({"google": _DisconnectedGoogle()}, tenant_id="t1")
+    account = view.accounts[0]
+    assert account.connected is False
+    assert account.collections == []
+
+
+# ── CollectionRouter (ADR-0030) ───────────────────────────────────────────────
+
+
+class _StaticPrefs:
+    """A prefs source returning a fixed selection (stands in for the PlatformClient)."""
+
+    def __init__(self, prefs: CollectionPrefs) -> None:
+        self._prefs = prefs
+
+    async def get_collections(self) -> CollectionPrefs:
+        return self._prefs
+
+
+def _google_ref(collection: str) -> CollectionRef:
+    return CollectionRef(account="google", collection=collection)
+
+
+async def _router(prefs: CollectionPrefs) -> tuple[CollectionRouter, LocalCalendarProvider, Any]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    google = _MockGoogleProvider()
+    router = CollectionRouter(local=local, external={"google": google}, prefs=_StaticPrefs(prefs))
+    return router, local, google
+
+
+async def test_router_reads_local_when_nothing_enabled() -> None:
+    router, local, _ = await _router(CollectionPrefs())
+    await local.create_event(tenant_id="t1", title="Local one", start=_dt(9), end=_dt(10))
+    events = await router.list_events(
+        tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
+    )
+    assert [e.title for e in events] == ["Local one"]
+
+
+async def test_router_overlays_enabled_collections() -> None:
+    router, local, google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    await google.create_event(tenant_id="t1", title="From Google", start=_dt(11), end=_dt(12))
+    # A local event exists but local is not enabled, so it must not appear in the overlay.
+    await local.create_event(tenant_id="t1", title="Local hidden", start=_dt(9), end=_dt(10))
+    events = await router.list_events(
+        tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
+    )
+    assert [e.title for e in events] == ["From Google"]
+
+
+async def test_router_writes_to_active_collection() -> None:
+    router, _, google = await _router(
+        CollectionPrefs(enabled=[_google_ref("primary")], active=_google_ref("primary"))
+    )
+    created = await router.create_event(tenant_id="t1", title="Routed", start=_dt(14), end=_dt(15))
+    assert created.provider == "google"
+    assert google.events[-1].title == "Routed"
+
+
+async def test_router_writes_local_when_no_active() -> None:
+    router, local, _ = await _router(CollectionPrefs())
+    created = await router.create_event(tenant_id="t1", title="Default", start=_dt(14), end=_dt(15))
+    assert created.provider == "local"
+    assert await local.get_event(tenant_id="t1", event_id=created.id) is not None
+
+
+async def test_router_get_event_searches_enabled_and_local() -> None:
+    router, _local, google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    g = await google.create_event(tenant_id="t1", title="G", start=_dt(9), end=_dt(10))
+    found = await router.get_event(tenant_id="t1", event_id=g.id)
+    assert found is not None
+    assert found.title == "G"
+    assert await router.get_event(tenant_id="t1", event_id="missing") is None
+
+
+async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:
+    class _BrokenPrefs:
+        async def get_collections(self) -> CollectionPrefs:
+            raise RuntimeError("core down")
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    router = CollectionRouter(local=local, external={}, prefs=_BrokenPrefs())
+    await local.create_event(tenant_id="t1", title="Survives", start=_dt(9), end=_dt(10))
+    events = await router.list_events(
+        tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
+    )
+    assert [e.title for e in events] == ["Survives"]
 
 
 # ── calendar_page (the `calendar` archetype data, ADR-0018) ───────────────────

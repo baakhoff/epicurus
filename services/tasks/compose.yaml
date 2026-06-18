@@ -14,8 +14,9 @@ services:
       # Core service base URL on the internal Docker network.
       PLATFORM_URL: http://core-app:8080
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
-      # "local" or "google".  Switch without changing any tool code (ADR-0016).
-      TASKS_PROVIDER: ${TASKS_PROVIDER:-local}
+      # No provider selection (ADR-0030): the module always backs itself with the local
+      # store and routes to a connected Google task list the operator selects. The
+      # selection lives in the core (module_prefs), not in service env.
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${TASKS_PORT:-8091}:8080"
     depends_on:

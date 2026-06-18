@@ -13,12 +13,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
       PLATFORM_URL: http://core-app:8080
-      # "local" (default) or "google". Local needs no external account; Google
-      # requires the tenant to have connected Google via the OAuth flow.
-      CALENDAR_PROVIDER: ${CALENDAR_PROVIDER:-local}
-      # Google Calendar ID to use (Google provider only). "primary" is the
-      # user's default calendar.
-      CALENDAR_GOOGLE_ID: ${CALENDAR_GOOGLE_ID:-primary}
+      # No provider selection (ADR-0030): the module always backs itself with the local
+      # store and routes to any Google calendars the operator connects + enables. The
+      # selection lives in the core (module_prefs), not in service env.
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${CALENDAR_PORT:-8087}:8080"
     depends_on:

@@ -10,10 +10,16 @@ from __future__ import annotations
 from epicurus_core._version import __version__
 from epicurus_core.config import CoreSettings, Environment, LogLevel
 from epicurus_core.contracts import (
+    LOCAL_ACCOUNT,
+    Account,
+    AccountsView,
     Attachment,
     AttachmentSource,
     ChatMessage,
     ChatResult,
+    Collection,
+    CollectionPrefs,
+    CollectionRef,
     EntityRef,
     HoverCard,
     HoverCardDetail,
@@ -28,6 +34,7 @@ from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
 from epicurus_core.logging import configure_logging, get_logger
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
+    CollectionsSpec,
     EventSpec,
     ModelRole,
     ModelSlot,
@@ -58,10 +65,17 @@ from epicurus_core.tenancy import (
 
 __all__ = [
     "CONTRACT_VERSION",
+    "LOCAL_ACCOUNT",
+    "Account",
+    "AccountsView",
     "Attachment",
     "AttachmentSource",
     "ChatMessage",
     "ChatResult",
+    "Collection",
+    "CollectionPrefs",
+    "CollectionRef",
+    "CollectionsSpec",
     "CoreSettings",
     "EntityRef",
     "Environment",

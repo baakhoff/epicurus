@@ -7,11 +7,12 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import CONTRACT_VERSION
+from epicurus_core import CONTRACT_VERSION, Collection, CollectionPrefs, CollectionRef
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
+from epicurus_tasks.router import TasksRouter
 from epicurus_tasks.service import (
     TASK_KIND,
     TaskNotFound,
@@ -22,6 +23,7 @@ from epicurus_tasks.service import (
     task_entity_ref,
     task_excerpt,
     task_hover_card,
+    tasks_accounts,
     tasks_attachments,
 )
 
@@ -46,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.5.0"
+    assert manifest.version == "0.6.0"
     assert manifest.contract_version == CONTRACT_VERSION
     tool_names = {t.name for t in manifest.tools}
     assert tool_names == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
@@ -60,6 +62,12 @@ async def test_manifest(module_fixture: object) -> None:
     # `tasks_list` returns an entity-ref envelope (chips), so it is no longer a card action.
     assert manifest.ui is not None
     assert manifest.ui.actions == []
+    # Account/collection model (ADR-0030): a single-active list picker, no provider dropdown.
+    assert manifest.collections is not None
+    assert manifest.collections.noun == "list"
+    assert manifest.collections.multi is False
+    assert manifest.collections.providers == ["google"]
+    assert manifest.ui.config_schema is None
 
 
 async def test_tasks_list_empty(module_fixture: object) -> None:
@@ -322,3 +330,133 @@ async def test_add_task_invalid_status_raises(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="invalid status"):
         await mod.mcp.call_tool("tasks_add", {"title": "Bad", "status": "pending"})  # type: ignore[attr-defined]
+
+
+# ── Connected accounts + router (ADR-0030) ────────────────────────────────────
+
+
+class _FakeGoogleTasks:
+    """Minimal in-memory Google-like tasks provider for accounts/router tests."""
+
+    def __init__(self, *, connected: bool = True) -> None:
+        self._connected = connected
+        self.tasks: list[Task] = []
+        self.last_list_id: str | None = None
+
+    def provider_name(self) -> str:
+        return "google"
+
+    async def is_available(self, tenant_id: str) -> bool:
+        return self._connected
+
+    async def list_collections(self, tenant_id: str) -> list[Collection]:
+        return [
+            Collection(account="google", collection="@default", title="My Tasks"),
+            Collection(account="google", collection="work", title="Work"),
+        ]
+
+    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
+        self.last_list_id = list_id
+        return self.tasks
+
+    async def add_task(
+        self, tenant_id: str, title: str, *, list_id: str | None = None, **kw: Any
+    ) -> Task:
+        self.last_list_id = list_id
+        created = Task(id="g1", title=title)
+        self.tasks.append(created)
+        return created
+
+    async def complete_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> Task:
+        self.last_list_id = list_id
+        return Task(id=task_id, title="done", status="done")
+
+    async def update_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None, **kw: Any
+    ) -> Task:
+        self.last_list_id = list_id
+        return Task(id=task_id, title="upd")
+
+    async def get_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> Task | None:
+        self.last_list_id = list_id
+        return next((t for t in self.tasks if t.id == task_id), None)
+
+
+class _StaticPrefs:
+    def __init__(self, prefs: CollectionPrefs) -> None:
+        self._prefs = prefs
+
+    async def get_collections(self) -> CollectionPrefs:
+        return self._prefs
+
+
+async def test_tasks_accounts_lists_connected_google() -> None:
+    view = await tasks_accounts({"google": _FakeGoogleTasks()}, tenant_id=TENANT)
+    assert view.noun == "list"
+    assert view.multi is False
+    account = view.accounts[0]
+    assert account.account == "google"
+    assert account.connected is True
+    assert [c.collection for c in account.collections] == ["@default", "work"]
+
+
+async def test_tasks_accounts_omits_lists_when_disconnected() -> None:
+    view = await tasks_accounts({"google": _FakeGoogleTasks(connected=False)}, tenant_id=TENANT)
+    assert view.accounts[0].connected is False
+    assert view.accounts[0].collections == []
+
+
+async def _local_router(
+    prefs: CollectionPrefs,
+) -> tuple[TasksRouter, LocalTasksProvider, _FakeGoogleTasks]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = TaskStore(engine)
+    await store.init()
+    local = LocalTasksProvider(store)
+    google = _FakeGoogleTasks()
+    router = TasksRouter(local=local, external={"google": google}, prefs=_StaticPrefs(prefs))
+    return router, local, google
+
+
+async def test_router_uses_local_when_no_active() -> None:
+    router, local, _google = await _local_router(CollectionPrefs())
+    await local.add_task(TENANT, "Local task")
+    tasks = await router.list_tasks(TENANT)
+    assert [t.title for t in tasks] == ["Local task"]
+
+
+async def test_router_routes_to_active_google_list() -> None:
+    active = CollectionRef(account="google", collection="work")
+    router, _local, google = await _local_router(CollectionPrefs(enabled=[active], active=active))
+    google.tasks = [Task(id="g1", title="Google task")]
+    tasks = await router.list_tasks(TENANT)
+    assert [t.title for t in tasks] == ["Google task"]
+    # The active collection id is passed through to the provider as list_id.
+    assert google.last_list_id == "work"
+
+
+async def test_router_add_routes_to_active_list() -> None:
+    active = CollectionRef(account="google", collection="work")
+    router, _local, google = await _local_router(CollectionPrefs(enabled=[active], active=active))
+    created = await router.add_task(TENANT, "New")
+    assert created.title == "New"
+    assert google.last_list_id == "work"
+
+
+async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:
+    class _BrokenPrefs:
+        async def get_collections(self) -> CollectionPrefs:
+            raise RuntimeError("core down")
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = TaskStore(engine)
+    await store.init()
+    local = LocalTasksProvider(store)
+    router = TasksRouter(local=local, external={}, prefs=_BrokenPrefs())
+    await local.add_task(TENANT, "Survives")
+    tasks = await router.list_tasks(TENANT)
+    assert [t.title for t in tasks] == ["Survives"]

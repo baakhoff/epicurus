@@ -14,6 +14,20 @@ images to GHCR.
 
 ### Added
 
+- **Account/collection model: `local` is the silent default; connect Google and toggle each
+  calendar/list** — calendar and tasks drop the binary `local`/`google` **provider dropdown**
+  (and the `CALENDAR_PROVIDER` / `TASKS_PROVIDER` env vars). `local` is now the zero-config
+  default that silently backs a module when nothing is connected, never shown as a provider.
+  Connecting Google fetches **all** its collections (every calendar / task list); the operator
+  toggles each on/off and picks the active one from a core-rendered **connected-accounts**
+  section in the Modules screen. Calendar overlays every enabled calendar on read and writes to
+  the active one; tasks is single-active. A module declares `collections` in its manifest and
+  serves `GET /accounts`; the core stores the selection in `module_prefs.collections` and serves
+  it (merged) at `GET·PUT /platform/v1/modules/{name}/collections` (+ a Postgres-only
+  `…/collections/prefs` the module reads via `PlatformClient.get_collections`). The router falls
+  back to local if the core is unreachable (local-first). ADR-0030; foundation for auto-connect
+  (#209) and the editable calendar (#208) (closes #211) (`epicurus-core` → 0.11.0,
+  `core-app` → 0.16.0, `calendar` → 0.5.0, `tasks` → 0.6.0, `web` → 0.18.0).
 - **User-managed knowledge base: nested folders + add anything (file tree)** — the Knowledge
   editor page gains a file tree: create nested folders, add documents into any folder, and
   rename/move/delete — all path-confined to the vault (no traversal) and re-indexed on change.

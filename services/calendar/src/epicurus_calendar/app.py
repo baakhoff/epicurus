@@ -13,14 +13,17 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.models import Event
+from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.google import GoogleCalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
+from epicurus_calendar.providers.router import CollectionRouter
 from epicurus_calendar.service import (
     CALENDAR_PAGE_ID,
     EVENT_KIND,
     MODULE_NAME,
     EventNotFound,
     build_module,
+    calendar_accounts,
     calendar_attachments,
     calendar_page,
     event_attachment,
@@ -54,18 +57,19 @@ def create_app() -> FastAPI:
     platform = PlatformClient(
         base_url=settings.platform_url,
         tenant_id=settings.default_tenant_id,
+        module=MODULE_NAME,
     )
 
     engine = create_async_engine(settings.database_url)
     store = LocalEventStore(engine)
 
-    if settings.calendar_provider == "google":
-        provider: LocalCalendarProvider | GoogleCalendarProvider = GoogleCalendarProvider(
-            platform=platform,
-            calendar_id=settings.calendar_google_id,
-        )
-    else:
-        provider = LocalCalendarProvider(store=store)
+    # Hold every backend at once and route per the operator's selection (ADR-0030): the
+    # silent local default plus each connectable external provider. The router reads the
+    # stored enabled/active collections from the core via the PlatformClient — there is no
+    # longer a single provider chosen at startup.
+    local_provider = LocalCalendarProvider(store=store)
+    external: dict[str, CalendarProvider] = {"google": GoogleCalendarProvider(platform=platform)}
+    provider = CollectionRouter(local=local_provider, external=external, prefs=platform)
 
     bus = EventBus.from_settings(settings)
     module = build_module(provider, tenant_id=settings.default_tenant_id)
@@ -74,14 +78,11 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            if settings.calendar_provider == "local":
-                await store.init()
+            # The local store always backs the module now (it is the silent default), so
+            # it is always initialised — not only when "local" was the chosen provider.
+            await store.init()
             await bus.connect()
-            log.info(
-                "calendar service ready",
-                provider=settings.calendar_provider,
-                tenant=settings.default_tenant_id,
-            )
+            log.info("calendar service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
@@ -101,15 +102,28 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
-        """Live status for the manifest-driven UI status panel."""
-        available = await provider.is_available(tenant_id=settings.default_tenant_id)
-        status: dict[str, Any] = {
-            "provider": provider.name,
-            "available": available,
+        """Live status for the manifest-driven UI status panel.
+
+        Reports whether Google is connected (best-effort) and how many events the local
+        default store holds; the operator's chosen calendars are shown in the
+        connected-accounts section rather than here (ADR-0030).
+        """
+        return {
+            "google_connected": await external["google"].is_available(
+                tenant_id=settings.default_tenant_id
+            ),
+            "local_events": await store.count(tenant=settings.default_tenant_id),
         }
-        if settings.calendar_provider == "local":
-            status["event_count"] = await store.count(tenant=settings.default_tenant_id)
-        return status
+
+    @app.get("/accounts")
+    async def get_accounts() -> dict[str, Any]:
+        """Connected accounts + their calendars for the operator's picker (ADR-0030).
+
+        The core proxies this at ``GET /platform/v1/modules/calendar/collections`` and
+        folds in the stored enabled/active selection before the shell renders it.
+        """
+        view = await calendar_accounts(external, tenant_id=settings.default_tenant_id)
+        return view.model_dump()
 
     @app.get("/pages/{page_id}")
     async def get_page(

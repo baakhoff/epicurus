@@ -12,7 +12,14 @@ import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Button, Card, Confirm, Dot, Spinner, Switch, TextInput, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
-import type { ModuleSnapshot, ToolSpec, UiAction } from "@/lib/contracts";
+import type {
+  Collection,
+  CollectionPrefs,
+  CollectionRef,
+  ModuleSnapshot,
+  ToolSpec,
+  UiAction,
+} from "@/lib/contracts";
 
 function ActionRow({ module, action }: { module: string; action: UiAction; }) {
   const [open, setOpen] = useState(false);
@@ -190,6 +197,148 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
   );
 }
 
+/** "calendar" → "Calendars", "list" → "Lists" — a section heading from the spec noun. */
+function pluralNoun(noun: string): string {
+  const cap = noun.charAt(0).toUpperCase() + noun.slice(1);
+  return cap.endsWith("s") ? cap : `${cap}s`;
+}
+
+const sameRef = (a: CollectionRef, b: { account: string; collection: string }): boolean =>
+  a.account === b.account && a.collection === b.collection;
+
+/**
+ * Connected accounts + per-collection toggles + an active switcher (ADR-0030) — the
+ * core-rendered replacement for the old local/google provider dropdown. The module
+ * supplies the data (its `/accounts`, merged with the stored selection); this shell
+ * owns the chrome. `local` is the silent default and never appears here.
+ */
+function ModuleCollections({ snapshot }: { snapshot: ModuleSnapshot }) {
+  const name = snapshot.manifest.name;
+  const spec = snapshot.manifest.collections;
+  const queryClient = useQueryClient();
+  const view = useQuery({
+    queryKey: ["module-collections", name],
+    queryFn: () => api.getModuleCollections(name),
+    enabled: spec != null,
+  });
+  const save = useMutation({
+    mutationFn: (prefs: CollectionPrefs) => api.saveModuleCollections(name, prefs),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-collections", name] }),
+  });
+  const connect = useMutation({
+    mutationFn: (provider: string) => api.oauthConnect(provider),
+    onSuccess: (res) => {
+      window.location.href = res.auth_url;
+    },
+  });
+  if (!spec) return null;
+
+  const accounts = view.data?.accounts ?? [];
+  const cols = accounts.flatMap((a) => a.collections);
+  const enabledRefs: CollectionRef[] = cols
+    .filter((c) => c.enabled)
+    .map((c) => ({ account: c.account, collection: c.collection }));
+  const activeCol = cols.find((c) => c.active) ?? null;
+
+  // Toggling/switching rebuilds the full selection and persists it; `active` must stay
+  // within `enabled`, and disabling the active collection falls back to the local default.
+  const toggleEnabled = (c: Collection, on: boolean) => {
+    const ref = { account: c.account, collection: c.collection };
+    const enabled = on
+      ? [...enabledRefs.filter((r) => !sameRef(r, ref)), ref]
+      : enabledRefs.filter((r) => !sameRef(r, ref));
+    const active =
+      activeCol && enabled.some((r) => sameRef(r, activeCol))
+        ? { account: activeCol.account, collection: activeCol.collection }
+        : null;
+    save.mutate({ enabled, active });
+  };
+  const setActive = (c: Collection | null) => {
+    if (c === null) {
+      save.mutate({ enabled: enabledRefs, active: null });
+      return;
+    }
+    const ref = { account: c.account, collection: c.collection };
+    const enabled = enabledRefs.some((r) => sameRef(r, ref)) ? enabledRefs : [...enabledRefs, ref];
+    save.mutate({ enabled, active: ref });
+  };
+
+  const activeWord = spec.multi ? "default" : "active";
+
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+        {pluralNoun(spec.noun)}
+      </h4>
+      {view.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex flex-col gap-3">
+          {accounts.map((account) => (
+            <div key={account.account} className="rounded-(--radius-field) border border-edge p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm text-ink">{account.label}</span>
+                {account.connected ? (
+                  <Badge tone="ok">connected</Badge>
+                ) : (
+                  <Button
+                    busy={connect.isPending}
+                    onClick={() => connect.mutate(account.provider)}
+                  >
+                    Connect
+                  </Button>
+                )}
+              </div>
+              {account.connected && account.collections.length === 0 && (
+                <p className="mt-2 text-xs text-ink-dim">No {spec.noun}s found in this account.</p>
+              )}
+              {account.collections.length > 0 && (
+                <div className="mt-2 flex flex-col gap-1.5">
+                  {account.collections.map((c) => (
+                    <div
+                      key={`${c.account}/${c.collection}`}
+                      className="flex items-center justify-between gap-3"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-sm text-ink">{c.title}</span>
+                      <div className="flex items-center gap-3">
+                        {c.enabled && c.writable && (
+                          <button
+                            className={cn("text-xs", c.active ? "text-accent" : "text-ink-faint")}
+                            aria-pressed={c.active ?? false}
+                            disabled={save.isPending}
+                            onClick={() => setActive(c.active ? null : c)}
+                          >
+                            {c.active ? activeWord : `set ${activeWord}`}
+                          </button>
+                        )}
+                        <Switch
+                          checked={c.enabled ?? false}
+                          onChange={(on) => toggleEnabled(c, on)}
+                          disabled={save.isPending}
+                          label={`Toggle ${c.title}`}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          <p className="text-xs text-ink-faint">
+            {activeCol
+              ? `New items are created in “${activeCol.title}”.`
+              : `Nothing active — the built-in local default is used.`}
+          </p>
+        </div>
+      )}
+      {save.isError && <p className="mt-2 text-sm text-danger">{(save.error as Error).message}</p>}
+      {connect.isError && (
+        <p className="mt-2 text-sm text-danger">{(connect.error as Error).message}</p>
+      )}
+    </div>
+  );
+}
+
 function ToolRow({ module, tool, disabled }: { module: string; tool: string; disabled: boolean }) {
   const queryClient = useQueryClient();
   const toggle = useMutation({
@@ -299,6 +448,10 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
           {known && status.healthy && ui?.status_url && <ModuleStatus name={manifest.name} />}
 
           {known && status.healthy && <ModuleConfig snapshot={snapshot} />}
+
+          {known && status.healthy && manifest.collections && (
+            <ModuleCollections snapshot={snapshot} />
+          )}
 
           {known && <ModuleModels snapshot={snapshot} />}
 

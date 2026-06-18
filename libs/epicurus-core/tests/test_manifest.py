@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
+    CollectionsSpec,
     EventSpec,
     ModelSlot,
     ModuleManifest,
@@ -127,6 +128,30 @@ def test_manifest_resolver_and_attachable_roundtrip() -> None:
     restored = ModuleManifest.model_validate(m.model_dump())
     assert restored.resolver is True
     assert restored.attachable is True
+
+
+def test_collections_spec_defaults() -> None:
+    spec = CollectionsSpec(noun="calendar")
+    assert spec.multi is False
+    assert spec.providers == []
+
+
+def test_manifest_collections_defaults_none() -> None:
+    assert ModuleManifest(name="m", version="1.0").collections is None
+
+
+def test_manifest_with_collections_roundtrips() -> None:
+    m = ModuleManifest(
+        name="calendar",
+        version="0.5.0",
+        collections=CollectionsSpec(noun="calendar", multi=True, providers=["google"]),
+    )
+    restored = ModuleManifest.model_validate(m.model_dump())
+    assert restored == m
+    assert restored.collections is not None
+    assert restored.collections.noun == "calendar"
+    assert restored.collections.multi is True
+    assert restored.collections.providers == ["google"]
 
 
 def test_manifest_with_pages_roundtrips() -> None:

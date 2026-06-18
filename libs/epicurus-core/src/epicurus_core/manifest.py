@@ -17,6 +17,7 @@ CONTRACT_VERSION = "0.1"
 
 __all__ = [
     "CONTRACT_VERSION",
+    "CollectionsSpec",
     "EventSpec",
     "ModelRole",
     "ModelSlot",
@@ -125,6 +126,24 @@ class UiSection(BaseModel):
     ui_url: str | None = None
 
 
+class CollectionsSpec(BaseModel):
+    """A module's account/collection capability (ADR-0030).
+
+    Declaring this opts the module into the account/collection model: it serves
+    ``GET /accounts`` (its connected accounts and their collections) and reads the
+    operator's selection via ``PlatformClient.get_collections``. The shell renders a
+    connected-accounts section — per-collection on/off toggles, an active switcher, and a
+    Connect affordance for each provider in ``providers``. ``noun`` labels a collection in
+    the UI (``"calendar"`` → "Calendars", ``"list"`` → "Lists"); ``multi`` is True when
+    reads overlay every enabled collection (calendar) and False when only the active one
+    is shown (tasks). ``local`` is always the silent fallback and is never listed here.
+    """
+
+    noun: str
+    multi: bool = False
+    providers: list[str] = Field(default_factory=list)
+
+
 class PageSpec(BaseModel):
     """A left-nav page a module contributes — core-rendered from a bounded vocabulary (ADR-0018).
 
@@ -181,6 +200,11 @@ class ModuleManifest(BaseModel):
     # model with ``PlatformClient.get_module_model`` and passes it to embed/chat; an unset
     # slot falls back to the core default.
     required_models: list[ModelSlot] = Field(default_factory=list)
+    # The module backs itself with a silent ``local`` default plus 0+ connected external
+    # accounts whose collections the operator toggles/switches (ADR-0030). When set, the
+    # module serves ``GET /accounts`` and reads its selection via
+    # ``PlatformClient.get_collections``; the shell renders the connected-accounts section.
+    collections: CollectionsSpec | None = None
     # A relative path on the module (e.g. ``/module-docs``) that returns documentation pages for
     # the knowledge module to auto-index (#215). Response shape:
     # ``{"documents": [{"path": "usage.md", "content": "..."}]}``. The core proxies this at

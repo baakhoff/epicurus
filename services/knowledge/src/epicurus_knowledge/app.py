@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -26,6 +27,7 @@ from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
+from epicurus_knowledge.runner import IndexRunner
 from epicurus_knowledge.service import MODULE_NAME, build_module, module_docs
 from epicurus_knowledge.settings import KnowledgeSettings
 
@@ -62,6 +64,7 @@ def create_app() -> FastAPI:
         tenant=settings.default_tenant_id,
         collection_base="knowledge",
         chunk_max_chars=settings.chunk_max_chars,
+        embed_batch_size=settings.embed_batch_size,
     )
     docs_indexer = KnowledgeIndexer(
         doc_index,
@@ -71,6 +74,7 @@ def create_app() -> FastAPI:
         tenant=settings.default_tenant_id,
         collection_base="docs",
         chunk_max_chars=settings.chunk_max_chars,
+        embed_batch_size=settings.embed_batch_size,
     )
     # Per-module docs (#215): indexed alongside the bundled platform docs into
     # <tenant>__docs; synced at startup and on every knowledge_reindex call.
@@ -86,6 +90,17 @@ def create_app() -> FastAPI:
     module = build_module(vault_indexer, docs_indexer, module_docs_indexer)
     mcp_app = module.http_app()
 
+    # The initial index runs in the background (#230): the vault + bundled docs can
+    # take minutes, so blocking startup would make /health flap and could trip restart
+    # loops. The runner retries with backoff so a cold `compose up` (deps not yet
+    # reachable) still ends with a populated index; GET /status reports its progress.
+    index_runner = IndexRunner(
+        [vault_indexer, docs_indexer, module_docs_indexer],
+        max_attempts=settings.index_retry_max_attempts,
+        base_delay_seconds=settings.index_retry_base_delay_seconds,
+        max_delay_seconds=settings.index_retry_max_delay_seconds,
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
@@ -99,21 +114,14 @@ def create_app() -> FastAPI:
                 docs=str(settings.docs_path),
                 tenant=settings.default_tenant_id,
             )
-            try:
-                await vault_indexer.run()
-            except Exception as exc:
-                log.warning("initial vault index failed", error=str(exc))
-            try:
-                await docs_indexer.run()
-            except Exception as exc:
-                log.warning("initial docs index failed", error=str(exc))
-            try:
-                await module_docs_indexer.run()
-            except Exception as exc:
-                log.warning("initial module docs index failed", error=str(exc))
+            # Serve immediately; index in the background.
+            index_task = asyncio.create_task(index_runner.run_with_retry())
             try:
                 yield
             finally:
+                index_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await index_task
                 await bus.close()
                 await engine.dispose()
                 await qdrant.close()
@@ -152,7 +160,11 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
-        """Index statistics for the manifest-driven UI status panel."""
+        """Index statistics for the manifest-driven UI status panel.
+
+        Counts grow as the background index (#230) progresses; ``index_phase`` and
+        ``index_attempts`` report whether it is still running, ready, or retrying.
+        """
         note_count = await note_index.count(tenant=settings.default_tenant_id)
         last_indexed_at = await note_index.last_indexed_at(tenant=settings.default_tenant_id)
         doc_count = await doc_index.count(tenant=settings.default_tenant_id)
@@ -162,6 +174,8 @@ def create_app() -> FastAPI:
             "last_indexed_at": last_indexed_at,
             "doc_count": doc_count,
             "module_doc_count": module_doc_count,
+            "index_phase": index_runner.state.phase,
+            "index_attempts": index_runner.state.attempts,
         }
 
     app.mount("/mcp", mcp_app)

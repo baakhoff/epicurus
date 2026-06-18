@@ -14,6 +14,12 @@ images to GHCR.
 
 ### Added
 
+- **User-managed knowledge base: nested folders + add anything (file tree)** — the Knowledge
+  editor page gains a file tree: create nested folders, add documents into any folder, and
+  rename/move/delete — all path-confined to the vault (no traversal) and re-indexed on change.
+  The `editor` archetype now carries an `EditorDoc.type` (`file`/`dir`) and a
+  `can_manage_files` flag; the core proxies folder-create, file/folder-delete, and move CRUD
+  to the module (closes #216) (`knowledge` → 0.11.0, `core-app` → 0.14.0, `web` → 0.16.0).
 - **Observability page with live log console** — the web shell gains an
   `/observability` screen that streams structured logs from core-app in real time,
   without `docker logs`. The page replays up to 200 buffered history entries on

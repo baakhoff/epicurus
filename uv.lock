@@ -843,7 +843,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.13.0"
+version = "0.14.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "asyncpg" },
@@ -891,7 +891,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-knowledge"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "services/knowledge" }
 dependencies = [
     { name = "asyncpg" },

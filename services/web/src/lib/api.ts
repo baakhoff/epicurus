@@ -182,6 +182,45 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
+  // Create a folder inside an editor page's store (#216).
+  createModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {
+    await request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/folder?path=${encodeURIComponent(path)}`,
+      { method: "POST" },
+    );
+  },
+  // Delete a document from an editor page's store (#216).
+  deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
+    const response = await fetch(
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail ?? detail; } catch { /* non-JSON */ }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  // Delete an empty folder from an editor page's store (#216).
+  deleteModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {
+    const response = await fetch(
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/folder?path=${encodeURIComponent(path)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail ?? detail; } catch { /* non-JSON */ }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  // Move or rename a file or folder within an editor page's store (#216).
+  moveModuleItem: (name: string, pageId: string, fromPath: string, toPath: string) =>
+    request(
+      z.object({ path: z.string() }),
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/move`,
+      { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
+    ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(

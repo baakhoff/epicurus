@@ -30,6 +30,8 @@ __all__ = [
     "doc_title",
     "encode_ref",
     "iter_md_files",
+    "iter_tree_nodes",
+    "safe_dir_relative",
     "safe_relative",
 ]
 
@@ -105,3 +107,60 @@ def iter_md_files(root: Path) -> list[str]:
                     paths.append((base / fname).relative_to(root).as_posix())
     paths.sort()
     return paths
+
+
+def iter_tree_nodes(root: Path) -> list[dict[str, str]]:
+    """Every ``.md`` file and non-hidden subdirectory under *root*, as ``{path, type}`` dicts.
+
+    The list is depth-first with **directories before files** at every level, both
+    alphabetically sorted within their group. This matches the visual tree the shell
+    renders and is stable regardless of filesystem order. Hidden directories (those
+    whose name starts with ``"."``) are skipped entirely — they are not indexed and
+    are not part of the vault UI.
+    """
+    nodes: list[dict[str, str]] = []
+    if not root.exists():
+        return nodes
+
+    def _walk(directory: Path) -> None:
+        try:
+            entries = list(directory.iterdir())
+        except PermissionError:
+            return
+        subdirs = sorted(
+            (e for e in entries if e.is_dir() and not e.name.startswith(".")),
+            key=lambda e: e.name,
+        )
+        files = sorted(
+            (e for e in entries if e.is_file() and e.suffix == ".md"),
+            key=lambda e: e.name,
+        )
+        # Emit dirs before files at this level, then recurse into each dir.
+        for subdir in subdirs:
+            nodes.append({"path": subdir.relative_to(root).as_posix(), "type": "dir"})
+            _walk(subdir)
+        for f in files:
+            nodes.append({"path": f.relative_to(root).as_posix(), "type": "file"})
+
+    _walk(root)
+    return nodes
+
+
+def safe_dir_relative(root: Path, rel: str) -> Path:
+    """Resolve *rel* against *root*, refusing anything that escapes it.
+
+    Like :func:`safe_relative` but for directories: no ``.md`` suffix
+    requirement. Used for folder-CRUD operations (create, delete, move).
+    Rejects absolute paths, ``..`` traversal, symlink escapes, and empty paths.
+    """
+    cleaned = rel.strip().replace("\\", "/")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="path is required")
+    candidate = PurePosixPath(cleaned)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise HTTPException(status_code=400, detail="path escapes the root")
+    root_resolved = root.resolve()
+    target = (root_resolved / candidate).resolve()
+    if not target.is_relative_to(root_resolved):
+        raise HTTPException(status_code=400, detail="path escapes the root")
+    return target

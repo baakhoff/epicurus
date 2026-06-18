@@ -16,11 +16,15 @@ def _hit(note_path: str, text: str, score: float, heading: str | None = None) ->
 
 
 def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> EpicurusModule:
+    from epicurus_knowledge.module_docs import ModuleDocsIndexer
+
     vault = AsyncMock(spec=KnowledgeIndexer)
     vault.search = AsyncMock(return_value=vault_hits)
     docs = AsyncMock(spec=KnowledgeIndexer)
     docs.search = AsyncMock(return_value=docs_hits)
-    return build_module(vault, docs)
+    module_docs = AsyncMock(spec=ModuleDocsIndexer)
+    module_docs.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
+    return build_module(vault, docs, module_docs)
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]

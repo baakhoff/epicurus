@@ -20,6 +20,7 @@ EpicurusModule(
     secrets: list[str] | None = None,
     ui: UiSection | None = None,
     pages: list[PageSpec] | None = None,
+    docs_url: str | None = None,
 )
 ```
 
@@ -82,6 +83,7 @@ app = module.http_app()
 | `resolver` | `bool` | `False` | module serves `GET /resolve/{kind}/{ref_id}` for hover-cards (ADR-0019) |
 | `attachable` | `bool` | `False` | module is a chat-attachment source: serves a picker + resolve (ADR-0019) |
 | `required_models` | `list[ModelSlot]` | `[]` | model "slots" the operator fills in the shell (#128); the module fetches its choice and passes it to embed/chat |
+| `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -375,3 +377,42 @@ embedding model, independent of the chat default.
 
 See ADR-0029 for the rationale (why the module passes the model rather than the core resolving
 it by identity).
+
+## Per-module docs contribution (#215)
+
+A module can contribute usage documentation that the knowledge service auto-indexes into the
+shared `<tenant>__docs` Qdrant collection, alongside the platform's own bundled docs. This
+means the agent can retrieve a module's how-to content with no operator action.
+
+**Declare `docs_url`** in the manifest (e.g. `docs_url="/docs"`). Serve a JSON response at
+that path:
+
+```jsonc
+// GET /docs
+{
+  "documents": [
+    { "path": "usage.md",  "content": "# Using the Calendar\n…" },
+    { "path": "tools.md",  "content": "# Available tools\n…" }
+  ]
+}
+```
+
+`path` is a relative identifier (used for display and incremental diffing); `content` is the
+raw markdown. The core proxies the endpoint at **`GET /platform/v1/modules/{name}/docs`** —
+the knowledge service fetches from there, never from the module directly.
+
+**Indexing behaviour.** The knowledge service calls `GET /platform/v1/modules` on startup to
+discover active modules, fetches each module's docs, diffs by SHA-256 content hash, and upserts
+only new or changed documents into `<tenant>__docs` with a `module/<name>/` path prefix so they
+don't collide with platform docs. Modules that are **disabled or removed** have their docs purged
+from the collection automatically. The `knowledge_reindex` tool repeats this process on demand.
+
+**The module docs are automatically searched.** Because they land in `<tenant>__docs`, the
+existing `knowledge_search` tool finds them alongside platform docs — no change to the tool
+or its callers is needed.
+
+**Tracking table.** The knowledge service records each indexed module doc in
+`knowledge_module_docs` (see [knowledge service docs](../services/knowledge.md#data-model)).
+
+A module with no docs to share omits `docs_url` (the default `None`); that module is ignored
+by the indexer.

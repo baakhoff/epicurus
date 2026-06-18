@@ -1,11 +1,14 @@
 # knowledge — Obsidian-vault RAG + platform self-documentation
 
-**`epicurus-knowledge`** is a sidecar module that indexes two markdown sources
+**`epicurus-knowledge`** is a sidecar module that indexes three markdown sources
 for retrieval-augmented generation, fully incrementally:
 
 1. **Operator vault** — an Obsidian markdown vault the operator mounts at `/vault`.
 2. **Platform docs** (self-documentation) — the `docs/` tree bundled into the image
    at `/docs`; available with **no operator setup** in any deploy.
+3. **Module docs** — usage documentation contributed by each enabled module via a
+   `docs_url` endpoint, auto-indexed on startup; disabled modules have their docs
+   purged automatically (#215).
 
 Chunks are embedded **through the core** (no model key lives here) and stored in
 tenant-scoped Qdrant collections. Host port **8085**.
@@ -17,7 +20,7 @@ tenant-scoped Qdrant collections. Host port **8085**.
 | Tool | Inputs | Returns |
 | --- | --- | --- |
 | `knowledge_search(query, k=5)` | `query`: search phrase; `k`: max results | A `ToolEnvelope`: the top-`k` matching chunks as readable text **plus** one entity-reference chip per cited document (ADR-0019). |
-| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over both sources. |
+| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over all three sources (vault + platform docs + module docs). |
 
 `knowledge_search` merges results from the vault (`<tenant>__knowledge`) and the
 platform-docs (`<tenant>__docs`) collections, re-ranked by cosine similarity score, so the
@@ -36,7 +39,7 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 
 | Panel | What it shows / does |
 | --- | --- |
-| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `last_indexed_at`. Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
+| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at`. Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
 | **Settings** | Vault path (`VAULT_PATH`) — editable in the shell. |
 | **Actions** | **Re-index** — triggers `knowledge_reindex` (both sources) through the core. |
 
@@ -105,6 +108,7 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver (#143): a cited doc → a `HoverCard`. `kind` is `knowledge`. Proxied at `GET /platform/v1/modules/knowledge/resolve/{kind}/{ref_id}`. |
+| `GET /docs` | Module docs endpoint — `{"documents": [{"path": "…", "content": "…"}]}`; the knowledge indexer fetches this via the core proxy (#215). |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ## How search works
@@ -120,7 +124,7 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 
 ## How indexing works
 
-The same incremental logic applies to both sources:
+The same incremental logic applies to the vault and platform-docs sources:
 
 1. **Hash** the file (sha-256) and compare with the DB record — skip unchanged files.
 2. **Chunk** new/changed files heading-aware, hard-splitting at paragraph boundaries past
@@ -131,6 +135,13 @@ The same incremental logic applies to both sources:
    file's hash/mtime/chunk-count in Postgres.
 
 Deleted files are purged from both stores on the next index run.
+
+**Module docs** use a variant of the same logic (`ModuleDocsIndexer`): each enabled module's
+`docs_url` is fetched via the core proxy, diffed by SHA-256 content hash (HTTP sources have no
+reliable mtime), and upserted into `<tenant>__docs` under a `module/<name>/` path prefix.
+Modules that are disabled or removed have their entries purged. A separate UUID namespace
+keeps module-doc point IDs from colliding with platform-doc IDs in the shared collection.
+Tracked in `knowledge_module_docs` (see *Data model*).
 
 ## Self-documentation (platform docs source)
 
@@ -149,6 +160,25 @@ services:
     volumes:
       - ${DOCS_PATH}:/docs:ro
 ```
+
+## Module-contributed docs (#215)
+
+On startup (and on every `knowledge_reindex` call) the service fetches the module list from
+the core (`GET /platform/v1/modules`), identifies every **enabled, non-removed** module that
+declares a `docs_url` in its manifest, and retrieves their documents via
+`GET /platform/v1/modules/{name}/docs`. Each document is diffed by SHA-256 hash, embedded
+via the core, and upserted into `<tenant>__docs` under the `module/<name>/` path prefix. A
+module that goes offline during a run is skipped gracefully; other modules still index. Docs
+for modules that are **disabled or removed** are purged from the collection automatically.
+
+This means a fresh install ships with both platform docs *and* every module's usage docs
+already indexed — no operator action required. The `knowledge_search` tool returns module docs
+alongside platform docs seamlessly because they share the `<tenant>__docs` collection.
+
+To contribute docs from a new module, declare `docs_url="/docs"` in its `EpicurusModule(...)`
+constructor and serve the JSON shape `{"documents": [{"path": "…", "content": "…"}]}` at
+that path. The platform-client helper (`PlatformClient.get_module_docs()`) lets other
+platform services read these docs if needed.
 
 ## Configuration
 
@@ -176,8 +206,14 @@ always present — bundled at image build time, and are not editable from the sh
   (sha-256), `chunk_count`, `indexed_at`; unique on `(tenant, note_path)`.
 - **Postgres `knowledge_doc_index`** — identical structure for platform-docs tracking;
   separate table so vault and docs paths can't collide.
+- **Postgres `knowledge_module_docs`** — module-docs ledger (#215): `id`, `tenant`,
+  `module_name`, `doc_path`, `content_hash` (SHA-256), `chunk_count`, `indexed_at`;
+  unique on `(tenant, module_name, doc_path)`. Records are purged when a module is
+  disabled or removed.
 - **Qdrant `<tenant>__knowledge`** — vault chunk embeddings (cosine), one collection per tenant.
-- **Qdrant `<tenant>__docs`** — platform-docs chunk embeddings (cosine), one collection per tenant.
+- **Qdrant `<tenant>__docs`** — platform-docs + module-docs chunk embeddings (cosine), one
+  collection per tenant. Module-doc points use a distinct UUID namespace from platform-doc
+  points to avoid ID collisions in the shared collection.
 
 Each Qdrant point payload: `{note_path, chunk_index, heading, text}`.
 
@@ -208,5 +244,6 @@ Package `epicurus_knowledge`:
 | `refs.py` | Opaque document refs (base64url `source:path`) + shared `.md` vault path-safety + vault walk. |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
-| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` routers, initial index of both sources on startup. |
+| `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` + `/attachments/*` + `/resolve/*` + `/docs` routers, initial index of all three sources on startup. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |

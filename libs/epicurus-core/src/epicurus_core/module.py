@@ -55,6 +55,7 @@ class EpicurusModule:
         resolver: bool = False,
         attachable: bool = False,
         required_models: list[ModelSlot] | None = None,
+        docs_url: str | None = None,
     ) -> None:
         self._name = name
         self._version = version
@@ -67,6 +68,7 @@ class EpicurusModule:
         self._resolver = resolver
         self._attachable = attachable
         self._required_models = list(required_models or [])
+        self._docs_url = docs_url
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -132,6 +134,7 @@ class EpicurusModule:
             resolver=self._resolver,
             attachable=self._attachable,
             required_models=list(self._required_models),
+            docs_url=self._docs_url,
         )
 
     def http_app(self) -> Starlette:

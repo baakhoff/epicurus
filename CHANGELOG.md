@@ -14,6 +14,14 @@ images to GHCR.
 
 ### Added
 
+- **Modules ship their own docs, auto-indexed into the knowledge base** — a module can declare
+  `docs_url` in its manifest and serve `GET /docs`; the core proxies it
+  (`GET /platform/v1/modules/{name}/docs`) and the **knowledge** module indexes every enabled
+  module's docs on startup (and on re-index) into the shared `<tenant>__docs` collection — so
+  `knowledge_search` answers questions about each service out of the box, alongside the bundled
+  platform docs. Disabling a module drops its docs from retrieval. Knowledge and echo ship usage
+  docs as the first examples (closes #215) (`epicurus-core` → 0.8.0, `core-app` → 0.12.0,
+  `knowledge` → 0.8.0, `echo` → 0.2.1).
 - **Tasks: richer fields** — tasks gain **priority, tags, and status** beyond the title/notes/
   due basics, on both the local store and (where the backend supports it) Google Tasks; the
   board view renders and edits them (#218) (`tasks` → 0.5.0, `web` → 0.14.0).

@@ -65,6 +65,8 @@ def build_module() -> EpicurusModule:
         # Serves GET /resolve/{kind}/{ref_id} so a referenced echo entity gets a
         # hover-card (ADR-0019) — the reference for the resolver contract.
         resolver=True,
+        # Contribute module docs for auto-indexing by the knowledge module (#215).
+        docs_url="/docs",
     )
 
     @module.tool()
@@ -138,3 +140,46 @@ async def echo_responder(event: Event) -> bytes:
 async def serve_responder(bus: EventBus, tenant_id: str) -> None:
     """Register the echo request/reply responder on the tenant-scoped subject."""
     await bus.reply(ECHO_SUBJECT, echo_responder, tenant_id=tenant_id)
+
+
+def echo_docs() -> dict[str, Any]:
+    """The echo module's documentation pages for auto-indexing (#215)."""
+    return {
+        "documents": [
+            {
+                "path": "overview.md",
+                "content": """\
+# Echo module
+
+The echo module is the epicurus contract-proof module: it exercises both halves
+of the module↔core contract — the MCP tool surface and the NATS event path.
+
+## Tools
+
+### echo
+
+Returns a message unchanged.
+
+**Parameters**
+- ``message`` (string) — the text to echo back.
+
+**Returns** the same string.
+
+## Pages
+
+The **Echoes** page (left nav) is rendered by the core using the ``browser``
+archetype: the module supplies a list of items; the shell renders them.
+
+## Events
+
+The echo module listens on the ``echo.request`` NATS subject and echoes the
+request payload back — a round-trip proof of the NATS request/reply contract.
+
+## Purpose
+
+echo exists as the reference a new module is modeled on: it demonstrates
+the tool, event, page, resolver, and docs contracts in one small service.
+""",
+            }
+        ]
+    }

@@ -27,6 +27,7 @@ from epicurus_core import (
 from epicurus_echo.service import (
     ECHO_PAGE_ID,
     build_module,
+    echo_docs,
     echo_hover_card,
     echo_page,
     serve_responder,
@@ -77,6 +78,11 @@ def create_app() -> FastAPI:
     async def resolve(kind: str, ref_id: str) -> dict[str, Any]:
         """Resolve an entity reference to a hover-card (ADR-0019); the core proxies this."""
         return echo_hover_card(kind, ref_id)
+
+    @app.get("/docs")
+    async def docs() -> dict[str, Any]:
+        """Return this module's documentation pages for auto-indexing (#215)."""
+        return echo_docs()
 
     app.mount("/mcp", mcp_app)
     return app

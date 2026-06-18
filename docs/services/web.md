@@ -19,7 +19,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | Screen | What it does |
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE readiness/delta/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **process timeline** of the agent's tool calls (#121), session sidebar (cross-chat memory), per-chat model picker. |
-| **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
+| **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |

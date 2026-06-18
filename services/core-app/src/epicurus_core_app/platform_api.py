@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from epicurus_core import CONTRACT_VERSION, __version__
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.settings import CoreAppSettings
 
 
@@ -57,7 +58,13 @@ class PlatformChatRequest(BaseModel):
     tenant_id: str | None = None
 
 
-def create_platform_router(settings: CoreAppSettings, gateway: LlmGateway) -> APIRouter:
+def create_platform_router(
+    settings: CoreAppSettings,
+    gateway: LlmGateway,
+    *,
+    prefs: LlmPrefsStore | None = None,
+    default_tenant: str = "local",
+) -> APIRouter:
     """Build the ``/platform/v1`` router that modules call into."""
     router = APIRouter(prefix="/platform/v1", tags=["platform"])
 
@@ -73,10 +80,13 @@ def create_platform_router(settings: CoreAppSettings, gateway: LlmGateway) -> AP
     async def embed(request: EmbedRequest) -> EmbedResponse:
         """Embed texts via the core's LLM gateway.
 
-        The model defaults to the core's configured embedding model when omitted.
-        Keys never leave the core; usage is metered via NATS.
+        Resolution order: per-module override (request.model) → global embedding
+        default pref → env default (memory_embed_model).  Keys never leave the
+        core; usage is metered via NATS.
         """
-        model = request.model or settings.memory_embed_model
+        tenant = request.tenant_id or default_tenant
+        global_embed = await prefs.get_embed_default(tenant) if prefs is not None else None
+        model = request.model or global_embed or settings.memory_embed_model
         embeddings = await gateway.embed(request.texts, model=model, tenant_id=request.tenant_id)
         return EmbedResponse(embeddings=embeddings)
 

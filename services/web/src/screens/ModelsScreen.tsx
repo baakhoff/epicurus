@@ -305,6 +305,55 @@ function LocalModels() {
   );
 }
 
+// ── Embedding default ─────────────────────────────────────────────────────────
+
+function EmbedDefault() {
+  const queryClient = useQueryClient();
+  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+
+  const current = llmPrefs.data?.global_embed_default ?? "";
+  const available = (models.data ?? []).filter((m) => !m.hidden);
+
+  const setEmbedDefault = useMutation({
+    mutationFn: (model: string | null) => api.setGlobalEmbedDefault(model),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
+  });
+
+  return (
+    <Card>
+      <h3 className="mb-1 font-serif text-base text-ink">Embedding model</h3>
+      <p className="mb-3 text-xs leading-relaxed text-ink-dim">
+        Global default used when a module has no per-module embedding override. Per-module
+        selections in the Modules page take precedence.
+      </p>
+      {llmPrefs.isLoading ? (
+        <Spinner />
+      ) : (
+        <label className="block">
+          <span className="sr-only">Global embedding model</span>
+          <select
+            className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+            value={current}
+            disabled={setEmbedDefault.isPending}
+            onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
+          >
+            <option value="">System default</option>
+            {available.map((m) => (
+              <option key={m.name} value={m.name}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {setEmbedDefault.isError && (
+        <p className="mt-2 text-sm text-danger">{(setEmbedDefault.error as Error).message}</p>
+      )}
+    </Card>
+  );
+}
+
 // ── Providers ─────────────────────────────────────────────────────────────────
 
 function KeySheet({
@@ -448,6 +497,7 @@ export function ModelsScreen() {
         <CatalogBrowser installed={installed} />
         <DownloadTray />
         <LocalModels />
+        <EmbedDefault />
         <Providers />
       </div>
     </div>

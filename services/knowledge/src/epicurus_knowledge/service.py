@@ -4,10 +4,13 @@ Registers two tools the agent can call:
 
 * ``knowledge_search`` — embed a query and return the top-k matching chunks
   from the indexed vault **and** the bundled platform docs, merged by score.
-* ``knowledge_reindex`` — trigger an incremental re-scan of both sources.
+* ``knowledge_reindex`` — trigger an incremental re-scan of all sources: the
+  operator vault, the bundled platform docs, and each enabled module's docs.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from epicurus_core import (
     EntityRef,
@@ -19,6 +22,7 @@ from epicurus_core import (
     tool_envelope,
 )
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
+from epicurus_knowledge.module_docs import ModuleDocsIndexer
 from epicurus_knowledge.pages import VAULT_PAGE_ID
 from epicurus_knowledge.refs import (
     KNOWLEDGE_KIND,
@@ -32,10 +36,84 @@ MODULE_NAME = "knowledge"
 
 INDEX_COMPLETE_SUBJECT = "knowledge.index.completed"
 
+# Usage documentation served at GET /docs (#215).
+_DOCS: list[dict[str, Any]] = [
+    {
+        "path": "usage.md",
+        "content": """\
+# Knowledge module — usage guide
+
+The knowledge module gives the agent semantic search over two sources:
+
+* **Your vault** — the Obsidian markdown notes in the configured vault path
+  (``VAULT_PATH``, default ``/vault``).
+* **Platform docs** — the epicurus platform documentation bundled in the
+  knowledge image (``DOCS_PATH``, default ``/docs``).
+* **Module docs** — usage guides contributed by each enabled module that
+  declares a ``docs_url`` in its manifest (#215).
+
+## Searching
+
+Ask the agent any natural-language question. The agent calls
+``knowledge_search`` automatically when it decides context from your notes
+or the platform docs would help.  You can also trigger it explicitly:
+
+> "Search my knowledge base for notes about project goals."
+
+Results are returned as scored chunks with hover-card chips you can click
+to open the source document.
+
+## Indexing
+
+Notes are indexed incrementally: only new or changed files are embedded on
+each run. The index is refreshed at service startup and whenever you click
+**Re-index** in the Modules UI or the agent calls ``knowledge_reindex``.
+
+After adding notes to your vault or changing the vault path, trigger a
+re-index to pick up the changes.
+
+## Changing the embedding model
+
+Pick a model in the Modules UI under **knowledge** → **Embedding model**.  After
+changing, click **Re-index** — vectors are model-specific and must be
+regenerated.  The previous vectors remain searchable until the re-index
+completes.
+""",
+    },
+    {
+        "path": "tools.md",
+        "content": """\
+# Knowledge module — agent tools
+
+## knowledge_search
+
+Search the knowledge base for content relevant to a query.
+
+**Parameters**
+- ``query`` (string) — natural-language question or search phrase.
+- ``k`` (integer, default 5) — maximum number of chunks to return.
+
+**Returns** the top-*k* chunks sorted by cosine similarity across the vault
+and platform-docs collections, with one entity-reference chip per distinct
+source document.
+
+## knowledge_reindex
+
+Incrementally re-index all sources: vault, platform docs, and module docs.
+
+**Parameters** — none.
+
+**Returns** ``{"indexed": N, "deleted": M, "unchanged": K}`` summed across
+all sources.
+""",
+    },
+]
+
 
 def build_module(
     vault_indexer: KnowledgeIndexer,
     docs_indexer: KnowledgeIndexer,
+    module_docs_indexer: ModuleDocsIndexer,
 ) -> EpicurusModule:
     """Build the knowledge module and register its tools.
 
@@ -44,10 +122,12 @@ def build_module(
             (``<tenant>__knowledge`` collection).
         docs_indexer: Indexer for the bundled platform docs
             (``<tenant>__docs`` collection).
+        module_docs_indexer: Indexer for per-module documentation (#215),
+            also written to ``<tenant>__docs`` under ``module/<name>/`` prefixes.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.7.0",
+        version="0.8.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."
@@ -83,7 +163,7 @@ def build_module(
                 UiAction(
                     tool="knowledge_reindex",
                     label="Re-index",
-                    description="Incrementally re-index the vault and platform docs.",
+                    description="Incrementally re-index the vault, platform docs, and module docs.",
                 )
             ],
         ),
@@ -103,6 +183,8 @@ def build_module(
                 description="Model used to embed vault notes and search queries.",
             )
         ],
+        # Contribute usage docs for the knowledge module itself (#215).
+        docs_url="/docs",
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")
@@ -159,24 +241,36 @@ def build_module(
 
     @module.tool()
     async def knowledge_reindex() -> dict[str, int]:
-        """Incrementally re-index the Obsidian vault and the bundled platform docs.
+        """Incrementally re-index all knowledge sources.
 
-        Walks each source directory, embeds new or changed files via the core's
-        LLM gateway, and removes vectors for deleted files.  Unchanged files are
-        skipped.
+        Walks the Obsidian vault, the bundled platform docs, and each enabled
+        module's declared docs, embedding new or changed files via the core's LLM
+        gateway and removing vectors for deleted files.  Unchanged files are skipped.
 
         Returns ``{"indexed": N, "deleted": M, "unchanged": K}`` summed across
-        both sources.
+        all sources.
         """
         vault_result = await vault_indexer.run()
         docs_result = await docs_indexer.run()
+        module_result = await module_docs_indexer.run()
         return {
-            "indexed": vault_result["indexed"] + docs_result["indexed"],
-            "deleted": vault_result["deleted"] + docs_result["deleted"],
-            "unchanged": vault_result["unchanged"] + docs_result["unchanged"],
+            "indexed": (
+                vault_result["indexed"] + docs_result["indexed"] + module_result["indexed"]
+            ),
+            "deleted": (
+                vault_result["deleted"] + docs_result["deleted"] + module_result["deleted"]
+            ),
+            "unchanged": (
+                vault_result["unchanged"] + docs_result["unchanged"] + module_result["unchanged"]
+            ),
         }
 
     return module
+
+
+def module_docs() -> dict[str, Any]:
+    """The knowledge module's own documentation pages for auto-indexing (#215)."""
+    return {"documents": _DOCS}
 
 
 def _snippet(text: str, limit: int = 120) -> str:

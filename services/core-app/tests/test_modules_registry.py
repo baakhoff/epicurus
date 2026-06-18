@@ -651,3 +651,45 @@ async def test_get_models_unknown_module_is_404() -> None:
     with pytest.raises(HTTPException) as err:
         await registry.get_models("ghost")
     assert err.value.status_code == 404
+
+
+# ── Module docs proxy (#215) ──────────────────────────────────────────────────
+
+
+def _docs_manifest() -> ModuleManifest:
+    return ModuleManifest(name="echo", version="0.2.1", docs_url="/docs")
+
+
+async def test_get_docs_proxies_module_docs_url() -> None:
+    from unittest.mock import MagicMock
+
+    registry, _, _ = _registry(manifest=_docs_manifest())
+    docs_payload = {"documents": [{"path": "overview.md", "content": "# Echo"}]}
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = docs_payload
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await registry.get_docs("echo")
+
+    assert result == docs_payload
+    mock_client.get.assert_called_once_with("/docs")
+
+
+async def test_get_docs_404_when_no_docs_url() -> None:
+    registry, _, _ = _registry(manifest=_echo_manifest())  # echo manifest has no docs_url
+    with pytest.raises(HTTPException) as err:
+        await registry.get_docs("echo")
+    assert err.value.status_code == 404
+
+
+async def test_get_docs_404_for_unknown_module() -> None:
+    registry, _, _ = _registry(manifest=_docs_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.get_docs("ghost")
+    assert err.value.status_code == 404

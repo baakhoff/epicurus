@@ -23,9 +23,10 @@ from epicurus_core import (
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.indexer import KnowledgeIndexer
+from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
-from epicurus_knowledge.service import MODULE_NAME, build_module
+from epicurus_knowledge.service import MODULE_NAME, build_module, module_docs
 from epicurus_knowledge.settings import KnowledgeSettings
 
 
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
     engine = create_async_engine(settings.database_url)
     note_index = NoteIndex(engine)
     doc_index = DocIndex(engine)
+    module_doc_ledger = ModuleDocLedger(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
     platform = PlatformClient(
         base_url=settings.platform_url,
@@ -70,9 +72,18 @@ def create_app() -> FastAPI:
         collection_base="docs",
         chunk_max_chars=settings.chunk_max_chars,
     )
+    # Per-module docs (#215): indexed alongside the bundled platform docs into
+    # <tenant>__docs; synced at startup and on every knowledge_reindex call.
+    module_docs_indexer = ModuleDocsIndexer(
+        module_doc_ledger,
+        qdrant,
+        platform,
+        tenant=settings.default_tenant_id,
+        chunk_max_chars=settings.chunk_max_chars,
+    )
 
     bus = EventBus.from_settings(settings)
-    module = build_module(vault_indexer, docs_indexer)
+    module = build_module(vault_indexer, docs_indexer, module_docs_indexer)
     mcp_app = module.http_app()
 
     @asynccontextmanager
@@ -80,6 +91,7 @@ def create_app() -> FastAPI:
         async with module.mcp.session_manager.run():
             await note_index.init()
             await doc_index.init()
+            await module_doc_ledger.init()
             await bus.connect()
             log.info(
                 "knowledge service ready",
@@ -95,6 +107,10 @@ def create_app() -> FastAPI:
                 await docs_indexer.run()
             except Exception as exc:
                 log.warning("initial docs index failed", error=str(exc))
+            try:
+                await module_docs_indexer.run()
+            except Exception as exc:
+                log.warning("initial module docs index failed", error=str(exc))
             try:
                 yield
             finally:
@@ -125,16 +141,23 @@ def create_app() -> FastAPI:
         )
     )
 
+    @app.get("/docs")
+    async def get_docs() -> dict[str, Any]:
+        """Return this module's documentation pages for auto-indexing (#215)."""
+        return module_docs()
+
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
         """Index statistics for the manifest-driven UI status panel."""
         note_count = await note_index.count(tenant=settings.default_tenant_id)
         last_indexed_at = await note_index.last_indexed_at(tenant=settings.default_tenant_id)
         doc_count = await doc_index.count(tenant=settings.default_tenant_id)
+        module_doc_count = await module_doc_ledger.count(tenant=settings.default_tenant_id)
         return {
             "note_count": note_count,
             "last_indexed_at": last_indexed_at,
             "doc_count": doc_count,
+            "module_doc_count": module_doc_count,
         }
 
     app.mount("/mcp", mcp_app)

@@ -154,3 +154,38 @@ class PlatformClient:
             resp.raise_for_status()
             model = resp.json().get("model")
             return str(model) if model else None
+
+    async def list_modules(self) -> list[dict[str, Any]]:
+        """List all modules with their manifests and enabled states (#215).
+
+        Returns a list of snapshot dicts, each with ``manifest`` (including ``docs_url``),
+        ``enabled``, ``removed``, and ``status`` fields.
+        """
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                "/platform/v1/modules",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            return resp.json()  # type: ignore[no-any-return]
+
+    async def get_module_docs(self, name: str) -> list[dict[str, Any]]:
+        """Fetch the documentation pages a module declares (#215).
+
+        The core proxies the module's ``docs_url`` endpoint and returns the parsed JSON.
+        Each element is a ``{"path": str, "content": str}`` dict.
+
+        Raises:
+            httpx.HTTPStatusError: 404 when the module has no ``docs_url``; other
+                non-2xx for connection or server errors.
+
+        Args:
+            name: Module name, e.g. ``"echo"``.
+        """
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                f"/platform/v1/modules/{name}/docs",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            return resp.json()["documents"]  # type: ignore[no-any-return]

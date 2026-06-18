@@ -282,6 +282,23 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def get_docs(self, name: str) -> dict[str, Any]:
+        """Proxy the module's declared ``docs_url`` endpoint to the caller (#215).
+
+        The module's manifest must declare ``docs_url`` (e.g. ``/docs``); the core
+        fetches that path and returns the JSON body. The response shape is
+        ``{"documents": [{"path": str, "content": str}]}``.
+        Returns 404 if the module is unreachable or has no ``docs_url``.
+        """
+        base, manifest = await self._resolve(name)
+        if not manifest.docs_url:
+            raise HTTPException(status_code=404, detail=f"module {name!r} declares no docs_url")
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.get(manifest.docs_url)
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
     async def get_page(
         self, name: str, page_id: str, *, params: Mapping[str, str] | None = None
     ) -> dict[str, Any]:
@@ -485,6 +502,11 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/{name}/status")
     async def get_module_status(name: str) -> dict[str, Any]:
         return await registry.get_status(name)
+
+    @router.get("/{name}/docs")
+    async def get_module_docs(name: str) -> dict[str, Any]:
+        """Proxy the module's docs_url endpoint — the knowledge service fetches from here (#215)."""
+        return await registry.get_docs(name)
 
     @router.get("/{name}/pages/{page_id}")
     async def get_module_page(request: Request, name: str, page_id: str) -> dict[str, Any]:

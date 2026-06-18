@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-echo"
-version = "0.2.0"
+version = "0.2.1"
 description = "Echo module — proves the epicurus module contract end-to-end."
 requires-python = ">=3.11"
 dependencies = [

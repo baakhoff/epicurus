@@ -248,7 +248,9 @@ async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Pa
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(vault_indexer, docs_indexer)
+    module_docs_stub = MagicMock()
+    module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
+    module = build_module(vault_indexer, docs_indexer, module_docs_stub)
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
@@ -263,7 +265,7 @@ async def test_manifest_declares_tool_and_event(
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(vault_indexer, docs_indexer)
+    module = build_module(vault_indexer, docs_indexer, MagicMock())
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert "knowledge_reindex" in tool_names
@@ -357,7 +359,7 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Pat
     )
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(vault_indexer, docs_indexer)
+    module = build_module(vault_indexer, docs_indexer, MagicMock())
     _content, structured = await module.mcp.call_tool("knowledge_search", {"query": "B", "k": 1})
     assert structured is not None
 
@@ -429,7 +431,9 @@ async def test_merged_search_returns_hits_from_both_sources(
         collection_base="docs",
     )
 
-    module = build_module(vault_indexer, docs_indexer)
+    module_docs_stub = MagicMock()
+    module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
+    module = build_module(vault_indexer, docs_indexer, module_docs_stub)
     from epicurus_core.contracts import ToolEnvelope
 
     content, _ = await module.mcp.call_tool("knowledge_search", {"query": "platform", "k": 5})
@@ -469,7 +473,9 @@ async def test_reindex_sums_both_sources(
         collection_base="docs",
     )
 
-    module = build_module(vault_indexer, docs_indexer)
+    module_docs_stub = MagicMock()
+    module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
+    module = build_module(vault_indexer, docs_indexer, module_docs_stub)
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]

@@ -76,3 +76,38 @@ async def test_multiple_updates_without_duplicate_rows() -> None:
     await store.set_default("t1", "model-x")
     await store.set_default("t1", "model-y")
     assert await store.get_default("t1") == "model-y"
+
+
+# ── Global embedding default ───────────────────────────────────────────────────
+
+
+async def test_embed_default_defaults_to_none() -> None:
+    store, _ = await _fresh_store()
+    assert await store.get_embed_default("t1") is None
+
+
+async def test_set_and_get_embed_default() -> None:
+    store, _ = await _fresh_store()
+    await store.set_embed_default("t1", "nomic-embed-text")
+    assert await store.get_embed_default("t1") == "nomic-embed-text"
+
+
+async def test_embed_default_is_tenant_scoped() -> None:
+    store, _ = await _fresh_store()
+    await store.set_embed_default("t1", "nomic-embed-text")
+    assert await store.get_embed_default("t2") is None
+
+
+async def test_clear_embed_default() -> None:
+    store, _ = await _fresh_store()
+    await store.set_embed_default("t1", "nomic-embed-text")
+    await store.set_embed_default("t1", None)
+    assert await store.get_embed_default("t1") is None
+
+
+async def test_embed_default_and_chat_default_coexist() -> None:
+    store, _ = await _fresh_store()
+    await store.set_default("t1", "qwen2.5:7b")
+    await store.set_embed_default("t1", "nomic-embed-text")
+    assert await store.get_default("t1") == "qwen2.5:7b"
+    assert await store.get_embed_default("t1") == "nomic-embed-text"

@@ -306,13 +306,33 @@ is a separate, privileged action — see issue #127.)
 - **Endpoint** — `POST /platform/v1/modules/{name}/enabled` with body `{ "enabled": bool }`
   persists the choice (404 for an unknown module).
 - **The module list** (`GET /platform/v1/modules`) carries the flag on each snapshot —
-  `{manifest, status, enabled}` — and **includes disabled modules** so the shell can show
-  the toggle. The shell omits a disabled module's pages from the nav and its entities from
-  the attach menu.
+  `{manifest, status, enabled, disabled_tools}` — and **includes disabled modules** so the
+  shell can show the toggle. The shell omits a disabled module's pages from the nav and its
+  entities from the attach menu.
 - **Invoking a disabled module's tool** through the core returns **403**; the agent never
   sees the tool in the first place.
 - **Tags** — `ModuleManifest.tags` feed the shell's search alongside the name and
   description.
+
+## Per-tool enable/disable (#213)
+
+Within an enabled module the operator can turn off **individual tools** — so, for example,
+a module's destructive tools are hidden from the agent while its read-only ones remain
+available. The module keeps running and other tools are unaffected.
+
+- **Endpoint** — `POST /platform/v1/modules/{name}/tools/{tool}/enabled` with body
+  `{ "enabled": bool }`. **404** unknown module or tool not declared in the manifest.
+- **Persisted** in `module_prefs.disabled_tools` (a JSON list of disabled tool names per
+  `(tenant, module)` row). A tool absent from the list is enabled by default.
+- **The agent never sees a disabled tool.** `McpHost.discover` filters disabled tools
+  from the tool list offered to the LLM; the same filtering applies to the `route` map so
+  a call to a filtered-out tool would return `error: unknown tool` (the model should never
+  reach this path).
+- **The module list snapshot** includes `disabled_tools: list[str]` on each
+  `ModuleSnapshot`; the shell renders each declared tool as a toggleable row — a strikethrough
+  style indicates disabled, and the toggle invokes the endpoint above.
+- **Re-enabling** removes the tool from `disabled_tools` and it reappears immediately in
+  the next `discover` call (no restart needed).
 
 ## Removing a module — confirmed container delete (#127, ADR-0028)
 

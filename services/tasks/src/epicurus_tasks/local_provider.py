@@ -14,6 +14,7 @@ class LocalTasksProvider:
     """Stores tasks in the module's tenant-scoped Postgres table.
 
     ``list_id`` is ignored — the local store has a single, flat list per tenant.
+    All richer fields (status, priority, tags) are fully persisted.
     """
 
     def __init__(self, store: TaskStore) -> None:
@@ -32,9 +33,20 @@ class LocalTasksProvider:
         *,
         notes: str | None = None,
         due: str | None = None,
+        status: str = "open",
+        priority: str | None = None,
+        tags: list[str] | None = None,
         list_id: str | None = None,
     ) -> Task:
-        return await self._store.add_task(tenant_id=tenant_id, title=title, notes=notes, due=due)
+        return await self._store.add_task(
+            tenant_id=tenant_id,
+            title=title,
+            notes=notes,
+            due=due,
+            status=status,
+            priority=priority,
+            tags=tags,
+        )
 
     async def complete_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
@@ -52,11 +64,21 @@ class LocalTasksProvider:
         title: str | None = None,
         notes: str | None = None,
         due: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        tags: list[str] | None = None,
         list_id: str | None = None,
     ) -> Task:
         try:
             return await self._store.update_task(
-                tenant_id=tenant_id, task_id=task_id, title=title, notes=notes, due=due
+                tenant_id=tenant_id,
+                task_id=task_id,
+                title=title,
+                notes=notes,
+                due=due,
+                status=status,
+                priority=priority,
+                tags=tags,
             )
         except KeyError as exc:
             raise ValueError(str(exc)) from exc

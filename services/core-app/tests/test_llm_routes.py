@@ -50,6 +50,7 @@ def test_prefs_routes_present() -> None:
     paths = _app().openapi()["paths"]
     assert "/platform/v1/llm/prefs" in paths
     assert "/platform/v1/llm/prefs/default" in paths
+    assert "/platform/v1/llm/prefs/embed-default" in paths
     assert "/platform/v1/llm/prefs/hidden" in paths
 
 
@@ -71,6 +72,7 @@ async def test_prefs_returns_empty_defaults_without_prefs_store() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["global_default"] is None
+    assert data["global_embed_default"] is None
     assert data["hidden"] == []
 
 
@@ -132,3 +134,49 @@ async def test_prefs_hidden_no_duplicates() -> None:
             "/platform/v1/llm/prefs/hidden", json={"name": "phi3:mini", "hidden": True}
         )
     assert resp.json()["hidden"].count("phi3:mini") == 1
+
+
+# ── Embedding default preference ──────────────────────────────────────────────
+
+
+async def test_prefs_embed_default_initially_null() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/llm/prefs")
+    assert resp.json()["global_embed_default"] is None
+
+
+async def test_prefs_set_and_get_embed_default() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        put = await client.put(
+            "/platform/v1/llm/prefs/embed-default", json={"model": "nomic-embed-text"}
+        )
+        assert put.status_code == 200
+        get = await client.get("/platform/v1/llm/prefs")
+    assert get.json()["global_embed_default"] == "nomic-embed-text"
+
+
+async def test_prefs_clear_embed_default() -> None:
+    prefs = await _fresh_prefs()
+    await prefs.set_embed_default("local", "nomic-embed-text")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        await client.put("/platform/v1/llm/prefs/embed-default", json={"model": None})
+        get = await client.get("/platform/v1/llm/prefs")
+    assert get.json()["global_embed_default"] is None
+
+
+async def test_prefs_embed_default_no_store_returns_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=None)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/llm/prefs/embed-default", json={"model": "nomic-embed-text"}
+        )
+    assert resp.status_code == 503

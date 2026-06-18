@@ -80,7 +80,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.4.0"
+    assert data["version"] == "0.5.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
     # Tasks references tasks (resolver) and is a chat-attachment source (ADR-0019).

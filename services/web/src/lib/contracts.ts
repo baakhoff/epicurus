@@ -19,6 +19,7 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
+  global_embed_default: z.string().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
@@ -217,6 +218,9 @@ export const ModuleSnapshot = z.object({
   // The operator's enable/disable choice (#126). A disabled module is hidden from the
   // agent and the left-nav but still shown on the Modules screen with a re-enable toggle.
   enabled: z.boolean().default(true),
+  // Tool names the operator has explicitly disabled for this module (#213). The agent
+  // never receives a disabled tool; the shell renders each as a toggleable row.
+  disabled_tools: z.array(z.string()).default([]),
 });
 export type ModuleSnapshot = z.infer<typeof ModuleSnapshot>;
 
@@ -272,6 +276,8 @@ export const BoardAction = z
     form: z.boolean().default(false),
     fields: z.array(z.string()).nullish(),
     form_values: z.record(z.string(), z.unknown()).default({}),
+    /** Per-field enum options: the shell renders a <select> for any field listed here. */
+    field_options: z.record(z.string(), z.array(z.string())).optional(),
     confirm: z.string().nullish(),
   })
   .superRefine((action, ctx) => {

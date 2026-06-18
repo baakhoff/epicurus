@@ -79,6 +79,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  setGlobalEmbedDefault: (model: string | null) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/embed-default", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",
@@ -136,6 +141,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ models }),
     }),
+  // Enable or disable a single tool (#213); the module keeps running, other tools unaffected.
+  setToolEnabled: (name: string, tool: string, enabled: boolean) =>
+    request(
+      z.object({ status: z.string() }),
+      `/platform/v1/modules/${encodeURIComponent(name)}/tools/${encodeURIComponent(tool)}/enabled`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
   invokeModuleTool: (name: string, tool: string, args: Record<string, unknown>) =>
     request(
       z.object({ result: z.string() }),

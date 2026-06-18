@@ -28,8 +28,10 @@ class _LlmPrefRow(_PrefBase):
     tenant: Mapped[str] = mapped_column(String(63), primary_key=True)
     # JSON-encoded list of model names the operator has hidden from pickers.
     hidden_models: Mapped[str] = mapped_column(Text, default="[]", server_default="'[]'")
-    # Operator-chosen global default; NULL means fall back to the env default.
+    # Operator-chosen global default for chat; NULL means fall back to the env default.
     global_default: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Operator-chosen global default for embedding; NULL means fall back to the env default.
+    embed_default: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 class LlmPrefsStore:
@@ -79,4 +81,17 @@ class LlmPrefsStore:
         async with self._session() as session:
             row = await self._get_or_create(session, tenant)
             row.global_default = model
+            await session.commit()
+
+    async def get_embed_default(self, tenant: str) -> str | None:
+        """Return the stored global embedding default, or ``None`` if unset."""
+        async with self._session() as session:
+            row = await session.get(_LlmPrefRow, tenant)
+            return row.embed_default if row is not None else None
+
+    async def set_embed_default(self, tenant: str, model: str | None) -> None:
+        """Set or clear the global embedding default for ``tenant``."""
+        async with self._session() as session:
+            row = await self._get_or_create(session, tenant)
+            row.embed_default = model
             await session.commit()

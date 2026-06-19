@@ -152,8 +152,20 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_5_0() -> None:
+async def test_manifest_version_is_0_6_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.5.0"
+    assert manifest.version == "0.6.0"
+
+
+async def test_manifest_declares_gmail_oauth_scopes() -> None:
+    # The Gmail API scopes the shell requests at connect (#241); identity is the core default.
+    provider = _make_provider()
+    manifest = await build_module(provider).manifest()
+    assert manifest.oauth_scopes == {
+        "google": [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+        ]
+    }

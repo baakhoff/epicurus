@@ -132,7 +132,7 @@ Requires client credentials to be configured first (see `PUT /client`).
 | Param | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `tenant_id` | `str` | core default | Which tenant to connect for. |
-| `scope` | `str` | provider default | Additional OAuth scopes to request. |
+| `scope` | `str` | none | Space-separated **API** scopes to request, on top of the default identity scopes. The core always includes the identity scopes and unions `scope` onto them, so a caller passes only the extra scopes (#241). The web shell fills this from the modules' declared `oauth_scopes` (see below). |
 
 **Response**
 
@@ -303,11 +303,25 @@ docker compose exec -e VAULT_TOKEN=$OPENBAO_TOKEN openbao \
 
 ## Incremental scopes
 
-The connect URL always includes `include_granted_scopes=true`.  When a second
-Google module connects, Google returns a token whose scope is the union of the
-new scopes and all previously-granted ones.  The core also unions the new scope
-string with whatever is stored in the vault, so the stored token always
-reflects the full accumulated grant.  This means:
+**Where the API scopes come from (#241).** A module declares the OAuth scopes it needs in
+its manifest — `oauth_scopes: {provider: [scope, …]}` (e.g. calendar →
+`…/auth/calendar`, tasks → `…/auth/tasks`, mail → the Gmail scopes). The web shell reads
+these from the module list and requests them at connect via `?scope=`:
+
+- **Settings → Connect** requests the **union** of every installed module's scopes for the
+  provider, so one connect grants them all.
+- A module card's **Connect** (the connected-accounts section, ADR-0030) requests just that
+  module's scopes — incremental, since the core accumulates (below).
+
+The core always prepends the default **identity** scopes (`openid email profile`) and unions
+the requested API scopes onto them, so a caller never has to repeat the identity scopes and
+can't accidentally drop them.
+
+**How grants accumulate.** The connect URL always includes `include_granted_scopes=true`.
+When a second Google module connects, Google returns a token whose scope is the union of the
+new scopes and all previously-granted ones. The core also unions the new scope string with
+whatever is stored in the vault, so the stored token always reflects the full accumulated
+grant. This means:
 
 - Connecting Calendar then Gmail leaves one Google token valid for both.
 - Disconnecting and reconnecting one module does not lose the other's scopes

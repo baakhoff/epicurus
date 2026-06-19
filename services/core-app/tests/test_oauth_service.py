@@ -140,6 +140,23 @@ async def test_connect_auth_url_includes_offline_access() -> None:
     assert "offline" in result.auth_url
 
 
+async def test_connect_includes_default_identity_scope() -> None:
+    # With no requested scope the default identity scopes are still requested.
+    svc, *_ = _service(secrets_get=CLIENT_CREDS)
+    result = await svc.connect(PROVIDER_GOOGLE, TEST_TENANT)
+    assert "openid" in result.auth_url
+
+
+async def test_connect_unions_requested_scope_onto_default() -> None:
+    # A requested module API scope is added to (not replacing) the identity scopes (#241).
+    svc, *_ = _service(secrets_get=CLIENT_CREDS)
+    result = await svc.connect(
+        PROVIDER_GOOGLE, TEST_TENANT, scope="https://www.googleapis.com/auth/calendar"
+    )
+    assert "openid" in result.auth_url
+    assert "calendar" in result.auth_url
+
+
 # ── handle_callback ──────────────────────────────────────────────────────────
 
 

@@ -23,12 +23,16 @@ from epicurus_mail.provider import MailMessage, MailProvider
 
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
 
-# Scopes the operator must grant when connecting Google for this module.
-GMAIL_REQUIRED_SCOPE = (
-    "openid email profile"
-    " https://www.googleapis.com/auth/gmail.readonly"
-    " https://www.googleapis.com/auth/gmail.send"
-)
+# The Gmail API scopes this module needs (beyond the default identity scopes the core
+# always requests). Declared in the manifest (``oauth_scopes``) so the shell requests them
+# when connecting Google (#241).
+GMAIL_API_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+]
+
+# Full scope set (identity + Gmail) the operator grants when connecting Google for mail.
+GMAIL_REQUIRED_SCOPE = "openid email profile " + " ".join(GMAIL_API_SCOPES)
 
 
 class GmailProvider(MailProvider):

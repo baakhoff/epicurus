@@ -467,10 +467,18 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
     assert manifest.ui.actions == []
 
 
-async def test_manifest_version_is_0_5_1(local_provider: LocalCalendarProvider) -> None:
+async def test_manifest_version_is_0_6_0(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.5.1"
+    assert manifest.version == "0.6.0"
+
+
+async def test_manifest_declares_calendar_oauth_scope(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/calendar"]}
 
 
 async def test_manifest_declares_collections_and_drops_provider_dropdown(

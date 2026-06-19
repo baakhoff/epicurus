@@ -73,8 +73,37 @@ async def test_count(store: LocalEventStore) -> None:
 
 async def test_delete_event(store: LocalEventStore) -> None:
     event = await store.create_event(tenant="t1", title="Gone", start=_dt(9), end=_dt(10))
-    await store.delete_event(tenant="t1", event_id=event.id)
+    assert await store.delete_event(tenant="t1", event_id=event.id) is True
     assert await store.count(tenant="t1") == 0
+
+
+async def test_delete_missing_event_returns_false(store: LocalEventStore) -> None:
+    assert await store.delete_event(tenant="t1", event_id="nope") is False
+
+
+async def test_update_event_applies_partial_fields(store: LocalEventStore) -> None:
+    event = await store.create_event(
+        tenant="t1", title="Old", start=_dt(9), end=_dt(10), description="d", location="here"
+    )
+    updated = await store.update_event(tenant="t1", event_id=event.id, title="New", start=_dt(11))
+    assert updated is not None
+    assert updated.title == "New"
+    assert updated.start == _dt(11)
+    assert updated.end == _dt(10)  # unchanged
+    assert updated.description == "d"  # unchanged
+    assert updated.location == "here"  # unchanged
+
+
+async def test_update_missing_event_returns_none(store: LocalEventStore) -> None:
+    assert await store.update_event(tenant="t1", event_id="nope", title="x") is None
+
+
+async def test_update_event_is_tenant_scoped(store: LocalEventStore) -> None:
+    created = await store.create_event(tenant="t1", title="Owned", start=_dt(9), end=_dt(10))
+    # Another tenant must not edit t1's event.
+    assert await store.update_event(tenant="t2", event_id=created.id, title="Hacked") is None
+    still = await store.get_event(tenant="t1", event_id=created.id)
+    assert still is not None and still.title == "Owned"
 
 
 async def test_get_event_returns_match(store: LocalEventStore) -> None:

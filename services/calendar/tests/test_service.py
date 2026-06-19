@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
@@ -338,6 +339,44 @@ class _MockGoogleProvider(CalendarProvider):
         self.events.append(event)
         return event
 
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+    ) -> Event | None:
+        for i, e in enumerate(self.events):
+            if e.id == event_id:
+                updated = e.model_copy(
+                    update={
+                        k: v
+                        for k, v in {
+                            "title": title,
+                            "start": start,
+                            "end": end,
+                            "description": description,
+                            "location": location,
+                        }.items()
+                        if v is not None
+                    }
+                )
+                self.events[i] = updated
+                return updated
+        return None
+
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:
+        before = len(self.events)
+        self.events = [e for e in self.events if e.id != event_id]
+        return len(self.events) < before
+
     async def find_free_slots(
         self,
         *,
@@ -467,10 +506,10 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
     assert manifest.ui.actions == []
 
 
-async def test_manifest_version_is_0_5_1(local_provider: LocalCalendarProvider) -> None:
+async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.5.1"
+    assert manifest.version == "0.6.0"
 
 
 async def test_manifest_declares_collections_and_drops_provider_dropdown(
@@ -585,6 +624,31 @@ async def test_router_get_event_searches_enabled_and_local() -> None:
     assert found is not None
     assert found.title == "G"
     assert await router.get_event(tenant_id="t1", event_id="missing") is None
+
+
+async def test_router_updates_event_where_it_lives() -> None:
+    # An event on an enabled (non-active) Google calendar is edited there, not on the
+    # active/local default — the router writes where the event lives (#208).
+    router, _local, google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    g = await google.create_event(tenant_id="t1", title="Old", start=_dt(9), end=_dt(10))
+    updated = await router.update_event(tenant_id="t1", event_id=g.id, title="New")
+    assert updated is not None
+    assert updated.title == "New"
+    assert google.events[0].title == "New"
+
+
+async def test_router_update_missing_event_returns_none() -> None:
+    router, _local, _google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    assert await router.update_event(tenant_id="t1", event_id="nope", title="x") is None
+
+
+async def test_router_deletes_event_where_it_lives() -> None:
+    router, _local, google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    g = await google.create_event(tenant_id="t1", title="Gone", start=_dt(9), end=_dt(10))
+    assert await router.delete_event(tenant_id="t1", event_id=g.id) is True
+    assert google.events == []
+    # A second delete finds nothing anywhere → False.
+    assert await router.delete_event(tenant_id="t1", event_id=g.id) is False
 
 
 async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:
@@ -738,3 +802,103 @@ async def test_manifest_declares_calendar_page(
     assert CALENDAR_PAGE_ID in pages
     assert pages[CALENDAR_PAGE_ID].archetype == "calendar"
     assert pages[CALENDAR_PAGE_ID].icon == "calendar"
+
+
+# ── Editable calendar: update / delete tools + page actions (#208) ────────────
+
+
+async def test_calendar_update_event_tool_edits_in_place(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Old", start=_dt(9), end=_dt(10)
+    )
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": created.id, "title": "New", "start": "2025-06-15T11:00:00+00:00"},
+    )
+    result = _extract(structured)
+    assert result["title"] == "New"
+    assert datetime.fromisoformat(result["start"]) == _dt(11)
+    assert datetime.fromisoformat(result["end"]) == _dt(10)  # unchanged
+
+
+async def test_calendar_update_event_tool_unknown_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    with pytest.raises(ToolError):  # MCP surfaces the ValueError as a ToolError
+        await module.mcp.call_tool("calendar_update_event", {"event_id": "nope", "title": "x"})
+
+
+async def test_calendar_delete_event_tool_removes(local_provider: LocalCalendarProvider) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Bye", start=_dt(9), end=_dt(10)
+    )
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_delete_event", {"event_id": created.id}
+    )
+    result = _extract(structured)
+    assert result["deleted"] is True
+    assert await local_provider.get_event(tenant_id="t1", event_id=created.id) is None
+
+
+async def test_calendar_delete_event_tool_unknown_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    with pytest.raises(ToolError):
+        await module.mcp.call_tool("calendar_delete_event", {"event_id": "nope"})
+
+
+async def test_calendar_create_event_declares_datetime_format(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # start/end surface as ISO date-time strings so the core form renders a picker (#208).
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    tool = next(t for t in manifest.tools if t.name == "calendar_create_event")
+    props = tool.input_schema["properties"]
+    assert props["start"]["format"] == "date-time"
+    assert props["end"]["format"] == "date-time"
+
+
+async def test_calendar_page_declares_new_event_action(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    data = await calendar_page(local_provider, tenant_id="t1")
+    actions = data["actions"]
+    assert [a["tool"] for a in actions] == ["calendar_create_event"]
+    new = actions[0]
+    assert new["form"] is True
+    assert new["fields"] == ["title", "start", "end", "location", "description"]
+    # The default time is prefilled so the picker opens on a sensible slot.
+    assert "start" in new["form_values"] and "end" in new["form_values"]
+
+
+async def test_calendar_page_events_carry_edit_and_delete_actions(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Editable", start=_dt(9), end=_dt(10), location="Room 1"
+    )
+    data = await calendar_page(
+        local_provider,
+        tenant_id="t1",
+        start="2025-06-15T00:00:00+00:00",
+        end="2025-06-16T00:00:00+00:00",
+    )
+    ev = next(e for e in data["events"] if e["id"] == created.id)
+    tools = {a["tool"]: a for a in ev["actions"]}
+    assert set(tools) == {"calendar_update_event", "calendar_delete_event"}
+    edit = tools["calendar_update_event"]
+    assert edit["form"] is True
+    assert edit["args"] == {"event_id": created.id}
+    assert edit["form_values"]["title"] == "Editable"
+    assert edit["form_values"]["location"] == "Room 1"
+    delete = tools["calendar_delete_event"]
+    assert delete["intent"] == "danger"
+    assert delete["confirm"]  # required for a danger action
+    assert delete["args"] == {"event_id": created.id}

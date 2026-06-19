@@ -14,7 +14,9 @@ import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
-import { CalendarData, type CalendarEvent } from "@/lib/contracts";
+import { CalendarData, type BoardAction, type CalendarEvent } from "@/lib/contracts";
+
+import { ActionControl } from "./ActionControl";
 
 type ViewMode = "month" | "week" | "agenda";
 
@@ -114,6 +116,9 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
         view={view}
         label={periodLabel(view, cursor)}
         fetching={query.isFetching}
+        actions={data?.actions ?? []}
+        module={module}
+        pageId={pageId}
         onView={setView}
         onPrev={() => setCursor((c) => step(view, c, -1))}
         onNext={() => setCursor((c) => step(view, c, 1))}
@@ -140,7 +145,14 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
         )}
       </div>
 
-      {selected && <EventDetail ev={selected} onClose={() => setSelected(null)} />}
+      {selected && (
+        <EventDetail
+          ev={selected}
+          module={module}
+          pageId={pageId}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   );
 }
@@ -151,6 +163,9 @@ function Toolbar({
   view,
   label,
   fetching,
+  actions,
+  module,
+  pageId,
   onView,
   onPrev,
   onNext,
@@ -159,6 +174,9 @@ function Toolbar({
   view: ViewMode;
   label: string;
   fetching: boolean;
+  actions: BoardAction[];
+  module: string;
+  pageId: string;
   onView: (v: ViewMode) => void;
   onPrev: () => void;
   onNext: () => void;
@@ -188,6 +206,15 @@ function Toolbar({
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Page-level actions (e.g. "New event") — core-rendered from the page data (#208). */}
+        {actions.map((action) => (
+          <ActionControl
+            key={action.tool + action.label}
+            module={module}
+            pageId={pageId}
+            action={action}
+          />
+        ))}
         <button
           onClick={onToday}
           className="rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs text-ink-dim hover:border-accent hover:text-accent-strong"
@@ -441,7 +468,17 @@ function whenLabel(ev: CalendarEvent): string {
   return `${startDay} ${fmtTime(ev.start)} → ${ev.end.toLocaleDateString(undefined, dayFmt)} ${fmtTime(ev.end)}`;
 }
 
-function EventDetail({ ev, onClose }: { ev: CalendarEvent; onClose: () => void }) {
+function EventDetail({
+  ev,
+  module,
+  pageId,
+  onClose,
+}: {
+  ev: CalendarEvent;
+  module: string;
+  pageId: string;
+  onClose: () => void;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -479,6 +516,20 @@ function EventDetail({ ev, onClose }: { ev: CalendarEvent; onClose: () => void }
           </p>
         )}
         {ev.provider && <p className="mt-4 text-xs text-ink-faint">via {ev.provider}</p>}
+        {ev.actions.length > 0 && (
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-edge pt-3">
+            {ev.actions.map((action) => (
+              <ActionControl
+                key={action.tool + action.label}
+                module={module}
+                pageId={pageId}
+                action={action}
+                compact
+                onSuccess={onClose}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

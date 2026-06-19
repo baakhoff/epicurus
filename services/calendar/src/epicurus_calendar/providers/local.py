@@ -67,6 +67,33 @@ class LocalCalendarProvider(CalendarProvider):
             location=location,
         )
 
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+    ) -> Event | None:
+        return await self._store.update_event(
+            tenant=tenant_id,
+            event_id=event_id,
+            title=title,
+            start=start,
+            end=end,
+            description=description,
+            location=location,
+        )
+
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:
+        return await self._store.delete_event(tenant=tenant_id, event_id=event_id)
+
     async def find_free_slots(
         self,
         *,

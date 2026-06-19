@@ -226,7 +226,10 @@ function ModuleCollections({ snapshot }: { snapshot: ModuleSnapshot }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-collections", name] }),
   });
   const connect = useMutation({
-    mutationFn: (provider: string) => api.oauthConnect(provider),
+    // Request this module's own API scopes for the provider (#241); the core unions them
+    // onto the default identity scopes and accumulates any previously-granted ones.
+    mutationFn: (provider: string) =>
+      api.oauthConnect(provider, (snapshot.manifest.oauth_scopes?.[provider] ?? []).join(" ") || undefined),
     onSuccess: (res) => {
       window.location.href = res.auth_url;
     },

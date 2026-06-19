@@ -158,17 +158,13 @@ task up          # or: docker compose up -d
 
 Before the module can access Gmail the operator must:
 
-1. Connect a Google account **with Gmail scopes**.  The default Google OAuth
-   connect flow requests only `openid email profile`.  Pass the Gmail scopes
-   explicitly:
-
-   ```
-   GET /platform/v1/oauth/google/connect
-     ?scope=openid%20email%20profile%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send
-   ```
-
-   The exact scopes are also available as `GMAIL_REQUIRED_SCOPE` in
-   `epicurus_mail.gmail`.
+1. Connect a Google account from the web shell (**Settings → Connect**, or the
+   **Connect** button on a Google-backed module card). The Gmail scopes are requested
+   **automatically** (#241): mail declares them in its manifest (`oauth_scopes`), and the
+   shell passes them at connect — Settings requests the union across every module, so one
+   connect grants Calendar / Tasks / Gmail together. The scopes are
+   `https://www.googleapis.com/auth/gmail.readonly` and `…/gmail.send` (exported as
+   `GMAIL_API_SCOPES` in `epicurus_mail.gmail`); the core adds the default identity scopes.
 
 2. Ensure the Gmail API is enabled in the Google Cloud project associated with
    the OAuth client credentials (see [OAuth operator setup](../reference/oauth.md#operator-setup-google)).

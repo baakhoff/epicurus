@@ -71,7 +71,7 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.5.1",
+        version="0.6.0",
         description=(
             "Provider-neutral calendar: list events, create events, and find"
             " free time slots. Backed by a local store (no account needed) plus"
@@ -113,6 +113,10 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
         # Google calendars the operator toggles/switches. Calendar overlays every enabled
         # calendar on read (multi) and writes to the active one. Serves GET /accounts.
         collections=CollectionsSpec(noun="calendar", multi=True, providers=["google"]),
+        # The Google API scope the shell requests when connecting an account (#241); the
+        # core adds the default identity scopes. Without this, connecting grants only an
+        # identity token and the Calendar API returns 403.
+        oauth_scopes={"google": ["https://www.googleapis.com/auth/calendar"]},
     )
 
     @module.tool()

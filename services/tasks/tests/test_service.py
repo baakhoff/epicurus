@@ -48,8 +48,10 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.6.0"
+    assert manifest.version == "0.7.0"
     assert manifest.contract_version == CONTRACT_VERSION
+    # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
+    assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
     tool_names = {t.name for t in manifest.tools}
     assert tool_names == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
     # The Tasks left-nav page is declared as a core `board` archetype (ADR-0018).

@@ -9,7 +9,7 @@ shell renders it. No markup ever leaves this module.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from epicurus_core import (
@@ -35,6 +35,11 @@ log = get_logger("epicurus_tasks.service")
 
 MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
+
+# An async hook returning the operator's enabled writable lists as ``(id, title)`` pairs.
+# Backs the ``tasks_lists`` tool so the chat agent can discover lists and pick one when
+# adding/moving (the web pickers get the same data via the page). ``None`` in unit tests.
+ListCategories = Callable[[], Awaitable[list[tuple[str, str]]]]
 """The id of the Tasks left-nav page; forms its nav route and data path."""
 
 # The external providers the tasks module can connect (ADR-0030); ``local`` is the
@@ -68,15 +73,27 @@ def _parse_tags(raw: str | None) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
+def build_module(
+    provider: TasksProvider,
+    *,
+    tenant_id: str,
+    categories: ListCategories | None = None,
+) -> EpicurusModule:
     """Register the provider-agnostic task tools and the Tasks page on the module.
 
     The tools are closed over *provider* and *tenant_id* at build time so the
     MCP tool signatures stay clean (no plumbing arguments leaked to the agent).
+
+    Args:
+        provider: The tasks backend (the ``TasksRouter`` in the running service).
+        tenant_id: Default tenant for all tool calls.
+        categories: Optional async hook returning the operator's enabled writable lists as
+            ``(id, title)`` pairs; backs the ``tasks_lists`` discovery tool. ``None`` (unit
+            tests / no external account) makes ``tasks_lists`` report only the default list.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.0",
+        version="0.9.0",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -140,6 +157,23 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         return tool_envelope(text, refs)
 
     @module.tool()
+    async def tasks_lists() -> str:
+        """List the task lists (categories) available to add to or move tasks between.
+
+        Call this before adding when the user hasn't named a list: if more than one list
+        is shown, ask which one and pass its id as ``list_id`` to ``tasks_add`` (or as
+        ``to_list_id`` to ``tasks_update`` to move a task). Omitting the id uses the
+        default list.
+
+        Returns the available lists as ``- <title> — id: <id>`` lines.
+        """
+        options = await categories() if categories is not None else []
+        if not options:
+            return "Only the default task list is available — add tasks without a list_id."
+        lines = [f"- {title} — id: {list_id}" for list_id, title in options]
+        return "Available task lists:\n" + "\n".join(lines)
+
+    @module.tool()
     async def tasks_add(
         title: str,
         notes: str | None = None,
@@ -150,6 +184,9 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         list_id: str | None = None,
     ) -> Task:
         """Create a new task.
+
+        If more than one task list exists and the user hasn't said which to use, call
+        ``tasks_lists`` first and ask which list, then pass its id as ``list_id``.
 
         Args:
             title: Task title (required).
@@ -214,11 +251,16 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         tags: str | None = None,
         status: str | None = None,
         list_id: str | None = None,
+        to_list_id: str | None = None,
     ) -> Task:
         """Edit an existing task's title, notes, due date, priority, tags, or status.
 
         Only the fields you pass are changed; omitted fields keep their current
         value. To mark a task done use ``tasks_complete`` — this tool edits content.
+
+        To **move** the task to another list, pass ``to_list_id`` (a list id from
+        ``tasks_lists``). On Google Tasks a move recreates the task in the target list —
+        it gets a new id, and subtasks/ordering aren't carried over.
 
         Args:
             task_id: The provider-specific task identifier (from ``tasks_list``).
@@ -232,7 +274,9 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 unchanged.  Google Tasks ignores this field.
             status: New status (``"open"``/``"in_progress"``/``"done"``).  Omit to
                 leave unchanged.
-            list_id: The list containing the task.  Omit for the default list.
+            list_id: The list the task currently lives in.  Omit for the default list.
+            to_list_id: Move the task to this list.  Omit to leave it where it is; when
+                equal to its current list it's a no-op move (a normal edit).
 
         Returns the updated :class:`Task`.
         """
@@ -256,6 +300,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
                 priority=priority,
                 tags=tag_list,
                 list_id=list_id,
+                to_list_id=to_list_id,
             )
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
@@ -366,12 +411,16 @@ def _bucket_for(task: Task, today: str) -> str:
     return "Upcoming"
 
 
-def _task_card(task: Task, bucket: str) -> dict[str, Any]:
+def _task_card(
+    task: Task, bucket: str, *, move_lists: list[tuple[str, str]] | None = None
+) -> dict[str, Any]:
     """One board card: the task plus its complete / edit actions.
 
     Each card carries ``list_id`` (the list the task belongs to) in its action args so a
     Complete / Edit routes back to the owning list when the board aggregates several lists
-    (ADR-0036); a per-card category tag names that list.
+    (ADR-0036); a per-card category tag names that list. When *move_lists* is given (more
+    than one writable list exists) the Edit form gains a **List** picker, prefilled to the
+    task's current list, that moves the task when changed (ADR-0038).
     """
     badges: list[dict[str, str]] = []
     if task.due:
@@ -384,6 +433,38 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
         badges.append({"label": task.list_title, "tone": "dim"})
 
     args = {"task_id": task.id, "list_id": task.list_id}
+    edit_action: dict[str, Any] = {
+        "tool": "tasks_update",
+        "label": "Edit",
+        "icon": "pencil",
+        "form": True,
+        "fields": ["title", "notes", "due", "priority", "tags", "status"],
+        "field_options": _TASK_FIELD_OPTIONS,
+        "args": args,
+        "form_values": {
+            "title": task.title,
+            "notes": task.notes or "",
+            "due": task.due or "",
+            "priority": task.priority or "",
+            "tags": ", ".join(task.tags),
+            "status": task.status,
+        },
+    }
+    if move_lists:
+        # The List picker is the move target (`to_list_id`); the source stays in `args`.
+        edit_action["fields"] = [
+            "title",
+            "to_list_id",
+            "notes",
+            "due",
+            "priority",
+            "tags",
+            "status",
+        ]
+        edit_action["field_choices"] = {
+            "to_list_id": [{"value": list_id, "label": title} for list_id, title in move_lists],
+        }
+        edit_action["form_values"]["to_list_id"] = task.list_id or ""
     return {
         "id": task.id,
         "title": task.title,
@@ -396,23 +477,7 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
                 "icon": "check",
                 "args": args,
             },
-            {
-                "tool": "tasks_update",
-                "label": "Edit",
-                "icon": "pencil",
-                "form": True,
-                "fields": ["title", "notes", "due", "priority", "tags", "status"],
-                "field_options": _TASK_FIELD_OPTIONS,
-                "args": args,
-                "form_values": {
-                    "title": task.title,
-                    "notes": task.notes or "",
-                    "due": task.due or "",
-                    "priority": task.priority or "",
-                    "tags": ", ".join(task.tags),
-                    "status": task.status,
-                },
-            },
+            edit_action,
         ],
     }
 
@@ -430,12 +495,16 @@ def build_tasks_board(
     bucketing is unit-testable without a clock. Empty columns are dropped; a board-level
     **Add task** action is always offered. When *lists* (``(list_id, title)`` pairs for the
     operator's enabled writable lists) is given, the Add form gains a list (category) picker
-    preselecting *default_list_id*; with none, adds go to the default list.
+    preselecting *default_list_id*; with none, adds go to the default list. With **two or
+    more** lists each task's Edit form also gains a List picker that moves it (ADR-0038).
     """
+    # A move needs somewhere to move to, so the per-task List picker appears only with ≥2
+    # writable lists. (Local-only tasks never reach here with a picker — see ADR-0038.)
+    move_lists = lists if lists and len(lists) >= 2 else None
     grouped: dict[str, list[dict[str, Any]]] = {bucket: [] for bucket in _BUCKET_ORDER}
     for task in tasks:
         bucket = _bucket_for(task, today)
-        grouped[bucket].append(_task_card(task, bucket))
+        grouped[bucket].append(_task_card(task, bucket, move_lists=move_lists))
 
     columns = [
         {

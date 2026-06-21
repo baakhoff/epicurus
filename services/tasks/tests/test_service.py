@@ -48,12 +48,18 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.8.0"
+    assert manifest.version == "0.9.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
     tool_names = {t.name for t in manifest.tools}
-    assert tool_names == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
+    assert tool_names == {
+        "tasks_list",
+        "tasks_lists",
+        "tasks_add",
+        "tasks_complete",
+        "tasks_update",
+    }
     # The Tasks left-nav page is declared as a core `board` archetype (ADR-0018).
     pages = {p.id: p for p in manifest.pages}
     assert pages["board"].archetype == "board"
@@ -353,6 +359,8 @@ class _FakeGoogleTasks:
         self.list_ids_seen: list[str | None] = []
         self.fail_lists: set[str | None] = set()
         self.fail_titles = False
+        self.add_targets: list[str | None] = []  # list ids add_task was routed to
+        self.deleted: list[tuple[str | None, str]] = []  # (list_id, task_id) deletes
 
     def provider_name(self) -> str:
         return "google"
@@ -379,6 +387,7 @@ class _FakeGoogleTasks:
         self, tenant_id: str, title: str, *, list_id: str | None = None, **kw: Any
     ) -> Task:
         self.last_list_id = list_id
+        self.add_targets.append(list_id)
         created = Task(id="g1", title=title)
         self.tasks.append(created)
         return created
@@ -388,6 +397,12 @@ class _FakeGoogleTasks:
     ) -> Task:
         self.last_list_id = list_id
         return Task(id=task_id, title="done", status="done")
+
+    async def delete_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> None:
+        self.deleted.append((list_id, task_id))
+        self.tasks = [t for t in self.tasks if t.id != task_id]
 
     async def update_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None, **kw: Any
@@ -566,3 +581,87 @@ async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:
     await local.add_task(TENANT, "Survives")
     tasks = await router.list_tasks(TENANT)
     assert [t.title for t in tasks] == ["Survives"]
+
+
+# ── Moving a task between lists (to_list_id, ADR-0038) ─────────────────────────
+
+
+async def test_router_update_moves_task_between_lists() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks = [Task(id="d1", title="Move me", notes="n")]
+    moved = await router.update_task(TENANT, "d1", list_id="@default", to_list_id="work")
+    # Recreated in the target list and deleted from the source (Google has no move API).
+    assert "work" in google.add_targets
+    assert ("@default", "d1") in google.deleted
+    # The returned task is stamped with its new list (category).
+    assert moved.list_id == "work"
+    assert moved.list_title == "Work"
+
+
+async def test_router_update_in_place_when_target_equals_source() -> None:
+    refs = [CollectionRef(account="google", collection="work")]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks = [Task(id="w1", title="Stay")]
+    await router.update_task(TENANT, "w1", list_id="work", to_list_id="work")
+    # Same list → a normal in-place edit, never a recreate/delete.
+    assert google.deleted == []
+    assert google.add_targets == []
+
+
+async def test_router_update_move_missing_task_raises() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, _google = await _local_router(CollectionPrefs(enabled=refs))
+    with pytest.raises(ValueError):
+        await router.update_task(TENANT, "nope", list_id="@default", to_list_id="work")
+
+
+async def test_tasks_update_tool_moves_via_router() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks = [Task(id="d1", title="Move me")]
+    module = build_module(router, tenant_id=TENANT)
+    await module.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": "d1", "list_id": "@default", "to_list_id": "work"}
+    )
+    assert ("@default", "d1") in google.deleted
+    assert "work" in google.add_targets
+
+
+async def test_local_provider_delete_task() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = TaskStore(engine)
+    await store.init()
+    local = LocalTasksProvider(store)
+    created = await local.add_task(TENANT, "Bye")
+    await local.delete_task(TENANT, created.id)
+    assert await local.get_task(TENANT, created.id) is None
+
+
+# ── tasks_lists discovery tool (so the agent can pick a list, #257) ────────────
+
+
+async def test_tasks_lists_tool_reports_categories() -> None:
+    async def cats() -> list[tuple[str, str]]:
+        return [("@default", "My Tasks"), ("work", "Work")]
+
+    module = build_module(_FakeGoogleTasks(), tenant_id=TENANT, categories=cats)
+    content, _ = await module.mcp.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
+    text = content[0].text
+    assert "My Tasks — id: @default" in text
+    assert "Work — id: work" in text
+
+
+async def test_tasks_lists_tool_reports_default_only_without_categories() -> None:
+    module = build_module(_FakeGoogleTasks(), tenant_id=TENANT)  # no discovery hook
+    content, _ = await module.mcp.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
+    assert "default task list" in content[0].text.lower()

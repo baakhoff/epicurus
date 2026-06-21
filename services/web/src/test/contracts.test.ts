@@ -7,10 +7,12 @@ import {
   BoardData,
   BrowserData,
   CalendarData,
+  CalendarEvent,
   MessageRecord,
   ModuleSnapshot,
   PageSpec,
   Readiness,
+  parseEventDate,
 } from "@/lib/contracts";
 
 describe("contracts", () => {
@@ -272,5 +274,33 @@ describe("contracts", () => {
 
   it("defaults calendar events to empty (a quiet calendar stays valid)", () => {
     expect(CalendarData.parse({}).events).toEqual([]);
+  });
+
+  it("parses an all-day event as a floating local date (no one-day-early shift)", () => {
+    // The module sends an all-day endpoint as a bare date; it must land on that calendar
+    // day in every timezone — never the day before (the bug a UTC instant caused).
+    const ev = CalendarEvent.parse({
+      id: "e1",
+      title: "Holiday",
+      start: "2026-06-15",
+      end: "2026-06-16",
+      all_day: true,
+    });
+    expect(ev.all_day).toBe(true);
+    expect(ev.start.getFullYear()).toBe(2026);
+    expect(ev.start.getMonth()).toBe(5); // June (0-based) — not shifted to May/14th
+    expect(ev.start.getDate()).toBe(15);
+    expect(ev.start.getHours()).toBe(0); // local midnight, not a UTC instant
+  });
+
+  it("parseEventDate keeps a timed instant but floats an all-day date", () => {
+    // Timed: a real instant (UTC here) — read in local zone like any calendar.
+    expect(parseEventDate("2026-06-15T09:00:00Z", false).getTime()).toBe(
+      new Date("2026-06-15T09:00:00Z").getTime(),
+    );
+    // All-day: built from the local date parts, so the calendar day never shifts.
+    const allDay = parseEventDate("2026-06-15", true);
+    expect(allDay.getDate()).toBe(15);
+    expect(allDay.getMonth()).toBe(5);
   });
 });

@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
@@ -122,6 +123,61 @@ async def test_get_event_is_tenant_scoped(store: LocalEventStore) -> None:
     created = await store.create_event(tenant="t1", title="Owned", start=_dt(9), end=_dt(10))
     # Another tenant must not resolve t1's event id.
     assert await store.get_event(tenant="t2", event_id=created.id) is None
+
+
+async def test_all_day_event_round_trips(store: LocalEventStore) -> None:
+    created = await store.create_event(
+        tenant="t1",
+        title="Holiday",
+        start=datetime(2026, 6, 15, tzinfo=UTC),
+        end=datetime(2026, 6, 16, tzinfo=UTC),
+        all_day=True,
+    )
+    assert created.all_day is True
+    fetched = await store.get_event(tenant="t1", event_id=created.id)
+    assert fetched is not None and fetched.all_day is True
+
+
+async def test_timed_event_defaults_all_day_false(store: LocalEventStore) -> None:
+    created = await store.create_event(tenant="t1", title="Call", start=_dt(9), end=_dt(10))
+    assert created.all_day is False
+
+
+async def test_init_heals_table_missing_all_day_column() -> None:
+    """A table provisioned before ``all_day`` existed is reconciled in place on init.
+
+    Mirrors the tasks #248 drift fix: ``create_all`` never alters an existing table, so
+    ``_ensure_columns`` must add the column or every local event read 500s. A legacy row
+    reads back with ``all_day`` defaulted to ``False`` (NULL coerced).
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    # Build the pre-all_day schema and seed a row, bypassing the ORM model.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE calendar_events ("
+                "id INTEGER PRIMARY KEY, tenant VARCHAR(63), event_id VARCHAR(64),"
+                "title VARCHAR(512), start_dt DATETIME, end_dt DATETIME,"
+                "description TEXT, location VARCHAR(512), created_at DATETIME)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO calendar_events (tenant, event_id, title, start_dt, end_dt)"
+                " VALUES ('t1', 'legacy-1', 'Old event', '2026-06-15 09:00:00',"
+                " '2026-06-15 10:00:00')"
+            )
+        )
+
+    store = LocalEventStore(engine)
+    await store.init()  # adds the missing all_day column
+
+    fetched = await store.get_event(tenant="t1", event_id="legacy-1")
+    assert fetched is not None
+    assert fetched.title == "Old event"
+    assert fetched.all_day is False  # NULL legacy value coerced to False
+    # init() is idempotent — a second call must not fail trying to re-add the column.
+    await store.init()
 
 
 # ── LocalCalendarProvider ────────────────────────────────────────────────────

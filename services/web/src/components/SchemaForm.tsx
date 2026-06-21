@@ -21,12 +21,18 @@ interface PropertySchema {
   // Display labels parallel to ``enum`` (a labeled <select>); falls back to the value.
   enumLabels?: string[];
   format?: string;
+  // Names a sibling boolean field that, when true, renders this date-time field as a
+  // *date* picker emitting a ``YYYY-MM-DD`` value (the calendar's all-day toggle).
+  date_toggle?: string;
   minimum?: number;
   maximum?: number;
   // An optional field (e.g. Python ``str | None``) arrives as ``anyOf`` of the real
   // member plus ``{type: "null"}``; ``resolveProp`` collapses it to the real member.
   anyOf?: PropertySchema[];
 }
+
+/** A bare floating date, ``YYYY-MM-DD``. */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface ObjectSchema {
   type?: string;
@@ -58,6 +64,14 @@ function toLocalInput(value: unknown): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** A ``date`` input value (``YYYY-MM-DD``) from either a floating date or an ISO datetime. */
+function toDateInput(value: unknown): string {
+  if (typeof value !== "string" || !value) return "";
+  if (DATE_ONLY.test(value)) return value; // already a floating date — never shift it
+  const local = toLocalInput(value); // ISO datetime → local wall time → take the date part
+  return local ? local.slice(0, 10) : "";
+}
+
 /** A ``datetime-local`` value (browser-zone wall time) → ISO-8601 UTC for the tool. */
 function fromLocalInput(local: string): string {
   const d = new Date(local);
@@ -81,12 +95,15 @@ function FieldFor({
   prop,
   required,
   value,
+  values,
   onChange,
 }: {
   name: string;
   prop: PropertySchema;
   required: boolean;
   value: unknown;
+  /** All current form values — so a field can react to a sibling (e.g. the all-day toggle). */
+  values: FormValues;
   onChange: (next: unknown) => void;
 }) {
   const title = (prop.title ?? name) + (required ? " *" : "");
@@ -125,18 +142,21 @@ function FieldFor({
   }
 
   if (prop.format === "date-time" || prop.format === "date") {
-    const isDate = prop.format === "date";
+    // A date-time field collapses to a date picker when its `date_toggle` sibling is on
+    // (the all-day toggle) or when it is a plain `date` field; it then emits a floating
+    // `YYYY-MM-DD` value, which the shell never timezone-shifts.
+    const asDate = prop.format === "date" || (!!prop.date_toggle && Boolean(values[prop.date_toggle]));
     return (
       <div>
         <Label hint={prop.description}>{title}</Label>
         <TextInput
-          type={isDate ? "date" : "datetime-local"}
+          type={asDate ? "date" : "datetime-local"}
           aria-label={title}
-          value={isDate ? String(value ?? "") : toLocalInput(value)}
+          value={asDate ? toDateInput(value) : toLocalInput(value)}
           onChange={(e) => {
             const raw = e.target.value;
             if (raw === "") return onChange("");
-            onChange(isDate ? raw : fromLocalInput(raw));
+            onChange(asDate ? raw : fromLocalInput(raw));
           }}
         />
       </div>
@@ -261,6 +281,7 @@ export function SchemaForm({
           prop={resolveProp(prop)}
           required={required.has(name)}
           value={values[name]}
+          values={values}
           onChange={(next) => setValues((prev) => ({ ...prev, [name]: next }))}
         />
       ))}

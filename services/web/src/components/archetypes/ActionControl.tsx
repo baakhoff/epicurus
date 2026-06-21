@@ -48,8 +48,8 @@ function pickSchema(
   const picked: NonNullable<ObjectSchema["properties"]> = {};
   for (const key of keys) {
     const base = properties[key] ?? {};
-    const opts = fieldOptions?.[key];
     const choices = fieldChoices?.[key];
+    const opts = fieldOptions?.[key];
     // Overlay field_choices / field_options as an enum so SchemaForm renders a <select>.
     // Flatten to a plain string enum (dropping any `anyOf` from an optional param) so the
     // enum survives `resolveProp`; carry labels for field_choices.

@@ -12,11 +12,30 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, DateTime, String, Text, UniqueConstraint, delete, func, select
+from sqlalchemy import (
+    Boolean,
+    CursorResult,
+    DateTime,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    func,
+    inspect,
+    select,
+)
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_calendar.models import Event
+from epicurus_core import get_logger
+
+log = get_logger("epicurus_calendar.db")
+
+# Columns added after the table's first release; reconciled in place at startup by
+# ``LocalEventStore._ensure_columns`` (the store has no migration framework).
+_ADDED_COLUMNS = ("all_day",)
 
 
 class _Base(DeclarativeBase):
@@ -37,6 +56,10 @@ class _StoredEvent(_Base):
     end_dt: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # All-day (date-only) event — ``start_dt``/``end_dt`` are UTC-midnight day boundaries
+    # with ``end_dt`` exclusive (see ``Event.all_day``). Added after first release, so it
+    # is reconciled in place by ``_ensure_columns``; existing rows read NULL → False.
+    all_day: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -48,9 +71,33 @@ class LocalEventStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the ``calendar_events`` table if it does not exist."""
+        """Create the ``calendar_events`` table, then add any later-added columns."""
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
+
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Idempotently add columns introduced after the table's first release.
+
+        There is no migration framework — the store uses ``create_all``, which builds a
+        missing table but never alters an existing one. On a database provisioned before
+        ``all_day`` was added, every local event read would 500 on Postgres with
+        ``column calendar_events.all_day does not exist``. This adds the column in place,
+        compiling a per-dialect type so it is portable across Postgres and the tests'
+        SQLite. Additive only — mirrors ``TaskStore._ensure_columns`` (same drift class).
+        Existing rows read NULL, coerced to ``False`` in ``_row_to_event``.
+        """
+        inspector = inspect(sync_conn)
+        existing = {col["name"] for col in inspector.get_columns(_StoredEvent.__tablename__)}
+        for name in _ADDED_COLUMNS:
+            if name in existing:
+                continue
+            type_sql = _StoredEvent.__table__.c[name].type.compile(dialect=sync_conn.dialect)
+            sync_conn.exec_driver_sql(
+                f"ALTER TABLE {_StoredEvent.__tablename__} ADD COLUMN {name} {type_sql}"
+            )
+            log.info("reconciled calendar_events: added missing column", column=name)
 
     async def list_events(self, *, tenant: str, start: datetime, end: datetime) -> list[Event]:
         """Return all events for *tenant* that overlap ``[start, end)``."""
@@ -86,6 +133,7 @@ class LocalEventStore:
         end: datetime,
         description: str | None = None,
         location: str | None = None,
+        all_day: bool = False,
     ) -> Event:
         """Insert a new event and return the domain object."""
         event_id = str(uuid.uuid4())
@@ -97,6 +145,7 @@ class LocalEventStore:
             end_dt=end,
             description=description,
             location=location,
+            all_day=all_day,
         )
         async with self._session() as session:
             session.add(row)
@@ -114,6 +163,7 @@ class LocalEventStore:
         end: datetime | None = None,
         description: str | None = None,
         location: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:
         """Apply non-``None`` fields to an event; return it, or ``None`` if absent.
 
@@ -139,6 +189,8 @@ class LocalEventStore:
                 row.description = description
             if location is not None:
                 row.location = location
+            if all_day is not None:
+                row.all_day = all_day
             await session.commit()
             await session.refresh(row)
             return _row_to_event(row)
@@ -173,6 +225,8 @@ def _row_to_event(row: _StoredEvent) -> Event:
         description=row.description,
         location=row.location,
         provider="local",
+        # Rows written before the column existed read NULL → False.
+        all_day=bool(row.all_day),
     )
 
 

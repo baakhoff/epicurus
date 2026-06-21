@@ -28,6 +28,12 @@ class Event(BaseModel):
     description: str | None = None
     location: str | None = None
     provider: str
+    # An all-day (date-only) event. When true, ``start``/``end`` are UTC-midnight
+    # boundaries of a *floating* date range — ``end`` is **exclusive** (the day after the
+    # last day, matching Google's all-day model), and the shell renders them on their
+    # calendar date with no timezone conversion. A single-day all-day event spans one day,
+    # so ``end == start + 1 day``.
+    all_day: bool = False
 
     @field_validator("start", "end")
     @classmethod

@@ -341,7 +341,8 @@ export const BoardAction = z
     /**
      * Per-field *labeled* options: the shell renders a <select> showing `label` while
      * submitting `value`. Used where the option id isn't human-friendly — e.g. the
-     * calendar/list picker, whose values are opaque tokens / list ids (ADR-0030/0036).
+     * calendar / task-list picker, whose values are opaque `account:collection` tokens or
+     * list ids (ADR-0030/0036/0037).
      */
     field_choices: z
       .record(z.string(), z.array(z.object({ value: z.string(), label: z.string() })))
@@ -383,19 +384,49 @@ export const BoardData = z.object({
 });
 export type BoardData = z.infer<typeof BoardData>;
 
+/** A bare floating date, ``YYYY-MM-DD`` (no time, no zone). */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Parse a calendar event endpoint to a `Date`.
+ *
+ * An all-day endpoint is a **floating date** (`YYYY-MM-DD`) the module sends with no time
+ * or zone; it is parsed in *local* time so it stays on its calendar date in every
+ * timezone — this is the fix for all-day events rendering one day early (a date treated as
+ * a UTC instant shifts back a day for negative UTC offsets). A timed endpoint is a normal
+ * instant read in the viewer's local zone.
+ */
+export function parseEventDate(raw: string, allDay: boolean): Date {
+  if (allDay && DATE_ONLY.test(raw)) {
+    const [y, m, d] = raw.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  return new Date(raw);
+}
+
 /** One event in a `calendar` page (provider-neutral; ADR-0018). */
-export const CalendarEvent = z.object({
-  id: z.string(),
-  title: z.string().default("(untitled)"),
-  start: z.coerce.date(),
-  end: z.coerce.date(),
-  location: z.string().nullish(),
-  description: z.string().nullish(),
-  provider: z.string().nullish(),
-  // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
-  // invokes the named MCP tool through the core's tool proxy and refetches on success.
-  actions: z.array(BoardAction).default([]),
-});
+export const CalendarEvent = z
+  .object({
+    id: z.string(),
+    title: z.string().default("(untitled)"),
+    // Raw strings: an instant for timed events, a floating `YYYY-MM-DD` for all-day ones.
+    // `parseEventDate` resolves each to a Date with the right calendar day (see transform).
+    start: z.string(),
+    end: z.string(),
+    /** All-day (date-only) event — rendered on its date with no time, no zone shift. */
+    all_day: z.boolean().default(false),
+    location: z.string().nullish(),
+    description: z.string().nullish(),
+    provider: z.string().nullish(),
+    // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
+    // invokes the named MCP tool through the core's tool proxy and refetches on success.
+    actions: z.array(BoardAction).default([]),
+  })
+  .transform((ev) => ({
+    ...ev,
+    start: parseEventDate(ev.start, ev.all_day),
+    end: parseEventDate(ev.end, ev.all_day),
+  }));
 export type CalendarEvent = z.infer<typeof CalendarEvent>;
 
 /** The `calendar` archetype's data: events within the requested `[start, end)` window. */

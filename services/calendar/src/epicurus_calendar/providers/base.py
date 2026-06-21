@@ -56,8 +56,14 @@ class CalendarProvider(ABC):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool = False,
     ) -> Event:
-        """Persist a new event and return the created domain object."""
+        """Persist a new event and return the created domain object.
+
+        When *all_day* is true, *start*/*end* are UTC-midnight day boundaries with *end*
+        exclusive (see :attr:`~epicurus_calendar.models.Event.all_day`); a provider stores
+        them as a date-only event (Google's ``date`` fields) rather than timed instants.
+        """
 
     @abstractmethod
     async def update_event(
@@ -71,12 +77,15 @@ class CalendarProvider(ABC):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:
         """Apply the given fields to an existing event and return it.
 
-        Only non-``None`` fields are changed; the rest are left as they are. Returns
-        ``None`` when the event does not exist in this provider/collection — the
-        router uses that to try the next source (write where the event lives, #208).
+        Only non-``None`` fields are changed; the rest are left as they are. Passing
+        *all_day* switches the event between timed and date-only (the caller supplies
+        *start*/*end* to match). Returns ``None`` when the event does not exist in this
+        provider/collection — the router uses that to try the next source (write where the
+        event lives, #208).
         """
 
     @abstractmethod

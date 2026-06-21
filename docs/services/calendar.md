@@ -34,6 +34,10 @@ views. Since **v0.6** that page is **editable** (#208): it declares create/edit/
 *actions* that name the write tools, and the shell invokes them through the core's tool
 proxy — no module markup (see *Calendar page* under Contract, below).
 
+Since **v0.8** (#252, ADR-0037) the module supports **all-day events** end-to-end — fixing
+the bug where all-day events rendered one day early — and lets the operator **choose which
+calendar** a new event lands on, from a picker in the create form.
+
 Since **v0.4** the module speaks the **entity-reference contract** (ADR-0019): listed events
 come back as interactive chips, a referenced event resolves to a core **hover-card**, and the
 module is a **chat-attachment source** so an event can be attached to a turn. It supplies data
@@ -47,16 +51,18 @@ hover-cards & attachments* under Contract, below).
 | Tool | Description |
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
-| `calendar_create_event(title, start, end, location?, description?)` | Create a new event on the **active** calendar. `start`/`end` are ISO-8601 strings (surfaced with `format: date-time` so the core form renders a picker). Returns the created event. |
-| `calendar_update_event(event_id, title?, start?, end?, location?, description?)` | Edit an event. Only the fields passed change; the rest are left as-is. Found and edited **wherever it lives** across the enabled calendars (#208). Returns the updated event; raises if absent. |
+| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?)` | Create a new event. `start`/`end` are ISO-8601 strings, or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **active** calendar, or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). Returns the created event. |
+| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?)` | Edit an event. Only the fields passed change; the rest are left as-is. Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208). Returns the updated event; raises if absent. |
 | `calendar_delete_event(event_id)` | Delete an event wherever it lives. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
 `calendar_list_events` overlays every enabled calendar (or local); `calendar_create_event`
-writes to the **active** one (or local); `calendar_update_event` / `calendar_delete_event`
-act on whichever enabled calendar holds the event (active → other enabled → local, the same
-search `get_event` uses). A per-call calendar override is not exposed on the tools.
+writes to the **active** one (or local) unless a `calendar_id` token picks another;
+`calendar_update_event` / `calendar_delete_event` act on whichever enabled calendar holds the
+event (active → other enabled → local, the same search `get_event` uses). The `calendar_id`
+token is decoded by the `CollectionRouter` into a concrete `account:collection` target — the
+one place a per-call calendar override is honoured.
 
 ### Event object
 
@@ -66,11 +72,20 @@ search `get_event` uses). A per-call calendar override is not exposed on the too
   "title": "string",
   "start": "2025-06-15T10:00:00+00:00",
   "end":   "2025-06-15T11:00:00+00:00",
+  "all_day": false,
   "description": "string | null",
   "location":    "string | null",
   "provider": "local | google"
 }
 ```
+
+**All-day events** carry `all_day: true` and represent a *floating* date range: internally
+`start`/`end` are UTC-midnight day boundaries with `end` **exclusive** (the day after the last
+day, matching Google's all-day model — a single-day event spans one day). On the **page**
+(below) they serialize as bare date strings (`"2026-06-15"`), never timed instants, so the
+shell renders them on their calendar date with **no timezone conversion**. Treating an all-day
+date as a UTC instant is what made events appear one day early for viewers behind UTC; the
+floating-date contract fixes it end-to-end (ADR-0037, #252).
 
 ### Connected accounts & collections (ADR-0030)
 
@@ -116,26 +131,34 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
     { "id": "e1", "title": "Standup",
       "start": "2026-06-15T09:00:00+00:00",
       "end":   "2026-06-15T09:30:00+00:00",
+      "all_day": false,
       "location": "Room 4", "description": "Daily sync", "provider": "local",
       // Per-event actions (#208): Edit opens a prefilled form, Delete confirms.
       "actions": [
         { "tool": "calendar_update_event", "label": "Edit", "icon": "pencil",
           "form": true, "args": { "event_id": "e1" },
-          "fields": ["title", "start", "end", "location", "description"],
-          "form_values": { "title": "Standup", "start": "…", "end": "…",
+          "fields": ["title", "all_day", "start", "end", "location", "description"],
+          "form_values": { "title": "Standup", "all_day": false, "start": "…", "end": "…",
                            "location": "Room 4", "description": "Daily sync" } },
         { "tool": "calendar_delete_event", "label": "Delete", "icon": "trash",
           "intent": "danger", "confirm": "Delete 'Standup'? This can't be undone.",
           "args": { "event_id": "e1" } }
       ]
-    }
+    },
+    // An all-day event serializes start/end as floating dates (end exclusive), not instants.
+    { "id": "e2", "title": "Holiday", "start": "2026-06-18", "end": "2026-06-19",
+      "all_day": true, "provider": "google", "actions": [ /* … */ ] }
   ],
   // Page-level action: "New event" opens a create form (time prefilled to the next hour).
+  // The all-day toggle (declared via `date_toggle`) switches start/end to date pickers.
+  // When more than one writable calendar exists, a labeled `calendar_id` picker is added.
   "actions": [
     { "tool": "calendar_create_event", "label": "New event", "icon": "plus",
       "intent": "primary", "form": true,
-      "fields": ["title", "start", "end", "location", "description"],
-      "form_values": { "start": "…", "end": "…" } }
+      "fields": ["title", "all_day", "start", "end", "location", "description", "calendar_id"],
+      "form_values": { "all_day": false, "start": "…", "end": "…", "calendar_id": "local" },
+      "field_choices": { "calendar_id": [ { "value": "local", "label": "Local" },
+                                          { "value": "google:primary", "label": "Personal" } ] } }
   ]
 }
 ```
@@ -151,6 +174,14 @@ manifest), refetching the page on success. A page-level **New event** action ope
 form; each event carries **Edit** (a prefilled form) and **Delete** (a confirm) action. The
 shared core form renders `start`/`end` as native datetime pickers because the tools mark them
 `format: date-time`. The module ships no markup — it supplies data + declares the actions.
+
+**All-day toggle & calendar picker (#252, ADR-0037).** The create/edit forms carry an
+**All day** switch: the `start`/`end` fields declare `date_toggle: "all_day"`, so the shared
+SchemaForm collapses them to date pickers (emitting floating `YYYY-MM-DD` values) when it is
+on. The **New event** action also offers a `calendar_id` picker — a labeled `field_choices`
+select of the writable calendars (local + each connected, writable Google calendar) whose
+values are `account:collection` tokens — so the operator chooses where a new event lands; it
+is shown only when more than one writable calendar exists, and defaults to the active one.
 
 ### Entity references, hover-cards & attachments (ADR-0019)
 
@@ -235,16 +266,24 @@ database.
 | `tenant` | `varchar(63)` | Tenant scope (indexed). |
 | `event_id` | `varchar(64)` | UUID stable identifier exposed to callers. |
 | `title` | `varchar(512)` | Event title. |
-| `start_dt` | `timestamptz` | Start time (timezone-aware). |
-| `end_dt` | `timestamptz` | End time (timezone-aware). |
+| `start_dt` | `timestamptz` | Start time (timezone-aware). For an all-day event, UTC midnight of the first day. |
+| `end_dt` | `timestamptz` | End time (timezone-aware). For an all-day event, UTC midnight of the day after the last (exclusive). |
 | `description` | `text` | Optional description. |
 | `location` | `varchar(512)` | Optional location. |
+| `all_day` | `boolean` | All-day (date-only) event flag. |
 | `created_at` | `timestamptz` | Row insertion timestamp. |
 
 Unique constraint: `(tenant, event_id)`.
 
+`all_day` was added after the table's first release. There is no migration framework, so
+`LocalEventStore.init` runs an additive `_ensure_columns` step that adds the column in place
+on an existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before it
+existed read `NULL`, coerced to `false`.
+
 The **Google provider** stores no data locally; all state lives in Google
-Calendar and in the core's OAuth vault.
+Calendar and in the core's OAuth vault. An all-day Google event uses `start.date`/`end.date`
+(date-only) rather than `start.dateTime`/`end.dateTime`; the provider maps between those and
+the `all_day` flag.
 
 ## Dependencies
 

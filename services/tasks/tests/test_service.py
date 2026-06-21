@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.7.1"
+    assert manifest.version == "0.8.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -64,10 +64,10 @@ async def test_manifest(module_fixture: object) -> None:
     # `tasks_list` returns an entity-ref envelope (chips), so it is no longer a card action.
     assert manifest.ui is not None
     assert manifest.ui.actions == []
-    # Account/collection model (ADR-0030): a single-active list picker, no provider dropdown.
+    # Account/collection model (ADR-0030/0036): multi — each enabled list is a category.
     assert manifest.collections is not None
     assert manifest.collections.noun == "list"
-    assert manifest.collections.multi is False
+    assert manifest.collections.multi is True
     assert manifest.collections.providers == ["google"]
     assert manifest.ui.config_schema is None
 
@@ -338,12 +338,21 @@ async def test_add_task_invalid_status_raises(module_fixture: object) -> None:
 
 
 class _FakeGoogleTasks:
-    """Minimal in-memory Google-like tasks provider for accounts/router tests."""
+    """Minimal in-memory Google-like tasks provider for accounts/router tests.
+
+    ``tasks`` is the default bucket; ``tasks_by_list`` overrides it per list id so the
+    aggregate path can be asserted. ``fail_lists`` / ``fail_titles`` simulate a failing
+    ``list_tasks`` for one list and a failing ``list_collections`` (title lookup).
+    """
 
     def __init__(self, *, connected: bool = True) -> None:
         self._connected = connected
         self.tasks: list[Task] = []
+        self.tasks_by_list: dict[str | None, list[Task]] = {}
         self.last_list_id: str | None = None
+        self.list_ids_seen: list[str | None] = []
+        self.fail_lists: set[str | None] = set()
+        self.fail_titles = False
 
     def provider_name(self) -> str:
         return "google"
@@ -352,6 +361,8 @@ class _FakeGoogleTasks:
         return self._connected
 
     async def list_collections(self, tenant_id: str) -> list[Collection]:
+        if self.fail_titles:
+            raise RuntimeError("discovery failed")
         return [
             Collection(account="google", collection="@default", title="My Tasks"),
             Collection(account="google", collection="work", title="Work"),
@@ -359,7 +370,10 @@ class _FakeGoogleTasks:
 
     async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
         self.last_list_id = list_id
-        return self.tasks
+        self.list_ids_seen.append(list_id)
+        if list_id in self.fail_lists:
+            raise RuntimeError("list read failed")
+        return self.tasks_by_list.get(list_id, self.tasks)
 
     async def add_task(
         self, tenant_id: str, title: str, *, list_id: str | None = None, **kw: Any
@@ -399,7 +413,7 @@ class _StaticPrefs:
 async def test_tasks_accounts_lists_connected_google() -> None:
     view = await tasks_accounts({"google": _FakeGoogleTasks()}, tenant_id=TENANT)
     assert view.noun == "list"
-    assert view.multi is False
+    assert view.multi is True
     account = view.accounts[0]
     assert account.account == "google"
     assert account.connected is True
@@ -424,21 +438,111 @@ async def _local_router(
     return router, local, google
 
 
-async def test_router_uses_local_when_no_active() -> None:
+async def test_router_uses_local_when_nothing_enabled() -> None:
     router, local, _google = await _local_router(CollectionPrefs())
     await local.add_task(TENANT, "Local task")
     tasks = await router.list_tasks(TENANT)
     assert [t.title for t in tasks] == ["Local task"]
+    # The local default reads back as the "Personal" category (ADR-0036).
+    assert tasks[0].list_id is None
+    assert tasks[0].list_title == "Personal"
 
 
-async def test_router_routes_to_active_google_list() -> None:
-    active = CollectionRef(account="google", collection="work")
-    router, _local, google = await _local_router(CollectionPrefs(enabled=[active], active=active))
-    google.tasks = [Task(id="g1", title="Google task")]
+async def test_router_aggregates_enabled_lists() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {
+        "@default": [Task(id="d1", title="Personal thing")],
+        "work": [Task(id="w1", title="Work thing")],
+    }
     tasks = await router.list_tasks(TENANT)
-    assert [t.title for t in tasks] == ["Google task"]
-    # The active collection id is passed through to the provider as list_id.
+    assert {t.title for t in tasks} == {"Personal thing", "Work thing"}
+    assert set(google.list_ids_seen) == {"@default", "work"}  # both lists read
+    # each task is stamped with the list (category) it came from
+    by_title = {t.title: t for t in tasks}
+    assert (by_title["Work thing"].list_id, by_title["Work thing"].list_title) == ("work", "Work")
+    assert by_title["Personal thing"].list_title == "My Tasks"
+
+
+async def test_router_skips_a_failing_list_on_aggregate() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {"work": [Task(id="w1", title="Work thing")]}
+    google.fail_lists = {"@default"}  # one list errors → skipped, not fatal (#209)
+    tasks = await router.list_tasks(TENANT)
+    assert [t.title for t in tasks] == ["Work thing"]
+
+
+async def test_router_list_tasks_single_list_id() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {"work": [Task(id="w1", title="Just work")]}
+    tasks = await router.list_tasks(TENANT, list_id="work")
+    assert [t.title for t in tasks] == ["Just work"]
+    assert google.list_ids_seen == ["work"]  # only the named list is read
+    assert tasks[0].list_title == "Work"
+
+
+async def test_router_title_lookup_failure_falls_back_to_ids() -> None:
+    refs = [CollectionRef(account="google", collection="work")]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {"work": [Task(id="w1", title="Work thing")]}
+    google.fail_titles = True  # discovery (titles) unavailable → label falls back to the id
+    tasks = await router.list_tasks(TENANT)
+    assert [t.title for t in tasks] == ["Work thing"]
+    assert tasks[0].list_title == "work"
+
+
+async def test_router_add_routes_to_named_list() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    await router.add_task(TENANT, "New", list_id="work")
     assert google.last_list_id == "work"
+
+
+async def test_router_add_defaults_to_active_then_first_enabled() -> None:
+    work = CollectionRef(account="google", collection="work")
+    default = CollectionRef(account="google", collection="@default")
+    # active set → default target is the active list
+    router, _local, google = await _local_router(
+        CollectionPrefs(enabled=[default, work], active=work)
+    )
+    await router.add_task(TENANT, "A")
+    assert google.last_list_id == "work"
+    # no active → default target is the first enabled list
+    router2, _l2, google2 = await _local_router(CollectionPrefs(enabled=[default, work]))
+    await router2.add_task(TENANT, "B")
+    assert google2.last_list_id == "@default"
+
+
+async def test_router_complete_and_update_route_by_list_id() -> None:
+    refs = [CollectionRef(account="google", collection="work")]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    await router.complete_task(TENANT, "g1", list_id="work")
+    assert google.last_list_id == "work"
+    await router.update_task(TENANT, "g1", title="x", list_id="work")
+    assert google.last_list_id == "work"
+
+
+async def test_router_get_task_searches_enabled_then_local() -> None:
+    refs = [CollectionRef(account="google", collection="work")]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks = [Task(id="g1", title="On the work list")]
+    found = await router.get_task(TENANT, "g1")  # no list_id → searches enabled, then local
+    assert found is not None
+    assert found.title == "On the work list"
 
 
 async def test_router_add_routes_to_active_list() -> None:

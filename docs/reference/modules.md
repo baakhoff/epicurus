@@ -185,7 +185,10 @@ core-rendered board edits without any module markup. `args` are fixed values mer
 every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_schema`
 (narrowed to `fields`, prefilled with `form_values`) before invoking; `confirm` gates a
 one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
-After a successful call the shell refetches the page.
+After a successful call the shell refetches the page. `field_options` overlays a `<select>`
+onto a form field: either a list of plain strings (label = value) or `{value, label}` pairs
+when the submitted value must differ from the shown label — e.g. a list picker whose value
+is a list id and label its title (ADR-0036).
 
 ```jsonc
 {

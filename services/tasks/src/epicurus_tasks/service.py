@@ -13,8 +13,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from epicurus_core import (
+    LOCAL_ACCOUNT,
     Account,
     AccountsView,
+    CollectionPrefs,
     CollectionsSpec,
     EntityRef,
     EpicurusModule,
@@ -22,11 +24,14 @@ from epicurus_core import (
     HoverCardDetail,
     PageSpec,
     UiSection,
+    get_logger,
     tool_envelope,
 )
 from epicurus_tasks.google_provider import GoogleTasksError
 from epicurus_tasks.models import VALID_PRIORITIES, VALID_STATUSES, Task
 from epicurus_tasks.providers import TasksProvider
+
+log = get_logger("epicurus_tasks.service")
 
 MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
@@ -71,7 +76,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.7.1",
+        version="0.8.0",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -79,12 +84,12 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         ui=UiSection(
             icon="check-square",
             summary=(
-                "Manage your tasks in a built-in local list (no account needed) or in a"
-                " **Google** task list you connect. Choose the active list below; the agent"
-                " can list, add, edit, and complete tasks on it."
+                "Manage your tasks in a built-in local list (no account needed) or in the"
+                " **Google** task lists you connect. Each enabled list is a category: the"
+                " board shows tasks from all of them, and you pick the list when adding."
             ),
             # No config_schema: there is no provider dropdown any more (ADR-0030). Accounts
-            # and the active list are managed in the connected-accounts section.
+            # and the enabled lists are managed in the connected-accounts section.
             status_url="/status",
         ),
         pages=[
@@ -98,10 +103,11 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         ],
         resolver=True,
         attachable=True,
-        # Account/collection model (ADR-0030): a silent local default plus connectable
-        # Google task lists. Tasks is single-active (not multi): the board and tools act on
-        # the active list. Serves GET /accounts.
-        collections=CollectionsSpec(noun="list", multi=False, providers=["google"]),
+        # Account/collection model (ADR-0030/0036): a silent local default plus connectable
+        # Google task lists. Tasks is ``multi`` — each enabled list is a category: the board
+        # aggregates open tasks across all enabled lists and the Add form picks the target
+        # list. Serves GET /accounts.
+        collections=CollectionsSpec(noun="list", multi=True, providers=["google"]),
         # The Google API scope the shell requests when connecting an account (#241); the
         # core adds the default identity scopes. Without this, the Google Tasks API 403s.
         oauth_scopes={"google": ["https://www.googleapis.com/auth/tasks"]},
@@ -262,7 +268,8 @@ async def tasks_accounts(external: Mapping[str, TasksProvider], *, tenant_id: st
 
     One :class:`Account` per supported external provider, ``connected`` from the live
     OAuth check and ``collections`` (task lists) listed only when connected. ``local`` is
-    the silent default and is never included. Tasks is single-active (``multi=False``).
+    the silent default and is never included. Tasks is ``multi`` — each enabled list is a
+    category (ADR-0036).
     """
     accounts: list[Account] = []
     for account_id, provider in external.items():
@@ -277,7 +284,52 @@ async def tasks_accounts(external: Mapping[str, TasksProvider], *, tenant_id: st
                 collections=collections,
             )
         )
-    return AccountsView(noun="list", multi=False, accounts=accounts)
+    return AccountsView(noun="list", multi=True, accounts=accounts)
+
+
+async def enabled_write_lists(
+    external: Mapping[str, TasksProvider],
+    prefs: CollectionPrefs,
+    *,
+    tenant_id: str,
+) -> tuple[list[tuple[str, str]], str | None]:
+    """The writable enabled external lists ``(id, title)`` + the default new-task target.
+
+    Backs the board's Add-task list (category) picker (ADR-0036). Titles come from each
+    external account's discovery; a lookup failure degrades to the list id and never fails
+    the board. The default target is the active list (when it is a writable enabled list),
+    else the first enabled list, else ``None`` (the local store, when nothing is enabled).
+    """
+    enabled = [ref for ref in prefs.enabled if ref.account != LOCAL_ACCOUNT]
+    if not enabled:
+        return [], None
+    titles: dict[tuple[str, str], tuple[str, bool]] = {}
+    for account in {ref.account for ref in enabled}:
+        provider = external.get(account)
+        if provider is None:
+            continue
+        try:
+            for col in await provider.list_collections(tenant_id):
+                titles[(col.account, col.collection)] = (col.title, col.writable)
+        except Exception as exc:
+            log.warning(
+                "task-list discovery failed for picker; using ids",
+                account=account,
+                error=str(exc),
+            )
+    lists: list[tuple[str, str]] = []
+    for ref in enabled:
+        title, writable = titles.get((ref.account, ref.collection), (ref.collection, True))
+        if writable:
+            lists.append((ref.collection, title))
+    valid = {list_id for list_id, _ in lists}
+    active = prefs.active
+    default = (
+        active.collection if (active is not None and active.account != LOCAL_ACCOUNT) else None
+    )
+    if default not in valid:
+        default = lists[0][0] if lists else None
+    return lists, default
 
 
 # ── Tasks page: the `board` archetype data (ADR-0018) ───────────────────────────
@@ -315,7 +367,12 @@ def _bucket_for(task: Task, today: str) -> str:
 
 
 def _task_card(task: Task, bucket: str) -> dict[str, Any]:
-    """One board card: the task plus its complete / edit actions."""
+    """One board card: the task plus its complete / edit actions.
+
+    Each card carries ``list_id`` (the list the task belongs to) in its action args so a
+    Complete / Edit routes back to the owning list when the board aggregates several lists
+    (ADR-0036); a per-card category tag names that list.
+    """
     badges: list[dict[str, str]] = []
     if task.due:
         badges.append({"label": task.due[:10], "tone": _BUCKET_TONE.get(bucket, "dim")})
@@ -323,7 +380,10 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
         badges.append({"label": task.priority.capitalize(), "tone": _PRIORITY_TONE[task.priority]})
     for tag in task.tags:
         badges.append({"label": tag, "tone": "accent"})
+    if task.list_title:  # the list (category) the task came from
+        badges.append({"label": task.list_title, "tone": "dim"})
 
+    args = {"task_id": task.id, "list_id": task.list_id}
     return {
         "id": task.id,
         "title": task.title,
@@ -334,7 +394,7 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
                 "tool": "tasks_complete",
                 "label": "Complete",
                 "icon": "check",
-                "args": {"task_id": task.id},
+                "args": args,
             },
             {
                 "tool": "tasks_update",
@@ -343,7 +403,7 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
                 "form": True,
                 "fields": ["title", "notes", "due", "priority", "tags", "status"],
                 "field_options": _TASK_FIELD_OPTIONS,
-                "args": {"task_id": task.id},
+                "args": args,
                 "form_values": {
                     "title": task.title,
                     "notes": task.notes or "",
@@ -357,12 +417,20 @@ def _task_card(task: Task, bucket: str) -> dict[str, Any]:
     }
 
 
-def build_tasks_board(tasks: list[Task], *, today: str) -> dict[str, Any]:
-    """Build the ``board`` archetype payload for the Tasks page (ADR-0018).
+def build_tasks_board(
+    tasks: list[Task],
+    *,
+    today: str,
+    lists: list[tuple[str, str]] | None = None,
+    default_list_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the ``board`` archetype payload for the Tasks page (ADR-0018/0036).
 
     Pure and deterministic given *today* (an ISO date, e.g. ``"2026-06-14"``) so the
-    bucketing is unit-testable without a clock. Empty columns are dropped; a
-    board-level **Add task** action is always offered.
+    bucketing is unit-testable without a clock. Empty columns are dropped; a board-level
+    **Add task** action is always offered. When *lists* (``(list_id, title)`` pairs for the
+    operator's enabled writable lists) is given, the Add form gains a list (category) picker
+    preselecting *default_list_id*; with none, adds go to the default list.
     """
     grouped: dict[str, list[dict[str, Any]]] = {bucket: [] for bucket in _BUCKET_ORDER}
     for task in tasks:
@@ -378,20 +446,29 @@ def build_tasks_board(tasks: list[Task], *, today: str) -> dict[str, Any]:
         for bucket in _BUCKET_ORDER
         if grouped[bucket]
     ]
+    add_action: dict[str, Any] = {
+        "tool": "tasks_add",
+        "label": "Add task",
+        "intent": "primary",
+        "icon": "plus",
+        "form": True,
+        "fields": ["title", "notes", "due", "priority", "tags"],
+        "field_options": _TASK_FIELD_OPTIONS,
+    }
+    if lists:
+        # Offer a list (category) picker: the option value is the list id, the label its
+        # title (the web renders {value,label} options as a label≠value <select>, ADR-0036).
+        add_action["fields"] = ["title", "list_id", "notes", "due", "priority", "tags"]
+        add_action["field_options"] = {
+            **_TASK_FIELD_OPTIONS,
+            "list_id": [{"value": list_id, "label": title} for list_id, title in lists],
+        }
+        if default_list_id is not None:
+            add_action["form_values"] = {"list_id": default_list_id}
     return {
         "title": "Tasks",
         "columns": columns,
-        "actions": [
-            {
-                "tool": "tasks_add",
-                "label": "Add task",
-                "intent": "primary",
-                "icon": "plus",
-                "form": True,
-                "fields": ["title", "notes", "due", "priority", "tags"],
-                "field_options": _TASK_FIELD_OPTIONS,
-            }
-        ],
+        "actions": [add_action],
     }
 
 

@@ -83,15 +83,15 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.7.1"
+    assert data["version"] == "0.8.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {"tasks_list", "tasks_add", "tasks_complete", "tasks_update"}
     # Tasks references tasks (resolver) and is a chat-attachment source (ADR-0019).
     assert data["resolver"] is True
     assert data["attachable"] is True
-    # Account/collection model (ADR-0030): a single-active task-list picker, no dropdown.
+    # Account/collection model (ADR-0030/0036): multi — each enabled list is a category.
     assert data["collections"]["noun"] == "list"
-    assert data["collections"]["multi"] is False
+    assert data["collections"]["multi"] is True
     assert data["collections"]["providers"] == ["google"]
     assert data["ui"]["config_schema"] is None
 
@@ -118,11 +118,25 @@ def test_page_unknown_id_404s(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def test_page_board_serves_board_data(booted_client: TestClient) -> None:
-    """GET /pages/board returns the board payload the shell renders (empty store)."""
+def test_page_board_serves_board_data(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /pages/board returns the board payload the shell renders (empty store).
+
+    No Google connected → the local store backs the board, the columns are empty, and the
+    Add action carries no list picker (ADR-0036). Stub the prefs read so the page makes no
+    network call to the core.
+    """
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
     resp = booted_client.get("/pages/board")
     assert resp.status_code == 200
     data = resp.json()
     assert data["title"] == "Tasks"
     assert data["columns"] == []  # fresh in-memory store has no tasks
-    assert data["actions"][0]["tool"] == "tasks_add"
+    add = data["actions"][0]
+    assert add["tool"] == "tasks_add"
+    assert "list_id" not in add.get("fields", [])  # no list picker without enabled lists

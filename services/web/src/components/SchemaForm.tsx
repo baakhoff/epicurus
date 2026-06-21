@@ -111,11 +111,21 @@ function FieldFor({
           <option value="" disabled>
             choose…
           </option>
-          {prop.enum.map((option) => (
-            <option key={String(option)} value={String(option)}>
-              {String(option)}
-            </option>
-          ))}
+          {prop.enum.map((option) => {
+            // An option is a plain string (label==value) or a {value,label} pair, so the
+            // submitted value can differ from the shown label (e.g. a list id vs its title).
+            const pair =
+              typeof option === "object" && option !== null && "value" in option
+                ? (option as { value: string; label: string })
+                : null;
+            const optValue = pair ? pair.value : String(option);
+            const optLabel = pair ? pair.label : String(option);
+            return (
+              <option key={optValue} value={optValue}>
+                {optLabel}
+              </option>
+            );
+          })}
         </select>
       </div>
     );

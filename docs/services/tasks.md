@@ -28,10 +28,18 @@ serves `GET /resolve/task/{id}`; the core renders the chip, the hover-card, and 
 
 **v0.6.0** adopts the **account/collection model** (ADR-0030): there is no `TASKS_PROVIDER`
 dropdown any more. The module holds both backends at once — the silent **local** default plus
-**Google** — and routes to the **active** task list the operator selects in the core-rendered
-connected-accounts section. Tasks is *single-active* (`multi: false`): the board and tools act
-on the one active list (or local when none is set). A `TasksRouter` (`router.py`) resolves the
-active list from the core's stored selection and falls back to local if the core is unreachable.
+**Google** — and routes to the task list the operator selects in the core-rendered
+connected-accounts section. A `TasksRouter` (`router.py`) resolves the selection from the core's
+stored prefs and falls back to local if the core is unreachable.
+
+**v0.8.0** makes tasks **`multi`** — **each enabled list is a category** (ADR-0036, refining
+ADR-0030's single-active for tasks). The board **aggregates open tasks across every enabled
+list**, tagging each card with the list it came from; the **Add task** form offers a **list
+picker** (the enabled writable lists, by name) so the operator chooses the category per task,
+and each card's Complete / Edit routes back to the list the task belongs to. A single failing
+list is skipped, not fatal (#209). Reads fall back to the local store only when no list is
+enabled. The router stamps each task with its `list_id` / `list_title`; titles come from each
+account's discovery (a lookup failure degrades to the list id, never failing the board).
 
 ## The contract it exposes
 
@@ -44,10 +52,12 @@ active list from the core's stored selection and falls back to local if the core
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
 | `tasks_update(task_id, title?, notes?, due?, list_id?)` | `task_id`: provider task ID; only the fields passed change, the rest are left intact | The updated `Task`. |
 
-All four tools are **provider-agnostic** and route to the operator's **active** list
-(ADR-0030); an explicit `list_id` overrides it within the active account, mapping to a
-Google task list or being ignored by local. `tasks_update` edits content (title/notes/due);
-`tasks_complete` flips the done flag — distinct operations. The `Task` domain model is:
+All four tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
+**aggregates open tasks across every enabled list**; with a `list_id` it reads just that
+list. `tasks_add` / `tasks_complete` / `tasks_update` route to the list named by `list_id`,
+or — with none — to the default target (the active list, else the first enabled, else local).
+`tasks_update` edits content (title/notes/due); `tasks_complete` flips the done flag —
+distinct operations. The `Task` domain model is:
 
 ```python
 class Task(BaseModel):
@@ -59,8 +69,13 @@ class Task(BaseModel):
     completed_at: str | None = None
     priority: Literal["low", "medium", "high"] | None = None    # local-only
     tags: list[str] = []                                        # local-only
+    list_id: str | None = None                                  # the list (category) — router-stamped
+    list_title: str | None = None                               # its human label — router-stamped
     # `completed` is a computed alias: True when status == "done".
 ```
+
+`list_id` / `list_title` are **not stored** — the router stamps them when it aggregates the
+board so each card knows its category and routes its mutations to the owning list (ADR-0036).
 
 ### HTTP
 
@@ -82,7 +97,7 @@ class Task(BaseModel):
 | Panel | What it shows / does |
 | --- | --- |
 | **Status** | Whether Google is connected (polled from `GET /status`). |
-| **Lists** | Connected accounts + their task lists: on/off toggles and the active-list picker (ADR-0030). |
+| **Lists** | Connected accounts + their task lists: per-list on/off toggles and a **default** picker for new tasks (ADR-0030/0036). |
 | **Actions** | None — `tasks_list` returns entity-reference chips (surfaced in chat), so it is not a card-action button. |
 | **Tasks page** | A left-nav `board` page (see below). |
 
@@ -91,30 +106,34 @@ class Task(BaseModel):
 The module declares one page — `{id: "board", title: "Tasks", archetype: "board"}` — and
 serves its data at `GET /pages/board`. The core renders it; the module ships **no markup**.
 
-- **Columns** group the tenant's **open** tasks by due date: **Overdue**, **Today**,
-  **Upcoming**, **No date** (empty columns are dropped). Completing a task removes it from
-  the board, mirroring the provider's open-tasks semantics. Bucketing is a pure function,
-  `build_tasks_board(tasks, today=…)`, so it is unit-tested without a clock — ISO date
-  strings compare lexicographically, so no parsing is needed.
+- **Columns** group the **open** tasks **aggregated across every enabled list** by due date:
+  **Overdue**, **Today**, **Upcoming**, **No date** (empty columns are dropped). Each card
+  carries a **category tag** naming the list it came from (ADR-0036). Completing a task removes
+  it from the board, mirroring the provider's open-tasks semantics. Bucketing is a pure
+  function, `build_tasks_board(tasks, today=…, lists=…, default_list_id=…)`, so it is unit-tested
+  without a clock — ISO date strings compare lexicographically, so no parsing is needed.
 - **Mutations are declarative actions** that name an MCP tool; the shell invokes it through
   the core (validated against the manifest) and refetches. Each card offers **Complete**
-  (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card);
-  the board offers **Add task** (`tasks_add`, a form). The board never carries credentials
-  or business logic — it is data plus tool references.
+  (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card),
+  both carrying the task's `list_id` so the mutation routes to the **owning** list; the board
+  offers **Add task** (`tasks_add`, a form) whose **list picker** chooses the target list
+  (`field_options` `{value, label}` = list id → title). The board never carries credentials or
+  business logic — it is data plus tool references.
 
 ### Connected accounts & collections (ADR-0030)
 
-The module declares `collections = {noun: "list", multi: false, providers: ["google"]}` and
+The module declares `collections = {noun: "list", multi: true, providers: ["google"]}` and
 serves **`GET /accounts`**: one account per supported provider, `connected` from the live OAuth
 state and, when connected, its task lists (`{account, collection, title, writable}`). `local`
 is never listed — it is the silent default.
 
 The core merges this with the stored selection at
-`GET /platform/v1/modules/tasks/collections`; the shell renders per-list on/off toggles plus an
-active picker, and `PUT …/collections` persists `{enabled, active}`. The module reads it via
-`PlatformClient.get_collections()` (a Postgres-only read at `GET …/collections/prefs`) and,
-being *single-active*, routes the board and every tool to the **active** list — or to local
-when none is active. If the core is unreachable it degrades to local (local-first).
+`GET /platform/v1/modules/tasks/collections`; the shell renders per-list on/off toggles plus a
+**default** picker, and `PUT …/collections` persists `{enabled, active}` (`active` is the default
+write target). The module reads it via `PlatformClient.get_collections()` (a Postgres-only read
+at `GET …/collections/prefs`) and, being **`multi`**, **aggregates the board across every enabled
+list** while routing each write/mutation to the list named by `list_id` (or the default — active,
+else first enabled, else local). If the core is unreachable it degrades to local (local-first).
 
 ### Entity references & hover-cards (ADR-0019)
 

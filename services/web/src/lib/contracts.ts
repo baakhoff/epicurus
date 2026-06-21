@@ -319,6 +319,17 @@ export const BoardBadge = z.object({
 export type BoardBadge = z.infer<typeof BoardBadge>;
 
 /**
+ * One option for a board form `<select>`. A plain string is its own label and value; a
+ * `{value, label}` pair lets the submitted value (e.g. a list id) differ from the shown
+ * label (e.g. the list's title) — ADR-0036.
+ */
+export const FieldOption = z.union([
+  z.string(),
+  z.object({ value: z.string(), label: z.string() }),
+]);
+export type FieldOption = z.infer<typeof FieldOption>;
+
+/**
  * A button a `board` surfaces — board-level or per-card. Pressing it invokes the
  * module's MCP `tool` through the core, so a core-rendered board mutates with no
  * module markup. `args` are fixed values merged into every call; `form` opens a
@@ -336,8 +347,9 @@ export const BoardAction = z
     form: z.boolean().default(false),
     fields: z.array(z.string()).nullish(),
     form_values: z.record(z.string(), z.unknown()).default({}),
-    /** Per-field enum options: the shell renders a <select> for any field listed here. */
-    field_options: z.record(z.string(), z.array(z.string())).optional(),
+    /** Per-field options: the shell renders a <select> for any field listed here. Each
+     *  option is a plain string or a {value,label} pair (label≠value, e.g. a list picker). */
+    field_options: z.record(z.string(), z.array(FieldOption)).optional(),
     confirm: z.string().nullish(),
   })
   .superRefine((action, ctx) => {

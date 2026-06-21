@@ -15,7 +15,7 @@ import { createElement, useMemo, useState } from "react";
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Button, Confirm, Sheet, cn } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { BoardAction } from "@/lib/contracts";
+import type { BoardAction, FieldOption } from "@/lib/contracts";
 import { moduleIcon } from "@/lib/icons";
 
 /** The argument schema a module tool declares, read from the cached manifest. */
@@ -36,7 +36,7 @@ function pickSchema(
   schema: ObjectSchema | undefined,
   fields: string[] | undefined,
   args: Record<string, unknown>,
-  fieldOptions?: Record<string, string[]>,
+  fieldOptions?: Record<string, FieldOption[]>,
 ): ObjectSchema {
   const properties: NonNullable<ObjectSchema["properties"]> = schema?.properties ?? {};
   const argKeys = new Set(Object.keys(args));

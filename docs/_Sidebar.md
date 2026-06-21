@@ -54,4 +54,5 @@
 - [Contributing](developer/contributing.md)
 - [Versioning](developer/versioning.md)
 - [Releases](developer/releases.md)
+- [Obsidian sync (#232)](developer/obsidian-sync.md)
 - [Obsidian Sync spike (#219)](developer/obsidian-sync-spike.md)

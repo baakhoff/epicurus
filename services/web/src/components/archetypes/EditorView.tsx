@@ -715,15 +715,28 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                   </button>
                 ))}
               </div>
-              <Button
-                variant="primary"
-                onClick={() => save.mutate()}
-                disabled={!dirty}
-                busy={save.isPending}
-              >
-                Save
-              </Button>
+              {/* A watched external vault is read-only here (#232) — Obsidian is the author. */}
+              {data.read_only ? (
+                <Badge tone="dim">read-only</Badge>
+              ) : (
+                <Button
+                  variant="primary"
+                  onClick={() => save.mutate()}
+                  disabled={!dirty}
+                  busy={save.isPending}
+                >
+                  Save
+                </Button>
+              )}
             </div>
+
+            {/* read-only banner: the vault is externally owned (watched Obsidian sync, #232) */}
+            {data.read_only && (
+              <div className="border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
+                Read-only — this vault is managed externally (Obsidian Sync). Edit notes in
+                Obsidian; changes sync back and re-index here automatically.
+              </div>
+            )}
 
             {/* body */}
             <div className="min-h-0 flex-1 overflow-y-auto">
@@ -734,9 +747,10 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                   onKeyDown={(e) => {
                     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
                       e.preventDefault();
-                      if (dirty) save.mutate();
+                      if (!data.read_only && dirty) save.mutate();
                     }
                   }}
+                  readOnly={data.read_only}
                   spellCheck={false}
                   className="h-full min-h-full rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
                   aria-label={`Edit ${selectedPath}`}

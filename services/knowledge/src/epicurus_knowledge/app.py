@@ -35,6 +35,7 @@ from epicurus_knowledge.suggestions import (
     SuggestionStore,
     create_review_router,
 )
+from epicurus_knowledge.watcher import VaultWatcher
 
 
 def _service_version() -> str:
@@ -102,13 +103,17 @@ def create_app() -> FastAPI:
         vault_path=settings.vault_path,
     )
     mcp_app = module.http_app()
-    vault_pages = VaultPages(settings.vault_path, vault_indexer)
+    # Watch mode (#232, ADR-0035) marks the vault externally owned: the editor goes
+    # read-only and agent suggestions can't be applied, so Obsidian stays the sole author.
+    vault_read_only = settings.vault_read_only
+    vault_pages = VaultPages(settings.vault_path, vault_indexer, read_only=vault_read_only)
     suggestion_review = SuggestionReview(
         suggestion_store,
         vault_pages,
         vault_indexer,
         vault_path=settings.vault_path,
         tenant=settings.default_tenant_id,
+        read_only=vault_read_only,
     )
 
     # The initial index runs in the background (#230): the vault + bundled docs can
@@ -120,6 +125,19 @@ def create_app() -> FastAPI:
         max_attempts=settings.index_retry_max_attempts,
         base_delay_seconds=settings.index_retry_base_delay_seconds,
         max_delay_seconds=settings.index_retry_max_delay_seconds,
+    )
+
+    # Live vault sync (#232): when an externally-synced vault is mounted, watch it and
+    # re-index incrementally on change. Off by default; the indexer's run-lock serialises
+    # a watch pass against the startup index, so the two never walk the vault at once.
+    vault_watcher = (
+        VaultWatcher(
+            settings.vault_path,
+            vault_indexer,
+            debounce_ms=settings.vault_watch_debounce_ms,
+        )
+        if settings.vault_watch
+        else None
     )
 
     @asynccontextmanager
@@ -135,15 +153,25 @@ def create_app() -> FastAPI:
                 vault=str(settings.vault_path),
                 docs=str(settings.docs_path),
                 tenant=settings.default_tenant_id,
+                vault_watch=settings.vault_watch,
+                vault_read_only=vault_read_only,
             )
             # Serve immediately; index in the background.
             index_task = asyncio.create_task(index_runner.run_with_retry())
+            watch_task = (
+                asyncio.create_task(vault_watcher.run()) if vault_watcher is not None else None
+            )
             try:
                 yield
             finally:
                 index_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await index_task
+                if vault_watcher is not None and watch_task is not None:
+                    vault_watcher.stop()
+                    watch_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await watch_task
                 await bus.close()
                 await engine.dispose()
                 await qdrant.close()

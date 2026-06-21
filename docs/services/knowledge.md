@@ -65,6 +65,13 @@ The vault must be mounted **read-write** for saving and folder management to wor
 Configuration); the default empty named volume is writable, and an operator binding their
 Obsidian vault should mount it writable by the container user (uid 10001).
 
+**Read-only when the vault is externally owned (#232, ADR-0035).** With a watched external
+vault (`VAULT_WATCH=true`, see *Live vault sync* below) the page returns `read_only: true`
+and `can_manage_files: false`: the shell hides Save and the file-tree controls and shows a
+read-only banner, and every write endpoint (save, folder create, doc/folder delete, move)
+returns **409**. Obsidian is the sole author; edits made there sync to disk and re-index
+automatically.
+
 **File-tree management (#216).** The Knowledge page sets `can_manage_files: true` in its
 `EditorData` response; the shell then shows CRUD controls over the tree — creating nested
 folders, creating documents inside any folder, deleting files or empty folders, and
@@ -84,6 +91,11 @@ The **trust boundary is the author**: agent edits route through review; direct *
 edits (the editor save, the file-tree CRUD) stay immediate, since the operator is already the
 approver. Approve/reject are operator-only endpoints the core proxies — deliberately **not**
 MCP tools, so the agent cannot approve its own proposals.
+
+With a **watched external vault** (`VAULT_WATCH=true`, #232) the vault is read-only to
+epicurus, so **approve returns 409** — applying would write a vault Obsidian owns. The agent
+can still propose and the operator can still *reject* to clear the queue; the operator makes
+the change in Obsidian instead (ADR-0035).
 
 - `GET /pages/review` — the pending queue: each suggestion as `{id, title, path, operation,
   origin, note, created_at, diff}`, where `diff` is a server-computed unified diff of the
@@ -133,15 +145,15 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
-| `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files}` (page id `vault`). `type` is `"file"` or `"dir"`. `can_manage_files: true` enables folder CRUD in the shell. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
+| `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only}` (page id `vault`). `type` is `"file"` or `"dir"`. `can_manage_files: true` enables folder CRUD in the shell; `read_only: true` (watch mode, #232) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
-| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. |
+| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. **409** when the vault is externally owned (watch mode, #232); the folder/delete/move write routes behave likewise. |
 | `POST /pages/{page_id}/folder?path=<rel>` | Create a directory at `path` → `{path}`. 409 if the directory already exists. Path goes through `safe_dir_relative` (no `..`, no absolute). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
 | `DELETE /pages/{page_id}/doc?path=<rel>` | Delete a `.md` file. 404 if absent. 400 for path-safety violations. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/doc`. |
 | `DELETE /pages/{page_id}/folder?path=<rel>` | Delete an **empty** directory. 409 if not empty, 404 if absent. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
 | `POST /pages/{page_id}/move` | Move or rename a file or folder. Body: `{from_path, to_path}` → `{path}`. 404 if source absent, 409 if destination exists. Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/move`. |
 | `GET /pages/review` | Pending suggestion queue (#220): `{title, suggestions:[{id, title, path, operation, origin, note, created_at, diff}]}`. Proxied at `GET /platform/v1/modules/knowledge/pages/review`. Registered before the editor pages router so it isn't shadowed by `/pages/{page_id}`. |
-| `POST /pages/review/suggestions/{sid}/approve` | Apply a staged change + index it, drop the row → `{id, status, path, operation, indexed}`. 404 if unknown. Proxied at `POST /platform/v1/modules/knowledge/pages/review/suggestions/{sid}/approve`. Operator-only (not an MCP tool). |
+| `POST /pages/review/suggestions/{sid}/approve` | Apply a staged change + index it, drop the row → `{id, status, path, operation, indexed}`. 404 if unknown; **409** when the vault is externally owned (watch mode, #232). Proxied at `POST /platform/v1/modules/knowledge/pages/review/suggestions/{sid}/approve`. Operator-only (not an MCP tool). |
 | `POST /pages/review/suggestions/{sid}/reject` | Discard a staged change, vault untouched → `{id, status, path, operation}`. 404 if unknown. Proxied likewise. Operator-only. |
 | `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
@@ -197,6 +209,33 @@ its collection is missing but its ledger is non-empty, it clears the ledger so t
 re-embeds from scratch. The runner reconciles **all** sources up front — before any of them
 recreates the shared `<tenant>__docs` collection — so the vault, platform docs, and module
 docs all rebuild after a reset.
+
+### Live vault sync — the watched vault (#232, ADR-0035)
+
+By default the index refreshes at startup and on an explicit `knowledge_reindex`. Set
+**`VAULT_WATCH=true`** to also **watch the vault and re-index on change** — the path for
+keeping the knowledge base in step with an Obsidian-Sync (or Git) folder bind-mounted at
+`/vault`. `watcher.VaultWatcher` runs a `watchfiles.awatch` loop; each debounced batch of
+changes (window `VAULT_WATCH_DEBOUNCE_MS`, default 1500 ms) triggers one incremental
+`KnowledgeIndexer.run()`. Because the indexer is hash/mtime-incremental, a watch event over
+a synced folder only re-embeds the files that actually changed.
+
+- **Debounced & scoped.** A burst (Obsidian Sync writes many files at once) coalesces into
+  a single pass; `.obsidian/` and `.trash/` are ignored and only `.md` files trigger work.
+  A deletion still carries its `.md` path, so removals flow through and their vectors are
+  purged on the next pass.
+- **Serialised.** `KnowledgeIndexer.run()` holds a run-lock, so a watch pass and the
+  background startup index (#230) never walk the vault at once.
+- **Resilient.** A failed pass (core paused mid-embed, a Qdrant blip) is logged and retried
+  on the next change; the watcher never dies on a transient error. A missing vault leaves
+  it idle rather than crashing the service.
+- **Externally owned ⇒ read-only.** Watch mode marks the vault externally owned: the editor
+  page is read-only, the file-tree CRUD is hidden, and applying an agent suggestion is
+  refused (409). Obsidian is the sole author — this avoids two writers racing the same files
+  (ADR-0035). See [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md)
+  for the same-host (bind-mount) and headless (Git) setup recipes.
+
+Off by default — the common image-only / empty-volume deploy starts no watcher.
 
 **Module docs** use a variant of the same logic (`ModuleDocsIndexer`): each enabled module's
 `docs_url` is fetched via the core proxy, diffed by SHA-256 content hash (HTTP sources have no
@@ -258,12 +297,18 @@ platform services read these docs if needed.
 | `INDEX_RETRY_MAX_ATTEMPTS` | `30` | Background-index retry cap before giving up (#230). |
 | `INDEX_RETRY_BASE_DELAY_SECONDS` | `1.0` | First retry backoff; doubles each attempt. |
 | `INDEX_RETRY_MAX_DELAY_SECONDS` | `30.0` | Upper bound on the retry backoff. |
+| `VAULT_WATCH` | `false` | Watch the vault and re-index on change (#232). Enabling it makes the vault **externally owned** — the editor page goes read-only and Obsidian becomes the sole author (ADR-0035). See [Obsidian sync](../developer/obsidian-sync.md). |
+| `VAULT_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of vault changes before a re-index is triggered. |
 
 The vault is bound to `/vault` **read-write** via `KNOWLEDGE_HOST_VAULT`, which
 defaults to an **empty named volume** (point it at your vault to index real notes).
 Read-write so the Knowledge editor page can save edits back to the vault (#130); mount a
 host directory the container user (uid 10001) can write. The platform docs at `/docs` are
 always present — bundled at image build time, and are not editable from the shell.
+
+In **watch mode** (`VAULT_WATCH=true`) epicurus only ever **reads** the vault, so a
+read-only mount of an Obsidian-synced folder is enough (the container user needs read
+access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md).
 
 ## Data model
 
@@ -308,14 +353,15 @@ Package `epicurus_knowledge`:
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
-| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save. |
+| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; a run-lock serialises full passes so the watcher (#232) and startup index never overlap. |
 | `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
+| `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). Started by `app.py` when `VAULT_WATCH=true`. |
 | `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`, `knowledge_propose_edit` → staged review #220) + manifest UI + the `editor` and `review` page specs. |
-| `pages.py` | The `editor` page surface (#130): document/folder tree, read, save, and folder CRUD (create, delete, move — #216). `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. |
-| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store, `SuggestionReview` (diff + apply on approve / discard on reject), and `create_review_router`. Approve/reject are operator-only — never MCP tools. |
+| `pages.py` | The `editor` page surface (#130): document/folder tree, read, save, and folder CRUD (create, delete, move — #216). `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. |
+| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store, `SuggestionReview` (diff + apply on approve / discard on reject), and `create_review_router`. Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
 | `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories) + vault walks (`iter_md_files`, `iter_tree_nodes`). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |
-| `app.py` | Lifespan, `GET /status`, the `/pages/*` (review router first, then editor) + `/attachments/*` + `/resolve/*` + `/module-docs` routers; launches the background `IndexRunner` (#230) so startup never blocks on the first index. |
-| `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL). |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` (review router first, then editor) + `/attachments/*` + `/resolve/*` + `/module-docs` routers; launches the background `IndexRunner` (#230) so startup never blocks on the first index, and the `VaultWatcher` (#232) when `VAULT_WATCH` is set. |
+| `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL, and the `VAULT_WATCH`/`VAULT_WATCH_DEBOUNCE_MS` watch fields + the derived `vault_read_only`). |

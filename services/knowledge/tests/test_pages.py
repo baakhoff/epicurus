@@ -180,3 +180,58 @@ def test_router_unknown_page_is_404(tmp_path: Path) -> None:
 def test_router_traversal_is_400(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/pages/vault/doc", params={"path": "../x.md"})
     assert resp.status_code == 400
+
+
+# ── read-only (watched external vault, #232) ──────────────────────────────────
+
+
+def test_read_only_marks_view_only_and_hides_file_crud(tmp_path: Path) -> None:
+    data = VaultPages(_vault(tmp_path), _FakeIndexer(), read_only=True).list_docs()
+    assert data.read_only is True
+    # File CRUD is hidden when epicurus may not write the vault (Obsidian is the author).
+    assert data.can_manage_files is False
+    # The tree itself is still listed — read-only means view-only, not invisible.
+    assert any(d.path == "alpha.md" for d in data.docs)
+
+
+async def test_read_only_write_doc_is_409_and_does_not_write(tmp_path: Path) -> None:
+    indexer = _FakeIndexer()
+    pages = VaultPages(_vault(tmp_path), indexer, read_only=True)
+    with pytest.raises(HTTPException) as err:
+        await pages.write_doc("alpha.md", "should not land")
+    assert err.value.status_code == 409
+    # The guard fires before any write or re-index.
+    assert (tmp_path / "alpha.md").read_text(encoding="utf-8") == "# Alpha\n"
+    assert indexer.calls == []
+
+
+def test_read_only_rejects_folder_and_move_operations(tmp_path: Path) -> None:
+    pages = VaultPages(_vault(tmp_path), _FakeIndexer(), read_only=True)
+    for call in (
+        lambda: pages.create_folder("newdir"),
+        lambda: pages.delete_doc("alpha.md"),
+        lambda: pages.delete_folder("projects"),
+        lambda: pages.move_item("alpha.md", "renamed.md"),
+    ):
+        with pytest.raises(HTTPException) as err:
+            call()
+        assert err.value.status_code == 409
+    # Nothing was touched on disk.
+    assert (tmp_path / "alpha.md").is_file()
+    assert (tmp_path / "projects" / "beta.md").is_file()
+    assert not (tmp_path / "newdir").exists()
+
+
+def test_router_save_is_409_when_read_only(tmp_path: Path) -> None:
+    app = FastAPI()
+    app.include_router(
+        create_pages_router(VaultPages(_vault(tmp_path), _FakeIndexer(), read_only=True))
+    )
+    client = TestClient(app)
+    # The list payload advertises read-only so the shell can hide Save / CRUD.
+    listing = client.get("/pages/vault")
+    assert listing.json()["read_only"] is True
+    assert listing.json()["can_manage_files"] is False
+    # And the write itself is refused server-side regardless of the UI.
+    resp = client.put("/pages/vault/doc", params={"path": "alpha.md"}, json={"content": "x"})
+    assert resp.status_code == 409

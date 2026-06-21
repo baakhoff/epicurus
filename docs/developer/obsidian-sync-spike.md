@@ -102,8 +102,8 @@ indexing.
 
 ## Follow-up
 
-Implementation is tracked in **#232** — *"knowledge: watch the vault for external
-changes and auto-reindex (Obsidian Sync via bind-mount)"*: add a debounced `watchfiles`
-watcher to the knowledge service driving an incremental re-index, plus docs for the
-Obsidian-Sync-via-bind-mount setup and the Obsidian Git alternative. When that lands,
-capture the read/write-ownership decision as an ADR.
+**Implemented in #232.** The knowledge service gained a debounced `watchfiles` watcher
+(`VAULT_WATCH`) that drives an incremental re-index when the bind-mounted vault changes,
+and the watched-vault mode is **read-only** so Obsidian stays the sole author — the
+read/write-ownership decision is **ADR-0035**. See the setup recipes (same-host bind-mount
+and headless Obsidian Git) in **[Keeping the knowledge vault in sync with Obsidian](obsidian-sync.md)**.

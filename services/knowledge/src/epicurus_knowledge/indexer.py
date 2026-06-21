@@ -8,6 +8,7 @@ the core's platform API so the module never holds provider credentials (ADR-0010
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import uuid
@@ -109,6 +110,13 @@ class KnowledgeIndexer:
         self._batch_size = max(1, embed_batch_size)
         self._collection = scope_collection(collection_base, tenant)
         self._ensured = False
+        # Serialises full re-index passes on this indexer instance. The vault indexer is
+        # shared between the startup runner (#230) and the live watcher (#232), and the
+        # Re-index action can fire mid-startup; without this two concurrent walks could
+        # double-embed or race the ledger. Held only by run(); single-file index_path /
+        # remove_path stay lock-free (in watch mode the vault is read-only, so they and a
+        # watch pass never overlap).
+        self._run_lock = asyncio.Lock()
 
     async def _ensure_collection(self, dim: int) -> None:
         if self._ensured:
@@ -325,7 +333,14 @@ class KnowledgeIndexer:
         New/changed notes are embedded in batches across files (#230): their chunks
         accumulate into ``pending`` and flush once ``embed_batch_size`` chunks are
         queued, so the index completes in a handful of round-trips, not one per file.
+
+        Serialised by ``self._run_lock`` so a watch-triggered pass (#232) and the startup
+        index never walk the vault concurrently.
         """
+        async with self._run_lock:
+            return await self._run_walk()
+
+    async def _run_walk(self) -> dict[str, int]:
         indexed = 0
         unchanged = 0
 

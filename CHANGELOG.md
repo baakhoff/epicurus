@@ -21,9 +21,9 @@ images to GHCR.
   belongs to; a single failing list is skipped, not fatal. Previously, enabling several Google
   lists without marking one active left the board reading the empty local store — nothing
   showed and there was no way to choose a list when adding (#253). Tasks is now `multi` like
-  calendar (ADR-0036, refining ADR-0030); the web `field_options` contract gained `{value,
-  label}` options so a board `<select>` can show a list's title while submitting its id
-  (`tasks` → 0.8.0, `web` → 0.22.0).
+  calendar (ADR-0036, refining ADR-0030); the web board gained a `field_choices` option type
+  so a `<select>` can show a list's title while submitting its id (`tasks` → 0.8.0, `web` →
+  0.22.0).
 - **Connecting Google grants each module's API scopes (incremental)** — modules now declare
   the OAuth scopes they need in their manifest (`oauth_scopes`, e.g. calendar →
   `…/auth/calendar`, tasks → `…/auth/tasks`, mail → the Gmail scopes), and the web **Connect**

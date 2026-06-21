@@ -152,12 +152,13 @@ def test_add_action_has_list_selector_when_lists_given() -> None:
     )
     add = board["actions"][0]
     assert add["fields"] == ["title", "list_id", "notes", "due", "priority", "tags"]
-    assert add["field_options"]["list_id"] == [
+    # the list picker is a labeled `field_choices` (value=list id, label=title)
+    assert add["field_choices"]["list_id"] == [
         {"value": "@default", "label": "My Tasks"},
         {"value": "work", "label": "Work"},
     ]
     assert add["form_values"]["list_id"] == "work"
-    # the plain enum fields are untouched
+    # the plain enum fields stay as `field_options`
     assert add["field_options"]["priority"] == ["low", "medium", "high"]
 
 
@@ -165,4 +166,4 @@ def test_add_action_has_no_list_selector_when_no_lists() -> None:
     board = build_tasks_board([], today=TODAY, lists=[])
     add = board["actions"][0]
     assert "list_id" not in add["fields"]
-    assert "list_id" not in add["field_options"]
+    assert "field_choices" not in add

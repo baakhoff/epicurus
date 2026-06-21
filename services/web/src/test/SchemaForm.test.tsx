@@ -104,8 +104,8 @@ describe("SchemaForm", () => {
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 
-  it("renders {value,label} enum options (label≠value) and submits the value (#253)", () => {
-    // A list picker: options show the list title but submit the list id (ADR-0036).
+  it("renders enumLabels as a labeled <select> (label≠value) and submits the value (#253)", () => {
+    // A list picker: options show the list title (enumLabels) but submit the list id (enum).
     const onSubmit = vi.fn();
     render(
       <SchemaForm
@@ -115,10 +115,8 @@ describe("SchemaForm", () => {
             list_id: {
               type: "string",
               title: "List",
-              enum: [
-                { value: "id-job", label: "Job" },
-                { value: "id-life", label: "Life" },
-              ],
+              enum: ["id-job", "id-life"],
+              enumLabels: ["Job", "Life"],
             },
           },
         }}

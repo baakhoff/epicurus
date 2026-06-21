@@ -117,8 +117,8 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card),
   both carrying the task's `list_id` so the mutation routes to the **owning** list; the board
   offers **Add task** (`tasks_add`, a form) whose **list picker** chooses the target list
-  (`field_options` `{value, label}` = list id → title). The board never carries credentials or
-  business logic — it is data plus tool references.
+  (a labeled `field_choices` entry, value = list id → label = title). The board never carries
+  credentials or business logic — it is data plus tool references.
 
 ### Connected accounts & collections (ADR-0030)
 

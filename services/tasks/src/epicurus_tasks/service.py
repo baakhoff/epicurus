@@ -456,11 +456,11 @@ def build_tasks_board(
         "field_options": _TASK_FIELD_OPTIONS,
     }
     if lists:
-        # Offer a list (category) picker: the option value is the list id, the label its
-        # title (the web renders {value,label} options as a label≠value <select>, ADR-0036).
+        # Offer a list (category) picker: a labeled choice whose value is the list id and
+        # label its title — the shell renders `field_choices` as a label≠value <select>
+        # (ADR-0036), distinct from `field_options`' plain string enums (priority/status).
         add_action["fields"] = ["title", "list_id", "notes", "due", "priority", "tags"]
-        add_action["field_options"] = {
-            **_TASK_FIELD_OPTIONS,
+        add_action["field_choices"] = {
             "list_id": [{"value": list_id, "label": title} for list_id, title in lists],
         }
         if default_list_id is not None:

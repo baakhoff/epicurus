@@ -18,6 +18,8 @@ interface PropertySchema {
   description?: string;
   default?: unknown;
   enum?: unknown[];
+  // Display labels parallel to ``enum`` (a labeled <select>); falls back to the value.
+  enumLabels?: string[];
   format?: string;
   minimum?: number;
   maximum?: number;
@@ -99,6 +101,7 @@ function FieldFor({
   }
 
   if (prop.enum && prop.enum.length > 0) {
+    const labels = prop.enumLabels;
     return (
       <div>
         <Label hint={prop.description}>{title}</Label>
@@ -111,21 +114,11 @@ function FieldFor({
           <option value="" disabled>
             choose…
           </option>
-          {prop.enum.map((option) => {
-            // An option is a plain string (label==value) or a {value,label} pair, so the
-            // submitted value can differ from the shown label (e.g. a list id vs its title).
-            const pair =
-              typeof option === "object" && option !== null && "value" in option
-                ? (option as { value: string; label: string })
-                : null;
-            const optValue = pair ? pair.value : String(option);
-            const optLabel = pair ? pair.label : String(option);
-            return (
-              <option key={optValue} value={optValue}>
-                {optLabel}
-              </option>
-            );
-          })}
+          {prop.enum.map((option, i) => (
+            <option key={String(option)} value={String(option)}>
+              {labels?.[i] ?? String(option)}
+            </option>
+          ))}
         </select>
       </div>
     );

@@ -57,6 +57,7 @@ class EpicurusModule:
         attachable: bool = False,
         required_models: list[ModelSlot] | None = None,
         collections: CollectionsSpec | None = None,
+        oauth_scopes: dict[str, list[str]] | None = None,
         docs_url: str | None = None,
     ) -> None:
         self._name = name
@@ -71,6 +72,7 @@ class EpicurusModule:
         self._attachable = attachable
         self._required_models = list(required_models or [])
         self._collections = collections
+        self._oauth_scopes = dict(oauth_scopes or {})
         self._docs_url = docs_url
         self._mcp = FastMCP(
             name,
@@ -138,6 +140,7 @@ class EpicurusModule:
             attachable=self._attachable,
             required_models=list(self._required_models),
             collections=self._collections,
+            oauth_scopes=dict(self._oauth_scopes),
             docs_url=self._docs_url,
         )
 

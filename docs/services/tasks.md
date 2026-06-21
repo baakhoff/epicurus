@@ -54,9 +54,12 @@ class Task(BaseModel):
     id: str
     title: str
     notes: str | None = None
-    due: str | None = None      # ISO date, e.g. "2025-01-15"
-    completed: bool = False
+    due: str | None = None                                      # ISO date, e.g. "2025-01-15"
+    status: Literal["open", "in_progress", "done"] = "open"
     completed_at: str | None = None
+    priority: Literal["low", "medium", "high"] | None = None    # local-only
+    tags: list[str] = []                                        # local-only
+    # `completed` is a computed alias: True when status == "done".
 ```
 
 ### HTTP
@@ -192,10 +195,20 @@ and routes to the connected Google list the operator selects, which lives in the
 | `completed` | `BOOLEAN` | Whether the task is done. |
 | `completed_at` | `VARCHAR(64) \| NULL` | ISO timestamp when completed. |
 | `created_at` | `DATETIME` | Auto-set at insert time. |
+| `status` | `VARCHAR(32) \| NULL` | `open` / `in_progress` / `done` (added v0.5.0). |
+| `priority` | `VARCHAR(16) \| NULL` | `low` / `medium` / `high`; local-only (added v0.5.0). |
+| `tags` | `TEXT \| NULL` | JSON array of labels; local-only (added v0.5.0). |
 
 Unique constraint on `(tenant_id, id)`. `tasks_list` returns only rows with `completed = FALSE`, ordered by `created_at DESC`.
 
-Schema is created automatically by `TaskStore.init()` at startup.
+Schema is created automatically by `TaskStore.init()` at startup, which also **reconciles
+columns added after the table's first release** — there is no migration framework, so `init()`
+runs `create_all` and then `ALTER TABLE … ADD COLUMN` for any model column missing from an
+existing table (additive only; the v0.5.0 `status`/`priority`/`tags` fields). Without this, a
+database provisioned before v0.5.0 has no `status` column and **every** task read (the board,
+`tasks_list`, the attachment picker, the resolver) 500s with `column tasks_local.status does
+not exist` (#247). Destructive changes — drops, renames, type changes, `NOT NULL` backfills —
+still require a real migration.
 
 ### Google provider
 

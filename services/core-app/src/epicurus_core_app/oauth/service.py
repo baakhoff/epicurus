@@ -41,10 +41,10 @@ from .models import (
 _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# Default scopes requested when connecting to Google.
-# openid + email give the agent a verified identity; additional scopes
-# (calendar, gmail, drive, …) are declared per-module and requested during their
-# own connect flows (future).
+# Default scopes always requested when connecting to Google — they give the agent a
+# verified identity. Additional API scopes (calendar, tasks, gmail, …) are declared
+# per-module (``ModuleManifest.oauth_scopes``) and passed in by the caller as ``scope``;
+# :meth:`connect` unions them onto this default so identity is never dropped (#241).
 _GOOGLE_DEFAULT_SCOPE = "openid email profile"
 
 # Tokens will be proactively refreshed this many seconds before they actually expire.
@@ -265,7 +265,9 @@ class OAuthService:
                 f"'oauth/clients/{provider}' (client_id, client_secret)"
             ) from exc
         client_id: str = creds["client_id"]
-        effective_scope = scope or _GOOGLE_DEFAULT_SCOPE
+        # Always include the default identity scopes; union any caller-requested module
+        # API scopes onto them so a passed `scope` adds to rather than replaces them (#241).
+        effective_scope = self._union_scopes(_GOOGLE_DEFAULT_SCOPE, scope or "")
         state = self._create_state(provider, tenant_id)
         auth_url = self._auth_url(provider, client_id, effective_scope, state)
         return OAuthConnectResponse(auth_url=auth_url)

@@ -78,6 +78,21 @@ describe("contracts", () => {
     expect(snapshot.manifest.tools).toEqual([]);
     expect(snapshot.manifest.pages).toEqual([]);
     expect(snapshot.manifest.required_models).toEqual([]);
+    expect(snapshot.manifest.oauth_scopes).toEqual({});
+  });
+
+  it("parses a manifest declaring OAuth scopes (#241)", () => {
+    const snapshot = ModuleSnapshot.parse({
+      manifest: {
+        name: "calendar",
+        version: "0.6.0",
+        oauth_scopes: { google: ["https://www.googleapis.com/auth/calendar"] },
+      },
+      status: { healthy: true },
+    });
+    expect(snapshot.manifest.oauth_scopes.google).toEqual([
+      "https://www.googleapis.com/auth/calendar",
+    ]);
   });
 
   it("parses a manifest declaring model slots (#128)", () => {

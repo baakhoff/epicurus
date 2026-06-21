@@ -71,7 +71,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.6.0",
+        version="0.7.1",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -102,6 +102,9 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
         # Google task lists. Tasks is single-active (not multi): the board and tools act on
         # the active list. Serves GET /accounts.
         collections=CollectionsSpec(noun="list", multi=False, providers=["google"]),
+        # The Google API scope the shell requests when connecting an account (#241); the
+        # core adds the default identity scopes. Without this, the Google Tasks API 403s.
+        oauth_scopes={"google": ["https://www.googleapis.com/auth/tasks"]},
     )
 
     @module.tool()

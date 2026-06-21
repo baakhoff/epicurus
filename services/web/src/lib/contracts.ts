@@ -262,6 +262,10 @@ export const ModuleManifest = z.object({
   // Account/collection model (ADR-0030): the module's connectable accounts + collections,
   // rendered as a connected-accounts section. Null when the module doesn't use the model.
   collections: CollectionsSpec.nullish(),
+  // OAuth API scopes the module needs per provider (#241): {provider: [scope, …]}. The shell
+  // unions these across modules and requests them at connect so a connected account grants
+  // the API access its modules require.
+  oauth_scopes: z.record(z.string(), z.array(z.string())).default({}),
 });
 export type ModuleManifest = z.infer<typeof ModuleManifest>;
 

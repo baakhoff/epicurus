@@ -127,3 +127,11 @@ stores, TanStack Query, zod-validated API contracts (`src/lib/contracts.ts` mirr
 core's models). The surface registry (`src/app/registry.ts`) is **data, not markup** — new
 screens add an entry, not a restructure. Installable PWA; `/platform` is excluded from the
 service worker so streams always hit the network.
+
+The shared primitive kit is one file — `src/components/ui.tsx` (`Button`, `Badge`, `Card`,
+the text fields, `Switch`, `Sheet`, `Confirm`). `Switch` is the single on/off control used
+everywhere (per-tool toggles, module enable/disable, boolean schema fields). Its **track
+colour carries the state** — accent when on, muted when off — while the thumb stays a
+constant, bright, evenly-inset circle that simply slides between ends. Keep that convention
+so every toggle in the shell reads the same; the thumb must never change colour or sit flush
+against the edge (that read as a dot escaping the pill, #245).

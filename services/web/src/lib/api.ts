@@ -300,8 +300,15 @@ export const api = {
     }),
   oauthStatus: (provider: string) =>
     request(OAuthStatus, `/platform/v1/oauth/${encodeURIComponent(provider)}/status`),
-  oauthConnect: (provider: string) =>
-    request(OAuthConnectResponse, `/platform/v1/oauth/${encodeURIComponent(provider)}/connect`),
+  // `scope` (space-separated) requests module API scopes beyond the default identity ones
+  // (#241); the core unions them onto the defaults and accumulates prior grants.
+  oauthConnect: (provider: string, scope?: string) =>
+    request(
+      OAuthConnectResponse,
+      `/platform/v1/oauth/${encodeURIComponent(provider)}/connect${
+        scope ? `?scope=${encodeURIComponent(scope)}` : ""
+      }`,
+    ),
   oauthDisconnect: (provider: string) =>
     request(z.object({ status: z.string() }), `/platform/v1/oauth/${encodeURIComponent(provider)}`, {
       method: "DELETE",

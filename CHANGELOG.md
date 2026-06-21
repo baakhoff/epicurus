@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Connecting Google grants each module's API scopes (incremental)** — modules now declare
+  the OAuth scopes they need in their manifest (`oauth_scopes`, e.g. calendar →
+  `…/auth/calendar`, tasks → `…/auth/tasks`, mail → the Gmail scopes), and the web **Connect**
+  button requests them: Settings connects with the **union** across all modules (one connect
+  grants everything), and a module card's Connect requests just that module's scopes
+  (incremental — the core accumulates). The core always includes the default identity scopes
+  and unions the requested ones onto them. Previously Connect requested only `openid email
+  profile`, so after connecting, the Calendar / Tasks / Gmail APIs returned 403 — the gap
+  surfaced by #209 (closes #241, the #102 wiring) (`epicurus-core` → 0.12.0, `core-app` →
+  0.18.0, `calendar` → 0.7.0, `tasks` → 0.7.0, `mail` → 0.6.0, `web` → 0.20.0).
 - **Connecting Google auto-connects the modules that use it; settings no longer 502** —
   connecting a Google account now **auto-enables** the calendar/task-list collections of
   every module that uses it (and disconnecting clears them), so the operator connects once
@@ -165,6 +175,14 @@ images to GHCR.
 
 ### Fixed
 
+- **Tasks board (and every task read) no longer 500s on upgraded deployments** —
+  `TaskStore.init()` now adds the v0.5.0 `status` / `priority` / `tags` columns to a
+  pre-existing `tasks_local` table (the same `create_all` + `_ensure_columns` pattern as
+  `llm_prefs` / `module_prefs` / the memory store). A database provisioned before #218 lacked
+  those columns, so the board page, the `tasks_list` tool, the attachment picker, and the
+  resolver all 500'd with `column tasks_local.status does not exist`. Fresh installs were
+  unaffected, so CI and the unit tests (SQLite, always built fresh) didn't catch it (#247)
+  (`tasks` → 0.7.1).
 - **Module docs are actually indexed (moved off the Swagger-reserved `/docs`)** — modules now
   serve their contributed docs at **`/module-docs`**, not `/docs`. `/docs` is FastAPI's built-in
   Swagger UI, which shadowed the route, so the core's docs proxy fetched HTML and the knowledge

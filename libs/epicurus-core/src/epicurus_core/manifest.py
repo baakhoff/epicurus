@@ -205,6 +205,13 @@ class ModuleManifest(BaseModel):
     # module serves ``GET /accounts`` and reads its selection via
     # ``PlatformClient.get_collections``; the shell renders the connected-accounts section.
     collections: CollectionsSpec | None = None
+    # OAuth API scopes the module needs, per provider (#241): ``{provider: [scope, …]}`` —
+    # e.g. ``{"google": ["https://www.googleapis.com/auth/calendar"]}``. The shell unions
+    # these across modules and requests them at connect (``?scope=``) so connecting an
+    # account grants the API access its modules require; the core always adds the default
+    # identity scopes and accumulates grants (``include_granted_scopes``). Empty = the module
+    # needs only the default identity scopes.
+    oauth_scopes: dict[str, list[str]] = Field(default_factory=dict)
     # A relative path on the module (e.g. ``/module-docs``) that returns documentation pages for
     # the knowledge module to auto-index (#215). Response shape:
     # ``{"documents": [{"path": "usage.md", "content": "..."}]}``. The core proxies this at

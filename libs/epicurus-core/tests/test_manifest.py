@@ -140,6 +140,17 @@ def test_manifest_collections_defaults_none() -> None:
     assert ModuleManifest(name="m", version="1.0").collections is None
 
 
+def test_manifest_oauth_scopes_default_empty() -> None:
+    assert ModuleManifest(name="m", version="1.0").oauth_scopes == {}
+
+
+def test_manifest_oauth_scopes_roundtrip() -> None:
+    scopes = {"google": ["https://www.googleapis.com/auth/calendar"]}
+    m = ModuleManifest(name="calendar", version="0.6.0", oauth_scopes=scopes)
+    restored = ModuleManifest.model_validate(m.model_dump())
+    assert restored.oauth_scopes == scopes
+
+
 def test_manifest_with_collections_roundtrips() -> None:
     m = ModuleManifest(
         name="calendar",

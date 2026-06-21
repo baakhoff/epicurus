@@ -1,0 +1,48 @@
+name: Testing images
+
+# Continuous deploy of the `testing` branch — NOT a release.
+#
+# Every push to `testing` rebuilds the service images and pushes them to GHCR
+# under the moving `:testing` tag. A box with `EPICURUS_VERSION=testing` in its
+# `.env` then pulls the branch HEAD on its next reconcile (see
+# docs/infrastructure/auto-deploy.md). No version tag and no GitHub Release are
+# created — this track is for the maintainer's own always-on box, ahead of the
+# semver releases cut by release.yml.
+on:
+  push:
+    branches: [testing]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# A newer push to testing supersedes an in-flight build — don't pile up images.
+concurrency:
+  group: testing-images
+  cancel-in-progress: true
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push :testing images to GHCR
+        run: |
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          for df in services/*/Dockerfile; do
+            svc="$(basename "$(dirname "$df")")"
+            img="ghcr.io/${owner}/epicurus-${svc}"
+            echo "::group::build + push ${svc}:testing"
+            docker build -f "$df" -t "${img}:testing" .
+            docker push "${img}:testing"
+            echo "::endgroup::"
+          done

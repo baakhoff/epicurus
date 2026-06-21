@@ -29,14 +29,40 @@ All service compose fragments resolve the image tag from `${EPICURUS_VERSION:-la
 
 | `.env` value | Behaviour |
 | --- | --- |
-| Unset / `latest` | Always pulls the most recent image on the next reconcile. |
+| Unset / `latest` | Always pulls the most recent **release** image on the next reconcile. |
 | `0.2.0` (pinned) | Always runs that exact image; upgrade is a deliberate `.env` edit + reconcile. |
+| `testing` | Tracks the **`testing` branch** HEAD — see below. Runs ahead of releases. |
 
 For a personal single-operator box, tracking `:latest` is the most convenient
 setup: tag → images on GHCR → next scheduled reconcile deploys it automatically.
 
 Set a pinned value if you want to control *when* upgrades happen, or to run a
 specific version on staging while production lags behind.
+
+### Tracking the `testing` branch (pre-release box)
+
+To run a box straight off a branch instead of cut releases — handy for a personal
+always-on box you want to dogfood before tagging a release — push to the `testing`
+branch. The [`Testing images`](../../.github/workflows/testing.yml) workflow rebuilds
+every service image on each push and publishes them to GHCR under the moving
+`:testing` tag (no version tag, no GitHub Release).
+
+On the box, set **both** of these in `.env`:
+
+```env
+EPICURUS_VERSION=testing        # pull the :testing images
+EPICURUS_TRACK_BRANCH=testing   # also sync the checkout to origin/testing
+```
+
+`EPICURUS_TRACK_BRANCH` makes `reconcile.sh` `git reset --hard origin/testing` before
+pulling, so the **compose files, `.env.example`, and any new services** move with the
+branch — not just the image tags. (`.env`/`.env.secrets` are gitignored, so the reset
+never touches your secrets.) Leave it unset for the normal release flow.
+
+Then the same scheduled reconcile (Option A) or Watchtower (Option B) below applies
+unchanged — the box just follows `testing` instead of `:latest`. Caveat: `testing`
+is intentionally *unprotected and unverified* — whatever you push runs on the box, so
+keep `main` for vetted code and treat the testing box as disposable.
 
 ## Option A — Scheduled reconcile script (recommended for Windows)
 

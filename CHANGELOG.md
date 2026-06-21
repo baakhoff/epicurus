@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: all-day events (fixes events showing a day early) + per-create calendar picker**
+  — all-day events are now modeled as a floating date range end-to-end. Google returns them
+  date-only; the module coerced that to a UTC-midnight instant, which the shell then shifted
+  into the viewer's local zone — landing on the **previous day** for any negative UTC offset.
+  Now `Event.all_day` is carried through; all-day `start`/`end` serialize as bare `YYYY-MM-DD`
+  and the shell parses them with the local `Date` constructor (no timezone shift), with an
+  **"All day"** toggle in the create/edit form. The create form also gains a **picker to choose
+  which calendar** a new event lands on (`calendar_create_event` accepts an optional
+  `calendar_id` `account:collection` token). The local store persists `all_day` via an additive
+  `_ensure_columns` migration (mirrors #248) (closes #252) (`calendar` → 0.8.0, `web` → 0.22.0).
 - **Tasks: each Google list is a category, pick the list per task** — the Tasks board now
   **aggregates open tasks across every enabled list** (not just one "active" list), tagging
   each card with the list it came from, and the **Add task** form gains a **list picker** so
@@ -23,7 +33,7 @@ images to GHCR.
   showed and there was no way to choose a list when adding (#253). Tasks is now `multi` like
   calendar (ADR-0036, refining ADR-0030); the web board gained a `field_choices` option type
   so a `<select>` can show a list's title while submitting its id (`tasks` → 0.8.0, `web` →
-  0.22.0).
+  0.23.0).
 - **Connecting Google grants each module's API scopes (incremental)** — modules now declare
   the OAuth scopes they need in their manifest (`oauth_scopes`, e.g. calendar →
   `…/auth/calendar`, tasks → `…/auth/tasks`, mail → the Gmail scopes), and the web **Connect**

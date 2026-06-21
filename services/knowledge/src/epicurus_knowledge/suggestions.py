@@ -246,12 +246,18 @@ class SuggestionReview:
         *,
         vault_path: Path,
         tenant: str,
+        read_only: bool = False,
     ) -> None:
         self._store = store
         self._pages = pages
         self._indexer = indexer
         self._vault = vault_path
         self._tenant = tenant
+        # Watch mode (#232, ADR-0035): the vault is externally owned, so an approval —
+        # which would write the vault — is refused. The agent may still *propose* (no
+        # write) and the operator may still reject to clear the queue; only the apply is
+        # blocked. The operator makes the change in Obsidian instead.
+        self._read_only = read_only
 
     def _current_content(self, rel: str) -> str:
         """The doc's current vault content, or ``""`` if it does not exist yet."""
@@ -285,7 +291,18 @@ class SuggestionReview:
 
         404 if the suggestion is unknown. ``create``/``update`` write the proposed
         content and re-index just that file; ``delete`` removes the file and its vectors.
+
+        409 when the vault is externally owned (watch mode, #232): applying would write a
+        vault Obsidian owns, so the apply is refused. Reject still works to clear the queue.
         """
+        if self._read_only:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "cannot apply suggestions while a watched external vault is mounted"
+                    " (VAULT_WATCH): the vault is managed in Obsidian — make the change there"
+                ),
+            )
         s = await self._store.get(tenant=self._tenant, sid=sid)
         if s is None:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")

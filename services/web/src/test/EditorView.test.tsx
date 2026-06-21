@@ -72,6 +72,26 @@ describe("EditorView", () => {
     );
   });
 
+  it("renders read-only when the vault is externally owned (#232)", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Knowledge",
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+      can_manage_files: false,
+      read_only: true,
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "# Hello" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
+    // The buffer is shown but not editable, and there is no Save path.
+    expect(textarea.readOnly).toBe(true);
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    // A read-only badge + banner make the externally-owned mode legible.
+    expect(screen.getByText("read-only")).toBeInTheDocument();
+    expect(screen.getByText(/managed externally/i)).toBeInTheDocument();
+  });
+
   it("toggles to a rendered preview of the current draft", async () => {
     mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
     mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "# Hi" });

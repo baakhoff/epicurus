@@ -40,6 +40,15 @@ log = get_logger("knowledge.pages")
 # The single editor page id this module declares (see service.py manifest `pages`).
 VAULT_PAGE_ID = "vault"
 
+# Surfaced to the shell and raised as HTTP 409 when the vault is externally owned (#232,
+# ADR-0035): in watch mode Obsidian (or whatever syncs the folder) is the sole author, so
+# epicurus refuses every write — the editor save, the file-tree CRUD, the move/rename — and
+# the editor page renders read-only.
+VAULT_READ_ONLY_DETAIL = (
+    "vault is read-only: a watched external vault is mounted (VAULT_WATCH), so it is managed"
+    " in Obsidian (or whatever syncs the folder) — edit it there"
+)
+
 
 class EditorDoc(BaseModel):
     """One entry in the editor's document/folder tree."""
@@ -56,6 +65,7 @@ class EditorData(BaseModel):
     title: str = "Knowledge"
     docs: list[EditorDoc] = Field(default_factory=list)
     can_manage_files: bool = False  # True → the shell shows folder CRUD controls (#216)
+    read_only: bool = False  # True → editor is view-only; vault is externally owned (#232)
 
 
 class EditorDocContent(BaseModel):
@@ -90,9 +100,19 @@ class MoveBody(BaseModel):
 class VaultPages:
     """Serves the editor page's data from the operator's Obsidian vault."""
 
-    def __init__(self, vault_path: Path, indexer: KnowledgeIndexer) -> None:
+    def __init__(
+        self, vault_path: Path, indexer: KnowledgeIndexer, *, read_only: bool = False
+    ) -> None:
         self._vault = vault_path
         self._indexer = indexer
+        # Watch mode (#232): the vault is externally owned, so every write is refused and
+        # the file-tree CRUD is hidden (the shell honours read_only / can_manage_files).
+        self._read_only = read_only
+
+    def _ensure_writable(self) -> None:
+        """Reject a mutating operation when the vault is externally owned (#232, ADR-0035)."""
+        if self._read_only:
+            raise HTTPException(status_code=409, detail=VAULT_READ_ONLY_DETAIL)
 
     def list_docs(self) -> EditorData:
         """Every ``.md`` document and non-hidden subdirectory in the vault (depth-first sorted)."""
@@ -106,7 +126,13 @@ class VaultPages:
             EditorDoc(id=node["path"], title=_title(node), path=node["path"], type=node["type"])
             for node in iter_tree_nodes(self._vault)
         ]
-        return EditorData(docs=docs, can_manage_files=True)
+        # File CRUD is offered only when epicurus may write the vault; a watched external
+        # vault is read-only here (Obsidian is the author) so the shell hides the controls.
+        return EditorData(
+            docs=docs,
+            can_manage_files=not self._read_only,
+            read_only=self._read_only,
+        )
 
     def read_doc(self, rel: str) -> EditorDocContent:
         """One document's content. 404 if it does not exist."""
@@ -122,7 +148,10 @@ class VaultPages:
         The file is the source of truth and is saved first; if the re-index embed
         round-trip fails (e.g. the core is paused), the save still succeeds with
         ``indexed=False`` so an edit is never lost — the Re-index action can retry.
+
+        409 when the vault is externally owned (watch mode, #232) — Obsidian is the author.
         """
+        self._ensure_writable()
         target = safe_relative(self._vault, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -136,8 +165,10 @@ class VaultPages:
     def create_folder(self, rel: str) -> dict[str, str]:
         """Create a directory at *rel* relative to the vault root.
 
-        409 if it already exists, 400 for any path-safety violation.
+        409 if it already exists, 400 for any path-safety violation, 409 when the vault is
+        externally owned (watch mode, #232).
         """
+        self._ensure_writable()
         target = safe_dir_relative(self._vault, rel)
         if target.exists():
             raise HTTPException(status_code=409, detail=f"folder already exists: {rel}")
@@ -148,8 +179,10 @@ class VaultPages:
     def delete_doc(self, rel: str) -> None:
         """Delete a ``.md`` file at *rel* relative to the vault root.
 
-        404 if it does not exist, 400 for any path-safety violation.
+        404 if it does not exist, 400 for any path-safety violation, 409 when the vault is
+        externally owned (watch mode, #232).
         """
+        self._ensure_writable()
         target = safe_relative(self._vault, rel)
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
@@ -160,8 +193,9 @@ class VaultPages:
         """Delete an **empty** directory at *rel* relative to the vault root.
 
         404 if it does not exist, 409 if it is not empty, 400 for any
-        path-safety violation.
+        path-safety violation, 409 when the vault is externally owned (watch mode, #232).
         """
+        self._ensure_writable()
         target = safe_dir_relative(self._vault, rel)
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"no such folder: {rel}")
@@ -180,8 +214,9 @@ class VaultPages:
         :func:`~epicurus_knowledge.refs.safe_dir_relative` (no ``.md``
         requirement, because both files and directories land here). 404 if the
         source does not exist, 409 if the destination already exists, 400 for
-        any path-safety violation.
+        any path-safety violation, 409 when the vault is externally owned (watch mode, #232).
         """
+        self._ensure_writable()
         from_target = safe_dir_relative(self._vault, from_rel)
         to_target = safe_dir_relative(self._vault, to_rel)
         if not from_target.exists():

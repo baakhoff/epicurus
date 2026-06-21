@@ -891,7 +891,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-knowledge"
-version = "0.12.0"
+version = "0.13.0"
 source = { editable = "services/knowledge" }
 dependencies = [
     { name = "asyncpg" },
@@ -901,6 +901,7 @@ dependencies = [
     { name = "qdrant-client" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "watchfiles" },
 ]
 
 [package.metadata]
@@ -912,6 +913,7 @@ requires-dist = [
     { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+    { name = "watchfiles", specifier = ">=0.21" },
 ]
 
 [[package]]

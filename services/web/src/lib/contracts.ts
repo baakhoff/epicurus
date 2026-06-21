@@ -423,6 +423,13 @@ export const EditorData = z.object({
    * notes does not (notes has its own `can_create` flow).
    */
   can_manage_files: z.boolean().default(false),
+  /**
+   * View-only mode (#232): when true the vault is externally owned — a watched
+   * Obsidian-synced folder — so the editor hides Save and all authoring, and shows a
+   * read-only banner. The module also leaves `can_create`/`can_manage_files` false in
+   * this mode, so Obsidian stays the sole author.
+   */
+  read_only: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 

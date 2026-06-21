@@ -33,3 +33,27 @@ class KnowledgeSettings(CoreSettings):
     index_retry_max_attempts: int = 30
     index_retry_base_delay_seconds: float = 1.0
     index_retry_max_delay_seconds: float = 30.0
+    # Live vault sync (#232): when an externally-synced vault is bind-mounted (e.g. an
+    # Obsidian Sync folder), watch it and incrementally re-index on change so edits
+    # landed on disk show up in search without a manual re-index. Opt-in — off by default
+    # so the common image-only / empty-volume deploy keeps no watcher. Enabling it also
+    # marks the vault **externally owned**: the editor page goes read-only and agent
+    # suggestions can't be applied, leaving Obsidian (or whatever syncs the folder) the
+    # sole author (ADR-0035).
+    vault_watch: bool = False
+    # Coalescing window (milliseconds) for a burst of vault changes before a re-index is
+    # triggered. Obsidian Sync writes many files at once; grouping them into one window
+    # keeps a burst to a single incremental pass. Passed to the watcher's debounce.
+    vault_watch_debounce_ms: int = 1500
+
+    @property
+    def vault_read_only(self) -> bool:
+        """Whether epicurus treats the vault as externally owned and never writes it.
+
+        Tied to watch mode (#232, ADR-0035): a watched external vault has a second author
+        (Obsidian / the syncing process), so epicurus-side writes — the editor save, the
+        file-tree CRUD, and applying an agent suggestion — are disabled to avoid two
+        writers racing on the same files. Obsidian Sync resolves conflicts within its own
+        ecosystem; epicurus stays a pure reader of the synced folder.
+        """
+        return self.vault_watch

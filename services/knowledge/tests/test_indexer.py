@@ -648,3 +648,37 @@ async def test_clear_removes_all_rows(note_index: NoteIndex) -> None:
     )
     await note_index.clear(tenant=TENANT)
     assert await note_index.count(tenant=TENANT) == 0
+
+
+async def test_concurrent_runs_are_serialized(note_index: NoteIndex, vault: Path) -> None:
+    """The run-lock (#232) stops the watcher and the startup index walking at once.
+
+    Two ``run()`` calls fired together must not embed concurrently: with the lock the
+    second waits, sees the first run's notes already recorded, and embeds nothing — so the
+    embed call is never re-entered (max concurrency 1). Without the lock both walks would
+    race the still-empty ledger and embed the same notes at the same time.
+    """
+    import asyncio
+
+    active = 0
+    max_active = 0
+
+    async def _embed(texts: list[str], **_: Any) -> list[list[float]]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)  # hold the embed so an overlap would be observable
+        active -= 1
+        return _fake_vectors(texts)
+
+    platform = MagicMock()
+    platform.embed = AsyncMock(side_effect=_embed)
+    platform.get_module_model = AsyncMock(return_value=None)
+    indexer = KnowledgeIndexer(
+        note_index, _make_mock_qdrant(), platform, vault_path=vault, tenant=TENANT
+    )
+
+    await asyncio.gather(indexer.run(), indexer.run())
+
+    assert max_active == 1
+    assert await note_index.count(tenant=TENANT) == 2

@@ -82,6 +82,15 @@ each run. The index is refreshed at service startup and whenever you click
 After adding notes to your vault or changing the vault path, trigger a
 re-index to pick up the changes.
 
+## Live sync (watched vault)
+
+If your vault is an Obsidian-synced folder bind-mounted into the container, set
+``VAULT_WATCH=true`` to have the service watch it and re-index automatically when
+files change on disk — no manual re-index needed. In this mode the vault is
+**externally owned**: the Knowledge editor page is read-only and Obsidian is the
+sole author. Edit notes in Obsidian; they sync to disk and re-index here within a
+few seconds.
+
 ## Changing the embedding model
 
 Pick a model in the Modules UI under **knowledge** → **Embedding model**.  After
@@ -159,7 +168,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.12.0",
+        version="0.13.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search"
             " and incremental indexing."

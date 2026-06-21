@@ -16,6 +16,8 @@ epicurus.
 - **[Contributing](contributing.md)** — the workflow for getting a change merged.
 - **[Versioning](versioning.md)** — per-component SemVer and the bundled-stack tag.
 - **[Releases](releases.md)** — how a release is cut and published.
+- **[Obsidian sync](obsidian-sync.md)** — keep the knowledge vault in step with an
+  Obsidian Sync vault (same-host bind-mount + watch, or headless Git pull) (#232).
 
 ## Research & spikes
 

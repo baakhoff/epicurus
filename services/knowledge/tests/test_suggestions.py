@@ -216,6 +216,49 @@ async def test_reject_discards_without_touching_vault(tmp_path: Path) -> None:
     assert await store.list(tenant=TENANT) == []
 
 
+# ── read-only mode (watched external vault, #232) ─────────────────────────────
+
+
+async def _read_only_review(
+    tmp_path: Path,
+) -> tuple[SuggestionReview, SuggestionStore, _FakeIndexer]:
+    store = await _store()
+    indexer = _FakeIndexer()
+    pages = VaultPages(tmp_path, indexer, read_only=True)  # type: ignore[arg-type]
+    review = SuggestionReview(
+        store,
+        pages,
+        indexer,
+        vault_path=tmp_path,
+        tenant=TENANT,
+        read_only=True,  # type: ignore[arg-type]
+    )
+    return review, store, indexer
+
+
+async def test_approve_is_409_when_read_only_and_keeps_the_suggestion(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    review, store, indexer = await _read_only_review(tmp_path)
+    sid = await _add(store, path="note.md", operation="create", content="# Note\n")
+    with pytest.raises(HTTPException) as err:
+        await review.approve(sid)
+    assert err.value.status_code == 409
+    # Nothing written or indexed, and the suggestion stays queued for when writing resumes.
+    assert not (tmp_path / "note.md").exists()
+    assert indexer.indexed == []
+    assert len(await store.list(tenant=TENANT)) == 1
+
+
+async def test_reject_still_works_when_read_only(tmp_path: Path) -> None:
+    # Read-only blocks the *apply*, not queue hygiene — the operator can still clear it.
+    review, store, _ = await _read_only_review(tmp_path)
+    sid = await _add(store, path="note.md", operation="create", content="# Note\n")
+    result = await review.reject(sid)
+    assert result.status == "rejected"
+    assert await store.list(tenant=TENANT) == []
+
+
 async def test_approve_unknown_suggestion_404(tmp_path: Path) -> None:
     review, _, _ = await _review(tmp_path)
     from fastapi import HTTPException

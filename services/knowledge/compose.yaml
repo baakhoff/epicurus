@@ -19,6 +19,14 @@ services:
       # Absolute path inside the container to the Obsidian vault.
       # Mount your vault directory here (e.g. KNOWLEDGE_HOST_VAULT in .env).
       VAULT_PATH: ${VAULT_PATH:-/vault}
+      # Live vault sync (#232): watch the bind-mounted vault and re-index on change, so
+      # edits Obsidian Sync lands on disk show up in search without a manual re-index.
+      # Off by default. Enabling it makes the vault **externally owned** — the Knowledge
+      # editor page goes read-only and Obsidian becomes the sole author (ADR-0035). Use
+      # it when KNOWLEDGE_HOST_VAULT points at an Obsidian-synced folder; see
+      # docs/developer/obsidian-sync.md for the same-host and headless (Git) recipes.
+      VAULT_WATCH: ${VAULT_WATCH:-false}
+      VAULT_WATCH_DEBOUNCE_MS: ${VAULT_WATCH_DEBOUNCE_MS:-1500}
     volumes:
       # By default an empty named volume — nothing is exposed until you opt in.
       # Set KNOWLEDGE_HOST_VAULT in .env to a host directory (your Obsidian vault).

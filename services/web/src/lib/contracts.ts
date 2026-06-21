@@ -380,6 +380,9 @@ export const CalendarEvent = z.object({
   location: z.string().nullish(),
   description: z.string().nullish(),
   provider: z.string().nullish(),
+  // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
+  // invokes the named MCP tool through the core's tool proxy and refetches on success.
+  actions: z.array(BoardAction).default([]),
 });
 export type CalendarEvent = z.infer<typeof CalendarEvent>;
 
@@ -389,6 +392,8 @@ export const CalendarData = z.object({
   provider: z.string().nullish(),
   range: z.object({ start: z.coerce.date(), end: z.coerce.date() }).nullish(),
   events: z.array(CalendarEvent).default([]),
+  // Page-level actions (#208) — e.g. "New event".
+  actions: z.array(BoardAction).default([]),
 });
 export type CalendarData = z.infer<typeof CalendarData>;
 

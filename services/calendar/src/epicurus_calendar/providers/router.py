@@ -90,23 +90,32 @@ class CollectionRouter(CalendarProvider):
         events.sort(key=lambda e: e.start)
         return events
 
-    async def get_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
-    ) -> Event | None:
-        prefs = await self._load_prefs()
-        # Search the active collection first, then the rest of the enabled set, then the
-        # local store — a referenced event resolves wherever it lives.
+    def _search_refs(self, prefs: CollectionPrefs) -> list[CollectionRef]:
+        """Ordered, de-duplicated places to find a single event by id.
+
+        Active collection first, then the rest of the enabled set, then the local store —
+        a referenced event resolves (and is edited/deleted) wherever it lives.
+        """
         refs: list[CollectionRef] = []
         if prefs.active is not None:
             refs.append(prefs.active)
         refs.extend(prefs.enabled)
         refs.append(_LOCAL_REF)
-        seen: set[tuple[str, str]] = set()
+        ordered: list[CollectionRef] = []
+        seen: set[tuple[str, str | None]] = set()
         for ref in refs:
             key = (ref.account, ref.collection)
             if key in seen:
                 continue
             seen.add(key)
+            ordered.append(ref)
+        return ordered
+
+    async def get_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> Event | None:
+        prefs = await self._load_prefs()
+        for ref in self._search_refs(prefs):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue
@@ -148,6 +157,72 @@ class CollectionRouter(CalendarProvider):
             location=location,
             calendar_id=ref.collection or None,
         )
+
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+    ) -> Event | None:
+        # Edit the event wherever it lives: try the active collection, then the rest of
+        # the enabled set, then local — the first source that has it wins (#208).
+        prefs = await self._load_prefs()
+        for ref in self._search_refs(prefs):
+            provider = self._provider_for(ref.account)
+            if provider is None:
+                continue
+            try:
+                event = await provider.update_event(
+                    tenant_id=tenant_id,
+                    event_id=event_id,
+                    title=title,
+                    start=start,
+                    end=end,
+                    description=description,
+                    location=location,
+                    calendar_id=ref.collection or None,
+                )
+            except Exception as exc:
+                log.warning(
+                    "calendar update failed; trying next source (#209)",
+                    account=ref.account,
+                    collection=ref.collection,
+                    error=str(exc),
+                )
+                continue
+            if event is not None:
+                return event
+        return None
+
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:
+        # Delete the event wherever it lives (#208).
+        prefs = await self._load_prefs()
+        for ref in self._search_refs(prefs):
+            provider = self._provider_for(ref.account)
+            if provider is None:
+                continue
+            try:
+                if await provider.delete_event(
+                    tenant_id=tenant_id, event_id=event_id, calendar_id=ref.collection or None
+                ):
+                    return True
+            except Exception as exc:
+                log.warning(
+                    "calendar delete failed; trying next source (#209)",
+                    account=ref.account,
+                    collection=ref.collection,
+                    error=str(exc),
+                )
+                continue
+        return False
 
     async def find_free_slots(
         self,

@@ -60,6 +60,36 @@ class CalendarProvider(ABC):
         """Persist a new event and return the created domain object."""
 
     @abstractmethod
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+    ) -> Event | None:
+        """Apply the given fields to an existing event and return it.
+
+        Only non-``None`` fields are changed; the rest are left as they are. Returns
+        ``None`` when the event does not exist in this provider/collection — the
+        router uses that to try the next source (write where the event lives, #208).
+        """
+
+    @abstractmethod
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:
+        """Delete an event. Returns ``True`` if it existed and was removed, else ``False``.
+
+        ``False`` lets the router fall through to the next enabled source rather than
+        report a spurious success (#208).
+        """
+
+    @abstractmethod
     async def find_free_slots(
         self,
         *,

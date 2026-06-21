@@ -28,6 +28,7 @@ import {
   Puzzle,
   Rss,
   Search,
+  Trash2,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -56,6 +57,7 @@ export const MODULE_ICONS: Record<string, LucideIcon> = {
   puzzle: Puzzle,
   rss: Rss,
   search: Search,
+  trash: Trash2,
   zap: Zap,
 };
 

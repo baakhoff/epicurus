@@ -21,7 +21,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
@@ -40,6 +42,12 @@ from epicurus_core import (
 
 MODULE_NAME = "calendar"
 CALENDAR_PAGE_ID = "calendar"
+
+# Tool-parameter aliases that surface JSON-Schema hints to the core-rendered form (#208):
+# the web SchemaForm renders an ISO-8601 string with ``format: date-time`` as a native
+# datetime picker, and a ``multiline`` string as a textarea.
+_IsoDateTime = Annotated[str, Field(json_schema_extra={"format": "date-time"})]
+_Multiline = Annotated[str, Field(json_schema_extra={"format": "multiline"})]
 
 # The external providers the calendar module can connect (ADR-0030); ``local`` is the
 # implicit default and is never listed. Maps the account id to its shell display label.
@@ -71,7 +79,7 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.5.1",
+        version="0.6.0",
         description=(
             "Provider-neutral calendar: list events, create events, and find"
             " free time slots. Backed by a local store (no account needed) plus"
@@ -146,19 +154,22 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     @module.tool()
     async def calendar_create_event(
         title: str,
-        start: str,
-        end: str,
-        description: str | None = None,
+        start: _IsoDateTime,
+        end: _IsoDateTime,
         location: str | None = None,
+        description: _Multiline | None = None,
     ) -> dict[str, Any]:
         """Create a calendar event and return the created event.
+
+        The event lands on the active calendar (the local store by default, or the
+        Google calendar the operator has set active — ADR-0030).
 
         Args:
             title: Event title (required).
             start: Start time in ISO-8601 format, e.g. ``"2025-06-15T10:00:00+00:00"``.
             end: End time in ISO-8601 format, e.g. ``"2025-06-15T11:00:00+00:00"``.
-            description: Optional description or agenda.
             location: Optional location string (address, room name, or URL).
+            description: Optional description or agenda.
 
         Returns the created event dict with all fields populated.
         """
@@ -173,6 +184,60 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
             location=location,
         )
         return event.model_dump(mode="json")
+
+    @module.tool()
+    async def calendar_update_event(
+        event_id: str,
+        title: str | None = None,
+        start: _IsoDateTime | None = None,
+        end: _IsoDateTime | None = None,
+        location: str | None = None,
+        description: _Multiline | None = None,
+    ) -> dict[str, Any]:
+        """Edit an existing event and return the updated event.
+
+        Only the fields you pass are changed; the rest are left as they are. The event
+        is found and edited wherever it lives across the enabled calendars (#208).
+
+        Args:
+            event_id: The id of the event to edit (from a listing or the page).
+            title: New title, if changing it.
+            start: New start time (ISO-8601), if changing it.
+            end: New end time (ISO-8601), if changing it.
+            location: New location, if changing it.
+            description: New description, if changing it.
+
+        Returns the updated event dict. Raises if no such event exists.
+        """
+        event = await provider.update_event(
+            tenant_id=tenant_id,
+            event_id=event_id,
+            title=title,
+            start=datetime.fromisoformat(start) if start else None,
+            end=datetime.fromisoformat(end) if end else None,
+            description=description,
+            location=location,
+        )
+        if event is None:
+            raise ValueError(f"event {event_id!r} not found")
+        return event.model_dump(mode="json")
+
+    @module.tool()
+    async def calendar_delete_event(event_id: str) -> dict[str, Any]:
+        """Delete a calendar event by its id.
+
+        Removes the event wherever it lives across the enabled calendars (#208).
+
+        Args:
+            event_id: The id of the event to delete.
+
+        Returns ``{"deleted": true, "id": ...}`` on success; raises if no such event
+        exists.
+        """
+        deleted = await provider.delete_event(tenant_id=tenant_id, event_id=event_id)
+        if not deleted:
+            raise ValueError(f"event {event_id!r} not found")
+        return {"deleted": True, "id": event_id}
 
     @module.tool()
     async def calendar_find_free(
@@ -332,7 +397,8 @@ async def calendar_page(
     Raises:
         ValueError: if *start*/*end* are unparseable or ``end <= start``.
     """
-    time_range = _resolve_range(start, end, now=now or datetime.now(tz=UTC))
+    ref = now or datetime.now(tz=UTC)
+    time_range = _resolve_range(start, end, now=ref)
     events = await provider.list_events(tenant_id=tenant_id, time_range=time_range)
     # With the account/collection model a page can overlay several calendars, so the
     # "provider" label reflects the sources actually present (ADR-0030) rather than a
@@ -345,7 +411,60 @@ async def calendar_page(
             "start": time_range.start.isoformat(),
             "end": time_range.end.isoformat(),
         },
-        "events": [e.model_dump(mode="json") for e in events],
+        # Per-event Edit/Delete actions (#208) — the core renders them in the event
+        # detail; the shell invokes the named MCP tool through the core's tool proxy.
+        "events": [_event_with_actions(e) for e in events],
+        # Page-level "New event" action; defaults the time to the next round hour.
+        "actions": [_new_event_action(ref)],
+    }
+
+
+_EVENT_FIELDS = ["title", "start", "end", "location", "description"]
+
+
+def _event_with_actions(event: Event) -> dict[str, Any]:
+    """An event dict plus its Edit/Delete actions for the editable calendar (#208)."""
+    data = event.model_dump(mode="json")
+    data["actions"] = [
+        {
+            "tool": "calendar_update_event",
+            "label": "Edit",
+            "icon": "pencil",
+            "form": True,
+            "args": {"event_id": event.id},
+            "fields": _EVENT_FIELDS,
+            "form_values": {
+                "title": event.title,
+                "start": event.start.isoformat(),
+                "end": event.end.isoformat(),
+                "location": event.location or "",
+                "description": event.description or "",
+            },
+        },
+        {
+            "tool": "calendar_delete_event",
+            "label": "Delete",
+            "icon": "trash",
+            "intent": "danger",
+            "confirm": f"Delete {event.title!r}? This can't be undone.",
+            "args": {"event_id": event.id},
+        },
+    ]
+    return data
+
+
+def _new_event_action(now: datetime) -> dict[str, Any]:
+    """The page-level "New event" action, prefilled with a sensible default time."""
+    start = (now.astimezone(UTC) + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    end = start + timedelta(hours=1)
+    return {
+        "tool": "calendar_create_event",
+        "label": "New event",
+        "icon": "plus",
+        "intent": "primary",
+        "form": True,
+        "fields": _EVENT_FIELDS,
+        "form_values": {"start": start.isoformat(), "end": end.isoformat()},
     }
 
 

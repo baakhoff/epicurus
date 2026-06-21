@@ -49,6 +49,25 @@ class _FakeProvider(CalendarProvider):
     ) -> Event:  # pragma: no cover - not exercised by these tests
         raise NotImplementedError
 
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+    ) -> Event | None:  # pragma: no cover - not exercised by these tests
+        return self._events.get(event_id)
+
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:  # pragma: no cover - not exercised by these tests
+        return self._events.pop(event_id, None) is not None
+
     async def find_free_slots(
         self,
         *,

@@ -1,7 +1,8 @@
 """Mail module — MCP tool surface (ADR-0016).
 
 Three provider-agnostic tools: ``mail_search``, ``mail_read``, ``mail_send``.
-The tool names and signatures are domain-neutral; no Gmail specifics appear here.
+The tool names and signatures are domain-neutral; no Gmail specifics appear in the
+tool surface (the manifest declares Gmail's OAuth scopes for the connect flow, #241).
 ``mail_search`` returns a :func:`~epicurus_core.tool_envelope` so the UI renders
 each result as an entity-reference chip (ADR-0019): hover for the hover-card,
 click to open the full message in the right-panel email-reader.
@@ -13,6 +14,7 @@ invoking it.
 from __future__ import annotations
 
 from epicurus_core import EntityRef, EpicurusModule, UiAction, UiSection, tool_envelope
+from epicurus_mail.gmail import GMAIL_API_SCOPES
 from epicurus_mail.provider import MailProvider
 
 MODULE_NAME = "mail"
@@ -22,7 +24,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.5.0",
+        version="0.6.0",
         description=(
             "Provider-agnostic mail — search, read, and send. Gmail is the v0.1 provider."
         ),
@@ -46,6 +48,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             ],
         ),
         resolver=True,
+        # The Gmail API scopes the shell requests when connecting Google (#241); the core
+        # adds the default identity scopes. Without these, Gmail API calls return 403.
+        oauth_scopes={"google": GMAIL_API_SCOPES},
     )
 
     module.emits("mail.sent", "Published after a message is sent successfully.")

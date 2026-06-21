@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Connecting Google grants each module's API scopes (incremental)** — modules now declare
+  the OAuth scopes they need in their manifest (`oauth_scopes`, e.g. calendar →
+  `…/auth/calendar`, tasks → `…/auth/tasks`, mail → the Gmail scopes), and the web **Connect**
+  button requests them: Settings connects with the **union** across all modules (one connect
+  grants everything), and a module card's Connect requests just that module's scopes
+  (incremental — the core accumulates). The core always includes the default identity scopes
+  and unions the requested ones onto them. Previously Connect requested only `openid email
+  profile`, so after connecting, the Calendar / Tasks / Gmail APIs returned 403 — the gap
+  surfaced by #209 (closes #241, the #102 wiring) (`epicurus-core` → 0.12.0, `core-app` →
+  0.18.0, `calendar` → 0.7.0, `tasks` → 0.7.0, `mail` → 0.6.0, `web` → 0.20.0).
 - **Connecting Google auto-connects the modules that use it; settings no longer 502** —
   connecting a Google account now **auto-enables** the calendar/task-list collections of
   every module that uses it (and disconnecting clears them), so the operator connects once

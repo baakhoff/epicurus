@@ -7,7 +7,17 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { EpsilonMark } from "@/components/Logo";
 import { Button, Card, Dot, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
+import type { ModuleSnapshot } from "@/lib/contracts";
 import { usePrefs } from "@/stores/prefs";
+
+/** Union of the OAuth API scopes every installed module declares for *provider* (#241). */
+function oauthScopeUnion(modules: ModuleSnapshot[] | undefined, provider: string): string | undefined {
+  const scopes = new Set<string>();
+  for (const snap of modules ?? []) {
+    for (const scope of snap.manifest.oauth_scopes?.[provider] ?? []) scopes.add(scope);
+  }
+  return scopes.size ? [...scopes].join(" ") : undefined;
+}
 
 const OAUTH_PROVIDERS: { id: string; label: string; description: string }[] = [
   {
@@ -93,8 +103,12 @@ function OAuthProviderRow({ providerId }: { providerId: string }) {
     queryFn: () => api.oauthStatus(providerId),
   });
 
+  // Request every installed module's API scopes for this provider, so one connect grants
+  // them all (the core unions them onto the default identity scopes and accumulates) (#241).
+  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+
   const connect = useMutation({
-    mutationFn: () => api.oauthConnect(providerId),
+    mutationFn: () => api.oauthConnect(providerId, oauthScopeUnion(modules.data, providerId)),
     onSuccess: (data) => {
       window.location.href = data.auth_url;
     },

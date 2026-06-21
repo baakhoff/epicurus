@@ -175,6 +175,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Calendar page no longer 500s once a Google calendar is connected** — the `Event` model
+  now coerces naive datetimes to UTC. The local store round-trips datetimes through a tz-naive
+  DB column while Google returns tz-aware RFC3339 instants; a page overlaying both sorted a mix
+  of naive and aware values and raised `TypeError: can't compare offset-naive and offset-aware
+  datetimes` in `CalendarRouter.list_events`. The unit tests and CI mock the Google API (always
+  aware), so only a real connected account surfaced it — caught on the live stack, not in CI
+  (`calendar` → 0.7.1).
 - **Tasks board (and every task read) no longer 500s on upgraded deployments** —
   `TaskStore.init()` now adds the v0.5.0 `status` / `priority` / `tags` columns to a
   pre-existing `tasks_local` table (the same `create_all` + `_ensure_columns` pattern as

@@ -136,6 +136,14 @@ export function Switch({
   label?: string;
   disabled?: boolean;
 }) {
+  // The track colour carries on/off; the thumb is a constant, bright, raised circle that
+  // slides between ends. The thumb is positioned ABSOLUTELY (not via flex) with an explicit
+  // `left-0`. Two browser facts force this: (1) Firefox ignores `display:flex` on a <button>,
+  // so a flex-laid-out thumb collapses to the wrong place there; (2) an absolute child with no
+  // `left` derives its resting edge from the static position, which Firefox and Chromium
+  // resolve differently — that put the dot on the wrong side. `left-0` + translate-x is
+  // identical in every engine. The thumb fills the inset height, so `top-0` centres it
+  // vertically with no transform hack. A 2px transparent border insets it evenly on both ends.
   return (
     <button
       type="button"
@@ -145,17 +153,17 @@ export function Switch({
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-6 w-11 cursor-pointer rounded-full border transition-colors",
+        "relative inline-block h-6 w-11 shrink-0 cursor-pointer rounded-full",
+        "border-2 border-transparent transition-colors",
         "disabled:cursor-not-allowed disabled:opacity-50",
-        checked
-          ? "border-accent bg-accent hover:opacity-90"
-          : "border-edge-strong bg-surface-2 hover:border-accent",
+        checked ? "bg-accent hover:bg-accent-strong" : "bg-edge-strong hover:bg-ink-faint",
       )}
     >
       <span
         className={cn(
-          "absolute top-0.5 size-4.5 rounded-full transition-transform",
-          checked ? "translate-x-6 bg-canvas" : "translate-x-0.5 bg-ink-dim",
+          "pointer-events-none absolute left-0 top-0 size-5 rounded-full bg-ink shadow-sm",
+          "transition-transform duration-200 ease-out",
+          checked ? "translate-x-5" : "translate-x-0",
         )}
       />
     </button>

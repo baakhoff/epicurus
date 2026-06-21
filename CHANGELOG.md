@@ -175,6 +175,14 @@ images to GHCR.
 
 ### Fixed
 
+- **Tasks board (and every task read) no longer 500s on upgraded deployments** —
+  `TaskStore.init()` now adds the v0.5.0 `status` / `priority` / `tags` columns to a
+  pre-existing `tasks_local` table (the same `create_all` + `_ensure_columns` pattern as
+  `llm_prefs` / `module_prefs` / the memory store). A database provisioned before #218 lacked
+  those columns, so the board page, the `tasks_list` tool, the attachment picker, and the
+  resolver all 500'd with `column tasks_local.status does not exist`. Fresh installs were
+  unaffected, so CI and the unit tests (SQLite, always built fresh) didn't catch it (#247)
+  (`tasks` → 0.7.1).
 - **Module docs are actually indexed (moved off the Swagger-reserved `/docs`)** — modules now
   serve their contributed docs at **`/module-docs`**, not `/docs`. `/docs` is FastAPI's built-in
   Swagger UI, which shadowed the route, so the core's docs proxy fetched HTML and the knowledge

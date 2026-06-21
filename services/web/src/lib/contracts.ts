@@ -341,7 +341,8 @@ export const BoardAction = z
     /**
      * Per-field *labeled* options: the shell renders a <select> showing `label` while
      * submitting `value`. Used where the option id isn't human-friendly — e.g. the
-     * calendar picker, whose values are `account:collection` tokens (ADR-0030).
+     * calendar / task-list picker, whose values are opaque `account:collection` tokens or
+     * list ids (ADR-0030/0036/0037).
      */
     field_choices: z
       .record(z.string(), z.array(z.object({ value: z.string(), label: z.string() })))

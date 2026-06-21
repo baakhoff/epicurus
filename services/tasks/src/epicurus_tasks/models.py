@@ -27,6 +27,12 @@ class Task(BaseModel):
     priority: Literal["low", "medium", "high"] | None = None
     # Free-form labels; local-only
     tags: list[str] = []
+    # The list (category) the task belongs to — stamped by the router when it aggregates
+    # across the operator's enabled lists (ADR-0036). ``list_id`` routes a per-task mutation
+    # to the owning list; ``list_title`` is the human label for the board's category tag.
+    # Both are None for the local default and for tasks fetched outside the board path.
+    list_id: str | None = None
+    list_title: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

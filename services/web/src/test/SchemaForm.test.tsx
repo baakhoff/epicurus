@@ -104,6 +104,33 @@ describe("SchemaForm", () => {
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 
+  it("renders enumLabels as a labeled <select> (label≠value) and submits the value (#253)", () => {
+    // A list picker: options show the list title (enumLabels) but submit the list id (enum).
+    const onSubmit = vi.fn();
+    render(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: {
+            list_id: {
+              type: "string",
+              title: "List",
+              enum: ["id-job", "id-life"],
+              enumLabels: ["Job", "Life"],
+            },
+          },
+        }}
+        onSubmit={onSubmit}
+      />,
+    );
+    // The shown option labels are the titles; their values are the ids.
+    expect(screen.getByRole("option", { name: "Job" })).toHaveValue("id-job");
+    expect(screen.getByRole("option", { name: "Life" })).toHaveValue("id-life");
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "id-life" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ list_id: "id-life" });
+  });
+
   it("renders a date-time field as a picker and submits an ISO instant (#208)", () => {
     const onSubmit = vi.fn();
     render(

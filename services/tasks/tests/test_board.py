@@ -12,8 +12,18 @@ from epicurus_tasks.service import TASKS_PAGE_ID, build_tasks_board
 TODAY = "2026-06-14"
 
 
-def _task(task_id: str, title: str, *, due: str | None = None, notes: str | None = None) -> Task:
-    return Task(id=task_id, title=title, due=due, notes=notes)
+def _task(
+    task_id: str,
+    title: str,
+    *,
+    due: str | None = None,
+    notes: str | None = None,
+    list_id: str | None = None,
+    list_title: str | None = None,
+) -> Task:
+    return Task(
+        id=task_id, title=title, due=due, notes=notes, list_id=list_id, list_title=list_title
+    )
 
 
 def test_page_id_is_board() -> None:
@@ -55,11 +65,12 @@ def test_card_carries_complete_and_edit_actions() -> None:
     assert tools == ["tasks_complete", "tasks_update"]
 
     complete, edit = card["actions"]
-    assert complete["args"] == {"task_id": "t1"}
+    # Each card carries its list_id so a mutation routes to the owning list (ADR-0036).
+    assert complete["args"] == {"task_id": "t1", "list_id": None}
     assert "form" not in complete  # one-tap, no form
 
     assert edit["form"] is True
-    assert edit["args"] == {"task_id": "t1"}
+    assert edit["args"] == {"task_id": "t1", "list_id": None}
     assert edit["fields"] == ["title", "notes", "due", "priority", "tags", "status"]
     assert edit["field_options"]["priority"] == ["low", "medium", "high"]
     assert edit["field_options"]["status"] == ["open", "in_progress", "done"]
@@ -118,3 +129,41 @@ def test_board_offers_add_action_even_when_empty() -> None:
     assert add["form"] is True
     assert add["fields"] == ["title", "notes", "due", "priority", "tags"]
     assert add["field_options"]["priority"] == ["low", "medium", "high"]
+
+
+def test_card_has_category_badge_from_list_title() -> None:
+    task = _task("t", "Categorised", list_id="work", list_title="Work")
+    board = build_tasks_board([task], today=TODAY)
+    badges = board["columns"][0]["cards"][0]["badges"]
+    assert {"label": "Work", "tone": "dim"} in badges
+
+
+def test_card_has_no_category_badge_without_list_title() -> None:
+    board = build_tasks_board([_task("t", "Uncategorised")], today=TODAY)
+    assert board["columns"][0]["cards"][0]["badges"] == []
+
+
+def test_add_action_has_list_selector_when_lists_given() -> None:
+    board = build_tasks_board(
+        [],
+        today=TODAY,
+        lists=[("@default", "My Tasks"), ("work", "Work")],
+        default_list_id="work",
+    )
+    add = board["actions"][0]
+    assert add["fields"] == ["title", "list_id", "notes", "due", "priority", "tags"]
+    # the list picker is a labeled `field_choices` (value=list id, label=title)
+    assert add["field_choices"]["list_id"] == [
+        {"value": "@default", "label": "My Tasks"},
+        {"value": "work", "label": "Work"},
+    ]
+    assert add["form_values"]["list_id"] == "work"
+    # the plain enum fields stay as `field_options`
+    assert add["field_options"]["priority"] == ["low", "medium", "high"]
+
+
+def test_add_action_has_no_list_selector_when_no_lists() -> None:
+    board = build_tasks_board([], today=TODAY, lists=[])
+    add = board["actions"][0]
+    assert "list_id" not in add["fields"]
+    assert "field_choices" not in add

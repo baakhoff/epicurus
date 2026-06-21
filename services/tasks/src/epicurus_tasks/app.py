@@ -33,6 +33,7 @@ from epicurus_tasks.service import (
     TaskNotFound,
     build_module,
     build_tasks_board,
+    enabled_write_lists,
     fetch_task,
     task_attachment,
     task_hover_card,
@@ -115,20 +116,31 @@ def create_app() -> FastAPI:
 
     @app.get("/pages/{page_id}")
     async def page(page_id: str) -> dict[str, Any]:
-        """Serve the Tasks page's `board` data (ADR-0018); the core proxies this.
+        """Serve the Tasks page's `board` data (ADR-0018/0036); the core proxies this.
 
-        Open tasks are grouped into due-date columns by ``build_tasks_board``. A
-        provider failure (e.g. Google not connected) becomes a 502 carrying the
-        reason, so the shell can show it instead of a blank board.
+        Open tasks from every enabled list are aggregated and grouped into due-date
+        columns by ``build_tasks_board``, each card tagged with its list (category). A
+        single failing list is skipped inside the router (#209), so the page degrades
+        rather than blanking; the ``(GoogleTasksError, ValueError) → 502`` is a backstop.
+        The Add form offers a picker of the operator's enabled writable lists.
         """
         if page_id != TASKS_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+        tenant = settings.default_tenant_id
         try:
-            tasks = await provider.list_tasks(settings.default_tenant_id)
+            tasks = await provider.list_tasks(tenant)
         except (GoogleTasksError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # The list picker must never fail the board: degrade to "no picker" on any error.
+        lists: list[tuple[str, str]] = []
+        default_list_id: str | None = None
+        try:
+            prefs = await platform.get_collections()
+            lists, default_list_id = await enabled_write_lists(external, prefs, tenant_id=tenant)
+        except Exception as exc:
+            log.warning("tasks board: list picker unavailable", error=str(exc))
         today = datetime.now(UTC).date().isoformat()
-        return build_tasks_board(tasks, today=today)
+        return build_tasks_board(tasks, today=today, lists=lists, default_list_id=default_list_id)
 
     async def _require_task(ref_id: str) -> Task:
         """Fetch an attached/referenced task, translating misses into proxy errors.

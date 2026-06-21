@@ -185,7 +185,11 @@ core-rendered board edits without any module markup. `args` are fixed values mer
 every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_schema`
 (narrowed to `fields`, prefilled with `form_values`) before invoking; `confirm` gates a
 one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
-After a successful call the shell refetches the page.
+After a successful call the shell refetches the page. A form field renders as a `<select>`
+when the action supplies options for it: `field_options` (`{field: [value, …]}`) for plain
+string enums, or `field_choices` (`{field: [{value, label}, …]}`) when the submitted value
+isn't human-friendly and needs a separate label — e.g. a list picker whose value is a list
+id and label its title (ADR-0036).
 
 A form field renders as a `<select>` when the action supplies options for it:
 `field_options` (`{field: [value, …]}`) for plain string enums, or `field_choices`

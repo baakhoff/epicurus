@@ -136,6 +136,9 @@ export function Switch({
   label?: string;
   disabled?: boolean;
 }) {
+  // The track colour carries on/off; the thumb is a constant, bright, raised circle
+  // in both states ("the same switch, flipped"). A 2px transparent border insets the
+  // thumb evenly so it never touches the edge in either position.
   return (
     <button
       type="button"
@@ -145,17 +148,17 @@ export function Switch({
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-6 w-11 cursor-pointer rounded-full border transition-colors",
+        "inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full",
+        "border-2 border-transparent transition-colors",
         "disabled:cursor-not-allowed disabled:opacity-50",
-        checked
-          ? "border-accent bg-accent hover:opacity-90"
-          : "border-edge-strong bg-surface-2 hover:border-accent",
+        checked ? "bg-accent hover:bg-accent-strong" : "bg-edge-strong hover:bg-ink-faint",
       )}
     >
       <span
         className={cn(
-          "absolute top-0.5 size-4.5 rounded-full transition-transform",
-          checked ? "translate-x-6 bg-canvas" : "translate-x-0.5 bg-ink-dim",
+          "pointer-events-none size-5 rounded-full bg-ink shadow-sm",
+          "transition-transform duration-200 ease-out",
+          checked ? "translate-x-5" : "translate-x-0",
         )}
       />
     </button>

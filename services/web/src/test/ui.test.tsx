@@ -54,4 +54,17 @@ describe("Switch", () => {
     expect(thumb(sw).className).toContain("bg-ink"); // same bright thumb
     expect(thumb(sw).className).toContain("translate-x-0"); // slid to the "off" end
   });
+
+  // Regression guard (#245): the thumb must be absolutely positioned with an explicit
+  // resting edge — NOT laid out by flex on the <button>. Firefox ignores `display:flex`
+  // on a button, and an absolute child with no `left` resolves its static position
+  // differently across engines; either way the dot landed on the wrong side in Firefox.
+  it("positions the thumb absolutely with an explicit edge (Firefox-safe), not via flex", () => {
+    render(<Switch checked={false} onChange={() => {}} label="x" />);
+    const sw = screen.getByRole("switch");
+    expect(sw.className).not.toContain("flex"); // no inline-flex/flex on the button
+    const t = thumb(sw);
+    expect(t.className).toContain("absolute");
+    expect(t.className).toContain("left-0"); // explicit resting edge, engine-agnostic
+  });
 });

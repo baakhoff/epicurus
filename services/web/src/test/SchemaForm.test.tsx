@@ -87,4 +87,40 @@ describe("SchemaForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     expect(onSubmit).toHaveBeenCalledWith({});
   });
+
+  it("resolves an optional (anyOf) field to its real type (#208)", () => {
+    // Python `str | None` arrives as anyOf; the enum member must still render a select.
+    render(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: {
+            mode: { anyOf: [{ type: "string", enum: ["a", "b"] }, { type: "null" }], title: "Mode" },
+          },
+        }}
+        onSubmit={() => {}}
+      />,
+    );
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+
+  it("renders a date-time field as a picker and submits an ISO instant (#208)", () => {
+    const onSubmit = vi.fn();
+    render(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: { start: { type: "string", format: "date-time", title: "Start" } },
+        }}
+        onSubmit={onSubmit}
+      />,
+    );
+    const input = screen.getByLabelText("Start");
+    expect(input).toHaveAttribute("type", "datetime-local");
+    fireEvent.change(input, { target: { value: "2026-06-20T10:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const submitted = onSubmit.mock.calls[0][0].start as string;
+    // Stored as an ISO-8601 instant; parsing it back yields the chosen local wall time.
+    expect(new Date(submitted).getTime()).toBe(new Date("2026-06-20T10:00").getTime());
+  });
 });

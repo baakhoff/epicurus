@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import DateTime, String, Text, UniqueConstraint, delete, func, select
+from sqlalchemy import CursorResult, DateTime, String, Text, UniqueConstraint, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -103,6 +104,45 @@ class LocalEventStore:
             await session.refresh(row)
         return _row_to_event(row)
 
+    async def update_event(
+        self,
+        *,
+        tenant: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+    ) -> Event | None:
+        """Apply non-``None`` fields to an event; return it, or ``None`` if absent.
+
+        A partial edit: only the fields the caller supplies are changed. Returns
+        ``None`` when no such event exists for *tenant* (#208).
+        """
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.event_id == event_id,
+                )
+            )
+            if row is None:
+                return None
+            if title is not None:
+                row.title = title
+            if start is not None:
+                row.start_dt = start
+            if end is not None:
+                row.end_dt = end
+            if description is not None:
+                row.description = description
+            if location is not None:
+                row.location = location
+            await session.commit()
+            await session.refresh(row)
+            return _row_to_event(row)
+
     async def count(self, *, tenant: str) -> int:
         """Return the total number of stored events for *tenant*."""
         async with self._session() as session:
@@ -111,16 +151,17 @@ class LocalEventStore:
             )
             return int(result) if result is not None else 0
 
-    async def delete_event(self, *, tenant: str, event_id: str) -> None:
-        """Remove a single event by its ID."""
+    async def delete_event(self, *, tenant: str, event_id: str) -> bool:
+        """Remove a single event by its ID; return ``True`` if a row was deleted (#208)."""
         async with self._session() as session:
-            await session.execute(
+            result = await session.execute(
                 delete(_StoredEvent).where(
                     _StoredEvent.tenant == tenant,
                     _StoredEvent.event_id == event_id,
                 )
             )
             await session.commit()
+            return (cast("CursorResult[Any]", result).rowcount or 0) > 0
 
 
 def _row_to_event(row: _StoredEvent) -> Event:

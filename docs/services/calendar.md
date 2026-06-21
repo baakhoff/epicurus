@@ -2,16 +2,16 @@
 
 ## What it is
 
-A provider-neutral calendar capability for the agent.  The module exposes three
-MCP tools — list events, create an event, find free slots — and routes them
-through a pluggable `CalendarProvider` interface.  Two providers ship:
+A provider-neutral calendar capability for the agent.  The module exposes five
+MCP tools — list, create, edit, and delete events, plus find free slots — and
+routes them through a pluggable `CalendarProvider` interface.  Two providers ship:
 
 - **`LocalCalendarProvider`** — events stored in the shared Postgres database.
   Works with no external account; this is the **silent default** that backs the
   module when nothing is connected (ADR-0030) and is never shown as a selectable
   provider.
-- **`GoogleCalendarProvider`** — reads and creates events via the Google
-  Calendar REST API.  Token is fetched from the core's OAuth vault (no secret
+- **`GoogleCalendarProvider`** — reads, creates, edits, and deletes events via the
+  Google Calendar REST API.  Token is fetched from the core's OAuth vault (no secret
   ever touches this module); requires the tenant to have connected their Google
   account.
 
@@ -30,7 +30,9 @@ unchanged (ADR-0016).
 
 Since **v0.2** the module also contributes a core-rendered **Calendar page** (month /
 week / agenda) via the `calendar` archetype — it supplies the events, the shell draws the
-views (see *Calendar page* under Contract, below).
+views. Since **v0.6** that page is **editable** (#208): it declares create/edit/delete
+*actions* that name the write tools, and the shell invokes them through the core's tool
+proxy — no module markup (see *Calendar page* under Contract, below).
 
 Since **v0.4** the module speaks the **entity-reference contract** (ADR-0019): listed events
 come back as interactive chips, a referenced event resolves to a core **hover-card**, and the
@@ -45,13 +47,16 @@ hover-cards & attachments* under Contract, below).
 | Tool | Description |
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
-| `calendar_create_event(title, start, end, description?, location?)` | Create a new event. `start`/`end` are ISO-8601 strings. Returns the created event. |
+| `calendar_create_event(title, start, end, location?, description?)` | Create a new event on the **active** calendar. `start`/`end` are ISO-8601 strings (surfaced with `format: date-time` so the core form renders a picker). Returns the created event. |
+| `calendar_update_event(event_id, title?, start?, end?, location?, description?)` | Edit an event. Only the fields passed change; the rest are left as-is. Found and edited **wherever it lives** across the enabled calendars (#208). Returns the updated event; raises if absent. |
+| `calendar_delete_event(event_id)` | Delete an event wherever it lives. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
-`calendar_list_events` overlays every enabled calendar (or local), `calendar_create_event`
-writes to the active one (or local). An optional `list`/calendar override is not exposed on
-the tools — the active calendar governs writes.
+`calendar_list_events` overlays every enabled calendar (or local); `calendar_create_event`
+writes to the **active** one (or local); `calendar_update_event` / `calendar_delete_event`
+act on whichever enabled calendar holds the event (active → other enabled → local, the same
+search `get_event` uses). A per-call calendar override is not exposed on the tools.
 
 ### Event object
 
@@ -111,7 +116,26 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
     { "id": "e1", "title": "Standup",
       "start": "2026-06-15T09:00:00+00:00",
       "end":   "2026-06-15T09:30:00+00:00",
-      "location": "Room 4", "description": "Daily sync", "provider": "local" }
+      "location": "Room 4", "description": "Daily sync", "provider": "local",
+      // Per-event actions (#208): Edit opens a prefilled form, Delete confirms.
+      "actions": [
+        { "tool": "calendar_update_event", "label": "Edit", "icon": "pencil",
+          "form": true, "args": { "event_id": "e1" },
+          "fields": ["title", "start", "end", "location", "description"],
+          "form_values": { "title": "Standup", "start": "…", "end": "…",
+                           "location": "Room 4", "description": "Daily sync" } },
+        { "tool": "calendar_delete_event", "label": "Delete", "icon": "trash",
+          "intent": "danger", "confirm": "Delete 'Standup'? This can't be undone.",
+          "args": { "event_id": "e1" } }
+      ]
+    }
+  ],
+  // Page-level action: "New event" opens a create form (time prefilled to the next hour).
+  "actions": [
+    { "tool": "calendar_create_event", "label": "New event", "icon": "plus",
+      "intent": "primary", "form": true,
+      "fields": ["title", "start", "end", "location", "description"],
+      "form_values": { "start": "…", "end": "…" } }
   ]
 }
 ```
@@ -120,8 +144,13 @@ The page overlays every **enabled** calendar (ADR-0030); `provider` is a label o
 sources actually present (e.g. `"local"`, `"google"`, or `"local, google"`), not a single
 backend name.
 
-Read-first in v0.2 (view + navigate); creating and editing events from the page is a later
-bump — the `calendar_*` MCP tools remain the agent's write path.
+**Editable (#208, ADR-0034).** The page declares actions in the **same vocabulary as the
+`board` archetype** (ADR-0024): each names an MCP write tool, and the shell invokes it through the
+core's tool proxy (`POST /platform/v1/modules/calendar/tools/{tool}`, validated against the
+manifest), refetching the page on success. A page-level **New event** action opens a create
+form; each event carries **Edit** (a prefilled form) and **Delete** (a confirm) action. The
+shared core form renders `start`/`end` as native datetime pickers because the tools mark them
+`format: date-time`. The module ships no markup — it supplies data + declares the actions.
 
 ### Entity references, hover-cards & attachments (ADR-0019)
 

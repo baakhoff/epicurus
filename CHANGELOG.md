@@ -23,7 +23,7 @@ images to GHCR.
   and unions the requested ones onto them. Previously Connect requested only `openid email
   profile`, so after connecting, the Calendar / Tasks / Gmail APIs returned 403 — the gap
   surfaced by #209 (closes #241, the #102 wiring) (`epicurus-core` → 0.12.0, `core-app` →
-  0.18.0, `calendar` → 0.6.0, `tasks` → 0.7.0, `mail` → 0.6.0, `web` → 0.19.0).
+  0.18.0, `calendar` → 0.7.0, `tasks` → 0.7.0, `mail` → 0.6.0, `web` → 0.20.0).
 - **Connecting Google auto-connects the modules that use it; settings no longer 502** —
   connecting a Google account now **auto-enables** the calendar/task-list collections of
   every module that uses it (and disconnecting clears them), so the operator connects once

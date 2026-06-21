@@ -186,6 +186,18 @@ ws="$(http -X POST "http://core-app:8080/platform/v1/modules/websearch/tools/web
 printf '%s' "$ws" | grep -q '"result"' || die "web_search tool did not round-trip: $ws"
 ok "web_search MCP tool round-tripped through core"
 
+# Editable calendar (#208): a write tool round-trips through the core onto the local
+# store (no model needed), and the page archetype carries the create/edit/delete actions
+# the shell renders. Exercises the full read-write path that unit tests can't (the proxy).
+cc="$(http -X POST "http://core-app:8080/platform/v1/modules/calendar/tools/calendar_create_event" \
+  -H 'Content-Type: application/json' \
+  -d '{"arguments":{"title":"Smoke check","start":"2030-01-01T10:00:00+00:00","end":"2030-01-01T11:00:00+00:00"}}' || true)"
+printf '%s' "$cc" | grep -q 'Smoke check' || die "calendar_create_event did not round-trip: $cc"
+cpage="$(http "http://core-app:8080/platform/v1/modules/calendar/pages/calendar?start=2030-01-01T00:00:00%2B00:00&end=2030-01-02T00:00:00%2B00:00" || true)"
+printf '%s' "$cpage" | grep -q 'calendar_create_event' || die "calendar page missing create action: $cpage"
+printf '%s' "$cpage" | grep -q 'calendar_delete_event' || die "calendar page event missing delete action: $cpage"
+ok "editable calendar: create tool + page actions round-tripped through core (#208)"
+
 # Every attachable module's chat-attachment picker (ADR-0019, #136) must round-trip
 # through the core — the only path a note/doc/event reaches the agent. The picker is
 # the attach surface the core exposes as a route; resolve runs in-process per turn.

@@ -309,22 +309,42 @@ operator is the approver. Knowledge is the first user (ADR-0033); see
 [knowledge](../services/knowledge.md).
 
 The `calendar` archetype's data shape is a window of events (the shell renders the month /
-week / agenda views and re-fetches as the user navigates):
+week / agenda views and re-fetches as the user navigates). Like the `board`, it is
+**read-write**: it carries the same declarative **actions** — page-level (e.g. "New event")
+and per-event (Edit / Delete) — that name MCP tools the shell invokes through the core's tool
+proxy, refetching on success (ADR-0024, #208):
 
 ```jsonc
 {
   "title": "Calendar",
-  "provider": "local",                              // active provider
+  "provider": "local",                              // sources present in the window
   "range": { "start": "2026-06-01T00:00:00+00:00",  // the window actually returned
              "end":   "2026-07-01T00:00:00+00:00" },
   "events": [
     { "id": "e1", "title": "Standup",
       "start": "2026-06-15T09:00:00+00:00",
       "end":   "2026-06-15T09:30:00+00:00",
-      "location": "Room 4", "description": "…", "provider": "local" }
+      "location": "Room 4", "description": "…", "provider": "local",
+      "actions": [                                  // per-event Edit (form) + Delete (confirm)
+        { "tool": "calendar_update_event", "label": "Edit", "icon": "pencil", "form": true,
+          "args": { "event_id": "e1" }, "fields": ["title", "start", "end", "location", "description"],
+          "form_values": { "title": "Standup", "start": "…", "end": "…" } },
+        { "tool": "calendar_delete_event", "label": "Delete", "icon": "trash",
+          "intent": "danger", "confirm": "Delete 'Standup'?", "args": { "event_id": "e1" } }
+      ] }
+  ],
+  "actions": [                                       // page-level "New event"
+    { "tool": "calendar_create_event", "label": "New event", "icon": "plus", "intent": "primary",
+      "form": true, "fields": ["title", "start", "end", "location", "description"],
+      "form_values": { "start": "…", "end": "…" } }
   ]
 }
 ```
+
+A tool field whose JSON-Schema declares `format: "date-time"` (or `"date"`) is rendered by
+the shared form as a native datetime/date picker, and `format: "multiline"` as a textarea —
+so the calendar's `start`/`end` get pickers without any custom UI. The same `actions`
+vocabulary works for any archetype that wants core-rendered mutations.
 
 ### Entity references & the resolver (ADR-0019)
 

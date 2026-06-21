@@ -119,6 +119,70 @@ class GoogleCalendarProvider(CalendarProvider):
             resp.raise_for_status()
         return _google_item_to_event(resp.json())
 
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+    ) -> Event | None:
+        """Patch an event via the Calendar API; ``None`` when Google reports it gone (404).
+
+        Sends only the supplied fields (``events.patch`` is a partial update), so an
+        edit that changes just the time leaves the title and description untouched.
+        """
+        cal = calendar_id or self._calendar_id
+        headers = await self._auth_headers()
+        body: dict[str, object] = {}
+        if title is not None:
+            body["summary"] = title
+        if start is not None:
+            body["start"] = {"dateTime": _to_rfc3339(start)}
+        if end is not None:
+            body["end"] = {"dateTime": _to_rfc3339(end)}
+        if description is not None:
+            body["description"] = description
+        if location is not None:
+            body["location"] = location
+        if not body:
+            # Nothing to change — return the event as-is rather than issue an empty patch.
+            return await self.get_event(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.patch(
+                f"{_CALENDAR_API}/calendars/{cal}/events/{event_id}",
+                headers=headers,
+                json=body,
+            )
+        if resp.status_code == httpx.codes.NOT_FOUND:
+            return None
+        resp.raise_for_status()
+        return _google_item_to_event(resp.json())
+
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:
+        """Delete an event via the Calendar API.
+
+        Returns ``True`` on success; ``False`` when Google reports the event already
+        gone (404/410), so the router can try the next enabled calendar (#208).
+        """
+        cal = calendar_id or self._calendar_id
+        headers = await self._auth_headers()
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.delete(
+                f"{_CALENDAR_API}/calendars/{cal}/events/{event_id}",
+                headers=headers,
+            )
+        if resp.status_code in (httpx.codes.NOT_FOUND, httpx.codes.GONE):
+            return False
+        resp.raise_for_status()
+        return True
+
     async def find_free_slots(
         self,
         *,

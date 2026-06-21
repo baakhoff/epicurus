@@ -21,6 +21,9 @@ interface PropertySchema {
   format?: string;
   minimum?: number;
   maximum?: number;
+  // An optional field (e.g. Python ``str | None``) arrives as ``anyOf`` of the real
+  // member plus ``{type: "null"}``; ``resolveProp`` collapses it to the real member.
+  anyOf?: PropertySchema[];
 }
 
 export interface ObjectSchema {
@@ -31,11 +34,40 @@ export interface ObjectSchema {
 
 export type FormValues = Record<string, unknown>;
 
+/** Collapse an ``anyOf`` (optional/union) prop to its first non-null member, keeping
+ *  the outer title/description/default so the field renders by its real type + format. */
+function resolveProp(prop: PropertySchema): PropertySchema {
+  if (!prop.anyOf || prop.anyOf.length === 0) return prop;
+  const member = prop.anyOf.find((p) => p.type && p.type !== "null") ?? prop.anyOf[0];
+  return {
+    ...member,
+    title: prop.title ?? member.title,
+    description: prop.description ?? member.description,
+    default: prop.default ?? member.default,
+  };
+}
+
+/** ISO-8601 (with offset) → a ``datetime-local`` input value in the browser's zone. */
+function toLocalInput(value: unknown): string {
+  if (typeof value !== "string" || !value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** A ``datetime-local`` value (browser-zone wall time) → ISO-8601 UTC for the tool. */
+function fromLocalInput(local: string): string {
+  const d = new Date(local);
+  return Number.isNaN(d.getTime()) ? local : d.toISOString();
+}
+
 function initialValues(schema: ObjectSchema, current: FormValues): FormValues {
   const values: FormValues = {};
-  for (const [key, prop] of Object.entries(schema.properties ?? {})) {
+  for (const [key, raw] of Object.entries(schema.properties ?? {})) {
+    const prop = resolveProp(raw);
     if (current[key] !== undefined) values[key] = current[key];
-    else if (prop.default !== undefined) values[key] = prop.default;
+    else if (prop.default !== undefined && prop.default !== null) values[key] = prop.default;
     else if (prop.type === "boolean") values[key] = false;
     else values[key] = "";
   }
@@ -85,6 +117,25 @@ function FieldFor({
             </option>
           ))}
         </select>
+      </div>
+    );
+  }
+
+  if (prop.format === "date-time" || prop.format === "date") {
+    const isDate = prop.format === "date";
+    return (
+      <div>
+        <Label hint={prop.description}>{title}</Label>
+        <TextInput
+          type={isDate ? "date" : "datetime-local"}
+          aria-label={title}
+          value={isDate ? String(value ?? "") : toLocalInput(value)}
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (raw === "") return onChange("");
+            onChange(isDate ? raw : fromLocalInput(raw));
+          }}
+        />
       </div>
     );
   }
@@ -204,7 +255,7 @@ export function SchemaForm({
         <FieldFor
           key={name}
           name={name}
-          prop={prop}
+          prop={resolveProp(prop)}
           required={required.has(name)}
           value={values[name]}
           onChange={(next) => setValues((prev) => ({ ...prev, [name]: next }))}

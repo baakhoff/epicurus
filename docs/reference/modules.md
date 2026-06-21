@@ -187,6 +187,14 @@ every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_sche
 one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
 After a successful call the shell refetches the page.
 
+A form field renders as a `<select>` when the action supplies options for it:
+`field_options` (`{field: [value, …]}`) for plain string enums, or `field_choices`
+(`{field: [{value, label}, …]}`) when the value isn't human-friendly and needs a separate
+label — e.g. the calendar picker, whose values are `account:collection` tokens (ADR-0037).
+A `date-time` field can also declare `date_toggle: "<boolean field>"` in its schema, which
+the form uses to collapse it to a **date** picker (emitting a floating `YYYY-MM-DD`) when
+that sibling boolean is on — the calendar's all-day toggle.
+
 ```jsonc
 {
   "title": "Tasks",                                  // optional page heading
@@ -324,19 +332,23 @@ proxy, refetching on success (ADR-0024, #208):
     { "id": "e1", "title": "Standup",
       "start": "2026-06-15T09:00:00+00:00",
       "end":   "2026-06-15T09:30:00+00:00",
+      "all_day": false,                             // all-day events serialize start/end as dates
       "location": "Room 4", "description": "…", "provider": "local",
       "actions": [                                  // per-event Edit (form) + Delete (confirm)
         { "tool": "calendar_update_event", "label": "Edit", "icon": "pencil", "form": true,
-          "args": { "event_id": "e1" }, "fields": ["title", "start", "end", "location", "description"],
-          "form_values": { "title": "Standup", "start": "…", "end": "…" } },
+          "args": { "event_id": "e1" },
+          "fields": ["title", "all_day", "start", "end", "location", "description"],
+          "form_values": { "title": "Standup", "all_day": false, "start": "…", "end": "…" } },
         { "tool": "calendar_delete_event", "label": "Delete", "icon": "trash",
           "intent": "danger", "confirm": "Delete 'Standup'?", "args": { "event_id": "e1" } }
       ] }
   ],
-  "actions": [                                       // page-level "New event"
+  "actions": [                                       // page-level "New event" (+ calendar picker)
     { "tool": "calendar_create_event", "label": "New event", "icon": "plus", "intent": "primary",
-      "form": true, "fields": ["title", "start", "end", "location", "description"],
-      "form_values": { "start": "…", "end": "…" } }
+      "form": true,
+      "fields": ["title", "all_day", "start", "end", "location", "description", "calendar_id"],
+      "form_values": { "all_day": false, "start": "…", "end": "…", "calendar_id": "local" },
+      "field_choices": { "calendar_id": [ { "value": "local", "label": "Local" } ] } }
   ]
 }
 ```

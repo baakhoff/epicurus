@@ -29,6 +29,24 @@ log = get_logger("epicurus_calendar.router")
 
 _LOCAL_REF = CollectionRef(account=LOCAL_ACCOUNT)
 
+# Separates account from collection in a calendar-picker token (e.g. ``google:primary``).
+# A token names a write target on the create form so the operator can pick which calendar a
+# new event lands on, overriding the active default for that one call. Google calendar ids
+# are email-like (``…@group.calendar.google.com``) and never contain ``:``, so splitting on
+# the *first* separator is unambiguous.
+_TOKEN_SEP = ":"
+
+
+def encode_collection_token(ref: CollectionRef) -> str:
+    """A stable ``account[:collection]`` token for a write target (the form's option value)."""
+    return f"{ref.account}{_TOKEN_SEP}{ref.collection}" if ref.collection else ref.account
+
+
+def decode_collection_token(token: str) -> CollectionRef:
+    """Parse an ``account[:collection]`` token back into a :class:`CollectionRef`."""
+    account, sep, collection = token.partition(_TOKEN_SEP)
+    return CollectionRef(account=account, collection=collection if sep else "")
+
 
 class CollectionPrefsSource(Protocol):
     """Returns the operator's stored collection selection (the module's PlatformClient)."""
@@ -145,8 +163,13 @@ class CollectionRouter(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool = False,
     ) -> Event:
-        ref = await self._active_ref()
+        # Unlike a plain provider (where ``calendar_id`` is a bare collection id), the
+        # router reads it as an ``account[:collection]`` token the create form supplies so
+        # the operator can pick the target calendar; absent a token it falls back to the
+        # active collection. The sub-provider still receives only the bare collection id.
+        ref = decode_collection_token(calendar_id) if calendar_id else await self._active_ref()
         provider = self._provider_for(ref.account) or self._local
         return await provider.create_event(
             tenant_id=tenant_id,
@@ -156,6 +179,7 @@ class CollectionRouter(CalendarProvider):
             description=description,
             location=location,
             calendar_id=ref.collection or None,
+            all_day=all_day,
         )
 
     async def update_event(
@@ -169,6 +193,7 @@ class CollectionRouter(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:
         # Edit the event wherever it lives: try the active collection, then the rest of
         # the enabled set, then local — the first source that has it wins (#208).
@@ -187,6 +212,7 @@ class CollectionRouter(CalendarProvider):
                     description=description,
                     location=location,
                     calendar_id=ref.collection or None,
+                    all_day=all_day,
                 )
             except Exception as exc:
                 log.warning(

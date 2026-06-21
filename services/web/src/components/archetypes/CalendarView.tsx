@@ -28,7 +28,6 @@ const VIEWS: { id: ViewMode; label: string }[] = [
 
 /* ── date helpers (local time — weeks start Monday, per ISO-8601) ──────────── */
 
-const DAY_MS = 86_400_000;
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const addDays = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 const addMonths = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth() + n, 1);
@@ -64,12 +63,6 @@ function step(view: ViewMode, cursor: Date, dir: 1 | -1): Date {
 const fmtDay = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const fmtTime = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
-/** A whole-day event: starts at local midnight and spans at least a full day. */
-const isAllDay = (ev: CalendarEvent) =>
-  ev.start.getHours() === 0 &&
-  ev.start.getMinutes() === 0 &&
-  ev.end.getTime() - ev.start.getTime() >= DAY_MS;
-
 function periodLabel(view: ViewMode, cursor: Date): string {
   if (view === "month") {
     return cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
@@ -78,14 +71,29 @@ function periodLabel(view: ViewMode, cursor: Date): string {
   return `${fmtDay(start)} – ${fmtDay(addDays(end, -1))}, ${start.getFullYear()}`;
 }
 
-/** Bucket events into local-day lists, each ordered by start time. */
+/** Bucket events into local-day lists, each ordered by start time.
+ *
+ * An all-day event is placed on every day in its `[start, end)` span (end exclusive) so a
+ * multi-day all-day event (a trip, holidays) shows on each day; timed events sit on their
+ * start day. All-day starts at local midnight, so they sort first within a day. */
 function groupByDay(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
   const map = new Map<string, CalendarEvent[]>();
-  for (const ev of [...events].sort((a, b) => a.start.getTime() - b.start.getTime())) {
-    const key = dayKey(ev.start);
+  const push = (key: string, ev: CalendarEvent) => {
     const bucket = map.get(key);
     if (bucket) bucket.push(ev);
     else map.set(key, [ev]);
+  };
+  for (const ev of [...events].sort((a, b) => a.start.getTime() - b.start.getTime())) {
+    if (ev.all_day) {
+      let day = startOfDay(ev.start);
+      if (ev.end.getTime() <= day.getTime()) {
+        push(dayKey(day), ev); // degenerate span — at least show it once
+        continue;
+      }
+      for (; day.getTime() < ev.end.getTime(); day = addDays(day, 1)) push(dayKey(day), ev);
+    } else {
+      push(dayKey(ev.start), ev);
+    }
   }
   return map;
 }
@@ -323,7 +331,7 @@ function EventChip({ ev, onSelect }: { ev: CalendarEvent; onSelect: (ev: Calenda
       title={ev.title}
       className="flex items-baseline gap-1 truncate rounded-sm bg-accent-dim px-1 py-0.5 text-left text-[11px] leading-tight text-accent-strong hover:bg-accent hover:text-canvas"
     >
-      {!isAllDay(ev) && (
+      {!ev.all_day && (
         <span className="shrink-0 tabular-nums opacity-80">{fmtTime(ev.start)}</span>
       )}
       <span className="truncate">{ev.title}</span>
@@ -392,7 +400,7 @@ function EventRow({ ev, onSelect }: { ev: CalendarEvent; onSelect: (ev: Calendar
     >
       <span className="truncate text-xs font-medium text-ink">{ev.title}</span>
       <span className="text-[11px] tabular-nums text-ink-dim">
-        {isAllDay(ev) ? "All day" : `${fmtTime(ev.start)} – ${fmtTime(ev.end)}`}
+        {ev.all_day ? "All day" : `${fmtTime(ev.start)} – ${fmtTime(ev.end)}`}
       </span>
     </button>
   );
@@ -458,10 +466,13 @@ function AgendaView({
 
 /** A human-readable date+time line for the detail modal. */
 function whenLabel(ev: CalendarEvent): string {
-  const allDay = isAllDay(ev);
   const dayFmt: Intl.DateTimeFormatOptions = { weekday: "long", month: "long", day: "numeric" };
   const startDay = ev.start.toLocaleDateString(undefined, dayFmt);
-  if (allDay) return `${startDay} · All day`;
+  if (ev.all_day) {
+    const lastDay = addDays(ev.end, -1); // exclusive end → inclusive last day
+    if (isSameDay(ev.start, lastDay)) return `${startDay} · All day`;
+    return `${startDay} → ${lastDay.toLocaleDateString(undefined, dayFmt)} · All day`;
+  }
   if (isSameDay(ev.start, ev.end)) {
     return `${startDay} · ${fmtTime(ev.start)} – ${fmtTime(ev.end)}`;
   }

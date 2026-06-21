@@ -37,6 +37,7 @@ function pickSchema(
   fields: string[] | undefined,
   args: Record<string, unknown>,
   fieldOptions?: Record<string, string[]>,
+  fieldChoices?: Record<string, { value: string; label: string }[]>,
 ): ObjectSchema {
   const properties: NonNullable<ObjectSchema["properties"]> = schema?.properties ?? {};
   const argKeys = new Set(Object.keys(args));
@@ -46,9 +47,25 @@ function pickSchema(
       : Object.keys(properties).filter((key) => !argKeys.has(key));
   const picked: NonNullable<ObjectSchema["properties"]> = {};
   for (const key of keys) {
-    // Overlay field_options as an enum so SchemaForm renders a <select>.
+    const base = properties[key] ?? {};
+    const choices = fieldChoices?.[key];
     const opts = fieldOptions?.[key];
-    picked[key] = opts ? { ...(properties[key] ?? {}), enum: opts } : properties[key];
+    // Overlay field_choices / field_options as an enum so SchemaForm renders a <select>.
+    // Flatten to a plain string enum (dropping any `anyOf` from an optional param) so the
+    // enum survives `resolveProp`; carry labels for field_choices.
+    if (choices) {
+      picked[key] = {
+        type: "string",
+        enum: choices.map((c) => c.value),
+        enumLabels: choices.map((c) => c.label),
+        title: base.title,
+        description: base.description,
+      };
+    } else if (opts) {
+      picked[key] = { type: "string", enum: opts, title: base.title, description: base.description };
+    } else {
+      picked[key] = base;
+    }
   }
   const required = (schema?.required ?? []).filter((key) => keys.includes(key));
   return { type: "object", properties: picked, required };
@@ -82,8 +99,15 @@ export function ActionControl({
   });
   const schema = useToolSchema(module, action.tool);
   const formSchema = useMemo(
-    () => pickSchema(schema, action.fields ?? undefined, action.args, action.field_options),
-    [schema, action.fields, action.args, action.field_options],
+    () =>
+      pickSchema(
+        schema,
+        action.fields ?? undefined,
+        action.args,
+        action.field_options,
+        action.field_choices,
+      ),
+    [schema, action.fields, action.args, action.field_options, action.field_choices],
   );
 
   const onClick = () => {

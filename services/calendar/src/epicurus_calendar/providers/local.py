@@ -57,6 +57,7 @@ class LocalCalendarProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool = False,
     ) -> Event:
         return await self._store.create_event(
             tenant=tenant_id,
@@ -65,6 +66,7 @@ class LocalCalendarProvider(CalendarProvider):
             end=end,
             description=description,
             location=location,
+            all_day=all_day,
         )
 
     async def update_event(
@@ -78,6 +80,7 @@ class LocalCalendarProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:
         return await self._store.update_event(
             tenant=tenant_id,
@@ -87,6 +90,7 @@ class LocalCalendarProvider(CalendarProvider):
             end=end,
             description=description,
             location=location,
+            all_day=all_day,
         )
 
     async def delete_event(

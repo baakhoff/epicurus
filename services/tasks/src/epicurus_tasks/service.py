@@ -71,7 +71,7 @@ def build_module(provider: TasksProvider, *, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.7.0",
+        version="0.7.1",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."

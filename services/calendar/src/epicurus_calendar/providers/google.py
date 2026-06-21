@@ -98,13 +98,14 @@ class GoogleCalendarProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool = False,
     ) -> Event:
         cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
         body: dict[str, object] = {
             "summary": title,
-            "start": {"dateTime": _to_rfc3339(start)},
-            "end": {"dateTime": _to_rfc3339(end)},
+            "start": _google_when(start, all_day=all_day),
+            "end": _google_when(end, all_day=all_day),
         }
         if description:
             body["description"] = description
@@ -130,21 +131,28 @@ class GoogleCalendarProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:
         """Patch an event via the Calendar API; ``None`` when Google reports it gone (404).
 
         Sends only the supplied fields (``events.patch`` is a partial update), so an
-        edit that changes just the time leaves the title and description untouched.
+        edit that changes just the time leaves the title and description untouched. When
+        *all_day* is given, the supplied ``start``/``end`` are written as ``date`` (all-day)
+        or ``dateTime`` (timed) fields to match.
         """
         cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
+        # An edit that only flips all-day still has to resend both endpoints, since
+        # Google rejects a ``start`` with ``date`` against an existing ``end`` with
+        # ``dateTime`` (and vice-versa); treat the flag as also touching start/end.
+        whole_day = bool(all_day)
         body: dict[str, object] = {}
         if title is not None:
             body["summary"] = title
         if start is not None:
-            body["start"] = {"dateTime": _to_rfc3339(start)}
+            body["start"] = _google_when(start, all_day=whole_day)
         if end is not None:
-            body["end"] = {"dateTime": _to_rfc3339(end)}
+            body["end"] = _google_when(end, all_day=whole_day)
         if description is not None:
             body["description"] = description
         if location is not None:
@@ -267,16 +275,35 @@ def _to_rfc3339(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _google_when(dt: datetime, *, all_day: bool) -> dict[str, str]:
+    """The Google start/end object for *dt*: a ``date`` for all-day, else a ``dateTime``.
+
+    All-day events carry the floating calendar date (Google's ``date`` field, UTC date
+    of the midnight boundary), never a timed instant — sending a ``dateTime`` would make
+    the event land at a wall-clock time and shift across days for non-UTC viewers.
+    """
+    if all_day:
+        return {"date": dt.astimezone(UTC).date().isoformat()}
+    return {"dateTime": _to_rfc3339(dt)}
+
+
 def _parse_rfc3339(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
 def _google_item_to_event(item: dict[str, object]) -> Event:
-    """Map one Google Calendar event item to the domain ``Event`` model."""
+    """Map one Google Calendar event item to the domain ``Event`` model.
+
+    A Google all-day event carries ``start.date``/``end.date`` (no time) instead of
+    ``dateTime``. Those are parsed to UTC-midnight boundaries and flagged ``all_day`` so
+    the shell renders them on their calendar date with no timezone conversion — fixing the
+    "one day early" off-by-one that treating a date as a UTC instant caused.
+    """
     start_raw = item.get("start", {})
     end_raw = item.get("end", {})
     assert isinstance(start_raw, dict)
     assert isinstance(end_raw, dict)
+    all_day = "date" in start_raw and "dateTime" not in start_raw
     start_str = str(start_raw.get("dateTime") or start_raw.get("date", ""))
     end_str = str(end_raw.get("dateTime") or end_raw.get("date", ""))
     return Event(
@@ -287,4 +314,5 @@ def _google_item_to_event(item: dict[str, object]) -> Event:
         description=str(item["description"]) if item.get("description") else None,
         location=str(item["location"]) if item.get("location") else None,
         provider="google",
+        all_day=all_day,
     )

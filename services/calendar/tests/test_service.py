@@ -23,12 +23,18 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.providers.google import _google_item_to_event, _google_when
 from epicurus_calendar.providers.local import LocalCalendarProvider
-from epicurus_calendar.providers.router import CollectionRouter
+from epicurus_calendar.providers.router import (
+    CollectionRouter,
+    decode_collection_token,
+    encode_collection_token,
+)
 from epicurus_calendar.service import (
     CALENDAR_PAGE_ID,
     EVENT_KIND,
     EventNotFound,
+    build_calendar_choices,
     build_module,
     calendar_accounts,
     calendar_attachments,
@@ -326,6 +332,7 @@ class _MockGoogleProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool = False,
     ) -> Event:
         event = Event(
             id="g-1",
@@ -335,6 +342,7 @@ class _MockGoogleProvider(CalendarProvider):
             description=description,
             location=location,
             provider="google",
+            all_day=all_day,
         )
         self.events.append(event)
         return event
@@ -350,6 +358,7 @@ class _MockGoogleProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:
         for i, e in enumerate(self.events):
             if e.id == event_id:
@@ -362,6 +371,7 @@ class _MockGoogleProvider(CalendarProvider):
                             "end": end,
                             "description": description,
                             "location": location,
+                            "all_day": all_day,
                         }.items()
                         if v is not None
                     }
@@ -509,7 +519,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.7.1"
+    assert manifest.version == "0.8.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -881,9 +891,10 @@ async def test_calendar_page_declares_new_event_action(
     assert [a["tool"] for a in actions] == ["calendar_create_event"]
     new = actions[0]
     assert new["form"] is True
-    assert new["fields"] == ["title", "start", "end", "location", "description"]
+    assert new["fields"] == ["title", "all_day", "start", "end", "location", "description"]
     # The default time is prefilled so the picker opens on a sensible slot.
     assert "start" in new["form_values"] and "end" in new["form_values"]
+    assert new["form_values"]["all_day"] is False
 
 
 async def test_calendar_page_events_carry_edit_and_delete_actions(
@@ -910,3 +921,224 @@ async def test_calendar_page_events_carry_edit_and_delete_actions(
     assert delete["intent"] == "danger"
     assert delete["confirm"]  # required for a danger action
     assert delete["args"] == {"event_id": created.id}
+
+
+# ── All-day events (the "one day early" off-by-one fix + the all-day toggle) ────
+
+
+async def test_create_all_day_event_spans_whole_day(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # An all-day create takes inclusive date strings and stores an exclusive end one day
+    # later, flagged all_day — never a timed midnight instant.
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Holiday", "start": "2026-06-15", "end": "2026-06-15", "all_day": True},
+    )
+    result = _extract(structured)
+    assert result["all_day"] is True
+    # Serialized as floating date strings (no time component) so the shell never shifts it.
+    assert result["start"] == "2026-06-15"
+    assert result["end"] == "2026-06-16"  # exclusive: a single day spans [15, 16)
+
+
+async def test_create_multi_day_all_day_event(local_provider: LocalCalendarProvider) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Trip", "start": "2026-06-15", "end": "2026-06-17", "all_day": True},
+    )
+    result = _extract(structured)
+    assert result["start"] == "2026-06-15"
+    assert result["end"] == "2026-06-18"  # inclusive 15-17 -> exclusive 18
+
+
+async def test_all_day_event_round_trips_through_local_store(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1",
+        title="Conf",
+        start=datetime(2026, 6, 15, tzinfo=UTC),
+        end=datetime(2026, 6, 16, tzinfo=UTC),
+        all_day=True,
+    )
+    fetched = await local_provider.get_event(tenant_id="t1", event_id=created.id)
+    assert fetched is not None
+    assert fetched.all_day is True
+    assert fetched.start == datetime(2026, 6, 15, tzinfo=UTC)
+    assert fetched.end == datetime(2026, 6, 16, tzinfo=UTC)
+
+
+async def test_calendar_page_serializes_all_day_as_dates(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    await local_provider.create_event(
+        tenant_id="t1",
+        title="All-day",
+        start=datetime(2026, 6, 15, tzinfo=UTC),
+        end=datetime(2026, 6, 16, tzinfo=UTC),
+        all_day=True,
+    )
+    data = await calendar_page(
+        local_provider,
+        tenant_id="t1",
+        start="2026-06-01T00:00:00+00:00",
+        end="2026-07-01T00:00:00+00:00",
+    )
+    ev = data["events"][0]
+    assert ev["all_day"] is True
+    assert ev["start"] == "2026-06-15"  # date string, not a UTC-midnight instant
+    assert "T" not in ev["start"]
+    # The Edit form prefills inclusive dates + the all_day toggle on.
+    edit = next(a for a in ev["actions"] if a["tool"] == "calendar_update_event")
+    assert edit["form_values"]["all_day"] is True
+    assert edit["form_values"]["start"] == "2026-06-15"
+    assert edit["form_values"]["end"] == "2026-06-15"  # inclusive last day of a 1-day event
+
+
+async def test_update_event_to_all_day(local_provider: LocalCalendarProvider) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Was timed", start=_dt(9), end=_dt(10)
+    )
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": created.id, "all_day": True, "start": "2025-06-15", "end": "2025-06-15"},
+    )
+    result = _extract(structured)
+    assert result["all_day"] is True
+    assert result["start"] == "2025-06-15"
+    assert result["end"] == "2025-06-16"
+
+
+def test_new_event_action_includes_all_day_toggle(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    from epicurus_calendar.service import _new_event_action
+
+    action = _new_event_action(datetime(2026, 6, 15, 12, 0, tzinfo=UTC))
+    assert "all_day" in action["fields"]
+    assert action["form_values"]["all_day"] is False
+    # Start/end declare the date_toggle hint so the form can collapse them to date pickers.
+    # (No calendar picker when no external calendars are offered.)
+    assert "field_choices" not in action
+    assert "calendar_id" not in action["fields"]
+
+
+async def test_create_event_start_declares_date_toggle(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    tool = next(t for t in manifest.tools if t.name == "calendar_create_event")
+    props = tool.input_schema["properties"]
+    assert props["start"]["format"] == "date-time"
+    assert props["start"]["date_toggle"] == "all_day"
+
+
+# ── Choose a calendar when creating an event (the New-event picker) ─────────────
+
+
+def test_collection_token_round_trips() -> None:
+    assert decode_collection_token(encode_collection_token(CollectionRef(account="local"))) == (
+        CollectionRef(account="local")
+    )
+    google = CollectionRef(account="google", collection="team@group.calendar.google.com")
+    assert encode_collection_token(google) == "google:team@group.calendar.google.com"
+    assert decode_collection_token("google:team@group.calendar.google.com") == google
+
+
+async def test_build_calendar_choices_lists_writable_calendars() -> None:
+    choices, default = await build_calendar_choices(
+        {"google": _MockGoogleProvider()}, tenant_id="t1"
+    )
+    values = [c["value"] for c in choices]
+    # Local is always first; only the *writable* Google calendar is offered (team@x.com is not).
+    assert values[0] == "local"
+    assert "google:primary" in values
+    assert "google:team@x.com" not in values
+    assert default == "local"  # no active set → first choice
+
+
+async def test_build_calendar_choices_default_is_active() -> None:
+    active = CollectionRef(account="google", collection="primary")
+    _choices, default = await build_calendar_choices(
+        {"google": _MockGoogleProvider()}, tenant_id="t1", active=active
+    )
+    assert default == "google:primary"
+
+
+async def test_build_calendar_choices_degrades_when_provider_errors() -> None:
+    class _BoomGoogle(_MockGoogleProvider):
+        async def list_collections(self, *, tenant_id: str) -> list[Collection]:
+            raise RuntimeError("google down")
+
+    choices, default = await build_calendar_choices({"google": _BoomGoogle()}, tenant_id="t1")
+    assert [c["value"] for c in choices] == ["local"]
+    assert default == "local"
+
+
+async def test_new_event_action_adds_calendar_picker_when_choices() -> None:
+    from epicurus_calendar.service import _new_event_action
+
+    choices = [
+        {"value": "local", "label": "Local"},
+        {"value": "google:primary", "label": "Personal"},
+    ]
+    action = _new_event_action(
+        datetime(2026, 6, 15, 12, 0, tzinfo=UTC), calendars=choices, active_token="google:primary"
+    )
+    assert "calendar_id" in action["fields"]
+    assert action["field_choices"]["calendar_id"] == choices
+    assert action["form_values"]["calendar_id"] == "google:primary"
+
+
+async def test_router_create_honors_calendar_id_token() -> None:
+    # Active is local, but an explicit token routes the create to the Google calendar.
+    router, _local, google = await _router(CollectionPrefs())
+    created = await router.create_event(
+        tenant_id="t1",
+        title="On Google",
+        start=_dt(14),
+        end=_dt(15),
+        calendar_id="google:primary",
+    )
+    assert created.provider == "google"
+    assert google.events[-1].title == "On Google"
+
+
+# ── Google provider all-day mapping ────────────────────────────────────────────
+
+
+def test_google_item_to_event_detects_all_day() -> None:
+    event = _google_item_to_event(
+        {
+            "id": "g1",
+            "summary": "Birthday",
+            "start": {"date": "2026-06-15"},
+            "end": {"date": "2026-06-16"},
+        }
+    )
+    assert event.all_day is True
+    assert event.start == datetime(2026, 6, 15, tzinfo=UTC)
+    assert event.end == datetime(2026, 6, 16, tzinfo=UTC)
+
+
+def test_google_item_to_event_timed_is_not_all_day() -> None:
+    event = _google_item_to_event(
+        {
+            "id": "g2",
+            "summary": "Call",
+            "start": {"dateTime": "2026-06-15T09:00:00+00:00"},
+            "end": {"dateTime": "2026-06-15T10:00:00+00:00"},
+        }
+    )
+    assert event.all_day is False
+
+
+def test_google_when_uses_date_for_all_day() -> None:
+    dt = datetime(2026, 6, 15, tzinfo=UTC)
+    assert _google_when(dt, all_day=True) == {"date": "2026-06-15"}
+    assert _google_when(dt, all_day=False) == {"dateTime": "2026-06-15T00:00:00+00:00"}

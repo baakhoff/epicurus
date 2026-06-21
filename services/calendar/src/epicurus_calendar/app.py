@@ -22,6 +22,7 @@ from epicurus_calendar.service import (
     EVENT_KIND,
     MODULE_NAME,
     EventNotFound,
+    build_calendar_choices,
     build_module,
     calendar_accounts,
     calendar_attachments,
@@ -137,12 +138,24 @@ def create_app() -> FastAPI:
         """
         if page_id != CALENDAR_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+        # Offer the writable calendars as the New-event picker and preselect the active one.
+        # Best-effort: a prefs/discovery hiccup degrades to local-only, never a page error.
+        active = None
+        try:
+            active = (await platform.get_collections()).active
+        except Exception:  # picker is optional; the page must still render
+            active = None
+        calendars, active_token = await build_calendar_choices(
+            external, tenant_id=settings.default_tenant_id, active=active
+        )
         try:
             return await calendar_page(
                 provider,
                 tenant_id=settings.default_tenant_id,
                 start=start,
                 end=end,
+                calendars=calendars,
+                active_token=active_token,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

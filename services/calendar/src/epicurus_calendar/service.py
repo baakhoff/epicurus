@@ -20,16 +20,19 @@ resolves a referenced event to a core **hover-card**, and it is a
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 
 from pydantic import Field
 
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.providers.router import encode_collection_token
 from epicurus_core import (
+    LOCAL_ACCOUNT,
     Account,
     AccountsView,
+    CollectionRef,
     CollectionsSpec,
     EntityRef,
     EpicurusModule,
@@ -48,6 +51,17 @@ CALENDAR_PAGE_ID = "calendar"
 # datetime picker, and a ``multiline`` string as a textarea.
 _IsoDateTime = Annotated[str, Field(json_schema_extra={"format": "date-time"})]
 _Multiline = Annotated[str, Field(json_schema_extra={"format": "multiline"})]
+# A start/end value that collapses to a *date* picker (and emits a ``YYYY-MM-DD`` value)
+# when the form's ``all_day`` toggle is on (``date_toggle`` names the controlling boolean).
+# This is how the shared SchemaForm renders the same field as a datetime or a date.
+_EventDateTime = Annotated[
+    str, Field(json_schema_extra={"format": "date-time", "date_toggle": "all_day"})
+]
+# Label for the silent local store in the create form's calendar picker.
+LOCAL_CALENDAR_LABEL = "Local"
+
+# One day — all-day bounds are whole days, with an exclusive end (see ``Event.all_day``).
+_DAY = timedelta(days=1)
 
 # The external providers the calendar module can connect (ADR-0030); ``local`` is the
 # implicit default and is never listed. Maps the account id to its shell display label.
@@ -79,11 +93,11 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.7.1",
+        version="0.8.0",
         description=(
-            "Provider-neutral calendar: list events, create events, and find"
-            " free time slots. Backed by a local store (no account needed) plus"
-            " any Google calendars the operator connects and enables."
+            "Provider-neutral calendar: list events, create events (timed or all-day, on a"
+            " chosen calendar), and find free time slots. Backed by a local store (no account"
+            " needed) plus any Google calendars the operator connects and enables."
         ),
         ui=UiSection(
             icon="calendar",
@@ -158,27 +172,43 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
     @module.tool()
     async def calendar_create_event(
         title: str,
-        start: _IsoDateTime,
-        end: _IsoDateTime,
+        start: _EventDateTime,
+        end: _EventDateTime,
+        all_day: Annotated[
+            bool, Field(description="Show as an all-day event; start/end are dates, no time.")
+        ] = False,
         location: str | None = None,
         description: _Multiline | None = None,
+        calendar_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Calendar to create on, as an account:collection token from the page's"
+                    " picker (e.g. 'google:primary'); omit to use the active calendar."
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Create a calendar event and return the created event.
 
-        The event lands on the active calendar (the local store by default, or the
-        Google calendar the operator has set active — ADR-0030).
+        By default the event lands on the active calendar (the local store, or the Google
+        calendar the operator has set active — ADR-0030); pass *calendar_id* to target a
+        specific calendar instead.
 
         Args:
             title: Event title (required).
-            start: Start time in ISO-8601 format, e.g. ``"2025-06-15T10:00:00+00:00"``.
-            end: End time in ISO-8601 format, e.g. ``"2025-06-15T11:00:00+00:00"``.
+            start: Start in ISO-8601, e.g. ``"2025-06-15T10:00:00+00:00"``; a date
+                (``"2025-06-15"``) when *all_day* is set.
+            end: End in ISO-8601; for an all-day event, the inclusive last date.
+            all_day: When true, *start*/*end* are dates and the event spans whole days.
             location: Optional location string (address, room name, or URL).
             description: Optional description or agenda.
+            calendar_id: Optional target calendar (account:collection token); omit for the
+                active calendar.
 
         Returns the created event dict with all fields populated.
         """
-        start_dt = datetime.fromisoformat(start)
-        end_dt = datetime.fromisoformat(end)
+        start_dt, end_dt = _parse_bounds(start, end, all_day=all_day)
         event = await provider.create_event(
             tenant_id=tenant_id,
             title=title,
@@ -186,15 +216,21 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
             end=end_dt,
             description=description,
             location=location,
+            calendar_id=calendar_id,
+            all_day=all_day,
         )
-        return event.model_dump(mode="json")
+        return _event_payload(event)
 
     @module.tool()
     async def calendar_update_event(
         event_id: str,
         title: str | None = None,
-        start: _IsoDateTime | None = None,
-        end: _IsoDateTime | None = None,
+        start: _EventDateTime | None = None,
+        end: _EventDateTime | None = None,
+        all_day: Annotated[
+            bool | None,
+            Field(description="Switch the event to/from all-day; start/end must match."),
+        ] = None,
         location: str | None = None,
         description: _Multiline | None = None,
     ) -> dict[str, Any]:
@@ -206,25 +242,29 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
         Args:
             event_id: The id of the event to edit (from a listing or the page).
             title: New title, if changing it.
-            start: New start time (ISO-8601), if changing it.
-            end: New end time (ISO-8601), if changing it.
+            start: New start, if changing it (ISO-8601, or a date when *all_day*).
+            end: New end, if changing it (the inclusive last date when *all_day*).
+            all_day: Set to switch the event between all-day and timed (supply start/end
+                to match); omit to leave its all-day-ness unchanged.
             location: New location, if changing it.
             description: New description, if changing it.
 
         Returns the updated event dict. Raises if no such event exists.
         """
+        start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day)
         event = await provider.update_event(
             tenant_id=tenant_id,
             event_id=event_id,
             title=title,
-            start=datetime.fromisoformat(start) if start else None,
-            end=datetime.fromisoformat(end) if end else None,
+            start=start_dt,
+            end=end_dt,
             description=description,
             location=location,
+            all_day=all_day,
         )
         if event is None:
             raise ValueError(f"event {event_id!r} not found")
-        return event.model_dump(mode="json")
+        return _event_payload(event)
 
     @module.tool()
     async def calendar_delete_event(event_id: str) -> dict[str, Any]:
@@ -284,9 +324,71 @@ class EventNotFound(Exception):
 def _format_when(event: Event) -> str:
     """A compact, human ``when`` line for an event (chips, hover-cards, excerpts)."""
     start, end = event.start, event.end
+    if event.all_day:
+        last = (end - _DAY).date()  # exclusive end → inclusive last day
+        if start.date() >= last:
+            return f"{start:%a %d %b %Y} · All day"
+        return f"{start:%a %d %b %Y} → {last:%a %d %b %Y} · All day"
     if start.date() == end.date():
         return f"{start:%a %d %b %Y, %H:%M}-{end:%H:%M}"
     return f"{start:%a %d %b %Y %H:%M} → {end:%a %d %b %Y %H:%M}"
+
+
+def _date_to_utc_midnight(value: str) -> datetime:
+    """Parse a date (``YYYY-MM-DD``, or the date part of an ISO datetime) to UTC midnight."""
+    d = date.fromisoformat(value[:10])
+    return datetime(d.year, d.month, d.day, tzinfo=UTC)
+
+
+def _all_day_bounds(start: str, end: str) -> tuple[datetime, datetime]:
+    """UTC-midnight ``[start, end)`` from inclusive all-day date strings.
+
+    *end* is the inclusive last date in the form; the stored/contract end is **exclusive**
+    (the day after), matching Google's all-day model, so a single-day event spans one day.
+    """
+    start_dt = _date_to_utc_midnight(start)
+    end_dt = _date_to_utc_midnight(end) + _DAY
+    return start_dt, max(end_dt, start_dt + _DAY)
+
+
+def _parse_bounds(start: str, end: str, *, all_day: bool) -> tuple[datetime, datetime]:
+    """Parse required create-event bounds: dates for all-day, else ISO datetimes."""
+    if all_day:
+        return _all_day_bounds(start, end)
+    return datetime.fromisoformat(start), datetime.fromisoformat(end)
+
+
+def _parse_update_bounds(
+    start: str | None, end: str | None, *, all_day: bool | None
+) -> tuple[datetime | None, datetime | None]:
+    """Parse the supplied edit bounds (either may be ``None``), all-day-aware.
+
+    With both bounds present the all-day branch reuses :func:`_all_day_bounds` so the end
+    is made exclusive; a lone bound is parsed in isolation (the page always sends both).
+    """
+    if all_day:
+        if start is not None and end is not None:
+            return _all_day_bounds(start, end)
+        start_dt = _date_to_utc_midnight(start) if start is not None else None
+        end_dt = _date_to_utc_midnight(end) + _DAY if end is not None else None
+        return start_dt, end_dt
+    start_dt = datetime.fromisoformat(start) if start else None
+    end_dt = datetime.fromisoformat(end) if end else None
+    return start_dt, end_dt
+
+
+def _event_payload(event: Event) -> dict[str, Any]:
+    """An event as JSON for the page/tool result.
+
+    All-day events serialize ``start``/``end`` as **floating date strings** (``YYYY-MM-DD``,
+    end exclusive) so the shell renders them on their calendar date with no timezone
+    conversion — fixing the "one day early" off-by-one. Timed events keep ISO datetimes.
+    """
+    data = event.model_dump(mode="json")
+    if event.all_day:
+        data["start"] = event.start.astimezone(UTC).date().isoformat()
+        data["end"] = event.end.astimezone(UTC).date().isoformat()
+    return data
 
 
 def event_entity_ref(event: Event) -> EntityRef:
@@ -382,6 +484,8 @@ async def calendar_page(
     start: str | None = None,
     end: str | None = None,
     now: datetime | None = None,
+    calendars: list[dict[str, str]] | None = None,
+    active_token: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``calendar`` archetype's page data (ADR-0018): events in a range.
 
@@ -397,6 +501,9 @@ async def calendar_page(
         start: Range start (ISO-8601); with *end*, the window to list.
         end: Range end (ISO-8601, exclusive).
         now: Reference instant for the default range (injected in tests).
+        calendars: Writable calendars (``{value, label}``) offered as the New-event
+            calendar picker; the field is shown only when more than one exists.
+        active_token: The picker's default selection (the active calendar's token).
 
     Raises:
         ValueError: if *start*/*end* are unparseable or ``end <= start``.
@@ -419,16 +526,41 @@ async def calendar_page(
         # detail; the shell invokes the named MCP tool through the core's tool proxy.
         "events": [_event_with_actions(e) for e in events],
         # Page-level "New event" action; defaults the time to the next round hour.
-        "actions": [_new_event_action(ref)],
+        "actions": [_new_event_action(ref, calendars=calendars, active_token=active_token)],
     }
 
 
-_EVENT_FIELDS = ["title", "start", "end", "location", "description"]
+# Form fields for the create/edit forms, in display order — the all-day toggle sits above
+# the start/end row (as in Google Calendar) so flipping it switches them to date pickers.
+_EVENT_FIELDS = ["title", "all_day", "start", "end", "location", "description"]
+
+
+def _event_form_values(event: Event) -> dict[str, Any]:
+    """Prefill values for an event's Edit form, all-day-aware.
+
+    An all-day event prefills ``start``/``end`` as **inclusive** date strings (the form's
+    convention) and sets ``all_day`` so the shell renders date pickers; a timed event
+    prefills ISO datetimes.
+    """
+    if event.all_day:
+        start_value = event.start.astimezone(UTC).date().isoformat()
+        end_value = (event.end.astimezone(UTC) - _DAY).date().isoformat()  # inclusive last day
+    else:
+        start_value = event.start.isoformat()
+        end_value = event.end.isoformat()
+    return {
+        "title": event.title,
+        "all_day": event.all_day,
+        "start": start_value,
+        "end": end_value,
+        "location": event.location or "",
+        "description": event.description or "",
+    }
 
 
 def _event_with_actions(event: Event) -> dict[str, Any]:
     """An event dict plus its Edit/Delete actions for the editable calendar (#208)."""
-    data = event.model_dump(mode="json")
+    data = _event_payload(event)
     data["actions"] = [
         {
             "tool": "calendar_update_event",
@@ -437,13 +569,7 @@ def _event_with_actions(event: Event) -> dict[str, Any]:
             "form": True,
             "args": {"event_id": event.id},
             "fields": _EVENT_FIELDS,
-            "form_values": {
-                "title": event.title,
-                "start": event.start.isoformat(),
-                "end": event.end.isoformat(),
-                "location": event.location or "",
-                "description": event.description or "",
-            },
+            "form_values": _event_form_values(event),
         },
         {
             "tool": "calendar_delete_event",
@@ -457,19 +583,72 @@ def _event_with_actions(event: Event) -> dict[str, Any]:
     return data
 
 
-def _new_event_action(now: datetime) -> dict[str, Any]:
-    """The page-level "New event" action, prefilled with a sensible default time."""
+def _new_event_action(
+    now: datetime,
+    *,
+    calendars: list[dict[str, str]] | None = None,
+    active_token: str | None = None,
+) -> dict[str, Any]:
+    """The page-level "New event" action, prefilled with a sensible default time.
+
+    When more than one writable calendar exists a ``calendar_id`` picker is added so the
+    operator chooses where the event lands (the active calendar is preselected).
+    """
     start = (now.astimezone(UTC) + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
     end = start + timedelta(hours=1)
-    return {
+    fields = [*_EVENT_FIELDS]
+    form_values: dict[str, Any] = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "all_day": False,
+    }
+    action: dict[str, Any] = {
         "tool": "calendar_create_event",
         "label": "New event",
         "icon": "plus",
         "intent": "primary",
         "form": True,
-        "fields": _EVENT_FIELDS,
-        "form_values": {"start": start.isoformat(), "end": end.isoformat()},
+        "fields": fields,
+        "form_values": form_values,
     }
+    if calendars and len(calendars) > 1:
+        fields.append("calendar_id")
+        action["field_choices"] = {"calendar_id": calendars}
+        if active_token is not None:
+            form_values["calendar_id"] = active_token
+    return action
+
+
+async def build_calendar_choices(
+    external: Mapping[str, CalendarProvider],
+    *,
+    tenant_id: str,
+    active: CollectionRef | None = None,
+) -> tuple[list[dict[str, str]], str]:
+    """The writable calendars the New-event picker offers, plus the default selection.
+
+    Always offers the silent local default first, then every **writable** collection of
+    each *connected* external account, as ``{value, label}`` where ``value`` is an
+    ``account:collection`` token (ADR-0030). Best-effort: a provider that errors or is
+    disconnected is skipped, so a transient Google outage degrades to local rather than
+    breaking the page. The returned default token is the operator's active calendar (or
+    the first choice when none is set).
+    """
+    local_token = encode_collection_token(CollectionRef(account=LOCAL_ACCOUNT))
+    choices: list[dict[str, str]] = [{"value": local_token, "label": LOCAL_CALENDAR_LABEL}]
+    for provider in external.values():
+        try:
+            if not await provider.is_available(tenant_id=tenant_id):
+                continue
+            for col in await provider.list_collections(tenant_id=tenant_id):
+                if not col.writable:
+                    continue
+                ref = CollectionRef(account=col.account, collection=col.collection)
+                choices.append({"value": encode_collection_token(ref), "label": col.title})
+        except Exception:  # a bad source must not break the page
+            continue
+    default = encode_collection_token(active) if active is not None else choices[0]["value"]
+    return choices, default
 
 
 async def calendar_accounts(

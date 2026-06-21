@@ -89,4 +89,24 @@ describe("CalendarView", () => {
     fireEvent.click(await screen.findByText("Agenda"));
     expect(await screen.findByText(/nothing scheduled/i)).toBeInTheDocument();
   });
+
+  it("renders an all-day event on its date and labels it All day", async () => {
+    // Floating date strings (end exclusive) — the event must show on June 15, not June 14.
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "ad1",
+          title: "Holiday",
+          start: "2026-06-15",
+          end: "2026-06-16",
+          all_day: true,
+          provider: "local",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    fireEvent.click(await screen.findByText("Holiday"));
+    expect(await screen.findByText(/All day/i)).toBeInTheDocument();
+  });
 });

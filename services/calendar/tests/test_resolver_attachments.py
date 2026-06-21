@@ -46,6 +46,7 @@ class _FakeProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool = False,
     ) -> Event:  # pragma: no cover - not exercised by these tests
         raise NotImplementedError
 
@@ -60,6 +61,7 @@ class _FakeProvider(CalendarProvider):
         description: str | None = None,
         location: str | None = None,
         calendar_id: str | None = None,
+        all_day: bool | None = None,
     ) -> Event | None:  # pragma: no cover - not exercised by these tests
         return self._events.get(event_id)
 

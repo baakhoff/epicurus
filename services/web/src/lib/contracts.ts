@@ -20,9 +20,46 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),
+  // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
+  global_context_window: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
+
+/* ── system / GPU info (context-window suggestion) ────────────────────────── */
+
+/** A detected GPU. `vram_free_mb` is null when the vendor can't report it. */
+export const GpuInfo = z.object({
+  vendor: z.string(),
+  name: z.string(),
+  vram_total_mb: z.number(),
+  vram_free_mb: z.number().nullish(),
+});
+export type GpuInfo = z.infer<typeof GpuInfo>;
+
+/** The currently-effective chat model and its on-disk size. */
+export const ModelSize = z.object({
+  name: z.string(),
+  size_mb: z.number().nullish(),
+});
+export type ModelSize = z.infer<typeof ModelSize>;
+
+/** A suggested context-window range (an estimate, not a hard maximum). */
+export const SuggestedContext = z.object({
+  min: z.number(),
+  suggested: z.number(),
+  max: z.number(),
+});
+export type SuggestedContext = z.infer<typeof SuggestedContext>;
+
+/** Host system + GPU snapshot backing the context-window suggestion. */
+export const SystemInfo = z.object({
+  gpu: GpuInfo.nullish(),
+  ram_total_mb: z.number().nullish(),
+  model: ModelSize.nullish(),
+  suggested_context: SuggestedContext.nullish(),
+});
+export type SystemInfo = z.infer<typeof SystemInfo>;
 
 export const ProviderInfo = z.object({
   alias: z.string(),

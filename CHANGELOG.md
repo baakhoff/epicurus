@@ -199,6 +199,12 @@ images to GHCR.
 
 ### Fixed
 
+- **The UI "Embedding model" choice now actually drives memory embedding** — core memory
+  recall hard-coded `settings.memory_embed_model` and ignored the operator's `embed_default`
+  pref, so picking an embedding model in the UI had no effect and recall 404'd if the env
+  default (`nomic-embed-text`) wasn't pulled. The gateway gains `effective_embed_default`
+  (symmetric with the chat `effective_default`); `embed()` with no explicit model resolves the
+  pref → env default, and a module's per-module override still wins (`core-app` → 0.18.1).
 - **Calendar page no longer 500s once a Google calendar is connected** — the `Event` model
   now coerces naive datetimes to UTC. The local store round-trips datetimes through a tz-naive
   DB column while Google returns tz-aware RFC3339 instants; a page overlaying both sorted a mix

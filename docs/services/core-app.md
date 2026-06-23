@@ -42,6 +42,8 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
+| `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message (history + recall), then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
+| `POST /platform/v1/agent/sessions/{id}/edit` | Replace the last user message with `{content}` (and `{model?}`) and re-answer it in place — edits, re-indexes recall, truncates the tail, then streams. An `error` event on empty content or no user turn (#302). |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat recall corpus — what the model remembers and pulls into future chats. No `q`: the corpus newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` carries role + timestamp (joined from `agent_messages`) and, for a search, a match `score`. `limit` is bounded 1–500 (default 100). Backs the **Memory** screen (ADR-0040). |
 | `DELETE /platform/v1/agent/memory/{point_id}` | Forget one remembered snippet so it stops being recalled. Drops the recall **vector only** — the source message stays in its conversation. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
@@ -178,7 +180,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 
 ## Data model
 
-- **Postgres `agent_messages`** — append-only conversation history: `id`, `tenant`,
+- **Postgres `agent_messages`** — conversation history (append-only in normal use; the last
+  turn can be edited/truncated for regenerate/edit, #302): `id`, `tenant`,
   `session_id`, `role`, `content`, `created_at`, plus JSON `entity_refs` / `attachments`
   (ADR-0019) and `activity` — the assistant turn's persisted process, rendered as the folded
   activity timeline on reopen (ADR-0041). `activity.timeline` is the **chronological**

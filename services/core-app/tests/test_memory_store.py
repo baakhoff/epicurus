@@ -177,3 +177,47 @@ async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
     assert record.entity_refs[0].ref_id == "e1"
     assert record.attachments[0].att_id == "a1"
     assert record.activity is not None and record.activity.thinking == "hmm"
+
+
+# ── regenerate / edit support: last id, in-place update, truncate (#302) ─────
+
+
+async def test_last_message_id_with_and_without_role() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t1", session_id="s", role="user", content="q1")
+    await store.append(tenant="t1", session_id="s", role="assistant", content="a1")
+    u2 = await store.append(tenant="t1", session_id="s", role="user", content="q2")
+    a2 = await store.append(tenant="t1", session_id="s", role="assistant", content="a2")
+    assert await store.last_message_id(tenant="t1", session_id="s") == a2
+    assert await store.last_message_id(tenant="t1", session_id="s", role="user") == u2
+    assert await store.last_message_id(tenant="t1", session_id="empty") is None
+
+
+async def test_update_content_replaces_in_place() -> None:
+    store, _ = await _fresh_store()
+    mid = await store.append(tenant="t1", session_id="s", role="user", content="oops")
+    await store.update_content(tenant="t1", message_id=mid, content="fixed")
+    assert [m.content for m in await store.messages(tenant="t1", session_id="s")] == ["fixed"]
+
+
+async def test_truncate_after_drops_the_tail_and_returns_ids() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t1", session_id="s", role="user", content="q")
+    await store.append(tenant="t1", session_id="s", role="assistant", content="a")
+    u2 = await store.append(tenant="t1", session_id="s", role="user", content="q2")
+    a2 = await store.append(tenant="t1", session_id="s", role="assistant", content="a2")
+    removed = await store.truncate_after(tenant="t1", session_id="s", after_id=u2)
+    assert removed == [a2]
+    kept = [m.content for m in await store.messages(tenant="t1", session_id="s")]
+    assert kept == ["q", "a", "q2"]
+
+
+async def test_truncate_after_is_tenant_and_session_scoped() -> None:
+    store, _ = await _fresh_store()
+    a = await store.append(tenant="t1", session_id="s", role="user", content="x")
+    await store.append(tenant="t2", session_id="s", role="user", content="y")  # other tenant
+    await store.append(tenant="t1", session_id="other", role="user", content="z")  # other session
+    removed = await store.truncate_after(tenant="t1", session_id="s", after_id=a - 1)
+    assert removed == [a]  # only this tenant's, this session's tail
+    assert [m.content for m in await store.messages(tenant="t2", session_id="s")] == ["y"]
+    assert [m.content for m in await store.messages(tenant="t1", session_id="other")] == ["z"]

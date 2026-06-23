@@ -225,3 +225,37 @@ async def test_stream_timeline_preserves_think_tool_think_order() -> None:
     # the flat fields are still derived for back-compat
     assert turn.activity.thinking == "plan: searchnow answer"
     assert [s.tool for s in turn.activity.steps] == ["echo"]
+
+
+async def test_reanswer_streams_from_stored_tail_without_a_new_user_message() -> None:
+    # run_stream([], persist_input=False) re-answers the stored history (regenerate/edit, #302):
+    # no new user message is persisted, and the recall query falls back to the last stored turn.
+    class _Mem:
+        def __init__(self) -> None:
+            self.remembered: list[tuple[str, str]] = []
+
+        async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
+            assert query == "the original question"  # fell back to the stored user turn
+            return ["recalled: the user likes tea"]
+
+        async def history(self, *, tenant: str, session_id: str) -> list[ChatMessage]:
+            return [ChatMessage(role="user", content="the original question")]
+
+        async def remember(
+            self, *, tenant: str, session_id: str, role: str, content: str, **kw: Any
+        ) -> None:
+            self.remembered.append((role, content))
+
+    mem = _Mem()
+    gw = _FakeStreamGateway([(["fresh ", "answer"], ChatResult(model="m", content="fresh answer"))])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=mem)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([], session_id="s1", persist_input=False)]
+
+    assert events[-1].type == "done"
+    assert events[-1].turn is not None and events[-1].turn.content == "fresh answer"
+    # Only the assistant answer is persisted — no duplicate user row.
+    assert [role for role, _ in mem.remembered] == ["assistant"]
+    # The model saw the recalled context + the stored user turn.
+    sent = gw.calls[0]
+    assert any(m.role == "system" and "tea" in (m.content or "") for m in sent)
+    assert any(m.role == "user" and m.content == "the original question" for m in sent)

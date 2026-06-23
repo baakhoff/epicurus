@@ -192,16 +192,22 @@ class Agent:
         model: str | None = None,
         tenant_id: str | None = None,
         session_id: str | None = None,
+        persist_input: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         """Stream one turn as it happens: deltas, tool progress, then ``done``.
 
         Memory semantics match :meth:`run`. The turn's content is exactly the text
         the caller watched stream by. A failure mid-stream ends with an ``error``
         event rather than an exception (the HTTP response has already started).
+
+        ``persist_input=False`` with empty ``messages`` re-answers the stored tail without
+        adding a new user message (regenerate / edit, #302).
         """
         tenant = tenant_id or self._default_tenant
         messages = await self._expand_attachments(messages, tenant=tenant)
-        convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
+        convo = await self._assemble(
+            messages, tenant=tenant, session_id=session_id, persist_input=persist_input
+        )
         parts: list[str] = []
         timeline: list[ActivityItem] = []
         tools_used: list[str] = []
@@ -311,19 +317,32 @@ class Agent:
         return [preamble, *messages]
 
     async def _assemble(
-        self, messages: list[ChatMessage], *, tenant: str, session_id: str | None
+        self,
+        messages: list[ChatMessage],
+        *,
+        tenant: str,
+        session_id: str | None,
+        persist_input: bool = True,
     ) -> list[ChatMessage]:
         """Prepend recalled context + session history, then persist the new input.
 
         Memory is best-effort: any failure (DB, Qdrant, embeddings) degrades to a
         plain turn rather than breaking the chat.
+
+        With ``persist_input=False`` and no new ``messages`` this re-answers the stored tail
+        (regenerate / edit, #302): the recall query falls back to the last *stored* user turn,
+        and nothing new is persisted — the user message is already in history.
         """
         if self._memory is None or not session_id:
             return list(messages)
         try:
             convo: list[ChatMessage] = []
+            history = await self._memory.history(tenant=tenant, session_id=session_id)
+            # Recall off the new user input, else (re-answer) the last user turn in history.
             last_user = next(
                 (m.content for m in reversed(messages) if m.role == "user" and m.content), None
+            ) or next(
+                (m.content for m in reversed(history) if m.role == "user" and m.content), None
             )
             if last_user:
                 recalled = await self._memory.recall(tenant=tenant, query=last_user)
@@ -335,21 +354,22 @@ class Agent:
                             content=f"Relevant context from earlier conversations:\n{joined}",
                         )
                     )
-            convo.extend(await self._memory.history(tenant=tenant, session_id=session_id))
+            convo.extend(history)
             convo.extend(messages)
-            for message in messages:
-                if message.role == "user" and message.content:
-                    await self._memory.remember(
-                        tenant=tenant,
-                        session_id=session_id,
-                        role="user",
-                        content=message.content,
-                        attachments=(
-                            [a.model_dump() for a in message.attachments]
-                            if message.attachments
-                            else None
-                        ),
-                    )
+            if persist_input:
+                for message in messages:
+                    if message.role == "user" and message.content:
+                        await self._memory.remember(
+                            tenant=tenant,
+                            session_id=session_id,
+                            role="user",
+                            content=message.content,
+                            attachments=(
+                                [a.model_dump() for a in message.attachments]
+                                if message.attachments
+                                else None
+                            ),
+                        )
             return convo
         except Exception as exc:  # memory is an enhancement, never a hard dependency
             log.warning("memory read failed; proceeding without it", error=str(exc))

@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from epicurus_core import get_logger
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.recall import RecallPoint, SemanticRecall
 from epicurus_core_app.memory.store import (
@@ -15,6 +16,8 @@ from epicurus_core_app.memory.store import (
     MessageRecord,
     SessionSummary,
 )
+
+log = get_logger("epicurus_core_app.memory")
 
 _INDEXED_ROLES = {"user", "assistant"}
 
@@ -100,6 +103,44 @@ class Memory:
         removed = await self._store.delete_session(tenant=tenant, session_id=session_id)
         await self._recall.forget_session(tenant=tenant, session_id=session_id)
         return removed
+
+    async def last_user_message_id(self, *, tenant: str, session_id: str) -> int | None:
+        """The id of the session's most recent user message (the regenerate/edit anchor)."""
+        return await self._store.last_message_id(tenant=tenant, session_id=session_id, role="user")
+
+    async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> int:
+        """Drop the session's messages after ``after_id`` from history **and** recall.
+
+        Used by regenerate/edit to clear the stale answer (and any trailing turns) before
+        re-running. Recall cleanup is best-effort — a stale vector is a curation nuisance,
+        never a reason to fail the re-answer.
+        """
+        removed = await self._store.truncate_after(
+            tenant=tenant, session_id=session_id, after_id=after_id
+        )
+        for point_id in removed:
+            try:
+                await self._recall.forget_point(tenant=tenant, point_id=point_id)
+            except Exception as exc:  # recall cleanup is best-effort
+                log.warning("recall forget failed in truncate", point_id=point_id, error=str(exc))
+        return len(removed)
+
+    async def revise_message(
+        self, *, tenant: str, session_id: str, message_id: int, content: str
+    ) -> None:
+        """Replace a stored message's content and re-index its recall vector (#302).
+
+        Keeps recall consistent with an edited turn: the point id is the message id, so
+        re-indexing upserts over the stale vector (re-embeds the new text).
+        """
+        await self._store.update_content(tenant=tenant, message_id=message_id, content=content)
+        if content:
+            try:
+                await self._recall.index(
+                    tenant=tenant, session_id=session_id, text=content, point_id=message_id
+                )
+            except Exception as exc:  # re-index is best-effort (re-embeds; never block the edit)
+                log.warning("recall re-index failed in edit", message_id=message_id, error=str(exc))
 
     async def memories(self, *, tenant: str, limit: int = 100) -> tuple[list[MemoryItem], int]:
         """The recall corpus newest-first (up to ``limit``) plus its total size.

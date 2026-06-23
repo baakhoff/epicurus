@@ -32,6 +32,7 @@ class _FakeAgent:
         model: str | None = None,
         tenant_id: str | None = None,
         session_id: str | None = None,
+        persist_input: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         yield AgentEvent(type="delta", text="hi")
         yield AgentEvent(type="done", turn=AgentTurn(content="hi", stopped="completed"))
@@ -160,9 +161,24 @@ async def test_readiness_endpoint_returns_a_snapshot() -> None:
 class _FakeMemory:
     """Stands in for the memory facade — records what the memory routes asked of it."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, last_user: int | None = 1) -> None:
         self.searched: list[str] = []
         self.forgotten: list[int] = []
+        self._last_user = last_user
+        self.truncated_after: list[int] = []
+        self.revised: list[tuple[int, str]] = []
+
+    async def last_user_message_id(self, *, tenant: str, session_id: str) -> int | None:
+        return self._last_user
+
+    async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> int:
+        self.truncated_after.append(after_id)
+        return 1
+
+    async def revise_message(
+        self, *, tenant: str, session_id: str, message_id: int, content: str
+    ) -> None:
+        self.revised.append((message_id, content))
 
     async def memories(self, *, tenant: str, limit: int = 100) -> tuple[list[MemoryItem], int]:
         return [
@@ -234,3 +250,53 @@ async def test_forget_memory_deletes_one_point() -> None:
     assert resp.status_code == 200
     assert resp.json() == {"forgotten": 1}
     assert memory.forgotten == [7]
+
+
+# ── regenerate / edit the conversation tail (#302) ───────────────────────────
+
+
+async def test_regenerate_truncates_then_streams_a_fresh_turn() -> None:
+    memory = _FakeMemory(last_user=5)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/regenerate", json={})
+    assert resp.status_code == 200
+    # The stale tail after the last user message (id 5) is dropped, then the turn streams.
+    assert memory.truncated_after == [5]
+    assert [event for event, _ in _parse_sse(resp.text)] == ["delta", "done"]
+
+
+async def test_regenerate_with_no_user_turn_errors() -> None:
+    memory = _FakeMemory(last_user=None)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/regenerate", json={})
+    frames = _parse_sse(resp.text)
+    assert [event for event, _ in frames] == ["error"]
+    assert memory.truncated_after == []  # nothing dropped when there's nothing to answer
+
+
+async def test_edit_revises_the_last_user_message_then_truncates_and_streams() -> None:
+    memory = _FakeMemory(last_user=5)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/sessions/s1/edit", json={"content": "  corrected ask  "}
+        )
+    assert resp.status_code == 200
+    assert memory.revised == [(5, "corrected ask")]  # trimmed, applied to the last user msg
+    assert memory.truncated_after == [5]
+    assert [event for event, _ in _parse_sse(resp.text)] == ["delta", "done"]
+
+
+async def test_edit_with_blank_content_errors_and_changes_nothing() -> None:
+    memory = _FakeMemory(last_user=5)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/edit", json={"content": "   "})
+    assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
+    assert memory.revised == [] and memory.truncated_after == []

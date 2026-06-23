@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Memory view — see and curate what epicurus remembers about you** — the cross-chat
+  semantic-recall corpus (every user/assistant turn is embedded into Qdrant and the most
+  similar past snippets are pulled into future chats as context) is now visible in a new
+  top-level **Memory** screen. Browse it newest-first, **search** to see exactly what recall
+  surfaces for a topic (the same ranking a chat turn gets), and **forget** any snippet so it
+  stops being recalled — forgetting drops the recall **vector only**, leaving the source
+  conversation intact. Backed by `GET /platform/v1/agent/memory?q=&limit=` and
+  `DELETE /platform/v1/agent/memory/{id}`; each snippet's role + timestamp are joined from
+  `agent_messages` by point id, so there's no change to the indexing path and it covers
+  existing memories (closes #276, ADR-0040) (`core-app` → 0.19.0, `web` → 0.25.0).
 - **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
   (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
   a 128K–256K context window. They show up in the Models screen and pull like any other entry

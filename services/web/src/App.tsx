@@ -13,6 +13,7 @@ import { moduleIcon } from "@/lib/icons";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { ChatScreen } from "@/screens/ChatScreen";
+import { MemoryScreen } from "@/screens/MemoryScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
 import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
@@ -139,6 +140,7 @@ function Shell() {
         <main className="min-h-0 flex-1">
           <Routes>
             <Route path="/" element={<ChatScreen />} />
+            <Route path="/memory" element={<MemoryScreen />} />
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />

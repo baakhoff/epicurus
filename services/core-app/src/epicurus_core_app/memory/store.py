@@ -52,6 +52,13 @@ class MessageRecord(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list)
 
 
+class MessageMeta(BaseModel):
+    """Per-message metadata looked up by id — enriches a recall snippet (role + when)."""
+
+    role: str
+    created_at: datetime
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -208,6 +215,24 @@ class ConversationStore:
                 )
                 for m in rows
             ]
+
+    async def metadata_for(self, *, tenant: str, ids: list[int]) -> dict[int, MessageMeta]:
+        """Look up role + created_at for a set of message ids (tenant-scoped).
+
+        Backs the memory view, which gets snippet ids + text from the recall index and joins
+        them back to ``agent_messages`` for display metadata.
+        """
+        if not ids:
+            return {}
+        async with self._session() as session:
+            rows = await session.execute(
+                select(StoredMessage.id, StoredMessage.role, StoredMessage.created_at).where(
+                    StoredMessage.tenant == tenant, StoredMessage.id.in_(ids)
+                )
+            )
+            return {
+                row.id: MessageMeta(role=row.role, created_at=row.created_at) for row in rows.all()
+            }
 
     async def delete_session(self, *, tenant: str, session_id: str) -> int:
         """Delete a session's messages; returns how many were removed."""

@@ -42,6 +42,8 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
+| `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat recall corpus — what the model remembers and pulls into future chats. No `q`: the corpus newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` carries role + timestamp (joined from `agent_messages`) and, for a search, a match `score`. `limit` is bounded 1–500 (default 100). Backs the **Memory** screen (ADR-0040). |
+| `DELETE /platform/v1/agent/memory/{point_id}` | Forget one remembered snippet so it stops being recalled. Drops the recall **vector only** — the source message stays in its conversation. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
@@ -151,7 +153,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   defaults to enabled, not-removed, core-default models, all tools on, and the local default
   collection. Post-release columns are added in place at startup (no migration framework).
 - **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
-  (768-dim, cosine), one collection per tenant.
+  (768-dim, cosine), one collection per tenant. Each point's id **is** the source
+  `agent_messages.id`, and its payload carries `{session_id, text}`. The **Memory** view
+  (ADR-0040) lists and searches this collection and joins the ids back to `agent_messages`
+  for each snippet's role + timestamp; forgetting one memory deletes its vector here and
+  leaves the message row intact.
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
 answers — just without memory — and never blocks core startup.

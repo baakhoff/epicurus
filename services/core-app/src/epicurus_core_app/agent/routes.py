@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -13,7 +13,7 @@ from epicurus_core import get_logger
 from epicurus_core_app.agent.agent import Agent, AgentEvent, AgentTurn
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.llm.models import ChatMessage
-from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.memory.memory import Memory, MemoryItem
 from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
 from epicurus_core_app.readiness import ReadinessProbe
 
@@ -65,6 +65,13 @@ class AttachmentUploaded(BaseModel):
     att_id: str
     title: str
     kind: str
+
+
+class MemoryListing(BaseModel):
+    """A page of remembered snippets plus the corpus total (so the UI can show the rest)."""
+
+    items: list[MemoryItem]
+    total: int
 
 
 def _sse(event: AgentEvent) -> str:
@@ -134,6 +141,29 @@ def create_agent_router(
     async def delete_session(session_id: str) -> dict[str, int]:
         removed = await memory.forget(tenant=tenant, session_id=session_id)
         return {"deleted": removed}
+
+    @router.get("/memory", response_model=MemoryListing)
+    async def list_memory(
+        q: str | None = None, limit: int = Query(default=100, ge=1, le=500)
+    ) -> MemoryListing:
+        """The cross-chat recall corpus — what the model remembers and can pull into chats.
+
+        Without ``q`` it returns the corpus newest-first; with ``q`` it returns what recall
+        surfaces for that query (the same ranking a chat turn gets). ``total`` is the full
+        corpus size. A backend failure surfaces as a 5xx — an inspection view must not mask
+        errors; an empty corpus is a clean ``{"items": [], "total": 0}``.
+        """
+        if q and q.strip():
+            items, total = await memory.search_memory(tenant=tenant, query=q.strip(), limit=limit)
+        else:
+            items, total = await memory.memories(tenant=tenant, limit=limit)
+        return MemoryListing(items=items, total=total)
+
+    @router.delete("/memory/{point_id}")
+    async def forget_memory(point_id: int) -> dict[str, int]:
+        """Forget one remembered snippet so it stops being recalled (keeps the conversation)."""
+        forgotten = await memory.forget_memory(tenant=tenant, point_id=point_id)
+        return {"forgotten": forgotten}
 
     @router.post("/attachments", response_model=AttachmentUploaded)
     async def upload_attachment(file: UploadFile) -> AttachmentUploaded:

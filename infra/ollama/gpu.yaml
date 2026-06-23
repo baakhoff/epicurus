@@ -14,3 +14,19 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  # core-app also gets the NVIDIA GPU so its system probe can run `nvidia-smi` to read VRAM
+  # for the context-window suggestion (GET /platform/v1/system/info). The reservation is
+  # identical to ollama's.
+  #
+  # NOTE: this covers NVIDIA only. AMD/Intel VRAM detection reads /sys/class/drm and (for
+  # AMD's rocm-smi) needs the card's own device nodes mounted into core-app — `/dev/dri`
+  # for both, plus `/dev/kfd` for AMD. Wiring those is out of scope here; without them the
+  # probe degrades gracefully (it reports no GPU and the suggestion falls back to system RAM).
+  core-app:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

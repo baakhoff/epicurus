@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from sqlalchemy import String, Text, inspect
+from sqlalchemy import Integer, String, Text, inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -33,6 +33,8 @@ class _LlmPrefRow(_PrefBase):
     global_default: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # Operator-chosen global default for embedding; NULL means fall back to the env default.
     embed_default: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Operator-chosen Ollama context window (num_ctx); NULL means fall back to the env default.
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class LlmPrefsStore:
@@ -55,14 +57,14 @@ class LlmPrefsStore:
         """Idempotently add columns introduced after the table's first release.
 
         No migration framework (the store uses ``create_all``); on a deployment that
-        predates ``global_default`` / ``embed_default`` (#214) we add them in place, with a
-        per-dialect type so it is portable across Postgres and the tests' SQLite. Without
-        this, an existing ``llm_prefs`` table 500s on every prefs/embedding read with
-        ``column llm_prefs.embed_default does not exist``.
+        predates ``global_default`` / ``embed_default`` (#214) or ``context_window`` we add
+        them in place, with a per-dialect type so it is portable across Postgres and the
+        tests' SQLite. Without this, an existing ``llm_prefs`` table 500s on every
+        prefs/embedding read with ``column llm_prefs.embed_default does not exist``.
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_LlmPrefRow.__tablename__)}
-        for name in ("global_default", "embed_default"):
+        for name in ("global_default", "embed_default", "context_window"):
             if name not in existing:
                 type_sql = _LlmPrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -115,4 +117,17 @@ class LlmPrefsStore:
         async with self._session() as session:
             row = await self._get_or_create(session, tenant)
             row.embed_default = model
+            await session.commit()
+
+    async def get_context_window(self, tenant: str) -> int | None:
+        """Return the stored Ollama context window (num_ctx), or ``None`` if unset."""
+        async with self._session() as session:
+            row = await session.get(_LlmPrefRow, tenant)
+            return row.context_window if row is not None else None
+
+    async def set_context_window(self, tenant: str, value: int | None) -> None:
+        """Set or clear the Ollama context window (num_ctx) for ``tenant``."""
+        async with self._session() as session:
+            row = await self._get_or_create(session, tenant)
+            row.context_window = value
             await session.commit()

@@ -45,6 +45,7 @@ from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.settings import CoreAppSettings
+from epicurus_core_app.system_info import create_system_router
 
 SERVICE_NAME = "core-app"
 
@@ -192,6 +193,7 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(create_readiness_router(readiness))
+    app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
     app.include_router(
         create_oauth_router(

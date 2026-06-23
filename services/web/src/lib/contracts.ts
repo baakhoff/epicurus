@@ -17,6 +17,24 @@ export const ModelInfo = z.object({
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
+/** Per-model tuning; null on a field means "inherit" the global / env default. */
+export const ModelSettings = z.object({
+  context_window: z.number().nullable(),
+  keep_alive: z.string().nullable(),
+});
+export type ModelSettings = z.infer<typeof ModelSettings>;
+
+/** Read-only facts about a local model from the runtime's `/api/show`. */
+export const ModelDetails = z.object({
+  // Weight quantization is fixed at pull time (e.g. "Q4_K_M") — not a runtime knob.
+  quantization: z.string().nullish(),
+  parameter_size: z.string().nullish(),
+  // The model's trained maximum context (a ceiling for the operator's choice).
+  context_length: z.number().nullish(),
+  family: z.string().nullish(),
+});
+export type ModelDetails = z.infer<typeof ModelDetails>;
+
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),

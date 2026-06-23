@@ -1,6 +1,7 @@
 """Mail module — MCP tool surface (ADR-0016).
 
-Three provider-agnostic tools: ``mail_search``, ``mail_read``, ``mail_send``.
+Provider-agnostic tools: ``mail_search``, ``mail_read``, ``mail_send``, and the
+read-state pair ``mail_mark_read`` / ``mail_mark_unread``.
 The tool names and signatures are domain-neutral; no Gmail specifics appear in the
 tool surface (the manifest declares Gmail's OAuth scopes for the connect flow, #241).
 ``mail_search`` returns a :func:`~epicurus_core.tool_envelope` so the UI renders
@@ -9,9 +10,13 @@ click to open the full message in the right-panel email-reader.
 ``mail_send`` is declared a danger action (ADR-0007): it sends a real message
 and cannot be undone, so the web shell displays a confirmation prompt before
 invoking it.
+``mail_mark_read`` / ``mail_mark_unread`` flip a message's read state; the
+``email-reader`` panel also surfaces them as a tool-backed toggle (ADR-0024).
 """
 
 from __future__ import annotations
+
+import httpx
 
 from epicurus_core import EntityRef, EpicurusModule, UiAction, UiSection, tool_envelope
 from epicurus_mail.gmail import GMAIL_API_SCOPES
@@ -19,12 +24,19 @@ from epicurus_mail.provider import MailProvider
 
 MODULE_NAME = "mail"
 
+# Shown when ``messages.modify`` is rejected for lack of scope — the operator connected
+# Google before mail required ``gmail.modify`` and must reconnect to grant it.
+_SCOPE_HINT = (
+    "Couldn't change the read state: the connected Google account is missing the Gmail"
+    " modify permission. Reconnect Google (Settings → Connect) to grant it."
+)
+
 
 def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.6.0",
+        version="0.7.0",
         description=(
             "Provider-agnostic mail — search, read, and send. Gmail is the v0.1 provider."
         ),
@@ -130,5 +142,42 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         sent_id = await provider.send(to=to, subject=subject, body=body)
         return f"sent:{sent_id}"
+
+    @module.tool()
+    async def mail_mark_read(message_id: str) -> str:
+        """Mark a mail message as read.
+
+        Clears the unread flag on the message identified by *message_id* (discover ids
+        with ``mail_search``). Distinct from ``mail_read``, which fetches the body —
+        this only changes read state and returns nothing to read. Idempotent.
+
+        Args:
+            message_id: The message ID returned by ``mail_search``.
+        """
+        try:
+            await provider.set_unread(message_id, unread=False)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                return _SCOPE_HINT
+            raise
+        return f"marked-read:{message_id}"
+
+    @module.tool()
+    async def mail_mark_unread(message_id: str) -> str:
+        """Mark a mail message as unread.
+
+        Restores the unread flag on the message identified by *message_id* (discover ids
+        with ``mail_search``). Idempotent.
+
+        Args:
+            message_id: The message ID returned by ``mail_search``.
+        """
+        try:
+            await provider.set_unread(message_id, unread=True)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                return _SCOPE_HINT
+            raise
+        return f"marked-unread:{message_id}"
 
     return module

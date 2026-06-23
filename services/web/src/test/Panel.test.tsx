@@ -1,9 +1,26 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PanelHost } from "@/components/Panel";
+import { api } from "@/lib/api";
 import { usePanel } from "@/stores/panel";
+
+vi.mock("@/lib/api", () => ({
+  api: {
+    invokeModuleTool: vi.fn().mockResolvedValue({ result: "marked-read:msg1" }),
+    readMailMessage: vi.fn().mockResolvedValue({
+      subject: "Lunch?",
+      from: "a@b.com",
+      date: null,
+      body: "noon",
+      module: "mail",
+      message_id: "msg1",
+      unread: false,
+      actions: [{ tool: "mail_mark_unread", label: "Mark as unread", args: { message_id: "msg1" } }],
+    }),
+  },
+}));
 
 const DETAIL = {
   title: "Standup",
@@ -12,7 +29,10 @@ const DETAIL = {
   href: { label: "Open in calendar", url: "https://cal.example/123" },
 };
 
-beforeEach(() => usePanel.getState().close());
+beforeEach(() => {
+  usePanel.getState().close();
+  vi.clearAllMocks();
+});
 
 describe("PanelHost", () => {
   it("renders nothing when the panel is closed", () => {
@@ -78,5 +98,39 @@ describe("PanelHost", () => {
     );
     expect(screen.getAllByText("Lunch?").length).toBeGreaterThan(0);
     expect(screen.getAllByText("noon").length).toBeGreaterThan(0);
+  });
+
+  it("marks an unread message read through the reader toggle", async () => {
+    render(<PanelHost />);
+    act(() =>
+      usePanel.getState().open(
+        "email-reader",
+        {
+          subject: "Lunch?",
+          from: "a@b.com",
+          body: "noon",
+          module: "mail",
+          message_id: "msg1",
+          unread: true,
+          actions: [
+            { tool: "mail_mark_read", label: "Mark as read", icon: "check", args: { message_id: "msg1" } },
+          ],
+        },
+        "Email",
+      ),
+    );
+    // The unread badge and the toggle both render.
+    expect(screen.getAllByText("Unread").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole("button", { name: /Mark as read/ })[0]);
+    await waitFor(() =>
+      expect(api.invokeModuleTool).toHaveBeenCalledWith("mail", "mail_mark_read", {
+        message_id: "msg1",
+      }),
+    );
+    // After success the reader re-fetches and the toggle flips to its opposite.
+    await waitFor(() => expect(api.readMailMessage).toHaveBeenCalledWith("mail", "msg1"));
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /Mark as unread/ }).length).toBeGreaterThan(0),
+    );
   });
 });

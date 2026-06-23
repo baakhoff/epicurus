@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **Mail: mark messages read / unread** — mail is no longer read-only. Two new MCP tools
+  (`mail_mark_read` / `mail_mark_unread`) let the agent flip a message's read state on request
+  ("mark my newsletter as read"), and the right-panel email reader gains a **Mark as read /
+  Mark as unread** toggle (a tool-backed action, ADR-0024) that invokes the tool through the core
+  proxy and re-fetches so the toggle flips. The provider seam gains `set_unread(message_id,
+  unread)`; the Gmail provider implements it via `messages.modify` on the `UNREAD` label, which
+  needs the **`gmail.modify`** scope — it **replaces** `gmail.readonly` (which it supersets), so
+  **an operator who connected Google before this change must reconnect once** (Settings → Connect)
+  to grant it; until then the mark tools return a reconnect hint rather than a 500. No core-app
+  change — the core's `/messages` and `/tools` proxies are generic pass-throughs (closes #277)
+  (`mail` → 0.7.0, `web` → 0.25.0).
 - **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
   (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
   a 128K–256K context window. They show up in the Models screen and pull like any other entry

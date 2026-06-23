@@ -30,6 +30,28 @@ def _service_version() -> str:
         return "0.0.0"
 
 
+def _mark_read_action(message_id: str) -> dict[str, Any]:
+    """A `BoardAction` (ADR-0024) the reader renders to mark an unread message read."""
+    return {
+        "tool": "mail_mark_read",
+        "label": "Mark as read",
+        "intent": "default",
+        "icon": "check",
+        "args": {"message_id": message_id},
+    }
+
+
+def _mark_unread_action(message_id: str) -> dict[str, Any]:
+    """A `BoardAction` (ADR-0024) the reader renders to mark a read message unread."""
+    return {
+        "tool": "mail_mark_unread",
+        "label": "Mark as unread",
+        "intent": "default",
+        "icon": "mail",
+        "args": {"message_id": message_id},
+    }
+
+
 def create_app() -> FastAPI:
     """Build the mail ASGI app."""
     settings = MailSettings(service_name=MODULE_NAME)
@@ -105,19 +127,28 @@ def create_app() -> FastAPI:
     async def get_message(ref_id: str) -> dict[str, Any]:
         """Full email message for the panel's email-reader view (ADR-0019).
 
-        Returns an EmailMessage envelope — subject, from, date, and the decoded
-        plain-text body — consumed by the right-panel ``email-reader`` view when a
-        user clicks a mail entity chip.
+        Returns an EmailMessage envelope — subject, from, date, the decoded plain-text
+        body, the message's ``unread`` state, and a single tool-backed ``actions`` entry
+        (ADR-0024): the reader renders it as a **Mark as read** (when unread) or **Mark as
+        unread** (when read) toggle that invokes the matching MCP tool through the core
+        proxy. ``module``/``message_id`` let the reader re-fetch itself after the toggle.
         """
         try:
             message = await provider.read(ref_id)
         except Exception as exc:
             raise HTTPException(status_code=404, detail=f"message {ref_id!r} not found") from exc
+        toggle = (
+            _mark_read_action(message.id) if message.unread else _mark_unread_action(message.id)
+        )
         return {
             "subject": message.subject or "(no subject)",
             "from": message.sender,
             "date": message.date,
             "body": message.body or "",
+            "module": MODULE_NAME,
+            "message_id": message.id,
+            "unread": message.unread,
+            "actions": [toggle],
         }
 
     app.mount("/mcp", mcp_app)

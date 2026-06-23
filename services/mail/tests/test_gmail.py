@@ -238,3 +238,38 @@ async def test_send_encodes_mime_and_calls_api(subject: str, to: str, body: str)
     # Verify the raw payload decodes back to valid RFC 2822 message containing the subject
     decoded = base64.urlsafe_b64decode(captured["raw"] + "==").decode("utf-8", errors="replace")
     assert to in decoded
+
+
+@pytest.mark.parametrize(
+    "unread,expected_body",
+    [
+        (False, {"removeLabelIds": ["UNREAD"]}),
+        (True, {"addLabelIds": ["UNREAD"]}),
+    ],
+)
+async def test_set_unread_modifies_unread_label(
+    unread: bool, expected_body: dict[str, list[str]]
+) -> None:
+    """set_unread() POSTs a messages.modify that adds/removes the UNREAD label."""
+    platform = _make_platform("tok_mark")
+    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+
+    captured: dict[str, Any] = {}
+
+    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
+        captured["url"] = url
+        captured["json"] = kwargs["json"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = AsyncMock(side_effect=fake_post)
+    provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+    await provider.set_unread("m42", unread=unread)
+    assert captured["url"] == "/users/me/messages/m42/modify"
+    assert captured["json"] == expected_body
+    platform.get_oauth_token.assert_called_once_with("google")  # type: ignore[attr-defined]

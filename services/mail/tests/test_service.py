@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import httpx
+
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_mail.provider import MailMessage, MailProvider
 from epicurus_mail.service import build_module
@@ -14,6 +16,7 @@ def _make_provider(*messages: MailMessage) -> MailProvider:
     provider.search = AsyncMock(return_value=list(messages))
     provider.read = AsyncMock(return_value=messages[0] if messages else _sample())
     provider.send = AsyncMock(return_value="sent_msg_id")
+    provider.set_unread = AsyncMock(return_value=None)
     return provider  # type: ignore[return-value]
 
 
@@ -109,12 +112,52 @@ async def test_mail_send_returns_sent_id() -> None:
     )
 
 
-async def test_manifest_declares_three_tools() -> None:
+async def test_mail_mark_read_clears_unread() -> None:
+    provider = _make_provider(_sample())
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_mark_read", {"message_id": "msg1"})
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "marked-read:msg1" in str(text)
+    provider.set_unread.assert_called_once_with("msg1", unread=False)  # type: ignore[attr-defined]
+
+
+async def test_mail_mark_unread_sets_unread() -> None:
+    provider = _make_provider(_sample())
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_mark_unread", {"message_id": "msg1"})
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "marked-unread:msg1" in str(text)
+    provider.set_unread.assert_called_once_with("msg1", unread=True)  # type: ignore[attr-defined]
+
+
+async def test_mail_mark_read_returns_hint_on_missing_scope() -> None:
+    # A 403 from Gmail (token lacks gmail.modify) returns a reconnect hint, not a 500.
+    provider = _make_provider(_sample())
+    provider.set_unread = AsyncMock(  # type: ignore[method-assign]
+        side_effect=httpx.HTTPStatusError(
+            "403 Forbidden",
+            request=httpx.Request("POST", "http://gmail/modify"),
+            response=httpx.Response(403),
+        )
+    )
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_mark_read", {"message_id": "msg1"})
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "Reconnect Google" in str(text)
+
+
+async def test_manifest_declares_all_tools() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
-    assert tool_names == {"mail_search", "mail_read", "mail_send"}
+    assert tool_names == {
+        "mail_search",
+        "mail_read",
+        "mail_send",
+        "mail_mark_read",
+        "mail_mark_unread",
+    }
 
 
 async def test_manifest_has_ui_with_status_url() -> None:
@@ -152,20 +195,21 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_6_0() -> None:
+async def test_manifest_version_is_0_7_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.6.0"
+    assert manifest.version == "0.7.0"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:
     # The Gmail API scopes the shell requests at connect (#241); identity is the core default.
+    # ``gmail.modify`` (not ``readonly``) backs read + mark read/unread (#277).
     provider = _make_provider()
     manifest = await build_module(provider).manifest()
     assert manifest.oauth_scopes == {
         "google": [
-            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/gmail.send",
         ]
     }

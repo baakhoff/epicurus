@@ -55,6 +55,7 @@ class LlmGateway:
         *,
         ollama_url: str,
         default_model: str,
+        default_embed_model: str = "nomic-embed-text",
         keep_alive: str,
         power: PowerController,
         secrets: SecretStore,
@@ -69,6 +70,7 @@ class LlmGateway:
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
+        self._default_embed_model = default_embed_model
         self._keep_alive = keep_alive
         self._power = power
         self._secrets = secrets
@@ -88,6 +90,34 @@ class LlmGateway:
             if stored:
                 return stored
         return self._default_model
+
+    async def effective_embed_default(self, tenant_id: str | None = None) -> str:
+        """The active embedding model: the stored embed pref if set, else the env default.
+
+        Symmetric with :meth:`effective_default` for chat. Callers that don't pass an
+        explicit ``model`` to :meth:`embed` (e.g. core memory recall) resolve through here,
+        so the operator's UI **Embedding model** choice actually drives embedding instead
+        of a hard-coded setting.
+        """
+        if self._prefs is not None:
+            stored = await self._prefs.get_embed_default(tenant_id or self._default_tenant)
+            if stored:
+                return stored
+        return self._default_embed_model
+
+    async def effective_context_window(self, tenant_id: str | None = None) -> int | None:
+        """The active Ollama context window (num_ctx): the stored pref if set, else the env default.
+
+        Symmetric with :meth:`effective_default` for chat. Resolved per turn so the operator's
+        UI **Context window** choice drives ``num_ctx`` (the fix for the 4096-default context
+        filling with the prompt and leaving no room to generate). ``None`` falls through to the
+        runtime's own default — local models only; ignored by hosted providers.
+        """
+        if self._prefs is not None:
+            stored = await self._prefs.get_context_window(tenant_id or self._default_tenant)
+            if stored is not None:
+                return stored
+        return self._num_ctx
 
     async def model_readiness(
         self, model: str | None = None, *, tenant_id: str | None = None
@@ -131,12 +161,16 @@ class LlmGateway:
         _, provider = registry.resolve(model)
         return not (self._power.paused and provider.is_local)
 
-    async def _call_config(self, model: str, tenant_id: str | None) -> dict[str, Any]:
+    async def _call_config(
+        self, model: str, tenant_id: str | None, *, num_ctx: int | None = None
+    ) -> dict[str, Any]:
         """The LiteLLM call kwargs (model, endpoint, key, tuning) for ``model``.
 
         For hosted providers the API key is fetched from OpenBao at call time and is
         never logged. Tuning knobs (temperature/top_p, plus local-only num_ctx and
-        keep_alive) come from settings, so they need no code edit to change.
+        keep_alive) come from settings, so they need no code edit to change. ``num_ctx``
+        is resolved per turn by the caller (the operator's Context-window pref, else the
+        env default); it is an Ollama runtime option applied to local models only.
         """
         litellm_model, provider = registry.resolve(model)
         config: dict[str, Any] = {"model": litellm_model}
@@ -144,8 +178,8 @@ class LlmGateway:
             config["api_base"] = self._ollama_url
             config["keep_alive"] = self._keep_alive
             # num_ctx is an Ollama runtime option — local models only.
-            if self._num_ctx is not None:
-                config["num_ctx"] = self._num_ctx
+            if num_ctx is not None:
+                config["num_ctx"] = num_ctx
         if provider.secret_path is not None:
             tenant = tenant_id or self._default_tenant
             secret = await self._secrets.get(provider.secret_path, tenant)
@@ -166,8 +200,9 @@ class LlmGateway:
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None,
         tenant_id: str | None,
+        num_ctx: int | None,
     ) -> ChatResult:
-        config = await self._call_config(model, tenant_id)
+        config = await self._call_config(model, tenant_id, num_ctx=num_ctx)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -206,12 +241,13 @@ class LlmGateway:
     ) -> ChatResult:
         """Return a completion, walking the fallback chain on failure."""
         resolved = model or await self.effective_default(tenant_id)
+        num_ctx = await self.effective_context_window(tenant_id)
         last_error: Exception | None = None
         for candidate in self._candidates(resolved):
             if not self._is_available(candidate):
                 continue
             try:
-                return await self._complete(candidate, messages, tools, tenant_id)
+                return await self._complete(candidate, messages, tools, tenant_id, num_ctx)
             except Exception as exc:  # provider/call error -> try the next candidate
                 last_error = exc
                 log.warning("llm call failed; trying next", model=candidate, error=str(exc))
@@ -231,7 +267,8 @@ class LlmGateway:
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
-        config = await self._call_config(candidate, tenant_id)
+        num_ctx = await self.effective_context_window(tenant_id)
+        config = await self._call_config(candidate, tenant_id, num_ctx=num_ctx)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -270,7 +307,8 @@ class LlmGateway:
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
-        config = await self._call_config(candidate, tenant_id)
+        num_ctx = await self.effective_context_window(tenant_id)
+        config = await self._call_config(candidate, tenant_id, num_ctx=num_ctx)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -350,7 +388,7 @@ class LlmGateway:
         """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``)."""
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
-        resolved = model or await self.effective_default(tenant_id)
+        resolved = model or await self.effective_embed_default(tenant_id)
         embed_model = f"ollama/{resolved}"
         start = time.monotonic()
         response = await litellm.aembedding(

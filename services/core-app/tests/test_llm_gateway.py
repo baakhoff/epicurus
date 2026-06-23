@@ -291,6 +291,40 @@ async def test_embed_usage_event_is_tenant_scoped(monkeypatch: pytest.MonkeyPatc
     assert tenant == "tenant-x"
 
 
+async def test_embed_resolves_global_embed_default_pref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator's UI Embedding-model choice (embed_default pref) drives embedding.
+
+    Before this, memory embedding ignored the pref and always hit the env default — a 404
+    when that model wasn't pulled. embed() with no explicit model now resolves the pref,
+    falling back to the env default; an explicit per-module model still wins.
+    """
+    captured: dict[str, Any] = {}
+
+    class _EmbedResp:
+        def model_dump(self) -> dict[str, Any]:
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbedResp:
+        captured.update(kwargs)
+        return _EmbedResp()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    prefs = await _fresh_prefs()
+
+    # No embed pref → the env default embedding model.
+    await _gateway(prefs=prefs).embed(["hi"])
+    assert captured["model"] == "ollama/nomic-embed-text"
+
+    # Operator picks an embedding model in the UI → it drives embedding.
+    await prefs.set_embed_default("local", "qwen3-embedding:0.6b")
+    await _gateway(prefs=prefs).embed(["hi"])
+    assert captured["model"] == "ollama/qwen3-embedding:0.6b"
+
+    # An explicit model (a module's per-module override) still wins.
+    await _gateway(prefs=prefs).embed(["hi"], model="bge-m3")
+    assert captured["model"] == "ollama/bge-m3"
+
+
 async def test_embed_refuses_when_paused() -> None:
     power = PowerController()
     power.pause()
@@ -621,3 +655,61 @@ async def test_model_readiness_defaults_to_effective_default(
 
     monkeypatch.setattr(gw, "models", fake_models)
     assert await gw.model_readiness() == ("llama3.2", True)
+
+
+# ── context window (num_ctx) pref resolution ──────────────────────────────────────
+
+
+async def test_effective_context_window_falls_back_to_env() -> None:
+    prefs = await _fresh_prefs()
+    # No stored pref → the env default (the gateway's num_ctx constructor arg).
+    assert await _gateway(prefs=prefs, num_ctx=4096).effective_context_window() == 4096
+    # No pref and no env default → None (the runtime's own default applies).
+    assert await _gateway(prefs=prefs).effective_context_window() is None
+
+
+async def test_stored_context_window_overrides_env() -> None:
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 16384)
+    assert await _gateway(prefs=prefs, num_ctx=4096).effective_context_window() == 16384
+
+
+async def test_chat_applies_context_window_pref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A streamed/blocking chat turn resolves num_ctx from the pref, per turn."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    gw = _gateway(prefs=prefs, num_ctx=4096)
+
+    # With no pref, the env default num_ctx is sent.
+    await gw.chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 4096
+
+    # The operator raises the context window in the UI → the next turn uses it.
+    await prefs.set_context_window("local", 16384)
+    await gw.chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 16384
+
+
+async def test_context_window_pref_not_sent_to_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 16384)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    await _gateway(prefs=prefs, secrets=secrets).chat(
+        [ChatMessage(role="user", content="hi")], model="claude/claude-3-5-sonnet-latest"
+    )
+    assert "num_ctx" not in captured  # Ollama-only runtime option, never sent to hosted

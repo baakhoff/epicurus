@@ -27,19 +27,34 @@ read-only `email-reader` panel directly, so the resolver carries no `href` (ther
 no outbound URL — the reader is in-app panel navigation).  Mail skips a 0.3.0
 "attach" step because it is read-only, jumping 0.2.0 → 0.4.0.
 
+**v0.7.0** (#277): mail is no longer read-only — messages can be **marked read / unread**.
+Two new MCP tools (`mail_mark_read`, `mail_mark_unread`) let the agent flip read state on
+request, and the right-panel `email-reader` now renders a **Mark as read / Mark as unread**
+toggle (a tool-backed action, ADR-0024): pressing it invokes the matching tool through the
+core proxy and re-fetches the message so the toggle flips. The provider seam gains
+`set_unread(message_id, unread)`; the Gmail provider implements it via `messages.modify`
+on the `UNREAD` label, which requires the **`gmail.modify`** scope (replacing `gmail.readonly`,
+which it supersets). **Operators who connected Google before v0.7.0 must reconnect once**
+(Settings → Connect) to grant `gmail.modify`; until then the mark tools return a reconnect hint.
+
 ---
 
 ## Contract
 
 ### MCP tools
 
-All three tools operate on the active `MailProvider` for the tenant.
+All tools operate on the active `MailProvider` for the tenant.
 
 | Tool | Inputs | Output | Notes |
 | --- | --- | --- | --- |
 | `mail_search` | `query: str`, `max_results: int = 10` | `ToolEnvelope` (text + entity refs) | Returns entity-ref chips; no body. Gmail query syntax. Max 50. |
 | `mail_read` | `message_id: str` | `str` (formatted text) | Subject, sender, date, and decoded plain-text body for the agent to reason on. |
 | `mail_send` | `to: str`, `subject: str`, `body: str` | `str` | **Danger action** — sends a real message. Returns `"sent:<id>"`. |
+| `mail_mark_read` | `message_id: str` | `str` | Clears the unread flag (`messages.modify`). Returns `"marked-read:<id>"`. Distinct from `mail_read` (which fetches the body). Idempotent. |
+| `mail_mark_unread` | `message_id: str` | `str` | Restores the unread flag. Returns `"marked-unread:<id>"`. Idempotent. |
+
+`mail_mark_read` / `mail_mark_unread` require the `gmail.modify` scope; on a 403 (a Google
+account connected before v0.7.0, lacking the scope) they return a reconnect hint instead of failing.
 
 `mail_search` returns a `ToolEnvelope` (ADR-0019): the `text` field is a human-readable
 summary; `entity_refs` carries one `EntityRef` per message (`module="mail"`,
@@ -58,7 +73,7 @@ proxies them to the web shell (the shell never calls the module directly).
 | Method | Path | Shape | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date, and unread status (a `Status: Unread` row, only when unread). No `href` — the chip's click opens the reader. |
-| `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body. |
+| `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body, `module`/`message_id`, the `unread` state, and a one-element `actions` toggle (mark read/unread, ADR-0024). |
 | `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
 
 The core exposes these via:
@@ -90,12 +105,29 @@ read-only `email-reader` panel directly (in-app navigation, not an outbound URL)
 
 #### `EmailMessage` shape (from `/messages/{ref_id}`)
 
+`actions` carries a single tool-backed toggle (ADR-0024) computed from `unread`: a **Mark as
+read** action (`mail_mark_read`) when the message is unread, or **Mark as unread**
+(`mail_mark_unread`) when it is read. `module`/`message_id` let the reader invoke the action
+through the core proxy and re-fetch itself afterwards.
+
 ```json
 {
   "subject": "Invoice from Acme",
   "from": "acme@example.com",
   "date": "Mon, 1 Jan 2024 10:00:00 +0000",
-  "body": "Dear customer,\n\nPlease find the invoice attached.\n\nRegards"
+  "body": "Dear customer,\n\nPlease find the invoice attached.\n\nRegards",
+  "module": "mail",
+  "message_id": "msg1",
+  "unread": true,
+  "actions": [
+    {
+      "tool": "mail_mark_read",
+      "label": "Mark as read",
+      "intent": "default",
+      "icon": "check",
+      "args": { "message_id": "msg1" }
+    }
+  ]
 }
 ```
 
@@ -163,8 +195,11 @@ Before the module can access Gmail the operator must:
    **automatically** (#241): mail declares them in its manifest (`oauth_scopes`), and the
    shell passes them at connect — Settings requests the union across every module, so one
    connect grants Calendar / Tasks / Gmail together. The scopes are
-   `https://www.googleapis.com/auth/gmail.readonly` and `…/gmail.send` (exported as
-   `GMAIL_API_SCOPES` in `epicurus_mail.gmail`); the core adds the default identity scopes.
+   `https://www.googleapis.com/auth/gmail.modify` (read + mark read/unread) and `…/gmail.send`
+   (exported as `GMAIL_API_SCOPES` in `epicurus_mail.gmail`); the core adds the default identity
+   scopes. **Upgrading from < v0.7.0:** an account connected when mail still requested
+   `gmail.readonly` must **reconnect once** to grant `gmail.modify`, or the mark-read/unread
+   tools return a reconnect hint (the core accumulates scopes, so reconnecting is non-destructive).
 
 2. Ensure the Gmail API is enabled in the Google Cloud project associated with
    the OAuth client credentials (see [OAuth operator setup](../reference/oauth.md#operator-setup-google)).

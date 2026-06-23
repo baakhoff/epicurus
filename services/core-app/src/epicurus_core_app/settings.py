@@ -30,6 +30,19 @@ class CoreAppSettings(CoreSettings):
     llm_top_p: float | None = None
     # Ollama context-window size (num_ctx); applied to local models only.
     llm_num_ctx: int | None = None
+    # ── Model catalog (#269) ────────────────────────────────────────────────────
+    # The core parses the browsable model list from this source on a schedule, so the
+    # Models screen never ships a hand-maintained list. Defaults to the public Ollama
+    # library; point it at a mirror for an air-gapped deployment.
+    llm_catalog_url: str = "https://ollama.com/library"
+    # How often the background loop re-parses the source (seconds). The library changes
+    # rarely, so this is hours, not minutes. Floored to 60s by the catalog.
+    llm_catalog_refresh_seconds: int = 6 * 60 * 60
+    # Cap on model families kept (the most-popular survive); 0 = unlimited.
+    llm_catalog_max_models: int = 0
+    # When false, no outbound fetch happens and the built-in seed is served as-is
+    # (air-gapped builds). The endpoint and seed still work; only the refresh is skipped.
+    llm_catalog_enabled: bool = True
     # Comma-separated module base URLs. Each module serves its MCP tools at
     # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
     # (the registry + web shell read these).

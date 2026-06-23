@@ -1,17 +1,14 @@
-/** Curated static Ollama model catalog for the v1 browser.
+/** Built-in fallback catalog + the model browser's filter helpers.
  *
- * Seam: when live Ollama-registry browse lands, replace CATALOG with a
- * `GET /platform/v1/llm/catalog` fetch and keep filterCatalog as-is.
+ * The live model list now comes from the core (`GET /platform/v1/llm/catalog`), which
+ * parses an upstream library on a schedule (#269). This `CATALOG` is the offline seed the
+ * Models screen falls back to when that endpoint is unreachable (e.g. an older core), so
+ * the browser is never empty. `CatalogTag` / `filterCatalog` / `formatGb` are the seam the
+ * core's entries flow through unchanged.
  */
+import type { CatalogEntry } from "@/lib/contracts";
 
-export interface CatalogEntry {
-  id: string;
-  family: string;
-  params: string;
-  size_gb: number;
-  description: string;
-  tags: CatalogTag[];
-}
+export type { CatalogEntry };
 
 export const ALL_TAGS = ["general", "code", "multilingual", "vision", "embedding", "small"] as const;
 export type CatalogTag = (typeof ALL_TAGS)[number];
@@ -108,6 +105,47 @@ export const CATALOG: CatalogEntry[] = [
     size_gb: 8.1,
     description: "Google's best local Gemma; excels at long-context tasks.",
     tags: ["general", "multilingual"],
+  },
+  // ── Gemma 4 (multimodal: text + image; 128K–256K context, reasoning) ───────
+  {
+    id: "gemma4:e2b",
+    family: "Gemma 4",
+    params: "E2B",
+    size_gb: 7.2,
+    description: "Google's efficient Gemma 4 — multimodal (text + image), 128K context; the lightest of the family.",
+    tags: ["general", "vision", "multilingual"],
+  },
+  {
+    id: "gemma4:e4b",
+    family: "Gemma 4",
+    params: "E4B",
+    size_gb: 9.6,
+    description: "The default Gemma 4 (gemma4:latest) — multimodal, 128K context, strong all-round reasoning.",
+    tags: ["general", "vision", "multilingual"],
+  },
+  {
+    id: "gemma4:12b",
+    family: "Gemma 4",
+    params: "12B",
+    size_gb: 7.6,
+    description: "Gemma 4 12B — multimodal with a large 256K context window, quantized to a GPU-friendly size.",
+    tags: ["general", "vision", "multilingual"],
+  },
+  {
+    id: "gemma4:26b",
+    family: "Gemma 4",
+    params: "26B",
+    size_gb: 18,
+    description: "Gemma 4 26B (mixture-of-experts, 4B active) — multimodal, noticeably higher quality.",
+    tags: ["general", "vision", "multilingual"],
+  },
+  {
+    id: "gemma4:31b",
+    family: "Gemma 4",
+    params: "31B",
+    size_gb: 20,
+    description: "The largest Gemma 4 — multimodal, top quality; for big-VRAM or CPU-offload setups.",
+    tags: ["general", "vision", "multilingual"],
   },
   {
     id: "llama3.1:8b",

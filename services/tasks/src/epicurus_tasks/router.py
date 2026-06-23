@@ -140,9 +140,28 @@ class TasksRouter:
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        to_list_id: str | None = None,
     ) -> Task:
         prefs = await self._load_prefs()
         provider, ref = self._resolve_collection(list_id, prefs)
+        if to_list_id is not None:
+            target_provider, target_ref = self._resolve_collection(to_list_id, prefs)
+            if (target_ref.account, target_ref.collection) != (ref.account, ref.collection):
+                # Cross-list move: recreate in the target then delete the source (ADR-0038) —
+                # Google Tasks has no move-between-lists API, so a move can't be an in-place
+                # edit. Field edits supplied alongside the move are applied to the new task.
+                return await self._move_task(
+                    tenant_id,
+                    task_id,
+                    source=(provider, ref),
+                    target=(target_provider, target_ref),
+                    title=title,
+                    notes=notes,
+                    due=due,
+                    status=status,
+                    priority=priority,
+                    tags=tags,
+                )
         return await provider.update_task(
             tenant_id,
             task_id,
@@ -154,6 +173,57 @@ class TasksRouter:
             tags=tags,
             list_id=ref.collection or None,
         )
+
+    async def delete_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> None:
+        prefs = await self._load_prefs()
+        provider, ref = self._resolve_collection(list_id, prefs)
+        await provider.delete_task(tenant_id, task_id, list_id=ref.collection or None)
+
+    async def _move_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        source: tuple[TasksProvider, CollectionRef],
+        target: tuple[TasksProvider, CollectionRef],
+        title: str | None,
+        notes: str | None,
+        due: str | None,
+        status: str | None,
+        priority: str | None,
+        tags: list[str] | None,
+    ) -> Task:
+        """Move a task to another list by recreating it in *target* and deleting the source.
+
+        Adds the new task before deleting the old, so a failure mid-move never loses the
+        task (worst case a transient duplicate). The created task is stamped with the target
+        list so the board shows it under its new category. Edits passed with the move
+        overlay the source task's current values.
+        """
+        source_provider, source_ref = source
+        target_provider, target_ref = target
+        current = await source_provider.get_task(
+            tenant_id, task_id, list_id=source_ref.collection or None
+        )
+        if current is None:
+            raise ValueError(f"task {task_id!r} not found")
+        created = await target_provider.add_task(
+            tenant_id,
+            title if title is not None else current.title,
+            notes=notes if notes is not None else current.notes,
+            due=due if due is not None else current.due,
+            status=status if status is not None else current.status,
+            priority=priority if priority is not None else current.priority,
+            tags=tags if tags is not None else current.tags,
+            list_id=target_ref.collection or None,
+        )
+        await source_provider.delete_task(tenant_id, task_id, list_id=source_ref.collection or None)
+        titles = await self._title_map(tenant_id, [target_ref])
+        return self._stamp(
+            [created], ref=target_ref, title=titles.get((target_ref.account, target_ref.collection))
+        )[0]
 
     async def get_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None

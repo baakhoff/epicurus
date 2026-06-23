@@ -180,9 +180,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 
 - **Postgres `agent_messages`** — append-only conversation history: `id`, `tenant`,
   `session_id`, `role`, `content`, `created_at`, plus JSON `entity_refs` / `attachments`
-  (ADR-0019) and `activity` — the assistant turn's persisted thinking + tool steps, rendered
-  as the folded activity timeline on reopen (ADR-0041). Tenant-scoped; post-release columns
-  are added in place at startup (no migration framework).
+  (ADR-0019) and `activity` — the assistant turn's persisted process, rendered as the folded
+  activity timeline on reopen (ADR-0041). `activity.timeline` is the **chronological**
+  interleaving of thinking blocks and tool steps (think → call → think, #300); the flat
+  `thinking`/`steps` are derived and kept for backward compatibility (older rows have only
+  those). Tenant-scoped; post-release columns are added in place at startup (no migration).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `hidden_models` (JSON list). A missing row
   means all defaults are `null` (fall back to env settings).

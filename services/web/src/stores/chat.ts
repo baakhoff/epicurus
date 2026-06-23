@@ -16,6 +16,14 @@ export interface ToolRun {
 
 export type ChatSegment =
   | { kind: "text"; text: string }
+  | { kind: "tool"; run: ToolRun }
+  | { kind: "thinking"; text: string };
+
+/** One entry on the activity timeline (the turn's *process*): a run of thinking or a tool
+ *  step, in chronological order (#300). Built from the live `segments` or a message's
+ *  persisted `activity` so {@link ProcessTimeline} renders both identically. */
+export type ActivityItem =
+  | { kind: "thinking"; text: string }
   | { kind: "tool"; run: ToolRun };
 
 interface ChatState {
@@ -25,12 +33,11 @@ interface ChatState {
   draft: string;
   /** The user message currently being answered (optimistic echo). */
   pendingUser: string | null;
-  /** The assistant turn under construction, in order. */
+  /** The assistant turn under construction, in order — text (answer), tool steps, and
+   *  thinking blocks interleaved exactly as they streamed (#300). The activity timeline is
+   *  derived from the thinking + tool segments; cleared on `done` when the server-stored turn
+   *  (which carries its own persisted activity) takes over. */
   segments: ChatSegment[];
-  /** The live turn's thinking (chain-of-thought), accumulated across `thinking` events
-   *  (ADR-0041). Shown in the activity timeline while streaming; cleared on `done`, when
-   *  the server-stored turn (which carries its own persisted activity) takes over. */
-  thinking: string;
   streaming: boolean;
   /** Warming progress emitted before the first token (ADR-0027); null once answered. */
   readiness: Readiness | null;
@@ -62,7 +69,6 @@ export const useChat = create<ChatState>()((set, get) => ({
   draft: "",
   pendingUser: null,
   segments: [],
-  thinking: "",
   streaming: false,
   readiness: null,
   error: null,
@@ -77,7 +83,6 @@ export const useChat = create<ChatState>()((set, get) => ({
       sessionId: freshId(),
       pendingUser: null,
       segments: [],
-      thinking: "",
       streaming: false,
       readiness: null,
       error: null,
@@ -92,7 +97,6 @@ export const useChat = create<ChatState>()((set, get) => ({
       sessionId: id,
       pendingUser: null,
       segments: [],
-      thinking: "",
       streaming: false,
       readiness: null,
       error: null,
@@ -108,7 +112,6 @@ export const useChat = create<ChatState>()((set, get) => ({
       draft: "",
       pendingUser: text,
       segments: [],
-      thinking: "",
       streaming: true,
       readiness: null,
       error: null,
@@ -125,6 +128,18 @@ export const useChat = create<ChatState>()((set, get) => ({
         set({ segments });
       } else {
         push({ kind: "text", text: delta });
+      }
+    };
+    // Coalesce consecutive reasoning into the trailing thinking segment; a tool (or answer
+    // text) between two runs of thinking splits them, so `segments` keeps the true order.
+    const appendThinking = (delta: string) => {
+      const segments = [...get().segments];
+      const last = segments[segments.length - 1];
+      if (last?.kind === "thinking") {
+        segments[segments.length - 1] = { kind: "thinking", text: last.text + delta };
+        set({ segments });
+      } else {
+        push({ kind: "thinking", text: delta });
       }
     };
     const setTool = (run: ToolRun) => {
@@ -157,8 +172,7 @@ export const useChat = create<ChatState>()((set, get) => ({
         const event = AgentEvent.parse(JSON.parse(message.data));
         if (event.type === "readiness" && event.readiness) set({ readiness: event.readiness });
         else if (event.type === "delta" && event.text) appendText(event.text);
-        else if (event.type === "thinking" && event.text)
-          set({ thinking: get().thinking + event.text });
+        else if (event.type === "thinking" && event.text) appendThinking(event.text);
         else if (event.type === "tool" && event.tool && event.status)
           setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
         else if (event.type === "error") {
@@ -177,7 +191,6 @@ export const useChat = create<ChatState>()((set, get) => ({
           abort: null,
           pendingUser: null,
           segments: [],
-          thinking: "",
           readiness: null,
         });
       } else {

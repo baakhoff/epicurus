@@ -17,7 +17,9 @@ import {
   LogEntry,
   MemoryListing,
   MessageRecord,
+  ModelDetails,
   ModelInfo,
+  ModelSettings,
   ModuleAttachmentItem,
   ModuleSnapshot,
   OAuthClientStatus,
@@ -105,6 +107,19 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ name, hidden }),
     }),
+
+  // Per-model settings (context window + keep-alive). `model` is a query param —
+  // names carry ":" and "/" which proxies may mangle in a path.
+  modelSettings: (model: string) =>
+    request(ModelSettings, `/platform/v1/llm/model-settings?model=${encodeURIComponent(model)}`),
+  setModelSettings: (model: string, settings: { context_window: number | null; keep_alive: string | null }) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/model-settings", {
+      method: "PUT",
+      body: JSON.stringify({ model, ...settings }),
+    }),
+  // Read-only facts (quantization, parameter size, trained context length) for the sheet.
+  modelDetails: (model: string) =>
+    request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),
 
   timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
   setTimezone: (timezone: string) =>

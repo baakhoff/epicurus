@@ -1,10 +1,11 @@
 /**
- * The live-turn activity surface: a warming readiness bar (#122), a "thinking"
- * indicator while the first token is pending, and a step-by-step process timeline of the
- * agent's tool calls (#121). The shell owns this rendering — modules supply only the event
- * data carried on the chat stream (ADR-0018 / ADR-0027).
+ * The turn-activity surface: a warming readiness bar (#122), a "thinking" indicator while
+ * the first token is pending, and a step-by-step process timeline of the agent's thinking
+ * and tool calls (#121, ADR-0041). The shell owns this rendering — modules supply only the
+ * event data carried on the chat stream (ADR-0018 / ADR-0027). The timeline renders both the
+ * live turn and, from the message's persisted activity, a reopened past turn.
  */
-import { Check, ChevronDown, Loader2, Wrench, X } from "lucide-react";
+import { Brain, Check, ChevronDown, Loader2, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Spinner, cn } from "@/components/ui";
@@ -110,11 +111,43 @@ function TimelineStep({ run }: { run: ToolRun }) {
   );
 }
 
+/** The model's chain-of-thought, collapsible, inside the timeline (ADR-0041). */
+function ThinkingBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="py-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 py-1 text-left text-xs text-ink-dim"
+        aria-expanded={open}
+      >
+        <span className="flex size-4 shrink-0 items-center justify-center">
+          <Brain size={13} className="text-accent" />
+        </span>
+        <span>Thinking</span>
+        <ChevronDown
+          size={11}
+          className={cn("ml-auto shrink-0 text-ink-faint transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <pre className="mb-1 ml-6 max-h-56 overflow-auto whitespace-pre-wrap rounded-(--radius-field) border border-edge bg-surface-2 p-2 text-[11px] leading-relaxed text-ink-dim">
+          {text}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 export function ProcessTimeline({
   runs,
+  thinking = "",
   collapsed = false,
 }: {
   runs: ToolRun[];
+  /** The turn's chain-of-thought, shown as a collapsible block above the steps (ADR-0041). */
+  thinking?: string;
   /** Fold to the summary header once the answer is flowing; the reader can still toggle. */
   collapsed?: boolean;
 }) {
@@ -125,8 +158,9 @@ export function ProcessTimeline({
     if (!userToggled.current) setOpen(!collapsed);
   }, [collapsed]);
 
-  if (runs.length === 0) return null;
+  if (runs.length === 0 && !thinking) return null;
   const running = runs.some((run) => run.status === "running");
+  const stepLabel = runs.length > 0 ? `${runs.length} step${runs.length > 1 ? "s" : ""}` : "Thought process";
   const toggle = () => {
     userToggled.current = true;
     setOpen((v) => !v);
@@ -140,16 +174,21 @@ export function ProcessTimeline({
         className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs text-ink-dim hover:text-ink"
         aria-expanded={open}
       >
-        {running ? <Spinner className="size-3" /> : <Wrench size={12} />}
-        <span>{running ? "Working…" : `${runs.length} step${runs.length > 1 ? "s" : ""}`}</span>
+        {running ? <Spinner className="size-3" /> : runs.length > 0 ? <Wrench size={12} /> : <Brain size={12} />}
+        <span>{running ? "Working…" : stepLabel}</span>
         <ChevronDown size={12} className={cn("ml-auto transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <ol className="flex flex-col border-t border-edge px-2.5 pb-1">
-          {runs.map((run, i) => (
-            <TimelineStep key={i} run={run} />
-          ))}
-        </ol>
+        <div className="flex flex-col border-t border-edge px-2.5 pb-1">
+          {thinking && <ThinkingBlock text={thinking} />}
+          {runs.length > 0 && (
+            <ol className="flex flex-col">
+              {runs.map((run, i) => (
+                <TimelineStep key={i} run={run} />
+              ))}
+            </ol>
+          )}
+        </div>
       )}
     </div>
   );

@@ -34,6 +34,7 @@ from epicurus_core_app.llm.models import (
 )
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.reasoning import ThinkSplitter, split_reasoning
 
 litellm.telemetry = False
 litellm.drop_params = True
@@ -196,10 +197,16 @@ class LlmGateway:
         data: dict[str, Any] = response.model_dump()
         message = data["choices"][0]["message"]
         usage = data.get("usage") or {}
+        # Reasoning is either a separate field (hosted reasoning models) or inlined in the
+        # content as <think>…</think> (local models); take the native field if present, else
+        # split it out so the answer stays clean (ADR-0041).
+        answer, inline_thinking = split_reasoning(message.get("content") or "")
+        reasoning = message.get("reasoning_content") or inline_thinking or None
         result = ChatResult(
             model=data.get("model") or config["model"],
-            content=message.get("content") or "",
+            content=answer,
             tool_calls=message.get("tool_calls"),
+            reasoning=reasoning,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
         )
@@ -297,15 +304,28 @@ class LlmGateway:
         )
         self._power.mark_active()
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        splitter = ThinkSplitter()
         calls: dict[int, dict[str, Any]] = {}
         async for chunk in response:
             choices = chunk.choices
             if not choices:
                 continue
             delta = choices[0].delta
+            # Hosted reasoning models stream a separate reasoning_content field.
+            native_reasoning = getattr(delta, "reasoning_content", None)
+            if native_reasoning:
+                reasoning_parts.append(native_reasoning)
+                yield StreamEvent(reasoning=native_reasoning)
             if delta.content:
-                content_parts.append(delta.content)
-                yield StreamEvent(delta=delta.content)
+                # Local models inline thinking as <think>…</think>; split it from the answer.
+                answer_delta, think_delta = splitter.feed(delta.content)
+                if think_delta:
+                    reasoning_parts.append(think_delta)
+                    yield StreamEvent(reasoning=think_delta)
+                if answer_delta:
+                    content_parts.append(answer_delta)
+                    yield StreamEvent(delta=answer_delta)
             for fragment in delta.tool_calls or []:
                 index = fragment.index or 0
                 entry = calls.setdefault(
@@ -323,10 +343,19 @@ class LlmGateway:
                     entry["function"]["arguments"] += arguments
                 elif arguments is not None:  # some providers send whole args as a dict
                     entry["function"]["arguments"] = arguments
+        # Release any tail the splitter was holding back in case it began a <think> tag.
+        answer_tail, think_tail = splitter.flush()
+        if think_tail:
+            reasoning_parts.append(think_tail)
+            yield StreamEvent(reasoning=think_tail)
+        if answer_tail:
+            content_parts.append(answer_tail)
+            yield StreamEvent(delta=answer_tail)
         result = ChatResult(
             model=config["model"],
             content="".join(content_parts),
             tool_calls=[calls[i] for i in sorted(calls)] or None,
+            reasoning="".join(reasoning_parts) or None,
         )
         yield StreamEvent(result=result)
         await self._emit_usage(

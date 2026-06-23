@@ -455,6 +455,100 @@ async def test_stream_chat_assembles_tool_call_fragments(monkeypatch: pytest.Mon
     assert call["function"]["arguments"] == '{"message": "hi"}'
 
 
+# ── reasoning / thinking capture (ADR-0041) ──────────────────────────────────────
+
+
+async def test_chat_extracts_inline_think_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            {
+                "model": "ollama_chat/llama3.2",
+                "choices": [{"message": {"content": "<think>ponder</think>The reply."}}],
+            }
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    result = await _gateway().chat([ChatMessage(role="user", content="hi")])
+    # The <think> span is lifted out of the answer into the reasoning field.
+    assert result.content == "The reply."
+    assert result.reasoning == "ponder"
+
+
+async def test_chat_prefers_native_reasoning_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            {
+                "model": "anthropic/c",
+                "choices": [{"message": {"content": "Done.", "reasoning_content": "native trace"}}],
+            }
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    result = await _gateway(secrets=secrets).chat(
+        [ChatMessage(role="user", content="hi")], model="claude/c"
+    )
+    assert result.content == "Done."
+    assert result.reasoning == "native trace"
+
+
+def _reasoning_chunk(content: str | None = None, reasoning: str | None = None) -> Any:
+    """A streaming chunk whose delta carries content and/or a reasoning_content field."""
+
+    class _Delta:
+        def __init__(self) -> None:
+            self.content = content
+            self.reasoning_content = reasoning
+            self.tool_calls = None
+
+    class _Choice:
+        def __init__(self) -> None:
+            self.delta = _Delta()
+
+    class _Chunk:
+        def __init__(self) -> None:
+            self.choices = [_Choice()]
+
+    return _Chunk()
+
+
+async def test_stream_chat_surfaces_native_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_chunks() -> AsyncIterator[Any]:
+        yield _reasoning_chunk(reasoning="weigh it")
+        yield _reasoning_chunk(content="Answer.")
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    events = [e async for e in _gateway().stream_chat([ChatMessage(role="user", content="hi")])]
+    assert [e.reasoning for e in events if e.reasoning] == ["weigh it"]
+    assert [e.delta for e in events if e.delta] == ["Answer."]
+    result = next(e.result for e in events if e.result is not None)
+    assert result.content == "Answer."
+    assert result.reasoning == "weigh it"
+
+
+async def test_stream_chat_splits_inline_think_from_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_chunks() -> AsyncIterator[Any]:
+        # The <think> span is split across chunk boundaries; the answer follows.
+        for piece in ["<thi", "nk>hidden</think>vis", "ible"]:
+            yield _reasoning_chunk(content=piece)
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    events = [e async for e in _gateway().stream_chat([ChatMessage(role="user", content="hi")])]
+    assert "".join(e.reasoning for e in events if e.reasoning) == "hidden"
+    assert "".join(e.delta for e in events if e.delta) == "visible"
+    result = next(e.result for e in events if e.result is not None)
+    assert result.content == "visible"
+    assert result.reasoning == "hidden"
+
+
 # ── LLM tuning (#114) ────────────────────────────────────────────────────────────
 
 

@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field, ValidationError
 
 from epicurus_core import Attachment, EntityRef, ToolEnvelope, get_logger
+from epicurus_core_app.agent.activity import MessageActivity, ToolStep
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
@@ -25,6 +26,22 @@ from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.readiness import Readiness
 
 log = get_logger("epicurus_core_app.agent")
+
+# Persisted-activity bounds: a reasoning trace can be very long, so cap what is stored, and
+# keep a tool step's argument detail short (it's a glanceable hint, not the full payload).
+_THINKING_CAP = 20_000
+_TOOL_DETAIL_CAP = 500
+
+
+def _tool_detail(arguments: dict[str, Any]) -> str | None:
+    """Compact JSON of a tool call's arguments for the step's expandable detail (or None)."""
+    if not arguments:
+        return None
+    try:
+        rendered = json.dumps(arguments, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    return rendered[:_TOOL_DETAIL_CAP]
 
 
 class AgentTurn(BaseModel):
@@ -35,6 +52,9 @@ class AgentTurn(BaseModel):
     stopped: str  # "completed" or "max_steps"
     # Module entities the turn referenced, lifted from tool outputs (ADR-0019).
     entity_refs: list[EntityRef] = Field(default_factory=list)
+    # The turn's process — thinking + tool steps — persisted so the activity timeline
+    # survives a reopen, not only the live stream (ADR-0041).
+    activity: MessageActivity = Field(default_factory=MessageActivity)
 
 
 def _extract_entities(output: str) -> tuple[str, list[EntityRef]]:
@@ -177,7 +197,9 @@ class Agent:
         messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         parts: list[str] = []
+        thinking_parts: list[str] = []
         tools_used: list[str] = []
+        steps: list[ToolStep] = []
         refs = _RefCollector()
         stopped = "completed"
         try:
@@ -190,6 +212,9 @@ class Agent:
                     if event.delta:
                         parts.append(event.delta)
                         yield AgentEvent(type="delta", text=event.delta)
+                    if event.reasoning:
+                        thinking_parts.append(event.reasoning)
+                        yield AgentEvent(type="thinking", text=event.reasoning)
                     if event.result is not None:
                         result = event.result
                 if result is None or not result.tool_calls:
@@ -202,12 +227,14 @@ class Agent:
                 for call in result.tool_calls:
                     name, arguments, call_id = _parse_tool_call(call)
                     tools_used.append(name)
-                    yield AgentEvent(type="tool", tool=name, status="running")
+                    detail = _tool_detail(arguments)
+                    yield AgentEvent(type="tool", tool=name, status="running", detail=detail)
                     output = await self._invoke(name, arguments, route)
                     text, found = _extract_entities(output)
                     refs.add(found)
-                    failed = text.startswith("error:")
-                    yield AgentEvent(type="tool", tool=name, status="error" if failed else "ok")
+                    status = "error" if text.startswith("error:") else "ok"
+                    yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
+                    steps.append(ToolStep(tool=name, status=status, detail=detail))
                     convo.append(
                         ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                     )
@@ -219,12 +246,19 @@ class Agent:
                     if event.delta:
                         parts.append(event.delta)
                         yield AgentEvent(type="delta", text=event.delta)
+                    if event.reasoning:
+                        thinking_parts.append(event.reasoning)
+                        yield AgentEvent(type="thinking", text=event.reasoning)
         except Exception as exc:  # the response already started — finish with an error event
             log.warning("streaming turn failed", error=str(exc))
             yield AgentEvent(type="error", detail=str(exc))
             return
         turn = AgentTurn(
-            content="".join(parts), tools_used=tools_used, stopped=stopped, entity_refs=refs.refs
+            content="".join(parts),
+            tools_used=tools_used,
+            stopped=stopped,
+            entity_refs=refs.refs,
+            activity=MessageActivity(thinking="".join(thinking_parts)[:_THINKING_CAP], steps=steps),
         )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         yield AgentEvent(type="done", turn=turn)
@@ -241,6 +275,8 @@ class Agent:
                 role="assistant",
                 content=turn.content,
                 entity_refs=[ref.model_dump() for ref in turn.entity_refs],
+                # Persist the process only when there is one — keep plain turns blob-free.
+                activity=None if turn.activity.is_empty() else turn.activity.model_dump(),
             )
         except Exception as exc:  # a failed write must not lose the answer
             log.warning("memory write failed", error=str(exc))
@@ -321,17 +357,26 @@ class Agent:
         specs, route = await self._mcp.discover()
         convo = list(messages)
         tools_used: list[str] = []
+        steps: list[ToolStep] = []
+        thinking_parts: list[str] = []
         refs = _RefCollector()
+
+        def activity() -> MessageActivity:
+            return MessageActivity(thinking="".join(thinking_parts)[:_THINKING_CAP], steps=steps)
+
         for _ in range(self._max_steps):
             result = await self._gateway.chat(
                 convo, model=model, tools=specs or None, tenant_id=tenant_id
             )
+            if result.reasoning:
+                thinking_parts.append(result.reasoning)
             if not result.tool_calls:
                 return AgentTurn(
                     content=result.content,
                     tools_used=tools_used,
                     stopped="completed",
                     entity_refs=refs.refs,
+                    activity=activity(),
                 )
             convo.append(
                 ChatMessage(role="assistant", content=result.content, tool_calls=result.tool_calls)
@@ -342,12 +387,20 @@ class Agent:
                 output = await self._invoke(name, arguments, route)
                 text, found = _extract_entities(output)
                 refs.add(found)
+                status = "error" if text.startswith("error:") else "ok"
+                steps.append(ToolStep(tool=name, status=status, detail=_tool_detail(arguments)))
                 convo.append(
                     ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                 )
         final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
+        if final.reasoning:
+            thinking_parts.append(final.reasoning)
         return AgentTurn(
-            content=final.content, tools_used=tools_used, stopped="max_steps", entity_refs=refs.refs
+            content=final.content,
+            tools_used=tools_used,
+            stopped="max_steps",
+            entity_refs=refs.refs,
+            activity=activity(),
         )
 
     async def _invoke(self, name: str, arguments: dict[str, Any], route: dict[str, str]) -> str:

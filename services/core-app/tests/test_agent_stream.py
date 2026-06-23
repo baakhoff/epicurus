@@ -46,8 +46,8 @@ class _FakeMcp:
         return self._outputs.get(name, "out")
 
 
-def _tool_call(name: str = "echo") -> dict[str, Any]:
-    return {"id": "c1", "type": "function", "function": {"name": name, "arguments": "{}"}}
+def _tool_call(name: str = "echo", arguments: str = "{}") -> dict[str, Any]:
+    return {"id": "c1", "type": "function", "function": {"name": name, "arguments": arguments}}
 
 
 async def _collect(agent: Agent, text: str) -> list[AgentEvent]:
@@ -108,6 +108,61 @@ async def test_stream_gateway_error_yields_error_event() -> None:
     events = await _collect(Agent(gateway=_Exploding(), mcp=_FakeMcp()), "hi")  # type: ignore[arg-type]
     assert [e.type for e in events] == ["error"]
     assert events[0].detail == "paused"
+
+
+async def test_stream_emits_thinking_events_and_persists_them() -> None:
+    # A reasoning model streams a `reasoning` event before its answer; the agent surfaces it
+    # as a `thinking` event and folds it into the turn's persisted activity (ADR-0041).
+    class _ReasoningGateway:
+        async def stream_chat(
+            self,
+            messages: list[ChatMessage],
+            *,
+            model: str | None = None,
+            tools: Any = None,
+            tenant_id: str | None = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(reasoning="let me ")
+            yield StreamEvent(reasoning="think")
+            yield StreamEvent(delta="answer")
+            yield StreamEvent(
+                result=ChatResult(model="m", content="answer", reasoning="let me think")
+            )
+
+    agent = Agent(gateway=_ReasoningGateway(), mcp=_FakeMcp())  # type: ignore[arg-type]
+    events = await _collect(agent, "hi")
+
+    assert [e.type for e in events] == ["thinking", "thinking", "delta", "done"]
+    assert [e.text for e in events if e.type == "thinking"] == ["let me ", "think"]
+    turn = events[-1].turn
+    assert turn is not None
+    assert turn.activity.thinking == "let me think"
+    assert turn.activity.steps == []
+
+
+async def test_stream_tool_steps_are_captured_in_activity() -> None:
+    gw = _FakeStreamGateway(
+        [
+            (
+                [],
+                ChatResult(model="m", content="", tool_calls=[_tool_call(arguments='{"q": "x"}')]),
+            ),
+            (["ok"], ChatResult(model="m", content="ok")),
+        ]
+    )
+    events = await _collect(
+        Agent(gateway=gw, mcp=_FakeMcp(outputs={"echo": "pong"})),  # type: ignore[arg-type]
+        "use echo",
+    )
+
+    turn = events[-1].turn
+    assert turn is not None
+    assert len(turn.activity.steps) == 1
+    step = turn.activity.steps[0]
+    assert step.tool == "echo" and step.status == "ok"
+    assert step.detail == '{"q": "x"}'  # the call's arguments, compact JSON
+    # both the running and settled tool events carry the same glanceable detail
+    assert [e.detail for e in events if e.type == "tool"] == ['{"q": "x"}', '{"q": "x"}']
 
 
 async def test_stream_max_steps_forces_final_answer() -> None:

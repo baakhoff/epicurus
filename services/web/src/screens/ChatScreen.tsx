@@ -41,7 +41,7 @@ import {
 import { api } from "@/lib/api";
 import type { Attachment, EntityRef } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
-import { useChat, type ChatSegment } from "@/stores/chat";
+import { useChat, type ToolRun } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 
@@ -59,25 +59,26 @@ function AssistantRow({ children }: { children: ReactNode }) {
   );
 }
 
-/** A finished or streaming assistant message: a process timeline (#121) over the prose. */
+/**
+ * A finished or streaming assistant message: the activity timeline (#121, ADR-0041) over the
+ * prose. `runs`/`thinking` are the turn's *process* — fed live from the stream, or from the
+ * message's persisted activity when a past conversation is reopened — so the timeline folds
+ * to its summary header (rather than vanishing) once the answer is in.
+ */
 function AssistantBlock({
-  segments,
+  text,
+  runs = [],
+  thinking = "",
   streaming,
   entityRefs = [],
 }: {
-  segments: ChatSegment[];
+  text: string;
+  runs?: ToolRun[];
+  thinking?: string;
   streaming: boolean;
   entityRefs?: EntityRef[];
 }) {
   const refsMap = useMemo(() => refsById(entityRefs), [entityRefs]);
-  const toolRuns = useMemo(
-    () => segments.flatMap((s) => (s.kind === "tool" ? [s.run] : [])),
-    [segments],
-  );
-  const text = useMemo(
-    () => segments.map((s) => (s.kind === "text" ? s.text : "")).join("\n"),
-    [segments],
-  );
   // Refs not already linked inline get a chip row beneath the message, so every
   // referenced entity surfaces exactly once (ADR-0019).
   const rowRefs = useMemo(() => {
@@ -88,7 +89,9 @@ function AssistantBlock({
   return (
     <AssistantRow>
       {/* The activity timeline folds to its summary header once the answer starts. */}
-      {toolRuns.length > 0 && <ProcessTimeline runs={toolRuns} collapsed={text.length > 0} />}
+      {(runs.length > 0 || thinking.length > 0) && (
+        <ProcessTimeline runs={runs} thinking={thinking} collapsed={text.length > 0} />
+      )}
       <EntityRefsContext.Provider value={refsMap}>
         {text && <Markdown>{text}</Markdown>}
       </EntityRefsContext.Provider>
@@ -112,10 +115,11 @@ function LiveTurn() {
   const segments = useChat((s) => s.segments);
   const streaming = useChat((s) => s.streaming);
   const readiness = useChat((s) => s.readiness);
-  if (segments.length === 0 && !streaming) return null;
+  const thinking = useChat((s) => s.thinking);
+  if (segments.length === 0 && !thinking && !streaming) return null;
 
-  // Before the first token or tool: warming progress (#122), then a thinking cue (#121).
-  if (streaming && segments.length === 0) {
+  // Before any thinking, token, or tool: warming progress (#122), then a thinking cue (#121).
+  if (streaming && segments.length === 0 && !thinking) {
     return (
       <div className="ep-settle">
         <AssistantRow>
@@ -129,9 +133,11 @@ function LiveTurn() {
     );
   }
 
+  const text = segments.flatMap((s) => (s.kind === "text" ? [s.text] : [])).join("\n");
+  const runs = segments.flatMap((s) => (s.kind === "tool" ? [s.run] : []));
   return (
     <div className="ep-settle">
-      <AssistantBlock segments={segments} streaming={streaming} />
+      <AssistantBlock text={text} runs={runs} thinking={thinking} streaming={streaming} />
     </div>
   );
 }
@@ -488,7 +494,12 @@ export function ChatScreen() {
             ) : (
               <AssistantBlock
                 key={i}
-                segments={[{ kind: "text", text: message.content }]}
+                text={message.content}
+                runs={(message.activity?.steps ?? []).map((s) => ({
+                  ...s,
+                  detail: s.detail ?? undefined,
+                }))}
+                thinking={message.activity?.thinking ?? ""}
                 streaming={false}
                 entityRefs={message.entity_refs}
               />

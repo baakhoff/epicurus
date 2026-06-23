@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Chat: the activity timeline persists and now shows the model's thinking** — the agent's
+  process (its tool steps) used to disappear the instant a turn finished. Now the turn's
+  **thinking + tool steps** are persisted with the message: the timeline **folds** to its
+  summary rather than vanishing, and reappears folded when you reopen the conversation. The
+  model's chain-of-thought is surfaced in a collapsible **Thinking** block — captured both
+  from a provider's native reasoning field and from inline `<think>…</think>` spans (local
+  reasoning models), and kept out of the answer. Adds a `thinking` SSE event and an additive
+  `activity` JSON column on `agent_messages` (ADR-0041). Note: collides with #267 / #276 on
+  the `core-app` 0.19.0 and `web` 0.25.0 bumps — rebase whichever merges later (`epicurus-core`
+  → 0.13.0, `core-app` → 0.19.0, `web` → 0.25.0).
 - **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
   (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
   a 128K–256K context window. They show up in the Models screen and pull like any other entry

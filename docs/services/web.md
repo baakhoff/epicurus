@@ -19,10 +19,9 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | Screen | What it does |
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker. |
-| **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
-| **Models** | **Catalog browser** — search and filter the model catalog by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
+| **Models** | **Catalog browser** — search and filter the model catalog by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress. The catalog list is capped to ~5 rows in its **own scroll box** so the long upstream list never pushes the rest of the page away (ADR-0045). It is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
-| **Settings** | Theme (dark/light/system), default model. |
+| **Settings** | Theme (dark/light), connected accounts (OAuth), timezone, platform info, and a **Memory** box at the foot: the durable facts epicurus remembers about you across chats (ADR-0045) — searchable and scrollable, with a provenance badge per fact (*you asked* = the `remember` tool · *learned* = background extraction) and a **forget** button. Memory is reference you curate occasionally, so it lives here rather than in the left nav. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
 | **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`) programmatically (ADR-0018). |
 
@@ -59,6 +58,13 @@ watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are
 and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
 toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
 bar.
+
+The shell is a **fixed-viewport app**: `#root` is pinned to the viewport (`position: fixed`,
+in `src/index.css`) so the document itself never scrolls — only the regions inside it (the
+side rail, the main screen) own their scroll. Without that, a nested `overflow:auto` region
+(a long Models page) inflated the document's scroll height in Chromium, and a wheel over the
+static side rail dragged the whole interface to the top; plain `overflow:hidden` doesn't
+collapse that phantom height, removing the root from flow does (ADR-0045).
 
 When the page is **`versioned`** (notes, knowledge — ADR-0045), a **History** control lists
 past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh

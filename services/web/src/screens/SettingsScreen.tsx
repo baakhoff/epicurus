@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { EpsilonMark } from "@/components/Logo";
+import { MemorySection } from "@/components/MemorySection";
 import { Button, Card, Dot, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { ModuleSnapshot } from "@/lib/contracts";
@@ -398,6 +399,8 @@ export function SettingsScreen() {
           )}
           {info.isError && <p className="text-sm text-warn">core unreachable</p>}
         </Card>
+
+        <MemorySection />
 
         <Card>
           <div className="flex items-start gap-3">

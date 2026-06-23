@@ -171,18 +171,19 @@ export const MessageRecord = z.object({
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
-/** One remembered snippet in the Memory view — `score` is set only for search results. */
+/** One durable fact the assistant remembers about the user (ADR-0043).
+ *  `source` is how it was learned ("tool" = the remember tool, "auto" = background
+ *  extraction); `score` is set only for search results. */
 export const MemoryItem = z.object({
-  id: z.number(),
-  session_id: z.string(),
-  role: z.string().default(""),
+  id: z.string(),
   text: z.string(),
+  source: z.string().default("auto"),
   created_at: z.coerce.date().nullish(),
   score: z.number().nullish(),
 });
 export type MemoryItem = z.infer<typeof MemoryItem>;
 
-/** A page of remembered snippets plus the full corpus size (so the UI can show the rest). */
+/** A page of remembered facts plus the full corpus size (so the UI can show the rest). */
 export const MemoryListing = z.object({
   items: z.array(MemoryItem),
   total: z.number(),

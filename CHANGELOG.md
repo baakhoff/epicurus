@@ -199,6 +199,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
+  (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
+  So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,
+  its overflow escaped to `<body>` and a wheel event anywhere over the rail dragged the entire
+  UI — most visible on the Models screen. The shell now sets `overflow-hidden` (every region
+  already owns its scroll) and the rail scrolls its own links; the rail also gained an
+  accessible name (`aria-label="Primary"`) (`web` → 0.24.1).
 - **Calendar page no longer 500s once a Google calendar is connected** — the `Event` model
   now coerces naive datetimes to UTC. The local store round-trips datetimes through a tz-naive
   DB column while Google returns tz-aware RFC3339 instants; a page overlaying both sorted a mix

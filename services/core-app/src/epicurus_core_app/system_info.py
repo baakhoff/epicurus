@@ -1,0 +1,389 @@
+"""Host system + GPU probe behind the context-window suggestion (#context-window).
+
+The Models page asks "how big a context can this box hold?". Answering it needs the
+GPU's VRAM (or, with no GPU, system RAM) and the active model's on-disk size. This
+module gathers that — **best-effort and graceful**: every probe is wrapped so a missing
+tool or unreadable file degrades to ``None`` rather than raising, and nothing shells out
+at import time.
+
+GPU detection is multi-vendor but only NVIDIA is exercised on the box this ships to; the
+AMD and Intel paths read ``/sys/class/drm`` (or ``rocm-smi``) and are written to be safe —
+they return ``None`` on any failure. Detection is factored so the subprocess runner and
+file reads are **injectable**, which is what makes each vendor's path unit-testable by
+feeding it canned output instead of touching real hardware.
+
+The suggestion (:func:`suggest_context`) is an explicit *estimate* from a rough,
+documented KV-cache-per-token heuristic — it is a sane starting point the operator can
+override, not a measured maximum.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from collections.abc import Callable
+from pathlib import Path
+from typing import Protocol, TypeVar
+
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from epicurus_core import get_logger
+from epicurus_core_app.llm.models import ModelInfo
+
+log = get_logger("epicurus_core_app.system_info")
+
+# A subprocess runner: takes argv, returns stdout (or raises). Injectable for tests.
+Runner = Callable[[list[str]], str]
+# A file reader: takes a path, returns its text (or raises). Injectable for tests.
+FileReader = Callable[[str], str]
+# A glob: takes a pattern, returns matching path strings. Injectable for tests.
+Globber = Callable[[str], list[str]]
+
+# ── Suggestion heuristic constants ────────────────────────────────────────────────
+# Headroom carved out of VRAM for the runtime, CUDA context, and activation/compute
+# buffers before the KV cache — a deliberately generous flat reserve (an estimate).
+_HEADROOM_MB = 1024
+# Rough KV-cache cost per token, in MB. The real cost scales with layers * hidden-size *
+# 2 (K and V) * bytes-per-element, which is itself ~proportional to model size. We model
+# that as a simple linear function of model size (see ``_kv_per_token_mb``) anchored on a
+# mid-size (~4.7 GB / 8B-class) model needing ~0.18 MB/token at f16 KV — enough to keep the
+# suggestion conservative rather than optimistic. This is an estimate, not a measurement.
+_KV_PER_TOKEN_AT_REF_MB = 0.18
+_REF_MODEL_SIZE_MB = 4700.0
+# Clamp bounds for the computed maximum context.
+_MIN_CONTEXT = 2048
+_MAX_CONTEXT = 32768
+# Preferred floor for the *suggested* value when it fits (a comfortable working context).
+_PREFERRED_SUGGESTED = 8192
+# With no GPU we lean on system RAM but cap hard — CPU inference with a big context is slow,
+# and RAM is shared with everything else on the box.
+_NO_GPU_MAX_CONTEXT = 8192
+
+
+class GpuInfo(BaseModel):
+    """A detected GPU. ``vram_free_mb`` is ``None`` when the vendor can't report it."""
+
+    vendor: str  # "nvidia" | "amd" | "intel" | "unknown"
+    name: str
+    vram_total_mb: int
+    vram_free_mb: int | None = None
+
+
+class ModelSize(BaseModel):
+    """The currently-effective chat model and its on-disk size."""
+
+    name: str
+    size_mb: int | None = None
+
+
+class SuggestedContext(BaseModel):
+    """A suggested context-window range (an estimate, not a hard maximum)."""
+
+    min: int
+    suggested: int
+    max: int
+
+
+class SystemInfo(BaseModel):
+    """What the Models page needs to suggest a context window."""
+
+    gpu: GpuInfo | None = None
+    ram_total_mb: int | None = None
+    model: ModelSize | None = None
+    suggested_context: SuggestedContext | None = None
+
+
+def _default_runner(argv: list[str]) -> str:
+    """Run ``argv`` and return stdout; raises on non-zero exit or a missing binary."""
+    # Fixed argv lists, no shell, no user input — safe to run directly.
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=5, check=True)
+    return completed.stdout
+
+
+def _default_file_reader(path: str) -> str:
+    return Path(path).read_text()
+
+
+def _default_globber(pattern: str) -> list[str]:
+    # Patterns we use are anchored at /sys; resolve them relative to the filesystem root.
+    return [str(p) for p in Path("/").glob(pattern.lstrip("/"))]
+
+
+def _next_power_of_two_at_most(value: int) -> int:
+    """The largest power of two ``<= value`` (``value`` assumed ``>= 1``)."""
+    power = 1
+    while power * 2 <= value:
+        power *= 2
+    return power
+
+
+def _kv_per_token_mb(model_size_mb: float) -> float:
+    """A rough KV-cache cost per token (MB), modeled proportional to model size.
+
+    Bigger models have more/larger layers, so their KV cache costs more per token. We scale
+    a reference cost (a ~4.7 GB model) linearly by size. This is an intentional
+    approximation — the suggestion is an estimate, and erring high keeps it conservative.
+    """
+    if model_size_mb <= 0:
+        return _KV_PER_TOKEN_AT_REF_MB
+    return _KV_PER_TOKEN_AT_REF_MB * (model_size_mb / _REF_MODEL_SIZE_MB)
+
+
+def suggest_context(
+    vram_total_mb: int | None, model_size_mb: int | None, *, cap: int = _MAX_CONTEXT
+) -> SuggestedContext:
+    """Suggest a context-window range from available memory and the model's size.
+
+    ``vram_total_mb`` is GPU VRAM when a GPU was detected, else system RAM (the caller
+    decides which to pass). The math, all an **estimate**:
+
+    * ``available = vram_total - model_size - headroom`` (memory left for the KV cache).
+    * ``max = clamp(available / kv_per_token, [2048, cap])`` — how many tokens that
+      memory buys at the rough per-token KV cost (see :func:`_kv_per_token_mb`).
+    * ``suggested`` = the largest power of two ``<= max`` (a clean, runtime-friendly size),
+      lifted to 8192 when 8192 still fits — a comfortable working context.
+
+    ``cap`` is the hard ceiling for the maximum (default 32768); the caller passes a lower
+    one when basing the estimate on system RAM (no GPU), where CPU inference makes a huge
+    context impractical. With no memory figure at all, fall back to a safe minimum so the UI
+    still has a value.
+    """
+    if not vram_total_mb or vram_total_mb <= 0:
+        return SuggestedContext(min=_MIN_CONTEXT, suggested=_MIN_CONTEXT, max=_MIN_CONTEXT)
+
+    ceiling = max(_MIN_CONTEXT, min(_MAX_CONTEXT, cap))
+    model_mb = model_size_mb or 0
+    available = vram_total_mb - model_mb - _HEADROOM_MB
+    if available <= 0:
+        # The model barely fits (or doesn't) — there's no room for a generous cache.
+        return SuggestedContext(min=_MIN_CONTEXT, suggested=_MIN_CONTEXT, max=_MIN_CONTEXT)
+
+    raw_max = available / _kv_per_token_mb(model_mb)
+    max_ctx = max(_MIN_CONTEXT, min(ceiling, int(raw_max)))
+
+    suggested = _next_power_of_two_at_most(max_ctx)
+    # Prefer a comfortable 8K working context when it genuinely fits under the max.
+    if max_ctx >= _PREFERRED_SUGGESTED:
+        suggested = max(suggested, _PREFERRED_SUGGESTED)
+    suggested = min(suggested, max_ctx)
+    return SuggestedContext(min=_MIN_CONTEXT, suggested=suggested, max=max_ctx)
+
+
+# ── GPU detectors (each best-effort; returns None on ANY failure) ──────────────────
+
+
+def _detect_nvidia(runner: Runner) -> GpuInfo | None:
+    """Detect an NVIDIA GPU via ``nvidia-smi`` (the only vendor exercised on the box)."""
+    try:
+        out = runner(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.free",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        first = next((line for line in out.splitlines() if line.strip()), "")
+        if not first:
+            return None
+        parts = [p.strip() for p in first.split(",")]
+        name = parts[0]
+        total = int(float(parts[1]))  # MiB (nounits)
+        free = int(float(parts[2])) if len(parts) > 2 and parts[2] else None
+        return GpuInfo(vendor="nvidia", name=name, vram_total_mb=total, vram_free_mb=free)
+    except Exception:  # missing binary, parse error, no GPU — degrade to "not found"
+        log.debug("nvidia-smi detection failed", exc_info=True)
+        return None
+
+
+def _read_vram_from_drm(reader: FileReader, globber: Globber) -> int | None:
+    """Read total VRAM (MB) from ``/sys/class/drm/card*/device/mem_info_vram_total``.
+
+    The DRM file is in bytes. Present for discrete AMD/Intel cards with the right kernel
+    driver; absent for integrated graphics (then there's nothing to report).
+    """
+    try:
+        cards = sorted(globber("/sys/class/drm/card*/device/mem_info_vram_total"))
+        for path in cards:
+            try:
+                raw = reader(path).strip()
+                if not raw:
+                    continue
+                vram_bytes = int(raw)
+                if vram_bytes > 0:
+                    return vram_bytes // (1024 * 1024)
+            except (OSError, ValueError):
+                continue
+        return None
+    except Exception:  # globbing itself failed (non-Linux, no /sys) — nothing to report
+        log.debug("drm vram read failed", exc_info=True)
+        return None
+
+
+def _detect_amd(runner: Runner, reader: FileReader, globber: Globber) -> GpuInfo | None:
+    """Detect an AMD GPU via ``rocm-smi`` JSON, falling back to the DRM VRAM file.
+
+    Untested on the target box (NVIDIA only). Written defensively: any failure → ``None``,
+    so a box without ROCm or the right ``/dev`` mounts simply reports no AMD GPU.
+    """
+    try:
+        out = runner(["rocm-smi", "--showmeminfo", "vram", "--json"])
+        import json
+
+        data = json.loads(out)
+        for card_key, fields in data.items():
+            if not isinstance(fields, dict):
+                continue
+            total_bytes = None
+            for key, value in fields.items():
+                if "vram" in key.lower() and "total" in key.lower():
+                    try:
+                        total_bytes = int(float(value))
+                    except (TypeError, ValueError):
+                        total_bytes = None
+            if total_bytes:
+                return GpuInfo(
+                    vendor="amd",
+                    name=str(fields.get("Card series") or fields.get("name") or card_key),
+                    vram_total_mb=total_bytes // (1024 * 1024),
+                )
+    except Exception:  # rocm-smi missing or unparseable — try the kernel DRM file instead
+        log.debug("rocm-smi detection failed; trying DRM", exc_info=True)
+
+    vram_mb = _read_vram_from_drm(reader, globber)
+    if vram_mb:
+        return GpuInfo(vendor="amd", name="AMD GPU", vram_total_mb=vram_mb)
+    return None
+
+
+def _detect_intel(reader: FileReader, globber: Globber) -> GpuInfo | None:
+    """Detect a discrete Intel GPU via the DRM VRAM file (untested; NVIDIA-only box).
+
+    Integrated Intel graphics share system RAM and expose no ``mem_info_vram_total``, so
+    this returns ``None`` there — the suggestion then falls back to system RAM upstream.
+    """
+    vram_mb = _read_vram_from_drm(reader, globber)
+    if vram_mb:
+        return GpuInfo(vendor="intel", name="Intel GPU", vram_total_mb=vram_mb)
+    return None
+
+
+def detect_gpu(
+    *,
+    runner: Runner = _default_runner,
+    reader: FileReader = _default_file_reader,
+    globber: Globber = _default_globber,
+) -> GpuInfo | None:
+    """Best-effort multi-vendor GPU probe: NVIDIA, then AMD, then Intel; else ``None``.
+
+    Each detector is independently guarded (it returns ``None`` on any failure), so the
+    chain never raises and "no GPU detected" (integrated graphics or none) is a normal
+    result. NVIDIA is preferred because it is the only vendor exercised on the target box.
+    """
+    return (
+        _detect_nvidia(runner)
+        or _detect_amd(runner, reader, globber)
+        or _detect_intel(reader, globber)
+    )
+
+
+def read_ram_total_mb(reader: FileReader = _default_file_reader) -> int | None:
+    """Total system RAM in MB, parsed from ``/proc/meminfo`` ``MemTotal`` (kB)."""
+    try:
+        for line in reader("/proc/meminfo").splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])  # "MemTotal:   16327584 kB"
+                return kb // 1024
+        return None
+    except Exception:  # non-Linux, unreadable — RAM is simply unknown
+        log.debug("meminfo read failed", exc_info=True)
+        return None
+
+
+class _ModelSource(Protocol):
+    """Minimal protocol the probe needs from the gateway: list local models with sizes.
+
+    Structurally satisfied by :class:`~epicurus_core_app.llm.gateway.LlmGateway` (and by the
+    test fakes) — the probe depends on the two methods, not the whole gateway.
+    """
+
+    async def models(self, tenant_id: str | None = None) -> list[ModelInfo]: ...
+    async def effective_default(self, tenant_id: str | None = None) -> str: ...
+
+
+async def collect_system_info(
+    gateway: _ModelSource,
+    *,
+    tenant_id: str | None = None,
+    detect: Callable[[], GpuInfo | None] = detect_gpu,
+    ram: Callable[[], int | None] = read_ram_total_mb,
+) -> SystemInfo:
+    """Assemble the :class:`SystemInfo` snapshot for the suggestion.
+
+    GPU + RAM detection are injectable (the route passes the real probes; tests pass fakes).
+    The model size comes from the gateway's local-model listing matched to the effective
+    chat model. Memory for the suggestion is GPU VRAM when present, else system RAM.
+    """
+    gpu = _safe(detect, "gpu detection")
+    ram_total = _safe(ram, "ram detection")
+    model = await _effective_model_size(gateway, tenant_id)
+
+    model_size = model.size_mb if model else None
+    suggested = None
+    if gpu is not None:
+        suggested = suggest_context(gpu.vram_total_mb, model_size)
+    elif ram_total:
+        # No GPU: base the estimate on system RAM, with a conservative cap — CPU inference
+        # with a huge context is slow and RAM is shared with the rest of the box.
+        suggested = suggest_context(ram_total, model_size, cap=_NO_GPU_MAX_CONTEXT)
+
+    return SystemInfo(gpu=gpu, ram_total_mb=ram_total, model=model, suggested_context=suggested)
+
+
+_T = TypeVar("_T")
+
+
+def _safe(fn: Callable[[], _T | None], label: str) -> _T | None:
+    """Run a probe, swallowing any failure (returns ``None``)."""
+    try:
+        return fn()
+    except Exception:  # every probe is best-effort; the page renders regardless
+        log.warning("%s failed", label, exc_info=True)
+        return None
+
+
+async def _effective_model_size(gateway: _ModelSource, tenant_id: str | None) -> ModelSize | None:
+    """The active chat model and its on-disk size (MB), from the gateway's model list."""
+    try:
+        active = await gateway.effective_default(tenant_id)
+    except Exception:
+        log.warning("could not resolve the effective model", exc_info=True)
+        return None
+    try:
+        models = await gateway.models(tenant_id)
+    except Exception:  # runtime unreachable — name without a size is still useful
+        log.warning("could not list local models for sizing", exc_info=True)
+        return ModelSize(name=active)
+
+    bare = active.split("/", 1)[-1]  # hosted ids carry a provider prefix; locals don't
+    for info in models:
+        if info.name in (active, bare) or info.name.split(":", 1)[0] == bare:
+            size_mb = info.size // (1024 * 1024) if info.size else None
+            return ModelSize(name=info.name, size_mb=size_mb)
+    # The active model isn't a local one (e.g. a hosted provider): no on-disk size.
+    return ModelSize(name=active)
+
+
+def create_system_router(
+    gateway: _ModelSource,
+    *,
+    detect: Callable[[], GpuInfo | None] = detect_gpu,
+    ram: Callable[[], int | None] = read_ram_total_mb,
+) -> APIRouter:
+    """The ``GET /platform/v1/system/info`` route backing the context-window suggestion."""
+    router = APIRouter(prefix="/platform/v1/system", tags=["system"])
+
+    @router.get("/info", response_model=SystemInfo)
+    async def system_info() -> SystemInfo:
+        return await collect_system_info(gateway, detect=detect, ram=ram)
+
+    return router

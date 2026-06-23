@@ -75,6 +75,10 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_temperature` | `LLM_TEMPERATURE` | `float \| None` | `None` | Sampling temperature passed to each chat completion (local + hosted). A blank env value means unset. |
 | `llm_top_p` | `LLM_TOP_P` | `float \| None` | `None` | Nucleus-sampling `top_p` passed to each chat completion (local + hosted). |
 | `llm_num_ctx` | `LLM_NUM_CTX` | `int \| None` | `None` | Ollama context-window size (`num_ctx`); applied to local models only. |
+| `llm_catalog_url` | `LLM_CATALOG_URL` | `str` | `https://ollama.com/library` | Source the core parses the browsable model catalog from (#269). Point at a mirror for an air-gapped deployment. |
+| `llm_catalog_refresh_seconds` | `LLM_CATALOG_REFRESH_SECONDS` | `int` | `21600` (6h) | How often the background loop re-parses the catalog source. Floored to 60s. |
+| `llm_catalog_max_models` | `LLM_CATALOG_MAX_MODELS` | `int` | `0` | Cap on model families kept (the most-popular survive); `0` = unlimited. |
+| `llm_catalog_enabled` | `LLM_CATALOG_ENABLED` | `bool` | `true` | When false, no outbound fetch — the built-in seed is served as-is (the endpoint still works). |
 | `module_urls` | `MODULE_URLS` | `str` | `http://echo:8080` | Comma-separated module base URLs; each serves MCP at `<base>/mcp` and its manifest at `<base>/manifest`. |
 | `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | Max tool-calling rounds per agent turn. |
 | `attachment_sink_url` | `ATTACHMENT_SINK_URL` | `str` | `http://storage:8080` | Base URL of the module that durably keeps chat uploads (ADR-0025); the upload route best-effort POSTs bytes to `<url>/ingest`. Empty disables the sink (uploads stay core-side only); a failed push never breaks the upload. |
@@ -83,6 +87,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `database_url` | `DATABASE_URL` | `str` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for conversation persistence. |
 | `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
 | `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |
+| `default_timezone` | `DEFAULT_TIMEZONE` | `str` | `UTC` | Fallback IANA timezone the agent's `now` tool reports when the operator hasn't set one in Settings (ADR-0039). |
 
 ### Properties
 

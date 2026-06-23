@@ -1,17 +1,14 @@
-/** Curated static Ollama model catalog for the v1 browser.
+/** Built-in fallback catalog + the model browser's filter helpers.
  *
- * Seam: when live Ollama-registry browse lands, replace CATALOG with a
- * `GET /platform/v1/llm/catalog` fetch and keep filterCatalog as-is.
+ * The live model list now comes from the core (`GET /platform/v1/llm/catalog`), which
+ * parses an upstream library on a schedule (#269). This `CATALOG` is the offline seed the
+ * Models screen falls back to when that endpoint is unreachable (e.g. an older core), so
+ * the browser is never empty. `CatalogTag` / `filterCatalog` / `formatGb` are the seam the
+ * core's entries flow through unchanged.
  */
+import type { CatalogEntry } from "@/lib/contracts";
 
-export interface CatalogEntry {
-  id: string;
-  family: string;
-  params: string;
-  size_gb: number;
-  description: string;
-  tags: CatalogTag[];
-}
+export type { CatalogEntry };
 
 export const ALL_TAGS = ["general", "code", "multilingual", "vision", "embedding", "small"] as const;
 export type CatalogTag = (typeof ALL_TAGS)[number];

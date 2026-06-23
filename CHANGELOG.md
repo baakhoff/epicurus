@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Live model catalog — the core parses the model list from upstream on a schedule** — the
+  Models screen's "Browse models" list used to be a hand-maintained static file
+  (`services/web/src/data/catalog.ts`) that went stale and forced a web release for every new
+  model. The core now owns it (constraint #8): a new `ModelCatalog` fetches a configurable
+  source (`https://ollama.com/library` by default), parses each model's sizes, description,
+  capabilities (→ tags) and popularity, caches the result, and refreshes it **regularly** on a
+  background loop. New endpoint `GET /platform/v1/llm/catalog` → `{ entries, source, updated_at,
+  stale }`; the web shell fetches it (keeping `filterCatalog` unchanged) and shows provenance
+  ("From ollama.com/library · updated 3m ago"). Resilient: a failed/disabled refresh serves the
+  last-good snapshot, and a small built-in **seed** when nothing has been fetched yet (cold or
+  air-gapped), so the browser is never empty — the bundled list is the offline fallback. New
+  knobs: `LLM_CATALOG_URL`, `LLM_CATALOG_REFRESH_SECONDS` (default 6h), `LLM_CATALOG_MAX_MODELS`
+  (0 = unlimited), `LLM_CATALOG_ENABLED` (closes #269) (`core-app` → 0.19.0, `web` → 0.24.0).
 - **Calendar: all-day events (fixes events showing a day early) + per-create calendar picker**
   — all-day events are now modeled as a floating date range end-to-end. Google returns them
   date-only; the module coerced that to a UTC-midnight instant, which the shell then shifted

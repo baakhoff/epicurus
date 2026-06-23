@@ -83,7 +83,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.9.0"
+    assert data["version"] == "0.10.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {"tasks_list", "tasks_lists", "tasks_add", "tasks_complete", "tasks_update"}
     # Tasks references tasks (resolver) and is a chat-attachment source (ADR-0019).
@@ -140,3 +140,39 @@ def test_page_board_serves_board_data(
     add = data["actions"][0]
     assert add["tool"] == "tasks_add"
     assert "list_id" not in add.get("fields", [])  # no list picker without enabled lists
+
+
+def test_page_board_declares_view_controls(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The board declares Group-by + Show controls the shell renders (ADR-0049)."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    data = booted_client.get("/pages/board").json()
+    controls = {c["id"]: c for c in data["controls"]}
+    assert set(controls) == {"group", "show"}
+    assert controls["group"]["value"] == "due"  # default grouping
+    assert controls["show"]["value"] == "open"  # default filter
+    # No enabled lists → the "List" grouping option is omitted.
+    assert "list" not in [o["value"] for o in controls["group"]["options"]]
+
+
+def test_page_board_forwards_and_clamps_query_params(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core forwards ?group/?show verbatim; the module echoes valid ones and clamps junk."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    valid = booted_client.get("/pages/board?group=priority&show=all").json()
+    valid_controls = {c["id"]: c["value"] for c in valid["controls"]}
+    assert valid_controls == {"group": "priority", "show": "all"}
+
+    junk = booted_client.get("/pages/board?group=nonsense&show=bogus").json()
+    junk_controls = {c["id"]: c["value"] for c in junk["controls"]}
+    assert junk_controls == {"group": "due", "show": "open"}  # clamped to defaults

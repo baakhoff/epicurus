@@ -46,7 +46,10 @@ each naming one of the module's MCP tools. The shell invokes the tool through th
 (`invokeModuleTool`, validated against the manifest) — a one-tap call, a `confirm` dialog,
 or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the page. The
 tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
-one path, so no module ever ships its own buttons or forms.
+one path, so no module ever ships its own buttons or forms. A board may also declare **view
+controls** (ADR-0049) — labeled selectors (e.g. group-by, filters) the shell renders in the
+toolbar; changing one re-fetches the page with a `?<id>=<value>` query param, so grouping and
+filtering stay module-side while the shell stays a bounded renderer.
 
 ### Right panel / split-screen (ADR-0018)
 

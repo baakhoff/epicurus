@@ -26,7 +26,9 @@ class _FakeProvider:
     def provider_name(self) -> str:
         return "local"
 
-    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
+    async def list_tasks(
+        self, tenant_id: str, *, list_id: str | None = None, scope: str = "open"
+    ) -> list[Task]:
         return list(self._tasks.values())
 
     async def get_task(

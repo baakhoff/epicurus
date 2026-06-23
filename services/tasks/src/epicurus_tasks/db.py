@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import get_logger
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import Task, TaskScope
 
 log = get_logger("epicurus_tasks.db")
 
@@ -122,20 +122,21 @@ class TaskStore:
             )
             log.info("reconciled tasks_local: added missing column", column=name)
 
-    async def list_tasks(self, *, tenant_id: str) -> list[Task]:
-        """Return all open tasks for *tenant_id*, newest first."""
+    async def list_tasks(self, *, tenant_id: str, scope: TaskScope = "open") -> list[Task]:
+        """Return tasks for *tenant_id*, newest first, filtered by *scope* (ADR-0049).
+
+        ``"open"`` (default) returns un-completed tasks, ``"done"`` only completed ones,
+        ``"all"`` both. The filter is on the legacy ``completed`` flag — the ``status``
+        column is nullable and can't be the primary filter without a backfill migration —
+        which ``complete_task`` / ``update_task`` always keep in sync with ``status``.
+        """
+        stmt = select(_StoredTask).where(_StoredTask.tenant_id == tenant_id)
+        if scope == "open":
+            stmt = stmt.where(_StoredTask.completed.is_(False))
+        elif scope == "done":
+            stmt = stmt.where(_StoredTask.completed.is_(True))
         async with self._session() as session:
-            rows = await session.scalars(
-                select(_StoredTask)
-                .where(
-                    _StoredTask.tenant_id == tenant_id,
-                    # A task is open when the legacy completed flag is False (the status
-                    # column is nullable and can't be used as the primary filter without
-                    # a full backfill migration).
-                    _StoredTask.completed.is_(False),
-                )
-                .order_by(_StoredTask.created_at.desc())
-            )
+            rows = await session.scalars(stmt.order_by(_StoredTask.created_at.desc()))
             return [_row_to_task(r) for r in rows]
 
     async def add_task(

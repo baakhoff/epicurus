@@ -199,9 +199,28 @@ A `date-time` field can also declare `date_toggle: "<boolean field>"` in its sch
 the form uses to collapse it to a **date** picker (emitting a floating `YYYY-MM-DD`) when
 that sibling boolean is on — the calendar's all-day toggle.
 
+A board may also declare **view controls** (ADR-0049) — `controls: [{id, label, value,
+options:[{value,label}]}]` — labeled selectors the shell renders in the board toolbar. The
+module declares the available `options` and the current `value`; changing a control sets the
+query param `?<id>=<value>` and re-fetches the page (the core forwards page query params
+verbatim, so there is no core change). This keeps regrouping/filtering **module-side** — the
+board carries only rendered cards to the client, not the underlying records — so the shell
+stays a bounded renderer. Tasks uses this for a **Group by** control (Due date / Status /
+Priority / List / None) and a **Show** filter (Open / Completed / All); the module reads the
+params, lays out the columns, and echoes the resolved selection back in each control's
+`value`. The vocabulary is archetype-generic, so any board module reuses it.
+
 ```jsonc
 {
   "title": "Tasks",                                  // optional page heading
+  "controls": [                                      // view controls (ADR-0049)
+    { "id": "group", "label": "Group by", "value": "due",
+      "options": [ { "value": "due", "label": "Due date" },
+                   { "value": "status", "label": "Status" } ] },
+    { "id": "show", "label": "Show", "value": "open",
+      "options": [ { "value": "open", "label": "Open" },
+                   { "value": "all", "label": "All" } ] }
+  ],
   "columns": [
     {
       "id": "today", "title": "Today",

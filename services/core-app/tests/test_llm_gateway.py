@@ -291,6 +291,40 @@ async def test_embed_usage_event_is_tenant_scoped(monkeypatch: pytest.MonkeyPatc
     assert tenant == "tenant-x"
 
 
+async def test_embed_resolves_global_embed_default_pref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator's UI Embedding-model choice (embed_default pref) drives embedding.
+
+    Before this, memory embedding ignored the pref and always hit the env default — a 404
+    when that model wasn't pulled. embed() with no explicit model now resolves the pref,
+    falling back to the env default; an explicit per-module model still wins.
+    """
+    captured: dict[str, Any] = {}
+
+    class _EmbedResp:
+        def model_dump(self) -> dict[str, Any]:
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbedResp:
+        captured.update(kwargs)
+        return _EmbedResp()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    prefs = await _fresh_prefs()
+
+    # No embed pref → the env default embedding model.
+    await _gateway(prefs=prefs).embed(["hi"])
+    assert captured["model"] == "ollama/nomic-embed-text"
+
+    # Operator picks an embedding model in the UI → it drives embedding.
+    await prefs.set_embed_default("local", "qwen3-embedding:0.6b")
+    await _gateway(prefs=prefs).embed(["hi"])
+    assert captured["model"] == "ollama/qwen3-embedding:0.6b"
+
+    # An explicit model (a module's per-module override) still wins.
+    await _gateway(prefs=prefs).embed(["hi"], model="bge-m3")
+    assert captured["model"] == "ollama/bge-m3"
+
+
 async def test_embed_refuses_when_paused() -> None:
     power = PowerController()
     power.pause()

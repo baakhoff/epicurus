@@ -55,6 +55,7 @@ class LlmGateway:
         *,
         ollama_url: str,
         default_model: str,
+        default_embed_model: str = "nomic-embed-text",
         keep_alive: str,
         power: PowerController,
         secrets: SecretStore,
@@ -69,6 +70,7 @@ class LlmGateway:
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
+        self._default_embed_model = default_embed_model
         self._keep_alive = keep_alive
         self._power = power
         self._secrets = secrets
@@ -88,6 +90,20 @@ class LlmGateway:
             if stored:
                 return stored
         return self._default_model
+
+    async def effective_embed_default(self, tenant_id: str | None = None) -> str:
+        """The active embedding model: the stored embed pref if set, else the env default.
+
+        Symmetric with :meth:`effective_default` for chat. Callers that don't pass an
+        explicit ``model`` to :meth:`embed` (e.g. core memory recall) resolve through here,
+        so the operator's UI **Embedding model** choice actually drives embedding instead
+        of a hard-coded setting.
+        """
+        if self._prefs is not None:
+            stored = await self._prefs.get_embed_default(tenant_id or self._default_tenant)
+            if stored:
+                return stored
+        return self._default_embed_model
 
     async def model_readiness(
         self, model: str | None = None, *, tenant_id: str | None = None
@@ -350,7 +366,7 @@ class LlmGateway:
         """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``)."""
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
-        resolved = model or await self.effective_default(tenant_id)
+        resolved = model or await self.effective_embed_default(tenant_id)
         embed_model = f"ollama/{resolved}"
         start = time.monotonic()
         response = await litellm.aembedding(

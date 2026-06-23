@@ -73,6 +73,7 @@ def create_app() -> FastAPI:
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
+        default_embed_model=settings.memory_embed_model,
         keep_alive=settings.llm_keep_alive,
         power=power,
         secrets=secrets,
@@ -87,7 +88,10 @@ def create_app() -> FastAPI:
     )
 
     async def embed(texts: list[str]) -> list[list[float]]:
-        return await gateway.embed(texts, model=settings.memory_embed_model)
+        # No explicit model → the gateway resolves the operator's Embedding-model pref
+        # (effective_embed_default), falling back to settings.memory_embed_model. This is
+        # what makes the UI "Embedding model" choice actually drive memory recall.
+        return await gateway.embed(texts)
 
     memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
     attachment_store = AttachmentStore(engine)

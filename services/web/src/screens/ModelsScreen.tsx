@@ -4,7 +4,7 @@
  * (key entry → core → OpenBao; the key never comes back).
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, Search, Star, Trash2 } from "lucide-react";
+import { Cpu, Eye, EyeOff, KeyRound, Search, Sparkles, Star, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -24,7 +24,6 @@ import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
 import type { ProviderInfo } from "@/lib/contracts";
 import { useDownloads } from "@/stores/downloads";
-import { usePrefs } from "@/stores/prefs";
 
 // ── Download tray ─────────────────────────────────────────────────────────────
 
@@ -203,8 +202,6 @@ function LocalModels() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
-  const prefModel = usePrefs((s) => s.model);
-  const setModel = usePrefs((s) => s.setModel);
   const [confirming, setConfirming] = useState<string | null>(null);
 
   const globalDefault = llmPrefs.data?.global_default ?? null;
@@ -249,17 +246,12 @@ function LocalModels() {
               model.hidden && "opacity-60",
             )}
           >
-            <button
-              className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              onClick={() => setModel(model.name)}
-              title="Use for new chats"
-            >
+            <div className="flex min-w-0 flex-1 items-center gap-2">
               <span className="truncate text-sm text-ink">{model.name}</span>
               {model.loaded && <Badge tone="ok">loaded</Badge>}
               {globalDefault === model.name && <Badge tone="accent">default</Badge>}
-              {prefModel === model.name && <Badge tone="accent">chatting</Badge>}
               {model.hidden && <Badge tone="dim">hidden</Badge>}
-            </button>
+            </div>
             <span className="text-xs text-ink-faint">{formatBytes(model.size)}</span>
             <button
               aria-label={globalDefault === model.name ? "Clear global default" : `Set ${model.name} as global default`}
@@ -301,6 +293,179 @@ function LocalModels() {
           setConfirming(null);
         }}
       />
+    </Card>
+  );
+}
+
+// ── Context window ──────────────────────────────────────────────────────────────
+
+/** Render a megabyte count as a compact GB string (VRAM / model size). */
+function formatMb(mb: number | null | undefined): string {
+  if (mb == null || mb <= 0) return "—";
+  return `${(mb / 1024).toFixed(mb < 10 * 1024 ? 1 : 0)} GB`;
+}
+
+const CTX_FLOOR = 2048;
+const CTX_CEILING = 32768;
+const CTX_STEP = 512;
+
+/**
+ * Context window — how many tokens the local runtime keeps in play (Ollama `num_ctx`).
+ * The default 4096 is small enough that epicurus's own system prompt (instructions + every
+ * module's tool schemas) can fill it, leaving no room to answer. This card surfaces a
+ * hardware-aware suggestion and lets the operator set the persisted pref.
+ */
+export function ContextWindow() {
+  const queryClient = useQueryClient();
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
+
+  const stored = llmPrefs.data?.global_context_window ?? null;
+  const suggestion = system.data?.suggested_context ?? null;
+  const gpu = system.data?.gpu ?? null;
+  const model = system.data?.model ?? null;
+
+  // The in-progress edit. `undefined` = untouched (show the stored/suggested value);
+  // a number = the operator is editing; deriving the displayed value (rather than seeding
+  // state in an effect) keeps it in sync with the pref without cascading renders.
+  const [draft, setDraft] = useState<number | undefined>(undefined);
+
+  const save = useMutation({
+    mutationFn: (value: number | null) => api.setContextWindow(value),
+    onSuccess: () => {
+      setDraft(undefined); // fall back to following the freshly-saved pref
+      void queryClient.invalidateQueries({ queryKey: ["llmPrefs"] });
+    },
+  });
+
+  const value = draft ?? stored ?? suggestion?.suggested ?? 4096;
+  const sliderMax = Math.max(suggestion?.max ?? CTX_CEILING, value, CTX_FLOOR);
+  const dirty = draft !== undefined && draft !== stored;
+
+  const commit = (next: number | null) => save.mutate(next);
+  const clampToStep = (raw: number) =>
+    Math.min(sliderMax, Math.max(CTX_FLOOR, Math.round(raw / CTX_STEP) * CTX_STEP));
+
+  return (
+    <Card>
+      <h3 className="mb-1 font-serif text-base text-ink">Context window</h3>
+      <p className="mb-3 text-xs leading-relaxed text-ink-dim">
+        How many tokens the local runtime keeps in play (Ollama <code>num_ctx</code>). The
+        agent's instructions and tool list alone are sizeable — too small a window and there's
+        no room left to answer. Applies to local models only.
+      </p>
+
+      {/* detected hardware + active model */}
+      <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2">
+          <p className="text-[11px] uppercase tracking-wide text-ink-faint">Detected</p>
+          {system.isLoading ? (
+            <Spinner className="mt-1" />
+          ) : gpu ? (
+            <p className="mt-0.5 flex items-center gap-1.5 text-sm text-ink">
+              <Cpu size={14} className="shrink-0 text-accent" />
+              <span className="truncate">
+                {gpu.name} · {formatMb(gpu.vram_total_mb)} VRAM
+              </span>
+            </p>
+          ) : (
+            <p className="mt-0.5 flex items-center gap-1.5 text-sm text-ink">
+              <Cpu size={14} className="shrink-0 text-ink-faint" />
+              No GPU detected — CPU
+              {system.data?.ram_total_mb ? ` · ${formatMb(system.data.ram_total_mb)} RAM` : ""}
+            </p>
+          )}
+        </div>
+        <div className="rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2">
+          <p className="text-[11px] uppercase tracking-wide text-ink-faint">Active model</p>
+          <p className="mt-0.5 truncate text-sm text-ink">
+            {model ? model.name : "—"}
+            {model?.size_mb ? ` · ${formatMb(model.size_mb)}` : ""}
+          </p>
+        </div>
+      </div>
+
+      {/* suggestion */}
+      {suggestion && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-(--radius-field) border border-accent/30 bg-accent-dim/40 px-3 py-2 text-sm">
+          <Sparkles size={14} className="shrink-0 text-accent" />
+          <span className="text-ink">
+            Suggested <strong>{suggestion.suggested.toLocaleString()}</strong>
+            <span className="text-ink-dim">
+              {" "}
+              (range {suggestion.min.toLocaleString()}–{suggestion.max.toLocaleString()})
+            </span>
+          </span>
+          <Button
+            variant="outline"
+            className="ml-auto"
+            onClick={() => commit(suggestion.suggested)}
+            disabled={save.isPending}
+          >
+            Use suggested ({suggestion.suggested.toLocaleString()})
+          </Button>
+        </div>
+      )}
+      <p className="mb-3 text-[11px] italic leading-relaxed text-ink-faint">
+        The suggestion is a rough estimate from your VRAM and the model's size — a sensible
+        starting point, not a measured maximum. Tune it if replies run short or the runtime
+        complains.
+      </p>
+
+      {/* number input + slider bound to the pref */}
+      {llmPrefs.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            <Label>Tokens</Label>
+            <TextInput
+              type="number"
+              min={CTX_FLOOR}
+              max={CTX_CEILING}
+              step={CTX_STEP}
+              value={value}
+              aria-label="Context window tokens"
+              className="w-32"
+              disabled={save.isPending}
+              onChange={(e) => setDraft(e.target.value ? Number(e.target.value) : undefined)}
+              onBlur={() => draft !== undefined && commit(clampToStep(draft))}
+            />
+            {stored !== null && (
+              <Button
+                variant="ghost"
+                onClick={() => commit(null)}
+                disabled={save.isPending}
+                aria-label="Reset to the system default"
+              >
+                Reset to default
+              </Button>
+            )}
+          </div>
+          <input
+            type="range"
+            min={CTX_FLOOR}
+            max={sliderMax}
+            step={CTX_STEP}
+            value={Math.min(value, sliderMax)}
+            aria-label="Context window slider"
+            className="w-full accent-accent"
+            disabled={save.isPending}
+            onChange={(e) => setDraft(Number(e.target.value))}
+            onPointerUp={() => draft !== undefined && commit(clampToStep(draft))}
+          />
+          <p className="text-xs text-ink-dim">
+            {stored === null
+              ? "Using the system default — set a value to override it."
+              : dirty
+                ? "Unsaved — release the slider or leave the field to apply."
+                : `Saved · the runtime will use ${stored.toLocaleString()} tokens.`}
+          </p>
+          {save.isError && (
+            <p className="text-sm text-danger">{(save.error as Error).message}</p>
+          )}
+        </div>
+      )}
     </Card>
   );
 }
@@ -497,6 +662,7 @@ export function ModelsScreen() {
         <CatalogBrowser installed={installed} />
         <DownloadTray />
         <LocalModels />
+        <ContextWindow />
         <EmbedDefault />
         <Providers />
       </div>

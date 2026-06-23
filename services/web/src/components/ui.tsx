@@ -9,6 +9,7 @@ import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
+  type Ref,
   type TextareaHTMLAttributes,
 } from "react";
 import { Loader2, X } from "lucide-react";
@@ -121,8 +122,11 @@ export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cn(fieldBase, props.className)} />;
 }
 
-export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea {...props} className={cn(fieldBase, "resize-none", props.className)} />;
+export function TextArea({
+  ref,
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & { ref?: Ref<HTMLTextAreaElement> }) {
+  return <textarea ref={ref} {...props} className={cn(fieldBase, "resize-none", props.className)} />;
 }
 
 export function Switch({

@@ -35,12 +35,11 @@ into the agent's context:
 
 The module contributes a **Notes** left-nav page — declared as a `pages` entry
 `{id: "notes", archetype: "editor"}`. The **core renders** the editor (a document list, a
-markdown editor that **opens rendered** and **auto-saves** while you type — ADR-0042 — and,
-because the page sets `can_create`, a **New note** control); the module ships **no markup**
-and only supplies data over three endpoints the core proxies. Saving to a new slug
-**creates** the note; saving an existing one updates it. Each save (auto or manual)
-re-indexes the note into `<tenant>__notes`, so the auto-save debounce is deliberately
-unhurried.
+markdown editor that **opens rendered** and **saves on leave / idle / explicit Save** —
+not per keystroke, since each save re-embeds (ADR-0042) — and, because the page sets
+`can_create`, a **New note** control); the module ships **no markup** and only supplies
+data over three endpoints the core proxies. Saving to a new slug **creates** the note;
+saving an existing one updates it. Each save re-indexes the note into `<tenant>__notes`.
 
 The shared `EditorView` is **core-owned**; notes reuses it (knowledge is the other user).
 The note **title** is derived from the body (its first heading / line), so the

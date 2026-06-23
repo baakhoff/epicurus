@@ -79,7 +79,7 @@ describe("EditorView", () => {
     );
   });
 
-  it("auto-saves the draft a beat after editing stops, with no Save click", async () => {
+  it("saves after the document idles, with no Save click (ADR-0042)", async () => {
     mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
     mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "old" });
     mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
@@ -88,16 +88,21 @@ describe("EditorView", () => {
     fireEvent.click(await screen.findByText("a"));
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     const textarea = await screen.findByLabelText("Edit a.md");
-    fireEvent.change(textarea, { target: { value: "auto body" } });
 
-    // No Save click — the debounced auto-save fires on its own (ADR-0042).
-    await waitFor(
-      () => expect(mockSave).toHaveBeenCalledWith("notes", "notes", "a.md", "auto body"),
-      { timeout: 2500 },
+    // Edit under fake timers so the idle timeout is fake, then let it elapse — no Save click.
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(textarea, { target: { value: "idle body" } });
+      await vi.advanceTimersByTimeAsync(4500); // > IDLE_SAVE_MS
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("notes", "notes", "a.md", "idle body"),
     );
   });
 
-  it("never auto-saves stale content to a newly-selected document", async () => {
+  it("saves the open document when you switch away — to its own path, never the new one", async () => {
     mockModulePage.mockResolvedValue({
       docs: [
         { id: "a.md", title: "a", path: "a.md" },
@@ -113,17 +118,35 @@ describe("EditorView", () => {
     mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
 
-    // Open A, edit it (a save is now pending on the debounce), then jump to B.
     fireEvent.click(await screen.findByText("a"));
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     fireEvent.change(await screen.findByLabelText("Edit a.md"), {
       target: { value: "AAA-edited" },
     });
-    fireEvent.click(screen.getByText("b"));
 
-    // Past the debounce, nothing was written — A's stale draft must not land on B's path.
-    await new Promise((resolve) => setTimeout(resolve, 1400));
-    expect(mockSave).not.toHaveBeenCalled();
+    // Switching documents is "leaving" — it flushes the buffer to *its* path (A), and the
+    // stale-path guard means A's draft never lands on the not-yet-loaded B.
+    fireEvent.click(screen.getByText("b"));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "a.md", "AAA-edited"),
+    );
+    expect(mockSave).not.toHaveBeenCalledWith("knowledge", "vault", "b.md", "AAA-edited");
+  });
+
+  it("saves the open document on unmount (leaving the editor)", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "old" });
+    mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
+    const { unmount } = render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.change(await screen.findByLabelText("Edit a.md"), { target: { value: "leaving" } });
+
+    unmount(); // navigating away from the editor screen
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("notes", "notes", "a.md", "leaving"),
+    );
   });
 
   it("renders read-only when the vault is externally owned (#232)", async () => {

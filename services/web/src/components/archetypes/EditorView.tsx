@@ -31,7 +31,7 @@ import {
   MoreHorizontal,
   Plus,
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -41,9 +41,10 @@ import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
 import type { EditorDoc } from "@/lib/contracts";
 
-/** Debounce before an edit auto-saves (ADR-0042) — long enough that a burst of typing
- *  is one save, short enough to feel immediate. Each save re-indexes, so don't go lower. */
-const AUTOSAVE_MS = 1200;
+/** Idle delay before an unsaved edit is flushed (ADR-0042). Saving re-embeds, so we do NOT
+ *  save on every keystroke — only once the doc has been still this long (plus on leaving the
+ *  page and on explicit Save). Long enough to mean "stopped editing", short enough to be safe. */
+const IDLE_SAVE_MS = 4000;
 
 /** A filesystem-safe, readable slug for a note title (the editor `path`). */
 function slugify(name: string): string {
@@ -376,43 +377,81 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   }
 
   const save = useMutation({
-    mutationFn: (content: string) =>
-      api.saveModulePageDoc(module, pageId, selectedPath as string, content),
-    // Mark the baseline as exactly what was persisted (the mutation variable), not a
-    // closed-over `draft` — keystrokes made *during* the save round-trip then stay dirty
-    // and queue the next auto-save instead of being silently marked clean.
-    onSuccess: (_result, content) => {
-      setBaseline(content);
-      setIsNew(false);
+    // The path travels with the save (not via a `selectedPath` closure) so a flush fired as
+    // we navigate away still targets the doc the draft belongs to, even though the selection
+    // has already moved on.
+    mutationFn: ({ path, content }: { path: string; content: string }) =>
+      api.saveModulePageDoc(module, pageId, path, content),
+    onSuccess: (_result, { path, content }) => {
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      // Reconcile the buffer only if we're still on the doc we saved — a leave-flush of the
+      // *previous* doc must not stamp its content onto the now-open one's baseline. Setting
+      // the baseline to exactly what was persisted keeps edits made mid-save dirty.
+      if (path === selectedPath) {
+        setBaseline(content);
+        setIsNew(false);
+      }
     },
   });
 
   const dirty = draft !== baseline;
   // react-query's `mutate` is referentially stable; depending on it (not the whole `save`
-  // object, which is a new reference every render) keeps the auto-save timer from resetting.
+  // object, which is a new reference every render) keeps timers/callbacks from churning.
   const { mutate: saveMutate } = save;
 
-  // ── Auto-save (ADR-0042) ───────────────────────────────────────────────────
-  // Persist a short beat after typing stops. A read-only (watched Obsidian) vault never
-  // auto-saves. A save already in flight defers the next one — `savingRef` skips it, and
-  // the trailing draft reschedules when the baseline lands. `isNew` notes auto-create on
-  // the first beat just like any other edit (the slug is already chosen). The
-  // `selectedPath === seededPath` guard is the safety: between opening a document and its
-  // content loading, `draft` still holds the *previous* doc — without it the timer could
-  // write that stale content to the newly-selected path.
+  // ── Save policy (ADR-0042) ─────────────────────────────────────────────────
+  // Notes/knowledge re-embed on every save, so we deliberately do NOT save on each
+  // keystroke. A save (and its re-index) happens only when the user (1) leaves the page,
+  // (2) idles — leaves the document unchanged for IDLE_SAVE_MS — or (3) saves explicitly
+  // (the Save button / Ctrl-S). A read-only (watched Obsidian) vault never saves.
   const readOnly = Boolean(list.data?.read_only);
   const savingRef = useRef(false);
   useEffect(() => {
     savingRef.current = save.isPending;
   }, [save.isPending]);
+
+  // Latest values for the leave-the-page flushes below — a listener or unmount cleanup
+  // captures a stale closure otherwise. Refreshed after every commit.
+  const flushRef = useRef({ draft, baseline, selectedPath, seededPath, readOnly });
+  useEffect(() => {
+    flushRef.current = { draft, baseline, selectedPath, seededPath, readOnly };
+  });
+  // Persist the buffer iff it has unsaved changes for the path it belongs to. The
+  // `selectedPath === seededPath` guard is the safety: between selecting a document and its
+  // content loading, `draft` still holds the *previous* doc — without it a flush could write
+  // that stale content onto the newly-selected path.
+  const flush = useCallback(() => {
+    const s = flushRef.current;
+    if (
+      s.selectedPath &&
+      s.selectedPath === s.seededPath &&
+      !s.readOnly &&
+      s.draft !== s.baseline &&
+      !savingRef.current
+    ) {
+      saveMutate({ path: s.selectedPath, content: s.draft });
+    }
+  }, [saveMutate]);
+
+  // (2) Idle: flush once the document has gone untouched for IDLE_SAVE_MS.
   useEffect(() => {
     if (!selectedPath || selectedPath !== seededPath || readOnly || draft === baseline) return;
-    const id = window.setTimeout(() => {
-      if (!savingRef.current) saveMutate(draft);
-    }, AUTOSAVE_MS);
+    const id = window.setTimeout(flush, IDLE_SAVE_MS);
     return () => window.clearTimeout(id);
-  }, [draft, baseline, selectedPath, seededPath, readOnly, saveMutate]);
+  }, [draft, baseline, selectedPath, seededPath, readOnly, flush]);
+
+  // (1) Leave the page: flush when the tab is hidden (closing / backgrounding — the reliable
+  // "about to leave" hook) and on unmount (navigating away from the editor screen).
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      flush();
+    };
+  }, [flush]);
 
   // ── Folder / file tree mutations ──────────────────────────────────────────
 
@@ -492,6 +531,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const tree = buildTree(data.docs);
 
   const openDoc = (path: string) => {
+    flush(); // (1) leaving the current document — persist it before switching
     setIsNew(false);
     setSelectedPath(path);
   };
@@ -721,6 +761,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
             <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
               <button
                 onClick={() => {
+                  flush(); // (1) leaving the document — persist it before closing
                   setSelectedPath(null);
                   setIsNew(false);
                 }}
@@ -767,7 +808,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 <Button
                   variant="primary"
                   className="shrink-0"
-                  onClick={() => save.mutate(draft)}
+                  onClick={() => save.mutate({ path: selectedPath, content: draft })}
                   disabled={!dirty}
                   busy={save.isPending}
                 >
@@ -791,14 +832,10 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 <TextArea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  onBlur={() => {
-                    // Leaving the field flushes the pending auto-save immediately.
-                    if (!data.read_only && dirty && !save.isPending) save.mutate(draft);
-                  }}
                   onKeyDown={(e) => {
                     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
                       e.preventDefault();
-                      if (!data.read_only && dirty) save.mutate(draft);
+                      if (!data.read_only && dirty) save.mutate({ path: selectedPath, content: draft });
                     }
                   }}
                   readOnly={data.read_only}

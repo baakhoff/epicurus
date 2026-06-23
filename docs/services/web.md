@@ -50,13 +50,15 @@ one path, so no module ever ships its own buttons or forms.
 
 The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
 shows immediately, and an Edit/Preview toggle drops to the raw source when you want to
-write (ADR-0042). Edits **auto-save** a short beat after typing stops (and on blur, and on
-Ctrl/Cmd-S), so the **Save** button is an explicit flush rather than the only path; a live
-status reads *Saving… → saved* (*saved · not indexed* if the re-index round-trip failed).
-A **read-only** vault — a watched Obsidian mount (ADR-0035) — never auto-saves. The list
-and editor panes are each width- and scroll-bounded (`min-w-0`, `overscroll-contain`), so
-on a phone the Save-bearing toolbar never overflows the viewport and scrolling a long note
-never drags the bottom tab bar.
+write (ADR-0042). Because notes/knowledge **re-embed on every save**, the editor does not
+save on each keystroke: a save fires only when you **leave** (switch document, go back, or
+the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
+or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →
+saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only** vault — a
+watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
+and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
+toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
+bar.
 
 ### Right panel / split-screen (ADR-0018)
 

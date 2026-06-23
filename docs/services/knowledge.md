@@ -51,12 +51,13 @@ No module code runs in the shell; all data flows through the core.
 The module contributes a **Knowledge** left-nav page — an Obsidian-style browse-and-edit
 view over the vault with nested folder management, declared as a `pages` entry
 `{id: "vault", archetype: "editor"}`. The **core renders** the editor from its bounded
-vocabulary (a document/folder tree, a markdown editor that **opens rendered** and
-**auto-saves** while you type — ADR-0042 — a save button, CRUD controls); the module ships
-**no markup** and only supplies data over the endpoints the core proxies.
+vocabulary (a document/folder tree, a markdown editor that **opens rendered** and **saves
+on leave / idle / explicit Save** — not per keystroke, since each save re-embeds (ADR-0042)
+— a save button, CRUD controls); the module ships **no markup** and only supplies data over
+the endpoints the core proxies.
 
-Saving a document — on the auto-save debounce or an explicit Save — writes it back to the
-vault and **re-indexes just that file** into `<tenant>__knowledge`, so an edit made in the
+Saving a document — on leaving the page, after it idles, or on an explicit Save — writes it
+back to the vault and **re-indexes just that file** into `<tenant>__knowledge`, so an edit made in the
 shell is immediately retrievable by the agent (the vault is agent-retrievable by default —
 contrast the Notes module). The editor component is **core-owned and shared**; Notes reuses
 it. The bundled platform docs are *not* exposed as an editor page (they are read-only,

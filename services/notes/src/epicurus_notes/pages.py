@@ -53,17 +53,45 @@ class EditorData(BaseModel):
 
     ``can_create`` opts this page into the shared editor's authoring affordance
     (ADR-0026): the shell shows a "New note" control that saves to a new slug.
+    ``versioned`` opts it into version history (ADR-0046): every save snapshots the
+    body, and the shell offers a browse/restore-past-versions affordance.
     """
 
     title: str = "Notes"
     docs: list[EditorDoc] = Field(default_factory=list)
     can_create: bool = True
+    versioned: bool = True
 
 
 class EditorDocContent(BaseModel):
     """One note's full content, returned when the editor opens it."""
 
     path: str
+    title: str
+    content: str
+
+
+class EditorVersion(BaseModel):
+    """One entry in a note's version list (ADR-0046)."""
+
+    version_id: str
+    created_at: str
+    title: str
+    size: int
+
+
+class EditorVersionList(BaseModel):
+    """A note's past versions, newest first."""
+
+    versions: list[EditorVersion] = Field(default_factory=list)
+
+
+class EditorVersionContent(BaseModel):
+    """One past version's full content, returned when the editor opens it."""
+
+    path: str
+    version_id: str
+    created_at: str
     title: str
     content: str
 
@@ -148,6 +176,15 @@ class NotesPages:
         slug = _clean_slug(slug)
         title = derive_title(content)
         await self._store.upsert(tenant=self._tenant, slug=slug, title=title, content=content)
+        # Snapshot the saved body for version history (ADR-0046). The save has
+        # already committed, so a failure here must never fail the save — it only
+        # loses one history entry.
+        try:
+            await self._store.add_version(
+                tenant=self._tenant, slug=slug, title=title, content=content
+            )
+        except Exception as exc:  # the note is saved; the snapshot is best-effort
+            log.warning("note saved but version snapshot failed", slug=slug, error=str(exc))
         try:
             chunk_count = await self._indexer.index_note(slug, content)
         except Exception as exc:  # the note is saved; indexing is best-effort
@@ -159,6 +196,38 @@ class NotesPages:
             except Exception as exc:  # observability only — never fail a save on it
                 log.warning("notes.saved publish failed", slug=slug, error=str(exc))
         return EditorSaveResult(path=slug, indexed=True, chunk_count=chunk_count)
+
+    async def list_versions(self, slug: str) -> EditorVersionList:
+        """A note's past versions, newest first (no bodies) — ADR-0046."""
+        slug = _clean_slug(slug)
+        summaries = await self._store.list_versions(tenant=self._tenant, slug=slug)
+        return EditorVersionList(
+            versions=[
+                EditorVersion(
+                    version_id=s.version_id,
+                    created_at=s.created_at.isoformat(),
+                    title=s.title,
+                    size=s.size,
+                )
+                for s in summaries
+            ]
+        )
+
+    async def get_version(self, slug: str, version_id: str) -> EditorVersionContent:
+        """One past version's full content. 404 if it is not this note's version."""
+        slug = _clean_slug(slug)
+        version = await self._store.get_version(
+            tenant=self._tenant, slug=slug, version_id=version_id
+        )
+        if version is None:
+            raise HTTPException(status_code=404, detail=f"no such version: {version_id}")
+        return EditorVersionContent(
+            path=version.slug,
+            version_id=version.version_id,
+            created_at=version.created_at.isoformat(),
+            title=version.title,
+            content=version.content,
+        )
 
 
 def create_pages_router(pages: NotesPages) -> APIRouter:
@@ -183,5 +252,17 @@ def create_pages_router(pages: NotesPages) -> APIRouter:
     async def put_doc(page_id: str, body: DocBody, path: str = Query(...)) -> EditorSaveResult:
         _require_known_page(page_id)
         return await pages.write_doc(path, body.content)
+
+    @router.get("/pages/{page_id}/doc/versions", response_model=EditorVersionList)
+    async def get_versions(page_id: str, path: str = Query(...)) -> EditorVersionList:
+        _require_known_page(page_id)
+        return await pages.list_versions(path)
+
+    @router.get("/pages/{page_id}/doc/version", response_model=EditorVersionContent)
+    async def get_version(
+        page_id: str, path: str = Query(...), version: str = Query(...)
+    ) -> EditorVersionContent:
+        _require_known_page(page_id)
+        return await pages.get_version(path, version)
 
     return router

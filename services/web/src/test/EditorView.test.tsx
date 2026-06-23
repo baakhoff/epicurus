@@ -9,11 +9,15 @@ import { EditorView } from "@/components/archetypes/EditorView";
 const mockModulePage = vi.fn();
 const mockModulePageDoc = vi.fn();
 const mockSave = vi.fn();
+const mockVersions = vi.fn();
+const mockVersion = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
     modulePageDoc: (...args: unknown[]) => mockModulePageDoc(...args),
     saveModulePageDoc: (...args: unknown[]) => mockSave(...args),
+    modulePageDocVersions: (...args: unknown[]) => mockVersions(...args),
+    modulePageDocVersion: (...args: unknown[]) => mockVersion(...args),
   },
 }));
 
@@ -35,6 +39,8 @@ beforeEach(() => {
   mockModulePage.mockReset();
   mockModulePageDoc.mockReset();
   mockSave.mockReset();
+  mockVersions.mockReset();
+  mockVersion.mockReset();
 });
 
 describe("EditorView", () => {
@@ -265,5 +271,51 @@ describe("EditorView", () => {
     // Opens the document rendered, with no click — the deep link selected it.
     expect(await screen.findByTestId("preview")).toHaveTextContent("# Deep");
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
+  });
+
+  it("browses, views, and restores a past version (ADR-0046)", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+      versioned: true,
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "current" });
+    mockVersions.mockResolvedValue({
+      versions: [
+        { version_id: "2", created_at: "2020-01-02T10:00:00.000Z", title: "a", size: 99 },
+        { version_id: "1", created_at: "2020-01-01T10:00:00.000Z", title: "a", size: 3 },
+      ],
+    });
+    mockVersion.mockResolvedValue({
+      path: "a.md",
+      version_id: "1",
+      created_at: "2020-01-01T10:00:00.000Z",
+      title: "a",
+      content: "the old version",
+    });
+    mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    // The History button appears only because the page is `versioned`; it opens the dropdown.
+    fireEvent.click(await screen.findByRole("button", { name: "Version history" }));
+    // View the older snapshot (size 3) read-only.
+    fireEvent.click(await screen.findByText("3 ch"));
+    expect(await screen.findByTestId("preview")).toHaveTextContent("the old version");
+    expect(mockVersion).toHaveBeenCalledWith("notes", "notes", "a.md", "1");
+
+    // Restore brings that version back as a fresh save through the normal path.
+    fireEvent.click(screen.getByRole("button", { name: "Restore this version" }));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("notes", "notes", "a.md", "the old version"),
+    );
+  });
+
+  it("hides version history when the page is not versioned", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "x" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByText("a"));
+    await screen.findByTestId("preview");
+    expect(screen.queryByRole("button", { name: "Version history" })).toBeNull();
   });
 });

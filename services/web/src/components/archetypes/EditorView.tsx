@@ -28,6 +28,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  History,
   MoreHorizontal,
   Plus,
 } from "lucide-react";
@@ -39,7 +40,8 @@ import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/c
 import { ApiError } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
-import type { EditorDoc } from "@/lib/contracts";
+import type { EditorDoc, EditorVersionContent } from "@/lib/contracts";
+import { relativeTime } from "@/lib/format";
 
 /** Idle delay before an unsaved edit is flushed (ADR-0042). Saving re-embeds, so we do NOT
  *  save on every keystroke — only once the doc has been still this long (plus on leaving the
@@ -340,6 +342,11 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   // The folder inside which a new file is being created (null = root)
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
 
+  // Version history (ADR-0046): the dropdown's open state and the past version being
+  // previewed (read-only) in place of the live buffer. `null` = editing the current doc.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [viewingVersion, setViewingVersion] = useState<EditorVersionContent | null>(null);
+
   // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's
   // "Open in Knowledge" link, #143). Re-applies if the param changes while mounted.
   const [searchParams] = useSearchParams();
@@ -384,6 +391,8 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
       api.saveModulePageDoc(module, pageId, path, content),
     onSuccess: (_result, { path, content }) => {
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      // Every save snapshots a version (ADR-0046) — refresh the open doc's history.
+      void qc.invalidateQueries({ queryKey: ["module-doc-versions", module, pageId] });
       // Reconcile the buffer only if we're still on the doc we saved — a leave-flush of the
       // *previous* doc must not stamp its content onto the now-open one's baseline. Setting
       // the baseline to exactly what was persisted keeps edits made mid-save dirty.
@@ -391,6 +400,23 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
         setBaseline(content);
         setIsNew(false);
       }
+    },
+  });
+
+  // Version history (ADR-0046): the save snapshots are fetched lazily when the History
+  // dropdown opens; viewing one previews it read-only in place of the live buffer.
+  const versioned = Boolean(list.data?.versioned);
+  const versions = useQuery({
+    queryKey: ["module-doc-versions", module, pageId, selectedPath],
+    queryFn: () => api.modulePageDocVersions(module, pageId, selectedPath as string),
+    enabled: historyOpen && versioned && selectedPath != null && !isNew,
+  });
+  const viewVersion = useMutation({
+    mutationFn: (versionId: string) =>
+      api.modulePageDocVersion(module, pageId, selectedPath as string, versionId),
+    onSuccess: (v) => {
+      setViewingVersion(v);
+      setHistoryOpen(false);
     },
   });
 
@@ -532,8 +558,24 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
 
   const openDoc = (path: string) => {
     flush(); // (1) leaving the current document — persist it before switching
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(false);
     setSelectedPath(path);
+  };
+
+  // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
+  // as a new version through the normal path. Confirms first if it would drop unsaved edits.
+  const restoreVersion = () => {
+    if (!viewingVersion || !selectedPath || data.read_only) return;
+    if (dirty && !window.confirm("Restore this version? Unsaved changes will be replaced.")) {
+      return;
+    }
+    const content = viewingVersion.content;
+    setViewingVersion(null);
+    setDraft(content);
+    setMode("preview");
+    save.mutate({ path: selectedPath, content });
   };
 
   // can_create: the existing "New note" flow (used by Notes module)
@@ -544,6 +586,8 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     const folderPrefix = newFileInFolder ? `${newFileInFolder}/` : "";
     const taken = new Set(data.docs.map((d) => d.path));
     const slug = uniqueSlug(folderPrefix + slugify(name), taken);
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(true);
     setSelectedPath(slug);
     setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
@@ -560,6 +604,8 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setNewFileInFolder(folderPath);
     const taken = new Set(data.docs.map((d) => d.path));
     const slug = uniqueSlug(`${folderPath}/new-note.md`, taken);
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(true);
     setSelectedPath(slug);
     setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
@@ -773,62 +819,164 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 {selectedPath}
                 {isNew && <span className="ml-1 text-ink-faint">(new)</span>}
               </span>
-              {/* Save status: auto-save (ADR-0042) keeps this live; the button is an explicit flush. */}
-              {save.isPending ? (
-                <span className="shrink-0 text-xs text-ink-faint">Saving…</span>
-              ) : save.isError ? (
-                <Badge tone="danger">save failed</Badge>
-              ) : dirty ? (
-                <span className="shrink-0 text-xs text-ink-faint">Unsaved…</span>
-              ) : save.isSuccess && !save.data?.indexed ? (
-                <Badge tone="warn">saved · not indexed</Badge>
-              ) : save.isSuccess ? (
-                <Badge tone="ok">saved</Badge>
-              ) : null}
-              <div className="inline-flex shrink-0 overflow-hidden rounded-(--radius-field) border border-edge">
-                {(["edit", "preview"] as const).map((m) => (
+              {/* Editing controls — hidden while previewing a past version (ADR-0046). */}
+              {!viewingVersion && (
+                <>
+                  {/* Save status: ADR-0042 keeps this live; the button is an explicit flush. */}
+                  {save.isPending ? (
+                    <span className="shrink-0 text-xs text-ink-faint">Saving…</span>
+                  ) : save.isError ? (
+                    <Badge tone="danger">save failed</Badge>
+                  ) : dirty ? (
+                    <span className="shrink-0 text-xs text-ink-faint">Unsaved…</span>
+                  ) : save.isSuccess && !save.data?.indexed ? (
+                    <Badge tone="warn">saved · not indexed</Badge>
+                  ) : save.isSuccess ? (
+                    <Badge tone="ok">saved</Badge>
+                  ) : null}
+                  <div className="inline-flex shrink-0 overflow-hidden rounded-(--radius-field) border border-edge">
+                    {(["edit", "preview"] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setMode(m)}
+                        className={cn(
+                          "px-2.5 py-1 text-xs transition-colors",
+                          mode === m
+                            ? "bg-accent-dim text-accent-strong"
+                            : "text-ink-dim hover:bg-surface-2",
+                        )}
+                      >
+                        {m === "edit" ? "Edit" : "Preview"}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* History (ADR-0046): browse + restore past saves of this document. */}
+              {versioned && !isNew && (
+                <div className="relative shrink-0">
                   <button
-                    key={m}
-                    onClick={() => setMode(m)}
+                    onClick={() => setHistoryOpen((o) => !o)}
+                    title="Version history"
+                    aria-label="Version history"
                     className={cn(
-                      "px-2.5 py-1 text-xs transition-colors",
-                      mode === m
+                      "inline-flex items-center rounded-(--radius-field) border border-edge px-2 py-1.5 transition-colors",
+                      historyOpen
                         ? "bg-accent-dim text-accent-strong"
                         : "text-ink-dim hover:bg-surface-2",
                     )}
                   >
-                    {m === "edit" ? "Edit" : "Preview"}
+                    <History size={14} />
                   </button>
-                ))}
-              </div>
-              {/* A watched external vault is read-only here (#232) — Obsidian is the author. */}
-              {data.read_only ? (
-                <Badge tone="dim">read-only</Badge>
-              ) : (
-                <Button
-                  variant="primary"
-                  className="shrink-0"
-                  onClick={() => save.mutate({ path: selectedPath, content: draft })}
-                  disabled={!dirty}
-                  busy={save.isPending}
-                >
-                  Save
-                </Button>
+                  {historyOpen && (
+                    <>
+                      <button
+                        type="button"
+                        aria-hidden
+                        tabIndex={-1}
+                        className="fixed inset-0 z-10 cursor-default"
+                        onClick={() => setHistoryOpen(false)}
+                      />
+                      <div className="absolute right-0 top-full z-20 mt-1 max-h-80 w-72 overflow-y-auto overscroll-contain rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)">
+                        <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">
+                          Version history
+                        </div>
+                        {versions.isLoading ? (
+                          <div className="flex justify-center py-4">
+                            <Spinner />
+                          </div>
+                        ) : versions.isError ? (
+                          <p className="px-3 py-3 text-xs text-ink-dim">Couldn’t load history.</p>
+                        ) : (versions.data?.versions.length ?? 0) === 0 ? (
+                          <p className="px-3 py-3 text-xs text-ink-faint">No past versions yet.</p>
+                        ) : (
+                          versions.data?.versions.map((v) => (
+                            <button
+                              key={v.version_id}
+                              onClick={() => viewVersion.mutate(v.version_id)}
+                              className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-xs hover:bg-surface-2"
+                            >
+                              <span className="text-ink">
+                                {relativeTime(new Date(v.created_at))}
+                              </span>
+                              <span className="shrink-0 text-ink-faint">
+                                {v.size.toLocaleString()} ch
+                              </span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
+
+              {/* A watched external vault is read-only here (#232) — Obsidian is the author. */}
+              {!viewingVersion &&
+                (data.read_only ? (
+                  <Badge tone="dim">read-only</Badge>
+                ) : (
+                  <Button
+                    variant="primary"
+                    className="shrink-0"
+                    onClick={() => save.mutate({ path: selectedPath, content: draft })}
+                    disabled={!dirty}
+                    busy={save.isPending}
+                  >
+                    Save
+                  </Button>
+                ))}
             </div>
 
-            {/* read-only banner: the vault is externally owned (watched Obsidian sync, #232) */}
-            {data.read_only && (
+            {/* read-only banner: externally-owned vault (#232) — hidden while viewing a version */}
+            {data.read_only && !viewingVersion && (
               <div className="border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
                 Read-only — this vault is managed externally (Obsidian Sync). Edit notes in
                 Obsidian; changes sync back and re-index here automatically.
               </div>
             )}
 
+            {/* viewing a past version (ADR-0046): a read-only preview with restore / close */}
+            {viewingVersion && (
+              <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
+                <span>
+                  Viewing a version from{" "}
+                  <span className="text-ink">
+                    {relativeTime(new Date(viewingVersion.created_at))}
+                  </span>{" "}
+                  — read-only.
+                </span>
+                <div className="ml-auto flex shrink-0 items-center gap-2">
+                  {!data.read_only && (
+                    <Button
+                      variant="primary"
+                      className="h-7 px-2.5 py-0 text-xs"
+                      onClick={restoreVersion}
+                      busy={save.isPending}
+                    >
+                      Restore this version
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    className="h-7 px-2.5 py-0 text-xs"
+                    onClick={() => setViewingVersion(null)}
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* body — the sole scroller; `overscroll-contain` keeps a phone's momentum
                 scroll from chaining into the bottom tab bar (the "lower panel") */}
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-              {mode === "edit" ? (
+              {viewingVersion ? (
+                <div className="mx-auto max-w-2xl px-5 py-4">
+                  <Markdown>{viewingVersion.content}</Markdown>
+                </div>
+              ) : mode === "edit" ? (
                 <TextArea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}

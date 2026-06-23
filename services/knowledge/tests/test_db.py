@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import BigInteger
+from sqlalchemy import BigInteger, Text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_knowledge.db import DocIndex, NoteIndex, _StoredDoc, _StoredNote
+from epicurus_knowledge.db import DocIndex, NoteIndex, _StoredDoc, _StoredNote, _StoredVersion
 
 TENANT = "test"
 
@@ -16,6 +16,13 @@ def test_mtime_ns_is_bigint_not_int32() -> None:
     # dynamic typing hides this in unit tests, so guard the column type explicitly.
     assert isinstance(_StoredNote.__table__.c.mtime_ns.type, BigInteger)
     assert isinstance(_StoredDoc.__table__.c.mtime_ns.type, BigInteger)
+
+
+def test_version_content_is_unbounded_text() -> None:
+    # A document snapshot can be arbitrarily large; String(n) would truncate in Postgres.
+    assert isinstance(_StoredVersion.__table__.c.content.type, Text)
+    # created_at is populated server-side so every snapshot carries a real timestamp.
+    assert _StoredVersion.__table__.c.created_at.server_default is not None
 
 
 @pytest.fixture

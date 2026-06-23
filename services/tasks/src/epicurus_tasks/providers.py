@@ -75,6 +75,22 @@ class TasksProvider(Protocol):
         """
         ...
 
+    async def delete_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> None:
+        """Delete a task. A missing task is treated as already-gone (no error).
+
+        Backs moving a task between lists (ADR-0038): Google Tasks has no cross-list
+        move, so the router recreates the task in the target list and deletes the
+        original here.
+
+        Args:
+            tenant_id: Tenant scope.
+            task_id: Provider-specific task identifier.
+            list_id: List containing the task; ``None`` means the default list.
+        """
+        ...
+
     async def update_task(
         self,
         tenant_id: str,
@@ -87,6 +103,7 @@ class TasksProvider(Protocol):
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        to_list_id: str | None = None,
     ) -> Task:
         """Edit a task's content and return the updated task.
 
@@ -106,6 +123,9 @@ class TasksProvider(Protocol):
             priority: New priority; ``None`` leaves it unchanged.
             tags: New tags list; ``None`` leaves it unchanged.
             list_id: List containing the task; ``None`` means the default list.
+            to_list_id: Move target — honored by the :class:`~epicurus_tasks.router.TasksRouter`
+                (which can move across lists by recreate+delete, ADR-0038). A single provider
+                has no cross-list move and **ignores** it (like Google ignores priority/tags).
         """
         ...
 

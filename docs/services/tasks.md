@@ -41,6 +41,15 @@ list is skipped, not fatal (#209). Reads fall back to the local store only when 
 enabled. The router stamps each task with its `list_id` / `list_title`; titles come from each
 account's discovery (a lookup failure degrades to the list id, never failing the board).
 
+**v0.9.0** lets the operator **pick a list when adding from chat and move tasks between
+lists** (ADR-0038, #257). A new **`tasks_lists`** tool reports the available lists so the
+agent can ask which one (it previously had no way to see them); `tasks_update` gains a
+**`to_list_id`** move target, and the board's Edit form gains a **List** picker (shown with
+≥2 writable lists). Google Tasks has no cross-list move API, so a move **recreates** the task
+in the target list and deletes the source — it gets a new id, and subtasks/order aren't
+carried. Moves operate between external lists (the local "Personal" store is the silent
+default and only shows when no external list is enabled).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -48,15 +57,18 @@ account's discovery (a lookup failure degrades to the list id, never failing the
 | Tool | Inputs | Returns |
 | --- | --- | --- |
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
-| `tasks_add(title, notes?, due?, list_id?)` | `title`: required; `notes`/`due`/`list_id`: optional | The created `Task`. |
+| `tasks_lists()` | none | The available lists (categories) as `- <title> — id: <id>` text, so the agent can pick one (or report only the default list exists). |
+| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`) | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
-| `tasks_update(task_id, title?, notes?, due?, list_id?)` | `task_id`: provider task ID; only the fields passed change, the rest are left intact | The updated `Task`. |
+| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?)` | `task_id`: provider task ID; only the fields passed change. `to_list_id`: **move** the task to this list | The updated `Task` (the moved task on a move). |
 
-All four tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
+All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
 **aggregates open tasks across every enabled list**; with a `list_id` it reads just that
 list. `tasks_add` / `tasks_complete` / `tasks_update` route to the list named by `list_id`,
 or — with none — to the default target (the active list, else the first enabled, else local).
-`tasks_update` edits content (title/notes/due); `tasks_complete` flips the done flag —
+Before adding from chat the agent should call **`tasks_lists`** and ask which list when more
+than one exists. `tasks_update` edits content (title/notes/due); passing **`to_list_id`**
+moves the task (recreate+delete on Google — ADR-0038); `tasks_complete` flips the done flag —
 distinct operations. The `Task` domain model is:
 
 ```python
@@ -117,8 +129,11 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card),
   both carrying the task's `list_id` so the mutation routes to the **owning** list; the board
   offers **Add task** (`tasks_add`, a form) whose **list picker** chooses the target list
-  (a labeled `field_choices` entry, value = list id → label = title). The board never carries
-  credentials or business logic — it is data plus tool references.
+  (a labeled `field_choices` entry, value = list id → label = title). With **two or more**
+  writable lists the Edit form also gains a **List** picker bound to `to_list_id` (prefilled
+  to the task's current list); choosing another **moves** the task there — a recreate+delete
+  on Google (ADR-0038). The board never carries credentials or business logic — it is data
+  plus tool references.
 
 ### Connected accounts & collections (ADR-0030)
 
@@ -258,11 +273,11 @@ Package `epicurus_tasks`:
 | Module | Responsibility |
 | --- | --- |
 | `models.py` | `Task` domain model (provider-neutral). |
-| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update + `get_task` + `is_available`/`list_collections`). |
+| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update/delete + `get_task` + `is_available`/`list_collections`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default). |
-| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery). |
-| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030). |
+| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038). |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
 | `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

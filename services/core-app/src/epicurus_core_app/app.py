@@ -47,6 +47,7 @@ from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.settings import CoreAppSettings
+from epicurus_core_app.system_info import create_system_router
 
 SERVICE_NAME = "core-app"
 
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
+        default_embed_model=settings.memory_embed_model,
         keep_alive=settings.llm_keep_alive,
         power=power,
         secrets=secrets,
@@ -96,7 +98,10 @@ def create_app() -> FastAPI:
     )
 
     async def embed(texts: list[str]) -> list[list[float]]:
-        return await gateway.embed(texts, model=settings.memory_embed_model)
+        # No explicit model → the gateway resolves the operator's Embedding-model pref
+        # (effective_embed_default), falling back to settings.memory_embed_model. This is
+        # what makes the UI "Embedding model" choice actually drive memory recall.
+        return await gateway.embed(texts)
 
     memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
     attachment_store = AttachmentStore(engine)
@@ -205,6 +210,7 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(create_readiness_router(readiness))
+    app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
     app.include_router(
         create_oauth_router(

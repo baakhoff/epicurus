@@ -20,9 +20,46 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),
+  // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
+  global_context_window: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
+
+/* ── system / GPU info (context-window suggestion) ────────────────────────── */
+
+/** A detected GPU. `vram_free_mb` is null when the vendor can't report it. */
+export const GpuInfo = z.object({
+  vendor: z.string(),
+  name: z.string(),
+  vram_total_mb: z.number(),
+  vram_free_mb: z.number().nullish(),
+});
+export type GpuInfo = z.infer<typeof GpuInfo>;
+
+/** The currently-effective chat model and its on-disk size. */
+export const ModelSize = z.object({
+  name: z.string(),
+  size_mb: z.number().nullish(),
+});
+export type ModelSize = z.infer<typeof ModelSize>;
+
+/** A suggested context-window range (an estimate, not a hard maximum). */
+export const SuggestedContext = z.object({
+  min: z.number(),
+  suggested: z.number(),
+  max: z.number(),
+});
+export type SuggestedContext = z.infer<typeof SuggestedContext>;
+
+/** Host system + GPU snapshot backing the context-window suggestion. */
+export const SystemInfo = z.object({
+  gpu: GpuInfo.nullish(),
+  ram_total_mb: z.number().nullish(),
+  model: ModelSize.nullish(),
+  suggested_context: SuggestedContext.nullish(),
+});
+export type SystemInfo = z.infer<typeof SystemInfo>;
 
 export const ProviderInfo = z.object({
   alias: z.string(),
@@ -566,12 +603,19 @@ export const HoverCard = z.object({
 });
 export type HoverCard = z.infer<typeof HoverCard>;
 
-/** A read-only email shown in the panel's `email-reader` view (used by 3.8 mail). */
+/** An email shown in the panel's `email-reader` view (used by 3.8 mail). */
 export const EmailMessage = z.object({
   subject: z.string().default("(no subject)"),
   from: z.string().nullish(),
   date: z.string().nullish(),
   body: z.string().default(""),
+  /** Owning module + id, so the reader can invoke this message's actions and re-fetch itself. */
+  module: z.string().default("mail"),
+  message_id: z.string().default(""),
+  /** Current read state — drives the status line and which toggle the reader shows. */
+  unread: z.boolean().default(false),
+  /** Tool-backed actions on this message (ADR-0024) — e.g. Mark as read / Mark as unread. */
+  actions: z.array(BoardAction).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
 

@@ -85,6 +85,7 @@ def test_prefs_routes_present() -> None:
     assert "/platform/v1/llm/prefs" in paths
     assert "/platform/v1/llm/prefs/default" in paths
     assert "/platform/v1/llm/prefs/embed-default" in paths
+    assert "/platform/v1/llm/prefs/context-window" in paths
     assert "/platform/v1/llm/prefs/hidden" in paths
 
 
@@ -213,4 +214,46 @@ async def test_prefs_embed_default_no_store_returns_503() -> None:
         resp = await client.put(
             "/platform/v1/llm/prefs/embed-default", json={"model": "nomic-embed-text"}
         )
+    assert resp.status_code == 503
+
+
+# ── Context-window preference ─────────────────────────────────────────────────
+
+
+async def test_prefs_context_window_initially_null() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/llm/prefs")
+    assert resp.json()["global_context_window"] is None
+
+
+async def test_prefs_set_and_get_context_window() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        put = await client.put("/platform/v1/llm/prefs/context-window", json={"value": 16384})
+        assert put.status_code == 200
+        get = await client.get("/platform/v1/llm/prefs")
+    assert get.json()["global_context_window"] == 16384
+
+
+async def test_prefs_clear_context_window() -> None:
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 16384)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        await client.put("/platform/v1/llm/prefs/context-window", json={"value": None})
+        get = await client.get("/platform/v1/llm/prefs")
+    assert get.json()["global_context_window"] is None
+
+
+async def test_prefs_context_window_no_store_returns_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=None)), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/llm/prefs/context-window", json={"value": 8192})
     assert resp.status_code == 503

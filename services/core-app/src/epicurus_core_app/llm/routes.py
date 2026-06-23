@@ -45,6 +45,8 @@ class LlmPrefsResponse(BaseModel):
 
     global_default: str | None
     global_embed_default: str | None
+    # Operator-chosen Ollama context window (num_ctx); NULL means the env/runtime default.
+    global_context_window: int | None
     hidden: list[str]
 
 
@@ -58,6 +60,12 @@ class SetEmbedDefaultRequest(BaseModel):
     """Body for PUT /llm/prefs/embed-default."""
 
     model: str | None
+
+
+class SetContextWindowRequest(BaseModel):
+    """Body for PUT /llm/prefs/context-window."""
+
+    value: int | None
 
 
 class SetHiddenRequest(BaseModel):
@@ -156,13 +164,20 @@ def create_llm_router(
     async def get_prefs() -> LlmPrefsResponse:
         """Return the tenant's stored global defaults and hidden-model list."""
         if prefs is None:
-            return LlmPrefsResponse(global_default=None, global_embed_default=None, hidden=[])
+            return LlmPrefsResponse(
+                global_default=None,
+                global_embed_default=None,
+                global_context_window=None,
+                hidden=[],
+            )
         stored_default = await prefs.get_default(default_tenant)
         stored_embed_default = await prefs.get_embed_default(default_tenant)
+        stored_context_window = await prefs.get_context_window(default_tenant)
         hidden = await prefs.get_hidden(default_tenant)
         return LlmPrefsResponse(
             global_default=stored_default,
             global_embed_default=stored_embed_default,
+            global_context_window=stored_context_window,
             hidden=hidden,
         )
 
@@ -181,6 +196,14 @@ def create_llm_router(
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_embed_default(default_tenant, request.model)
         return {"status": "ok", "model": request.model}
+
+    @router.put("/prefs/context-window")
+    async def set_context_window(request: SetContextWindowRequest) -> dict[str, int | None | str]:
+        """Set or clear the Ollama context window (num_ctx) for this tenant."""
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        await prefs.set_context_window(default_tenant, request.value)
+        return {"status": "ok", "value": request.value}
 
     @router.put("/prefs/hidden")
     async def set_hidden(request: SetHiddenRequest) -> dict[str, object]:

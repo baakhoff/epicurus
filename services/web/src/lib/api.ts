@@ -27,6 +27,7 @@ import {
   ProviderInfo,
   Readiness,
   SessionSummary,
+  SystemInfo,
   type PowerState,
 } from "@/lib/contracts";
 import { parseFrame } from "@/lib/sse";
@@ -91,6 +92,11 @@ export const api = {
     request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/embed-default", {
       method: "PUT",
       body: JSON.stringify({ model }),
+    }),
+  setContextWindow: (value: number | null) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
+      method: "PUT",
+      body: JSON.stringify({ value }),
     }),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
@@ -288,6 +294,9 @@ export const api = {
   },
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
+
+  // Host system + GPU snapshot backing the Models page's context-window suggestion.
+  systemInfo: () => request(SystemInfo, "/platform/v1/system/info"),
 
   readiness: (model?: string) => {
     const q = model ? `?model=${encodeURIComponent(model)}` : "";

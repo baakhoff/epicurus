@@ -9,10 +9,12 @@ import {
   CalendarData,
   CalendarEvent,
   CatalogResponse,
+  LlmPrefs,
   MessageRecord,
   ModuleSnapshot,
   PageSpec,
   Readiness,
+  SystemInfo,
   parseEventDate,
 } from "@/lib/contracts";
 
@@ -338,5 +340,42 @@ describe("contracts", () => {
     // params/description/tags fall back to their defaults for a sparse entry.
     expect(snap.entries[0].params).toBe("");
     expect(snap.entries[0].tags).toEqual([]);
+  });
+
+  it("parses LLM prefs including the context-window setting", () => {
+    const prefs = LlmPrefs.parse({
+      global_default: "llama3.2",
+      global_embed_default: null,
+      global_context_window: 16384,
+      hidden: [],
+    });
+    expect(prefs.global_context_window).toBe(16384);
+    // null = follow the env/runtime default
+    const unset = LlmPrefs.parse({
+      global_default: null,
+      global_embed_default: null,
+      global_context_window: null,
+      hidden: [],
+    });
+    expect(unset.global_context_window).toBeNull();
+  });
+
+  it("parses a system-info snapshot with a GPU and a suggestion", () => {
+    const info = SystemInfo.parse({
+      gpu: { vendor: "nvidia", name: "RTX 4090", vram_total_mb: 24564, vram_free_mb: 23000 },
+      ram_total_mb: 32000,
+      model: { name: "llama3.2:latest", size_mb: 4482 },
+      suggested_context: { min: 2048, suggested: 16384, max: 24000 },
+    });
+    expect(info.gpu?.vendor).toBe("nvidia");
+    expect(info.suggested_context?.suggested).toBe(16384);
+    expect(info.model?.size_mb).toBe(4482);
+  });
+
+  it("parses a system-info snapshot with no GPU (CPU fallback)", () => {
+    const info = SystemInfo.parse({ gpu: null, ram_total_mb: 16000, model: null });
+    expect(info.gpu).toBeNull();
+    expect(info.ram_total_mb).toBe(16000);
+    expect(info.suggested_context ?? null).toBeNull();
   });
 });

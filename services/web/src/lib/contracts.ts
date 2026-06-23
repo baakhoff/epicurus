@@ -579,12 +579,19 @@ export const HoverCard = z.object({
 });
 export type HoverCard = z.infer<typeof HoverCard>;
 
-/** A read-only email shown in the panel's `email-reader` view (used by 3.8 mail). */
+/** An email shown in the panel's `email-reader` view (used by 3.8 mail). */
 export const EmailMessage = z.object({
   subject: z.string().default("(no subject)"),
   from: z.string().nullish(),
   date: z.string().nullish(),
   body: z.string().default(""),
+  /** Owning module + id, so the reader can invoke this message's actions and re-fetch itself. */
+  module: z.string().default("mail"),
+  message_id: z.string().default(""),
+  /** Current read state — drives the status line and which toggle the reader shows. */
+  unread: z.boolean().default(false),
+  /** Tool-backed actions on this message (ADR-0024) — e.g. Mark as read / Mark as unread. */
+  actions: z.array(BoardAction).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
 

@@ -14,6 +14,14 @@ images to GHCR.
 
 ### Added
 
+- **The assistant knows the current time and your timezone** — the agent gained a built-in
+  `now` tool (its first non-module tool) so it stops guessing the date from its training
+  cutoff; combined with a new **Timezone** setting (Settings → Timezone, default `UTC`,
+  editable; env `DEFAULT_TIMEZONE`) it creates calendar events at the right local date and
+  time. `now` also surfaces the connected Google Calendar's timezone and flags a mismatch
+  with your setting. Previously, "add it at 19:00" could land on the wrong day at the wrong
+  hour. ADR-0039 (`core-app` → 0.21.0, `calendar` → 0.9.0 for the `/status` timezone,
+  `web` → 0.29.0 for the Settings card).
 - **Live model catalog — the core parses the model list from upstream on a schedule** — the
   Models screen's "Browse models" list used to be a hand-maintained static file
   (`services/web/src/data/catalog.ts`) that went stale and forced a web release for every new

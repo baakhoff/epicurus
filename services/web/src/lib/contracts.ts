@@ -26,6 +26,10 @@ export const LlmPrefs = z.object({
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
 
+/** The operator's IANA timezone (ADR-0039); used by the agent's `now` tool. */
+export const TimezonePrefs = z.object({ timezone: z.string() });
+export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
+
 /* ── system / GPU info (context-window suggestion) ────────────────────────── */
 
 /** A detected GPU. `vram_free_mb` is null when the vendor can't report it. */

@@ -151,6 +151,24 @@ export const MessageRecord = z.object({
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
+/** One remembered snippet in the Memory view — `score` is set only for search results. */
+export const MemoryItem = z.object({
+  id: z.number(),
+  session_id: z.string(),
+  role: z.string().default(""),
+  text: z.string(),
+  created_at: z.coerce.date().nullish(),
+  score: z.number().nullish(),
+});
+export type MemoryItem = z.infer<typeof MemoryItem>;
+
+/** A page of remembered snippets plus the full corpus size (so the UI can show the rest). */
+export const MemoryListing = z.object({
+  items: z.array(MemoryItem),
+  total: z.number(),
+});
+export type MemoryListing = z.infer<typeof MemoryListing>;
+
 export const AgentTurn = z.object({
   content: z.string(),
   tools_used: z.array(z.string()),

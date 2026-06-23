@@ -15,6 +15,7 @@ import {
   HoverCard,
   LlmPrefs,
   LogEntry,
+  MemoryListing,
   MessageRecord,
   ModelInfo,
   ModuleAttachmentItem,
@@ -128,6 +129,21 @@ export const api = {
     request(z.array(MessageRecord), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`),
   deleteSession: (id: string) =>
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // The cross-chat recall corpus — what the model remembers. No `q` = the corpus
+  // newest-first; with `q` = what recall surfaces for that query. `total` is the full size.
+  memory: (q?: string, limit?: number) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (limit != null) params.set("limit", String(limit));
+    const query = params.size ? `?${params}` : "";
+    return request(MemoryListing, `/platform/v1/agent/memory${query}`);
+  },
+  // Forget one remembered snippet so it stops being recalled (the conversation is kept).
+  forgetMemory: (id: number) =>
+    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${id}`, {
       method: "DELETE",
     }),
 

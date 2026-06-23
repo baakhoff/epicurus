@@ -18,6 +18,7 @@ from epicurus_core_app.agent import routes as agent_routes
 from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.llm.models import PowerState
+from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
 
 
@@ -151,3 +152,85 @@ async def test_readiness_endpoint_returns_a_snapshot() -> None:
     assert body["ready"] is True
     assert body["power"] == "idle"
     assert body["components"][0]["name"] == "model"
+
+
+# ── memory view routes ──────────────────────────────────────────────────────
+
+
+class _FakeMemory:
+    """Stands in for the memory facade — records what the memory routes asked of it."""
+
+    def __init__(self) -> None:
+        self.searched: list[str] = []
+        self.forgotten: list[int] = []
+
+    async def memories(self, *, tenant: str, limit: int = 100) -> tuple[list[MemoryItem], int]:
+        return [
+            MemoryItem(id=2, session_id="s1", role="assistant", text="hi there"),
+            MemoryItem(id=1, session_id="s1", role="user", text="hello"),
+        ], 2
+
+    async def search_memory(
+        self, *, tenant: str, query: str, limit: int = 20
+    ) -> tuple[list[MemoryItem], int]:
+        self.searched.append(query)
+        return [MemoryItem(id=1, session_id="s1", role="user", text="hello", score=0.9)], 2
+
+    async def forget_memory(self, *, tenant: str, point_id: int) -> int:
+        self.forgotten.append(point_id)
+        return 1
+
+
+def _memory_app(memory: object) -> FastAPI:
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            _FakeAgent(),  # type: ignore[arg-type]
+            memory,  # type: ignore[arg-type]
+            "local",
+            object(),  # attachment store — unused by the memory routes  # type: ignore[arg-type]
+        )
+    )
+    return app
+
+
+async def test_memory_list_returns_corpus_and_total() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert [item["id"] for item in body["items"]] == [2, 1]  # newest first
+    assert body["items"][0]["score"] is None  # corpus rows carry no score
+
+
+async def test_memory_search_trims_and_forwards_the_query() -> None:
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory", params={"q": "  apples "})
+    assert resp.status_code == 200
+    assert memory.searched == ["apples"]  # whitespace trimmed before search
+    assert resp.json()["items"][0]["score"] == 0.9
+
+
+async def test_memory_list_rejects_out_of_range_limit() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory", params={"limit": 0})
+    assert resp.status_code == 422  # limit has ge=1
+
+
+async def test_forget_memory_deletes_one_point() -> None:
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.delete("/platform/v1/agent/memory/7")
+    assert resp.status_code == 200
+    assert resp.json() == {"forgotten": 1}
+    assert memory.forgotten == [7]

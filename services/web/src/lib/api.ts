@@ -100,6 +100,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
+  // Agent loop bound (tool rounds per turn); null = the env default. The core clamps 1-12.
+  setAgentMaxSteps: (value: number | null) =>
+    request(
+      z.object({ status: z.string(), value: z.number().nullable() }),
+      "/platform/v1/llm/prefs/agent-max-steps",
+      { method: "PUT", body: JSON.stringify({ value }) },
+    ),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",

@@ -22,6 +22,7 @@ from epicurus_core_app.agent.activity import MessageActivity, ToolStep
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.readiness import Readiness
 
@@ -150,6 +151,7 @@ class Agent:
         max_steps: int = 4,
         default_tenant: str = "local",
         attachments: AttachmentExpander | None = None,
+        prefs: LlmPrefsStore | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
@@ -157,6 +159,19 @@ class Agent:
         self._max_steps = max_steps
         self._default_tenant = default_tenant
         self._attachments = attachments
+        self._prefs = prefs
+
+    async def _effective_max_steps(self, tenant_id: str | None) -> int:
+        """The active agent loop bound: the stored pref if set, else the env default.
+
+        Resolved per turn so the operator's UI choice takes effect without a restart
+        (the agent is constructed once). The route clamps the stored value's range.
+        """
+        if self._prefs is not None:
+            stored = await self._prefs.get_agent_max_steps(tenant_id or self._default_tenant)
+            if stored is not None:
+                return stored
+        return self._max_steps
 
     async def run(
         self,
@@ -194,6 +209,7 @@ class Agent:
         event rather than an exception (the HTTP response has already started).
         """
         tenant = tenant_id or self._default_tenant
+        max_steps = await self._effective_max_steps(tenant)
         messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         parts: list[str] = []
@@ -204,7 +220,7 @@ class Agent:
         stopped = "completed"
         try:
             specs, route = await self._mcp.discover()
-            for _ in range(self._max_steps):
+            for _ in range(max_steps):
                 result: ChatResult | None = None
                 async for event in self._gateway.stream_chat(
                     convo, model=model, tools=specs or None, tenant_id=tenant_id
@@ -355,6 +371,7 @@ class Agent:
     ) -> AgentTurn:
         """The tool-calling loop: ask, run tools, feed results back, until an answer."""
         specs, route = await self._mcp.discover()
+        max_steps = await self._effective_max_steps(tenant_id)
         convo = list(messages)
         tools_used: list[str] = []
         steps: list[ToolStep] = []
@@ -364,7 +381,7 @@ class Agent:
         def activity() -> MessageActivity:
             return MessageActivity(thinking="".join(thinking_parts)[:_THINKING_CAP], steps=steps)
 
-        for _ in range(self._max_steps):
+        for _ in range(max_steps):
             result = await self._gateway.chat(
                 convo, model=model, tools=specs or None, tenant_id=tenant_id
             )

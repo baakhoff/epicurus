@@ -257,3 +257,29 @@ async def test_prefs_context_window_no_store_returns_503() -> None:
     ) as client:
         resp = await client.put("/platform/v1/llm/prefs/context-window", json={"value": 8192})
     assert resp.status_code == 503
+
+
+async def test_agent_max_steps_route_clamps_and_round_trips() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        # Over the ceiling → clamped to 12.
+        put = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": 99})
+        assert put.status_code == 200
+        assert put.json()["value"] == 12
+        got = await client.get("/platform/v1/llm/prefs")
+    assert got.json()["global_agent_max_steps"] == 12
+
+
+async def test_agent_max_steps_floor_and_clear() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        floored = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": 0})
+        assert floored.json()["value"] == 1  # clamped up to the floor
+        cleared = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": None})
+        assert cleared.json()["value"] is None
+        got = await client.get("/platform/v1/llm/prefs")
+    assert got.json()["global_agent_max_steps"] is None

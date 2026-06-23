@@ -22,6 +22,8 @@ export const LlmPrefs = z.object({
   global_embed_default: z.string().nullable(),
   // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
   global_context_window: z.number().nullable(),
+  // Operator-chosen agent loop bound (tool rounds per turn); null = the env default.
+  global_agent_max_steps: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;

@@ -159,6 +159,9 @@ def create_app() -> FastAPI:
         max_steps=settings.agent_max_steps,
         default_tenant=settings.default_tenant_id,
         attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
+        # Resolve the loop bound per turn from the stored pref (else the env default), so the
+        # operator's UI choice takes effect without a restart (#297).
+        prefs=prefs,
     )
     oauth = OAuthService(
         secrets,

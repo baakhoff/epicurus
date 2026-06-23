@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core-app"
-version = "0.19.0"
+version = "0.23.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,9 @@ dependencies = [
     # Confirmed module removal (#127): the core stops/removes a module's own container via
     # the Docker socket through a tightly-scoped controller (ADR-0028).
     "docker>=7.0",
+    # IANA timezone database for zoneinfo (the `now` tool, ADR-0039) — so timezone lookups
+    # work on hosts without a system tz database (Windows dev, minimal images).
+    "tzdata>=2024.1",
 ]
 
 [build-system]

@@ -196,6 +196,30 @@ class GoogleTasksProvider:
             resp.raise_for_status()
             return self._parse_task(resp.json())
 
+    async def delete_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> None:
+        """Delete a task via the Google Tasks API.
+
+        Backs moving a task between lists (recreate in target + delete here — Google has
+        no cross-list move). A 404 is treated as already-gone, so a move whose source was
+        removed concurrently still succeeds; a 401 surfaces a reconnect hint.
+        """
+        tasklist = list_id or _DEFAULT_LIST
+        token = await self._access_token()
+        async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
+            resp = await client.delete(
+                f"/lists/{tasklist}/tasks/{task_id}",
+                headers=self._auth_headers(token),
+            )
+            if resp.status_code == 401:
+                raise GoogleTasksError(
+                    "Google token is invalid or revoked — reconnect via Settings"
+                )
+            if resp.status_code == 404:
+                return  # already gone — nothing to delete
+            resp.raise_for_status()
+
     async def get_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
     ) -> Task | None:
@@ -232,12 +256,14 @@ class GoogleTasksProvider:
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        to_list_id: str | None = None,  # ignored here; cross-list moves go through the router
     ) -> Task:
         """Edit a task's title/notes/due/status via a PATCH to the Google Tasks API.
 
         ``priority`` and ``tags`` are silently ignored. ``"in_progress"`` status is
         sent as ``"needsAction"`` and will read back as ``"open"``. With nothing
-        Google-mappable to change, GETs and returns the current task.
+        Google-mappable to change, GETs and returns the current task. ``to_list_id`` is
+        ignored — the router performs cross-list moves (recreate+delete, ADR-0038).
         """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()

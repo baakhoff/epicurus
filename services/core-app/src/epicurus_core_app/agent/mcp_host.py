@@ -17,6 +17,13 @@ from epicurus_core import get_logger
 
 log = get_logger("epicurus_core_app.agent.mcp")
 
+# Sentinel route for a core built-in tool — dispatched in-process by ``call`` rather than
+# over MCP to a module (ADR-0039).
+_BUILTIN_URL = "__builtin__"
+
+#: A built-in tool: its OpenAI function spec + an async handler ``(arguments) -> text``.
+BuiltinTool = tuple[dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]]
+
 
 def _text(content: list[Any]) -> str:
     """Join the text blocks of an MCP tool result."""
@@ -42,6 +49,19 @@ class McpHost:
         # across all enabled modules (#213). Tools in the set are skipped regardless of
         # whether their module URL is included.
         self._tool_filter: Callable[[], Awaitable[set[str]]] | None = None
+        # Core built-in tools (ADR-0039): name -> (spec, handler), offered alongside the
+        # modules' tools and dispatched in-process (no HTTP). Empty by default.
+        self._builtins: dict[str, BuiltinTool] = {}
+
+    def register_builtin(
+        self, name: str, spec: dict[str, Any], handler: Callable[[dict[str, Any]], Awaitable[str]]
+    ) -> None:
+        """Register a core built-in tool (ADR-0039).
+
+        A setter (like ``set_url_provider``) so wiring that needs the registry — e.g. the
+        ``now`` tool's calendar-timezone lookup — can be attached after construction.
+        """
+        self._builtins[name] = (spec, handler)
 
     def set_url_provider(self, provider: Callable[[], Awaitable[list[str]]]) -> None:
         """Wire the live enabled-modules URL source.
@@ -95,10 +115,20 @@ class McpHost:
                         route[tool.name] = url
             except Exception:
                 log.warning("mcp discovery failed", url=url, exc_info=True)
+        # Offer core built-in tools alongside the modules' (ADR-0039). They respect the same
+        # disabled-tools filter; a module tool of the same name would already own the route,
+        # so built-ins never shadow a module.
+        for name, (spec, _handler) in self._builtins.items():
+            if name in disabled or name in route:
+                continue
+            specs.append(spec)
+            route[name] = _BUILTIN_URL
         return specs, route
 
     async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
-        """Call ``name`` on the module at ``url`` and return its text result."""
+        """Call ``name`` on the module at ``url`` (or a core built-in) and return its text."""
+        if url == _BUILTIN_URL:
+            return await self._builtins[name][1](arguments)
         async with (
             streamablehttp_client(url) as (read, write, _),
             ClientSession(read, write) as session,

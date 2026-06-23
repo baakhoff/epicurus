@@ -21,9 +21,76 @@ images to GHCR.
   model's chain-of-thought is surfaced in a collapsible **Thinking** block — captured both
   from a provider's native reasoning field and from inline `<think>…</think>` spans (local
   reasoning models), and kept out of the answer. Adds a `thinking` SSE event and an additive
-  `activity` JSON column on `agent_messages` (ADR-0041). Note: collides with #267 / #276 on
-  the `core-app` 0.19.0 and `web` 0.25.0 bumps — rebase whichever merges later (`epicurus-core`
-  → 0.13.0, `core-app` → 0.19.0, `web` → 0.25.0).
+  `activity` JSON column on `agent_messages` (ADR-0041) (`epicurus-core` → 0.13.0,
+  `core-app` → 0.23.0, `web` → 0.31.0).
+- **Memory view — see and curate what epicurus remembers about you** — the cross-chat
+  semantic-recall corpus (every user/assistant turn is embedded into Qdrant and the most
+  similar past snippets are pulled into future chats as context) is now visible in a new
+  top-level **Memory** screen. Browse it newest-first, **search** to see exactly what recall
+  surfaces for a topic (the same ranking a chat turn gets), and **forget** any snippet so it
+  stops being recalled — forgetting drops the recall **vector only**, leaving the source
+  conversation intact. Backed by `GET /platform/v1/agent/memory?q=&limit=` and
+  `DELETE /platform/v1/agent/memory/{id}`; each snippet's role + timestamp are joined from
+  `agent_messages` by point id, so there's no change to the indexing path and it covers
+  existing memories (closes #276, ADR-0040) (`core-app` → 0.22.0, `web` → 0.30.0).
+- **The assistant knows the current time and your timezone** — the agent gained a built-in
+  `now` tool (its first non-module tool) so it stops guessing the date from its training
+  cutoff; combined with a new **Timezone** setting (Settings → Timezone, default `UTC`,
+  editable; env `DEFAULT_TIMEZONE`) it creates calendar events at the right local date and
+  time. `now` also surfaces the connected Google Calendar's timezone and flags a mismatch
+  with your setting. Previously, "add it at 19:00" could land on the wrong day at the wrong
+  hour. ADR-0039 (`core-app` → 0.21.0, `calendar` → 0.9.0 for the `/status` timezone,
+  `web` → 0.29.0 for the Settings card).
+- **Live model catalog — the core parses the model list from upstream on a schedule** — the
+  Models screen's "Browse models" list used to be a hand-maintained static file
+  (`services/web/src/data/catalog.ts`) that went stale and forced a web release for every new
+  model. The core now owns it (constraint #8): a new `ModelCatalog` fetches a configurable
+  source (`https://ollama.com/library` by default), parses each model's sizes, description,
+  capabilities (→ tags) and popularity, caches the result, and refreshes it **regularly** on a
+  background loop. New endpoint `GET /platform/v1/llm/catalog` → `{ entries, source, updated_at,
+  stale }`; the web shell fetches it (keeping `filterCatalog` unchanged) and shows provenance
+  ("From ollama.com/library · updated 3m ago"). Resilient: a failed/disabled refresh serves the
+  last-good snapshot, and a small built-in **seed** when nothing has been fetched yet (cold or
+  air-gapped), so the browser is never empty — the bundled list is the offline fallback. New
+  knobs: `LLM_CATALOG_URL`, `LLM_CATALOG_REFRESH_SECONDS` (default 6h), `LLM_CATALOG_MAX_MODELS`
+  (0 = unlimited), `LLM_CATALOG_ENABLED` (closes #269) (`core-app` → 0.20.0, `web` → 0.28.0).
+- **Mail: mark messages read / unread** — mail is no longer read-only. Two new MCP tools
+  (`mail_mark_read` / `mail_mark_unread`) let the agent flip a message's read state on request
+  ("mark my newsletter as read"), and the right-panel email reader gains a **Mark as read /
+  Mark as unread** toggle (a tool-backed action, ADR-0024) that invokes the tool through the core
+  proxy and re-fetches so the toggle flips. The provider seam gains `set_unread(message_id,
+  unread)`; the Gmail provider implements it via `messages.modify` on the `UNREAD` label, which
+  needs the **`gmail.modify`** scope — it **replaces** `gmail.readonly` (which it supersets), so
+  **an operator who connected Google before this change must reconnect once** (Settings → Connect)
+  to grant it; until then the mark tools return a reconnect hint rather than a 500. No core-app
+  change — the core's `/messages` and `/tools` proxies are generic pass-throughs (closes #277)
+  (`mail` → 0.7.0, `web` → 0.27.0).
+- **The chat composer keeps your unsent draft when you leave the page** — the message you're
+  typing now lives in the chat store rather than the screen's local state, so switching to
+  Models / Modules / a module page and back (which unmounts the chat screen) no longer discards
+  it. The draft is restored with its auto-grown height intact and is cleared only when the
+  message is actually sent. It persists for the app session (not across a full reload) (#278)
+  (`web` → 0.26.0).
+- **Context-window management (hardware-aware, UI-settable)** — the local runtime's context
+  window (Ollama `num_ctx`) is now a persisted, per-tenant preference set from a new **Context
+  window** card on the Models screen, instead of an env-var-only knob. This fixes empty replies:
+  the agent's system prompt (instructions + every module's tool schemas + recalled memory) is
+  sizeable, and at the default 4096-token context it filled the window with no room left to
+  generate. The card probes the host — `GET /platform/v1/system/info` reports the GPU
+  (multi-vendor: NVIDIA via `nvidia-smi`, AMD via `rocm-smi`/`/sys`, Intel via `/sys`, all
+  best-effort and graceful) or, with no GPU, system RAM, plus the active model's on-disk size —
+  and offers a **suggested range** from a documented, conservative KV-cache-per-token estimate
+  (explicitly labelled an estimate, not a measured maximum). A number input + slider bound to the
+  pref and a **Use suggested** button apply it; the gateway resolves the value **per turn**
+  (`effective_context_window`: the pref if set, else the env default), local models only, stored
+  alongside the existing defaults via the same additive `_ensure_columns` migration. The optional
+  NVIDIA GPU overlay (`infra/ollama/gpu.yaml`) now also reserves the GPU for `core-app` so the
+  probe can read VRAM (AMD/Intel need their own `/dev/dri` + `/dev/kfd` mounts — out of scope;
+  detection degrades to system RAM without them). The chat model picker now also drives the
+  warming/readiness bar for the model the turn will actually run on (not the global default), and
+  the Models screen drops the confusing duplicate `chatting` badge — the persisted **default** is
+  shown there, while the per-session override lives only in the chat picker (`core-app` → 0.19.0,
+  `web` → 0.25.0).
 - **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
   (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
   a 128K–256K context window. They show up in the Models screen and pull like any other entry
@@ -209,6 +276,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
+  (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
+  So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,
+  its overflow escaped to `<body>` and a wheel event anywhere over the rail dragged the entire
+  UI — most visible on the Models screen. The shell now sets `overflow-hidden` (every region
+  already owns its scroll) and the rail scrolls its own links; the rail also gained an
+  accessible name (`aria-label="Primary"`) (`web` → 0.25.1).
 - **The UI "Embedding model" choice now actually drives memory embedding** — core memory
   recall hard-coded `settings.memory_embed_model` and ignored the operator's `embed_default`
   pref, so picking an embedding model in the UI had no effect and recall 404'd if the env

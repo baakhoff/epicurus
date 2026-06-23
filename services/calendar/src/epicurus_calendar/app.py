@@ -105,15 +105,20 @@ def create_app() -> FastAPI:
     async def get_status() -> dict[str, Any]:
         """Live status for the manifest-driven UI status panel.
 
-        Reports whether Google is connected (best-effort) and how many events the local
-        default store holds; the operator's chosen calendars are shown in the
-        connected-accounts section rather than here (ADR-0030).
+        Reports whether Google is connected (best-effort), the Google Calendar timezone
+        (when connected — the core's ``now`` tool reads it to flag a mismatch, ADR-0039),
+        and how many events the local default store holds; the operator's chosen calendars
+        are shown in the connected-accounts section rather than here (ADR-0030).
         """
+        tenant = settings.default_tenant_id
+        connected = await external["google"].is_available(tenant_id=tenant)
+        google_timezone = (
+            await external["google"].get_timezone(tenant_id=tenant) if connected else None
+        )
         return {
-            "google_connected": await external["google"].is_available(
-                tenant_id=settings.default_tenant_id
-            ),
-            "local_events": await store.count(tenant=settings.default_tenant_id),
+            "google_connected": connected,
+            "google_timezone": google_timezone,
+            "local_events": await store.count(tenant=tenant),
         }
 
     @app.get("/accounts")

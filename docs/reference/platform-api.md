@@ -120,6 +120,12 @@ model.  (The gateway's former `POST /platform/v1/llm/chat` was removed in
 | --- | --- |
 | 503 | Gateway is paused with no hosted fallback available. |
 
+## `GET /platform/v1/timezone` · `PUT /platform/v1/timezone`
+
+The operator's IANA timezone, used by the agent's built-in `now` tool (ADR-0039). `GET`
+returns `{timezone}` (the stored value, else `DEFAULT_TIMEZONE`). `PUT {timezone}` validates
+it as a real IANA zone (**400** otherwise) and persists it; edited in the web Settings screen.
+
 ---
 
 ## `PlatformClient`

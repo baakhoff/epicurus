@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   AccountsView,
   AttachmentUploaded,
+  CatalogResponse,
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
@@ -14,6 +15,7 @@ import {
   HoverCard,
   LlmPrefs,
   LogEntry,
+  MemoryListing,
   MessageRecord,
   ModelInfo,
   ModuleAttachmentItem,
@@ -26,6 +28,8 @@ import {
   ProviderInfo,
   Readiness,
   SessionSummary,
+  SystemInfo,
+  TimezonePrefs,
   type PowerState,
 } from "@/lib/contracts";
 import { parseFrame } from "@/lib/sse";
@@ -73,6 +77,8 @@ export const api = {
     }),
 
   models: () => request(z.array(ModelInfo), "/platform/v1/llm/models"),
+  // The browsable model catalog the core parses from upstream on a schedule (#269).
+  catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>
     request(z.object({ status: z.string() }), `/platform/v1/llm/models?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
@@ -89,10 +95,22 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  setContextWindow: (value: number | null) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",
       body: JSON.stringify({ name, hidden }),
+    }),
+
+  timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
+  setTimezone: (timezone: string) =>
+    request(z.object({ status: z.string(), timezone: z.string() }), "/platform/v1/timezone", {
+      method: "PUT",
+      body: JSON.stringify({ timezone }),
     }),
 
   providers: () => request(z.array(ProviderInfo), "/platform/v1/llm/providers"),
@@ -111,6 +129,21 @@ export const api = {
     request(z.array(MessageRecord), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`),
   deleteSession: (id: string) =>
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // The cross-chat recall corpus — what the model remembers. No `q` = the corpus
+  // newest-first; with `q` = what recall surfaces for that query. `total` is the full size.
+  memory: (q?: string, limit?: number) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (limit != null) params.set("limit", String(limit));
+    const query = params.size ? `?${params}` : "";
+    return request(MemoryListing, `/platform/v1/agent/memory${query}`);
+  },
+  // Forget one remembered snippet so it stops being recalled (the conversation is kept).
+  forgetMemory: (id: number) =>
+    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${id}`, {
       method: "DELETE",
     }),
 
@@ -285,6 +318,9 @@ export const api = {
   },
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
+
+  // Host system + GPU snapshot backing the Models page's context-window suggestion.
+  systemInfo: () => request(SystemInfo, "/platform/v1/system/info"),
 
   readiness: (model?: string) => {
     const q = model ? `?model=${encodeURIComponent(model)}` : "";

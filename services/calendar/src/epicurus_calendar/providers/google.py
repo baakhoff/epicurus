@@ -49,6 +49,24 @@ class GoogleCalendarProvider(CalendarProvider):
         token = await self._platform.get_oauth_token("google")
         return {"Authorization": f"Bearer {token}"}
 
+    async def get_timezone(self, *, tenant_id: str) -> str | None:
+        """The user's Google Calendar timezone (IANA), or ``None`` best-effort (ADR-0039).
+
+        Reads ``GET /users/me/settings/timezone``; any failure (not connected, API error)
+        returns ``None`` so callers degrade rather than break.
+        """
+        try:
+            headers = await self._auth_headers()
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(
+                    f"{_CALENDAR_API}/users/me/settings/timezone", headers=headers
+                )
+                resp.raise_for_status()
+            value = resp.json().get("value")
+            return value if isinstance(value, str) else None
+        except Exception:
+            return None
+
     async def list_events(
         self,
         *,

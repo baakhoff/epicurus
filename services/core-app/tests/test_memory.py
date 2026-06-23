@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.memory.recall import RecallHit, RecallPoint
+from epicurus_core_app.memory.store import MessageMeta
+
+_BASE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _FakeStore:
@@ -14,6 +19,7 @@ class _FakeStore:
         self.last_refs: list[dict[str, Any]] | None = None
         self.last_attachments: list[dict[str, Any]] | None = None
         self.last_activity: dict[str, Any] | None = None
+        self.meta: dict[int, tuple[str, MessageMeta]] = {}  # id -> (tenant, meta)
 
     async def append(
         self,
@@ -31,10 +37,17 @@ class _FakeStore:
         self.last_attachments = attachments
         self.last_activity = activity
         self._next_id += 1
+        self.meta[self._next_id] = (
+            tenant,
+            MessageMeta(role=role, created_at=_BASE_TIME + timedelta(seconds=self._next_id)),
+        )
         return self._next_id
 
     async def history(self, *, tenant: str, session_id: str) -> list[tuple[str, str]]:
         return [(r, c) for (t, s, r, c) in self.rows if t == tenant and s == session_id]
+
+    async def metadata_for(self, *, tenant: str, ids: list[int]) -> dict[int, MessageMeta]:
+        return {i: meta for i, (t, meta) in self.meta.items() if t == tenant and i in ids}
 
 
 class _FakeRecall:
@@ -44,8 +57,35 @@ class _FakeRecall:
     async def index(self, *, tenant: str, session_id: str, text: str, point_id: int) -> None:
         self.indexed.append((tenant, session_id, point_id, text))
 
+    def _for(self, tenant: str) -> list[tuple[str, str, int, str]]:
+        return [row for row in self.indexed if row[0] == tenant]
+
     async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
         return [text for (t, _s, _pid, text) in self.indexed if t == tenant][:limit]
+
+    async def count(self, *, tenant: str) -> int:
+        return len(self._for(tenant))
+
+    async def list_points(
+        self, *, tenant: str, limit: int = 100, cap: int = 1000
+    ) -> list[RecallPoint]:
+        points = [
+            RecallPoint(id=pid, session_id=s, text=text) for (_t, s, pid, text) in self._for(tenant)
+        ]
+        points.sort(key=lambda p: p.id, reverse=True)
+        return points[:limit]
+
+    async def search(self, *, tenant: str, query: str, limit: int = 20) -> list[RecallHit]:
+        rows = self._for(tenant)[:limit]
+        return [
+            RecallHit(id=pid, session_id=s, text=text, score=1.0 - i * 0.1)
+            for i, (_t, s, pid, text) in enumerate(rows)
+        ]
+
+    async def forget_point(self, *, tenant: str, point_id: int) -> int:
+        before = len(self.indexed)
+        self.indexed = [r for r in self.indexed if not (r[0] == tenant and r[2] == point_id)]
+        return before - len(self.indexed)
 
 
 async def test_remember_persists_and_indexes_user_and_assistant() -> None:
@@ -125,3 +165,59 @@ async def test_remember_passes_activity_to_the_store() -> None:
         tenant="t", session_id="s", role="assistant", content="done", activity=activity
     )
     assert store.last_activity == activity
+
+
+async def test_memories_returns_corpus_newest_first_with_role_and_time() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    await memory.remember(tenant="t1", session_id="s1", role="user", content="hello")
+    await memory.remember(tenant="t1", session_id="s1", role="assistant", content="hi there")
+    items, total = await memory.memories(tenant="t1")
+    assert total == 2
+    assert [i.id for i in items] == [2, 1]  # newest first
+    assert (items[0].role, items[0].text) == ("assistant", "hi there")
+    assert items[0].created_at is not None
+    assert all(i.score is None for i in items)  # corpus rows carry no match score
+
+
+async def test_memories_is_tenant_scoped() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    await memory.remember(tenant="t1", session_id="s1", role="user", content="mine")
+    await memory.remember(tenant="t2", session_id="s1", role="user", content="theirs")
+    items, total = await memory.memories(tenant="t1")
+    assert total == 1
+    assert [i.text for i in items] == ["mine"]
+
+
+async def test_search_memory_sets_score_and_enriches_from_store() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    await memory.remember(tenant="t1", session_id="s1", role="user", content="alpha")
+    items, total = await memory.search_memory(tenant="t1", query="alpha")
+    assert total == 1
+    assert items[0].text == "alpha"
+    assert items[0].role == "user"
+    assert items[0].score is not None
+
+
+async def test_memories_degrade_gracefully_when_store_row_is_gone() -> None:
+    # A recall vector whose source message no longer exists → no role/time, still listed.
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    await recall.index(tenant="t1", session_id="s1", text="orphan", point_id=99)
+    items, total = await memory.memories(tenant="t1")
+    assert total == 1
+    assert items[0].text == "orphan"
+    assert items[0].role == ""
+    assert items[0].created_at is None
+
+
+async def test_forget_memory_drops_the_snippet_from_recall() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    await memory.remember(tenant="t1", session_id="s1", role="user", content="x")
+    assert await memory.forget_memory(tenant="t1", point_id=1) == 1
+    items, total = await memory.memories(tenant="t1")
+    assert total == 0
+    assert items == []

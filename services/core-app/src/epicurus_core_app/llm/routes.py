@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.models import ModelInfo, PowerState, ProviderInfo
 from epicurus_core_app.llm.power import PowerController
@@ -44,6 +45,8 @@ class LlmPrefsResponse(BaseModel):
 
     global_default: str | None
     global_embed_default: str | None
+    # Operator-chosen Ollama context window (num_ctx); NULL means the env/runtime default.
+    global_context_window: int | None
     hidden: list[str]
 
 
@@ -59,6 +62,12 @@ class SetEmbedDefaultRequest(BaseModel):
     model: str | None
 
 
+class SetContextWindowRequest(BaseModel):
+    """Body for PUT /llm/prefs/context-window."""
+
+    value: int | None
+
+
 class SetHiddenRequest(BaseModel):
     """Body for PUT /llm/prefs/hidden — toggle one model's hidden state."""
 
@@ -70,8 +79,10 @@ def create_llm_router(
     gateway: LlmGateway,
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
+    catalog: ModelCatalog | None = None,
 ) -> APIRouter:
-    """Gateway management routes — model catalog, providers, pulls, and prefs.
+    """Gateway management routes — installed models, the browse catalog, providers,
+    pulls, and prefs.
 
     Chat completions go through the single module-facing path
     ``POST /platform/v1/chat`` (ADR-0021); the gateway no longer exposes its own
@@ -82,6 +93,18 @@ def create_llm_router(
     @router.get("/models", response_model=list[ModelInfo])
     async def list_models() -> list[ModelInfo]:
         return await gateway.models()
+
+    @router.get("/catalog", response_model=CatalogResponse)
+    async def get_catalog() -> CatalogResponse:
+        """The browsable model catalog the core parses from upstream (#269).
+
+        Returns the cached snapshot (entries + provenance); ``stale`` flags a seed /
+        last-good list served after a failed or skipped refresh. An empty list with
+        ``stale=True`` means the catalog isn't wired (it should always be in the app).
+        """
+        if catalog is None:
+            return CatalogResponse(entries=[], source="", updated_at=None, stale=True)
+        return await catalog.snapshot()
 
     @router.delete("/models")
     async def delete_model(name: str) -> dict[str, str]:
@@ -141,13 +164,20 @@ def create_llm_router(
     async def get_prefs() -> LlmPrefsResponse:
         """Return the tenant's stored global defaults and hidden-model list."""
         if prefs is None:
-            return LlmPrefsResponse(global_default=None, global_embed_default=None, hidden=[])
+            return LlmPrefsResponse(
+                global_default=None,
+                global_embed_default=None,
+                global_context_window=None,
+                hidden=[],
+            )
         stored_default = await prefs.get_default(default_tenant)
         stored_embed_default = await prefs.get_embed_default(default_tenant)
+        stored_context_window = await prefs.get_context_window(default_tenant)
         hidden = await prefs.get_hidden(default_tenant)
         return LlmPrefsResponse(
             global_default=stored_default,
             global_embed_default=stored_embed_default,
+            global_context_window=stored_context_window,
             hidden=hidden,
         )
 
@@ -166,6 +196,14 @@ def create_llm_router(
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_embed_default(default_tenant, request.model)
         return {"status": "ok", "model": request.model}
+
+    @router.put("/prefs/context-window")
+    async def set_context_window(request: SetContextWindowRequest) -> dict[str, int | None | str]:
+        """Set or clear the Ollama context window (num_ctx) for this tenant."""
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        await prefs.set_context_window(default_tenant, request.value)
+        return {"status": "ok", "value": request.value}
 
     @router.put("/prefs/hidden")
     async def set_hidden(request: SetHiddenRequest) -> dict[str, object]:

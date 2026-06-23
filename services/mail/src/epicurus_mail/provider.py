@@ -44,6 +44,14 @@ class MailProvider(ABC):
         """Send a message and return the sent message ID."""
 
     @abstractmethod
+    async def set_unread(self, message_id: str, unread: bool) -> None:
+        """Set a message's read state: ``unread=False`` marks it read, ``True`` unread.
+
+        Provider-agnostic counterpart to the ``unread`` flag on :class:`MailMessage`.
+        Idempotent — setting the state a message is already in is a no-op.
+        """
+
+    @abstractmethod
     async def health_check(self) -> bool:
         """Return True when the provider is reachable and the account is connected.
 

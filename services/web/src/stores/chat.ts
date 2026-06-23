@@ -20,6 +20,9 @@ export type ChatSegment =
 
 interface ChatState {
   sessionId: string;
+  /** Unsent composer text. Lives here (not in the screen) so it survives leaving
+   *  and returning to the chat page; cleared on send. */
+  draft: string;
   /** The user message currently being answered (optimistic echo). */
   pendingUser: string | null;
   /** The assistant turn under construction, in order. */
@@ -35,6 +38,7 @@ interface ChatState {
   paused: boolean;
   abort: AbortController | null;
 
+  setDraft: (text: string) => void;
   newSession: () => void;
   openSession: (id: string) => void;
   /** `onDone` must complete the server-history refetch — the live turn is
@@ -55,6 +59,7 @@ function freshId(): string {
 
 export const useChat = create<ChatState>()((set, get) => ({
   sessionId: freshId(),
+  draft: "",
   pendingUser: null,
   segments: [],
   thinking: "",
@@ -63,6 +68,8 @@ export const useChat = create<ChatState>()((set, get) => ({
   error: null,
   paused: false,
   abort: null,
+
+  setDraft: (text) => set({ draft: text }),
 
   newSession: () => {
     get().abort?.abort();
@@ -98,6 +105,7 @@ export const useChat = create<ChatState>()((set, get) => ({
     if (get().streaming) return;
     const abort = new AbortController();
     set({
+      draft: "",
       pendingUser: text,
       segments: [],
       thinking: "",

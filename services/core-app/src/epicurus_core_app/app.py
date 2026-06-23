@@ -12,8 +12,9 @@ own MCP tool server (ADR-0004 / ADR-0009).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
@@ -26,9 +27,11 @@ from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_loggi
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
+from epicurus_core_app.agent.builtins import NOW_SPEC, make_now_handler
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -45,6 +48,9 @@ from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.settings import CoreAppSettings
+from epicurus_core_app.system_info import create_system_router
+from epicurus_core_app.timezone_prefs import TimezonePrefsStore
+from epicurus_core_app.timezone_routes import create_timezone_router
 
 SERVICE_NAME = "core-app"
 
@@ -87,6 +93,13 @@ def create_app() -> FastAPI:
         prefs=prefs,
     )
 
+    catalog = ModelCatalog(
+        source_url=settings.llm_catalog_url,
+        refresh_seconds=settings.llm_catalog_refresh_seconds,
+        max_models=settings.llm_catalog_max_models,
+        enabled=settings.llm_catalog_enabled,
+    )
+
     async def embed(texts: list[str]) -> list[list[float]]:
         # No explicit model → the gateway resolves the operator's Embedding-model pref
         # (effective_embed_default), falling back to settings.memory_embed_model. This is
@@ -101,6 +114,7 @@ def create_app() -> FastAPI:
         else None
     )
     module_prefs = ModulePrefsStore(engine)
+    timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
     mcp_host = McpHost(settings.module_mcp_urls)
     registry = ModuleRegistry(
         settings.module_base_urls,
@@ -118,6 +132,26 @@ def create_app() -> FastAPI:
     # Per-tool disable filter (#213): tools the operator has individually turned off are
     # skipped in discover even when their module's URL is included.
     mcp_host.set_tool_filter(registry.disabled_tools_set)
+
+    # Core `now` built-in tool (ADR-0039): reports the operator's configured timezone, and
+    # best-effort the connected calendar's timezone when it differs. Registered after the
+    # registry exists (the calendar lookup proxies the calendar module's /status).
+    async def _calendar_timezone() -> str | None:
+        try:
+            status = await registry.get_status("calendar")
+        except Exception:  # calendar absent / unreachable / not connected — never break `now`
+            return None
+        tz = status.get("google_timezone")
+        return tz if isinstance(tz, str) else None
+
+    mcp_host.register_builtin(
+        "now",
+        NOW_SPEC,
+        make_now_handler(
+            lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+            _calendar_timezone,
+        ),
+    )
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -150,6 +184,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("module prefs init failed; enable/disable unavailable", error=str(exc))
         try:
+            await timezone_prefs.init()
+        except Exception as exc:
+            log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
+        try:
             await registry.reconcile_tombstones()
         except Exception as exc:  # best-effort — a Docker hiccup must never block startup
             log.error("tombstone reconcile failed", error=str(exc))
@@ -157,10 +195,16 @@ def create_app() -> FastAPI:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades
             log.error("memory init failed; cross-chat memory disabled", error=str(exc))
+        # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
+        # startup never blocks on the network; the task self-heals on transient failures.
+        catalog_task = asyncio.create_task(catalog.run_periodic())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
         finally:
+            catalog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await catalog_task
             await bus.close()
             await engine.dispose()
             await qdrant.close()
@@ -176,7 +220,12 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(
-        create_llm_router(gateway, prefs=prefs, default_tenant=settings.default_tenant_id)
+        create_llm_router(
+            gateway, prefs=prefs, default_tenant=settings.default_tenant_id, catalog=catalog
+        )
+    )
+    app.include_router(
+        create_timezone_router(timezone_prefs, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(
@@ -192,6 +241,7 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(create_readiness_router(readiness))
+    app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
     app.include_router(
         create_oauth_router(

@@ -385,11 +385,22 @@ export function ChatScreen() {
   const queryClient = useQueryClient();
   const chat = useChat();
   const model = usePrefs((s) => s.model);
-  const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
+
+  // The composer text lives in the chat store so it survives leaving and returning
+  // to the page. The textarea's auto-grown height is set imperatively on keystroke,
+  // so restore it on mount when we come back to a saved (possibly multi-line) draft.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (el) {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
+    }
+  }, []);
 
   const history = useQuery({
     queryKey: ["session", chat.sessionId],
@@ -421,11 +432,10 @@ export function ChatScreen() {
   }, [chat.segments, chat.pendingUser, history.data]);
 
   const send = () => {
-    const text = draft.trim();
+    const text = chat.draft.trim();
     if (!text || chat.streaming) return;
     const sent = attachments;
-    setDraft("");
-    setAttachments([]);
+    setAttachments([]); // chat.send clears the draft itself
     pinnedRef.current = true;
     void chat.send(
       text,
@@ -553,10 +563,11 @@ export function ChatScreen() {
         <div className="mx-auto flex max-w-2xl items-end gap-2">
           <AttachButton onAttach={(a) => setAttachments((prev) => [...prev, a])} />
           <TextArea
+            ref={composerRef}
             rows={1}
-            value={draft}
+            value={chat.draft}
             onChange={(e) => {
-              setDraft(e.target.value);
+              chat.setDraft(e.target.value);
               e.target.style.height = "auto";
               e.target.style.height = `${Math.min(e.target.scrollHeight, 144)}px`;
             }}
@@ -579,7 +590,7 @@ export function ChatScreen() {
               variant="primary"
               aria-label="Send"
               onClick={send}
-              disabled={!draft.trim()}
+              disabled={!chat.draft.trim()}
               className="h-[42px]"
             >
               <SendHorizonal size={16} />

@@ -20,9 +20,50 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),
+  // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
+  global_context_window: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
+
+/** The operator's IANA timezone (ADR-0039); used by the agent's `now` tool. */
+export const TimezonePrefs = z.object({ timezone: z.string() });
+export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
+
+/* ── system / GPU info (context-window suggestion) ────────────────────────── */
+
+/** A detected GPU. `vram_free_mb` is null when the vendor can't report it. */
+export const GpuInfo = z.object({
+  vendor: z.string(),
+  name: z.string(),
+  vram_total_mb: z.number(),
+  vram_free_mb: z.number().nullish(),
+});
+export type GpuInfo = z.infer<typeof GpuInfo>;
+
+/** The currently-effective chat model and its on-disk size. */
+export const ModelSize = z.object({
+  name: z.string(),
+  size_mb: z.number().nullish(),
+});
+export type ModelSize = z.infer<typeof ModelSize>;
+
+/** A suggested context-window range (an estimate, not a hard maximum). */
+export const SuggestedContext = z.object({
+  min: z.number(),
+  suggested: z.number(),
+  max: z.number(),
+});
+export type SuggestedContext = z.infer<typeof SuggestedContext>;
+
+/** Host system + GPU snapshot backing the context-window suggestion. */
+export const SystemInfo = z.object({
+  gpu: GpuInfo.nullish(),
+  ram_total_mb: z.number().nullish(),
+  model: ModelSize.nullish(),
+  suggested_context: SuggestedContext.nullish(),
+});
+export type SystemInfo = z.infer<typeof SystemInfo>;
 
 export const ProviderInfo = z.object({
   alias: z.string(),
@@ -31,6 +72,30 @@ export const ProviderInfo = z.object({
   needs_base_url: z.boolean().default(false),
 });
 export type ProviderInfo = z.infer<typeof ProviderInfo>;
+
+// One browsable, pullable model in the catalog the core parses from upstream (#269).
+// `tags` stays a loose string array (not an enum) so a new upstream capability never
+// fails the whole response; the UI just ignores tags it has no chip for.
+export const CatalogEntry = z.object({
+  id: z.string(),
+  family: z.string(),
+  params: z.string().default(""),
+  size_gb: z.number().nullish(),
+  description: z.string().default(""),
+  tags: z.array(z.string()).default([]),
+  pulls: z.string().nullish(),
+});
+export type CatalogEntry = z.infer<typeof CatalogEntry>;
+
+// The catalog snapshot from GET /platform/v1/llm/catalog. `stale` flags a seed /
+// last-good list served after a failed or skipped upstream refresh.
+export const CatalogResponse = z.object({
+  entries: z.array(CatalogEntry),
+  source: z.string(),
+  updated_at: z.coerce.date().nullable(),
+  stale: z.boolean().default(false),
+});
+export type CatalogResponse = z.infer<typeof CatalogResponse>;
 
 export const SessionSummary = z.object({
   id: z.string(),
@@ -105,6 +170,24 @@ export const MessageRecord = z.object({
   activity: MessageActivity.nullish(),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
+
+/** One remembered snippet in the Memory view — `score` is set only for search results. */
+export const MemoryItem = z.object({
+  id: z.number(),
+  session_id: z.string(),
+  role: z.string().default(""),
+  text: z.string(),
+  created_at: z.coerce.date().nullish(),
+  score: z.number().nullish(),
+});
+export type MemoryItem = z.infer<typeof MemoryItem>;
+
+/** A page of remembered snippets plus the full corpus size (so the UI can show the rest). */
+export const MemoryListing = z.object({
+  items: z.array(MemoryItem),
+  total: z.number(),
+});
+export type MemoryListing = z.infer<typeof MemoryListing>;
 
 export const AgentTurn = z.object({
   content: z.string(),
@@ -563,12 +646,19 @@ export const HoverCard = z.object({
 });
 export type HoverCard = z.infer<typeof HoverCard>;
 
-/** A read-only email shown in the panel's `email-reader` view (used by 3.8 mail). */
+/** An email shown in the panel's `email-reader` view (used by 3.8 mail). */
 export const EmailMessage = z.object({
   subject: z.string().default("(no subject)"),
   from: z.string().nullish(),
   date: z.string().nullish(),
   body: z.string().default(""),
+  /** Owning module + id, so the reader can invoke this message's actions and re-fetch itself. */
+  module: z.string().default("mail"),
+  message_id: z.string().default(""),
+  /** Current read state — drives the status line and which toggle the reader shows. */
+  unread: z.boolean().default(false),
+  /** Tool-backed actions on this message (ADR-0024) — e.g. Mark as read / Mark as unread. */
+  actions: z.array(BoardAction).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
 

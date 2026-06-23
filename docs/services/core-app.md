@@ -42,9 +42,29 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
+| `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat recall corpus — what the model remembers and pulls into future chats. No `q`: the corpus newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` carries role + timestamp (joined from `agent_messages`) and, for a search, a match `score`. `limit` is bounded 1–500 (default 100). Backs the **Memory** screen (ADR-0040). |
+| `DELETE /platform/v1/agent/memory/{point_id}` | Forget one remembered snippet so it stops being recalled. Drops the recall **vector only** — the source message stays in its conversation. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
+
+### Built-in agent tools (ADR-0039)
+
+Besides the modules' MCP tools, the core offers **built-in tools** the agent can call,
+dispatched in-process (no module round-trip). They're registered on the `McpHost`
+(`register_builtin`) and routed via a `"__builtin__"` sentinel; they respect the same
+per-tool disable filter as module tools.
+
+- **`now(timezone?)`** — the current date/time. The agent has no inherent clock, so it
+  calls this for anything date/time-relative ("tomorrow", "at 19:00"). Returns the time
+  in the operator's configured timezone (or the `timezone` argument) plus UTC and the
+  weekday; when a connected calendar uses a *different* timezone, that is reported with a
+  note so events land in the intended zone. The configured timezone is read from:
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`). |
+| `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise). Edited in the web **Settings → Timezone** card. |
 
 ### LLM gateway (ADR-0010)
 
@@ -56,6 +76,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/llm/models` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). |
+| `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
@@ -63,6 +84,24 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
+
+#### Model catalog (#269)
+
+The model browser's "Browse models" list is parsed by the core, not hand-maintained in
+the web build. A `ModelCatalog` (`llm/catalog.py`) fetches a configurable source
+(`LLM_CATALOG_URL`, the public Ollama library by default), parses each model's sizes,
+description, capabilities (→ the browser's tag vocabulary) and popularity into
+`CatalogEntry` rows (one per pullable size), caches the snapshot, and **refreshes it on a
+background loop** (`LLM_CATALOG_REFRESH_SECONDS`, default 6h). `GET …/llm/catalog` returns
+the cached snapshot — it never blocks on the network.
+
+It degrades gracefully: a failed or empty parse keeps the last-good snapshot and flags it
+`stale`; before any successful fetch (cold start, or an air-gapped build with
+`LLM_CATALOG_ENABLED=false`) it serves a small built-in **seed**, so the browser is never
+empty. The catalog is **global, not tenant-scoped** — it mirrors a public registry, holds
+no tenant data, and is identical for every tenant (like the provider registry). The web
+shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
+older core).
 
 ### Power (ADR-0005)
 
@@ -133,6 +172,7 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
+| `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 
 Provider keys are **not** configured here — they go through the UI into OpenBao.
 
@@ -153,8 +193,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   account/collection selection (`{enabled, active}` JSON, ADR-0030). A module with no row
   defaults to enabled, not-removed, core-default models, all tools on, and the local default
   collection. Post-release columns are added in place at startup (no migration framework).
+- **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
+  `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
-  (768-dim, cosine), one collection per tenant.
+  (768-dim, cosine), one collection per tenant. Each point's id **is** the source
+  `agent_messages.id`, and its payload carries `{session_id, text}`. The **Memory** view
+  (ADR-0040) lists and searches this collection and joins the ids back to `agent_messages`
+  for each snippet's role + timestamp; forgetting one memory deletes its vector here and
+  leaves the message row intact.
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
 answers — just without memory — and never blocks core startup.

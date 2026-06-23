@@ -167,3 +167,33 @@ def test_add_action_has_no_list_selector_when_no_lists() -> None:
     add = board["actions"][0]
     assert "list_id" not in add["fields"]
     assert "field_choices" not in add
+
+
+def test_edit_action_has_move_picker_when_multiple_lists() -> None:
+    # With ≥2 lists each task's Edit form gains a List picker to move it (ADR-0038).
+    task = _task("t1", "Movable", due=TODAY, list_id="work", list_title="Work")
+    board = build_tasks_board(
+        [task],
+        today=TODAY,
+        lists=[("@default", "My Tasks"), ("work", "Work")],
+        default_list_id="work",
+    )
+    edit = board["columns"][0]["cards"][0]["actions"][1]
+    assert "to_list_id" in edit["fields"]
+    assert edit["field_choices"]["to_list_id"] == [
+        {"value": "@default", "label": "My Tasks"},
+        {"value": "work", "label": "Work"},
+    ]
+    # Prefilled to the task's current list, so leaving it unchanged is a no-op move.
+    assert edit["form_values"]["to_list_id"] == "work"
+    # The source list is still carried in args for routing.
+    assert edit["args"] == {"task_id": "t1", "list_id": "work"}
+
+
+def test_edit_action_has_no_move_picker_with_a_single_list() -> None:
+    # One list → nowhere to move to → no move picker (the Add picker can still show).
+    task = _task("t1", "Stuck", due=TODAY, list_id="work", list_title="Work")
+    board = build_tasks_board([task], today=TODAY, lists=[("work", "Work")], default_list_id="work")
+    edit = board["columns"][0]["cards"][0]["actions"][1]
+    assert "to_list_id" not in edit["fields"]
+    assert "field_choices" not in edit

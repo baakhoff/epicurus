@@ -70,6 +70,7 @@ class LocalTasksProvider:
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        to_list_id: str | None = None,  # ignored: the single local list has nowhere to move to
     ) -> Task:
         try:
             return await self._store.update_task(
@@ -89,6 +90,12 @@ class LocalTasksProvider:
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
     ) -> Task | None:
         return await self._store.get_task(tenant_id=tenant_id, task_id=task_id)
+
+    async def delete_task(
+        self, tenant_id: str, task_id: str, *, list_id: str | None = None
+    ) -> None:
+        # Hard-delete; a missing id is a no-op (the store deletes by id without error).
+        await self._store.delete_task(tenant_id=tenant_id, task_id=task_id)
 
     async def is_available(self, tenant_id: str) -> bool:
         return True

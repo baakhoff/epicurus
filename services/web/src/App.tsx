@@ -13,6 +13,7 @@ import { moduleIcon } from "@/lib/icons";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { ChatScreen } from "@/screens/ChatScreen";
+import { MemoryScreen } from "@/screens/MemoryScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
 import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
@@ -86,16 +87,23 @@ function DownloadTray() {
   );
 }
 
-function Shell() {
+export function Shell() {
   // Module-contributed pages join the nav at runtime (ADR-0018): the shell renders
   // them, the modules only declare which archetype + supply data.
   const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
   const modulePages = modulePageNavs(modules.data ?? []);
 
   return (
-    <div className="flex h-dvh flex-col sm:flex-row">
-      {/* side rail (wide screens) */}
-      <nav className="hidden w-52 flex-col gap-1 border-r border-edge p-3 pt-safe sm:flex">
+    // `overflow-hidden` pins the fixed-height shell so the page body never scrolls —
+    // every region below owns its own scroll. Without it, any child taller than the
+    // viewport (notably the rail) leaks its overflow to <body>, and scrolling while
+    // hovering that child drags the whole interface.
+    <div className="flex h-dvh flex-col overflow-hidden sm:flex-row">
+      {/* side rail (wide screens) — scrolls itself once the links outgrow the viewport */}
+      <nav
+        aria-label="Primary"
+        className="hidden w-52 flex-col gap-1 overflow-y-auto border-r border-edge p-3 pt-safe sm:flex"
+      >
         <div className="mb-4 flex items-center gap-2.5 px-2 pt-2">
           <EpsilonMark draw />
           <Wordmark />
@@ -139,6 +147,7 @@ function Shell() {
         <main className="min-h-0 flex-1">
           <Routes>
             <Route path="/" element={<ChatScreen />} />
+            <Route path="/memory" element={<MemoryScreen />} />
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />

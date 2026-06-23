@@ -6,7 +6,7 @@ holds a client secret or refresh token.
 
 Required Google OAuth scopes (requested when the operator connects via
 ``GET /platform/v1/oauth/google/connect?scope=...``):
-    https://www.googleapis.com/auth/gmail.readonly
+    https://www.googleapis.com/auth/gmail.modify  (read + label writes, e.g. mark read/unread)
     https://www.googleapis.com/auth/gmail.send
 """
 
@@ -26,8 +26,11 @@ _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
 # The Gmail API scopes this module needs (beyond the default identity scopes the core
 # always requests). Declared in the manifest (``oauth_scopes``) so the shell requests them
 # when connecting Google (#241).
+# ``gmail.modify`` (not ``gmail.readonly``) is required to flip the ``UNREAD`` label via
+# ``messages.modify`` (mark read/unread). It is a superset of read access, so it also backs
+# search/read; ``gmail.send`` is kept explicit to document the send capability.
 GMAIL_API_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
@@ -104,6 +107,15 @@ class GmailProvider(MailProvider):
             resp = await client.post("/users/me/messages/send", json={"raw": raw})
             resp.raise_for_status()
             return str(resp.json()["id"])
+
+    async def set_unread(self, message_id: str, unread: bool) -> None:
+        # Gmail tracks read state with the system ``UNREAD`` label: add it to mark unread,
+        # remove it to mark read. ``messages.modify`` requires the ``gmail.modify`` scope.
+        body = {"addLabelIds": ["UNREAD"]} if unread else {"removeLabelIds": ["UNREAD"]}
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.post(f"/users/me/messages/{message_id}/modify", json=body)
+            resp.raise_for_status()
 
     async def health_check(self) -> bool:
         try:

@@ -60,6 +60,12 @@ and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bea
 toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
 bar.
 
+When the page is **`versioned`** (notes, knowledge — ADR-0045), a **History** control lists
+past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh
+save (so the timeline only ever grows). The shell reads history from the proxied
+`…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
+version's content), so there is no restore endpoint.
+
 ### Right panel / split-screen (ADR-0018)
 
 A core-owned side panel (`src/components/Panel.tsx`, driven by the `src/stores/panel.ts`

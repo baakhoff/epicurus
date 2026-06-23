@@ -242,12 +242,27 @@ document/folder tree (content is fetched lazily per document), and it owns sever
     { "id": "b.md", "title": "b", "path": "b.md", "type": "file" }
   ],
   "can_create": false,        // true → shell shows "New note" (Notes module)
-  "can_manage_files": true    // true → shell shows folder CRUD (Knowledge module, #216)
+  "can_manage_files": true,   // true → shell shows folder CRUD (Knowledge module, #216)
+  "versioned": true           // true → shell shows save-history browse + restore (ADR-0045)
 }
 // GET /pages/{id}/doc?path=<rel>  →  one document's content
 { "path": "projects/a.md", "title": "a", "content": "# A\n…" }
-// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save
+// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save (also snapshots a version)
 { "path": "projects/a.md", "indexed": true, "chunk_count": 3 }
+```
+
+When `versioned` is true (notes, knowledge — ADR-0045), every save snapshots the body and
+two read-only endpoints expose the history (newest first, deduped, capped per document).
+Restore is **client-side** — the shell re-saves a past version's content through the normal
+`PUT …/doc`, so there is no restore endpoint:
+
+```jsonc
+// GET /pages/{id}/doc/versions?path=<rel>  →  the save history, newest first
+{ "versions": [ { "version_id": "42", "created_at": "2026-06-23T10:00:00+00:00",
+                  "title": "a", "size": 1280 } ] }
+// GET /pages/{id}/doc/version?path=<rel>&version=<version_id>  →  one past version (404 if absent)
+{ "path": "projects/a.md", "version_id": "42", "created_at": "2026-06-23T10:00:00+00:00",
+  "title": "a", "content": "# A\n…" }
 ```
 
 The following additional endpoints are available when `can_manage_files` is true (#216):
@@ -262,6 +277,8 @@ POST   /pages/{id}/move  { from_path, to_path } →  { "path": "…" }  (404 sou
 Proxied at:
 
 - `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
+- `GET /platform/v1/modules/{name}/pages/{id}/doc/versions?path=<rel>` (ADR-0045)
+- `GET /platform/v1/modules/{name}/pages/{id}/doc/version?path=<rel>&version=<version_id>` (ADR-0045)
 - `POST /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`

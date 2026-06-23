@@ -22,7 +22,7 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
-from epicurus_knowledge.db import DocIndex, NoteIndex
+from epicurus_knowledge.db import DocIndex, NoteIndex, VersionStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
@@ -56,6 +56,9 @@ def create_app() -> FastAPI:
     doc_index = DocIndex(engine)
     module_doc_ledger = ModuleDocLedger(engine)
     suggestion_store = SuggestionStore(engine)
+    # Editor-save version history (#ADR-0045): shares the same Postgres engine as the
+    # index ledgers; one content snapshot per save, retained per (tenant, note_path).
+    version_store = VersionStore(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
     platform = PlatformClient(
         base_url=settings.platform_url,
@@ -106,7 +109,13 @@ def create_app() -> FastAPI:
     # Watch mode (#232, ADR-0035) marks the vault externally owned: the editor goes
     # read-only and agent suggestions can't be applied, so Obsidian stays the sole author.
     vault_read_only = settings.vault_read_only
-    vault_pages = VaultPages(settings.vault_path, vault_indexer, read_only=vault_read_only)
+    vault_pages = VaultPages(
+        settings.vault_path,
+        vault_indexer,
+        read_only=vault_read_only,
+        versions=version_store,
+        tenant=settings.default_tenant_id,
+    )
     suggestion_review = SuggestionReview(
         suggestion_store,
         vault_pages,
@@ -147,6 +156,7 @@ def create_app() -> FastAPI:
             await doc_index.init()
             await module_doc_ledger.init()
             await suggestion_store.init()
+            await version_store.init()
             await bus.connect()
             log.info(
                 "knowledge service ready",

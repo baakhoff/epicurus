@@ -19,6 +19,7 @@ override, not a measured maximum.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -69,6 +70,14 @@ class GpuInfo(BaseModel):
     vram_free_mb: int | None = None
 
 
+class CpuInfo(BaseModel):
+    """The host CPU. Core counts are ``None`` when they can't be determined."""
+
+    model: str
+    physical_cores: int | None = None
+    logical_cores: int | None = None
+
+
 class ModelSize(BaseModel):
     """The currently-effective chat model and its on-disk size."""
 
@@ -85,9 +94,10 @@ class SuggestedContext(BaseModel):
 
 
 class SystemInfo(BaseModel):
-    """What the Models page needs to suggest a context window."""
+    """What the Models page needs: the host spec + a context-window suggestion."""
 
     gpu: GpuInfo | None = None
+    cpu: CpuInfo | None = None
     ram_total_mb: int | None = None
     model: ModelSize | None = None
     suggested_context: SuggestedContext | None = None
@@ -299,6 +309,44 @@ def read_ram_total_mb(reader: FileReader = _default_file_reader) -> int | None:
         return None
 
 
+def read_cpu_info(reader: FileReader = _default_file_reader) -> CpuInfo | None:
+    """The host CPU model + core counts, parsed from ``/proc/cpuinfo`` (Linux, in-container).
+
+    Logical cores = number of ``processor`` entries; physical cores = ``cpu cores`` times the
+    number of distinct ``physical id``s (sockets). Best-effort: on a non-Linux host (no
+    ``/proc``) it still reports a logical count from ``os.cpu_count()`` when available, else
+    ``None`` and the spec panel simply omits the CPU.
+    """
+    try:
+        text = reader("/proc/cpuinfo")
+    except Exception:  # non-Linux / no /proc — fall back to a bare logical count
+        log.debug("cpuinfo read failed", exc_info=True)
+        logical = os.cpu_count()
+        return CpuInfo(model="CPU", logical_cores=logical) if logical else None
+
+    model = "CPU"
+    logical = 0
+    cpu_cores: int | None = None
+    physical_ids: set[str] = set()
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "model name" and value:
+            model = value
+        elif key == "processor":
+            logical += 1
+        elif key == "cpu cores" and value.isdigit():
+            cpu_cores = int(value)
+        elif key == "physical id":
+            physical_ids.add(value)
+    physical_cores = cpu_cores * (len(physical_ids) or 1) if cpu_cores else None
+    return CpuInfo(
+        model=model, physical_cores=physical_cores, logical_cores=logical or os.cpu_count()
+    )
+
+
 class _ModelSource(Protocol):
     """Minimal protocol the probe needs from the gateway: list local models with sizes.
 
@@ -316,14 +364,16 @@ async def collect_system_info(
     tenant_id: str | None = None,
     detect: Callable[[], GpuInfo | None] = detect_gpu,
     ram: Callable[[], int | None] = read_ram_total_mb,
+    cpu: Callable[[], CpuInfo | None] = read_cpu_info,
 ) -> SystemInfo:
-    """Assemble the :class:`SystemInfo` snapshot for the suggestion.
+    """Assemble the :class:`SystemInfo` snapshot: host spec + the context-window suggestion.
 
-    GPU + RAM detection are injectable (the route passes the real probes; tests pass fakes).
-    The model size comes from the gateway's local-model listing matched to the effective
-    chat model. Memory for the suggestion is GPU VRAM when present, else system RAM.
+    GPU / CPU / RAM detection are injectable (the route passes the real probes; tests pass
+    fakes). The model size comes from the gateway's local-model listing matched to the
+    effective chat model. Memory for the suggestion is GPU VRAM when present, else system RAM.
     """
     gpu = _safe(detect, "gpu detection")
+    cpu_info = _safe(cpu, "cpu detection")
     ram_total = _safe(ram, "ram detection")
     model = await _effective_model_size(gateway, tenant_id)
 
@@ -336,7 +386,9 @@ async def collect_system_info(
         # with a huge context is slow and RAM is shared with the rest of the box.
         suggested = suggest_context(ram_total, model_size, cap=_NO_GPU_MAX_CONTEXT)
 
-    return SystemInfo(gpu=gpu, ram_total_mb=ram_total, model=model, suggested_context=suggested)
+    return SystemInfo(
+        gpu=gpu, cpu=cpu_info, ram_total_mb=ram_total, model=model, suggested_context=suggested
+    )
 
 
 _T = TypeVar("_T")
@@ -378,12 +430,13 @@ def create_system_router(
     *,
     detect: Callable[[], GpuInfo | None] = detect_gpu,
     ram: Callable[[], int | None] = read_ram_total_mb,
+    cpu: Callable[[], CpuInfo | None] = read_cpu_info,
 ) -> APIRouter:
-    """The ``GET /platform/v1/system/info`` route backing the context-window suggestion."""
+    """The ``GET /platform/v1/system/info`` route backing the spec panel + suggestion."""
     router = APIRouter(prefix="/platform/v1/system", tags=["system"])
 
     @router.get("/info", response_model=SystemInfo)
     async def system_info() -> SystemInfo:
-        return await collect_system_info(gateway, detect=detect, ram=ram)
+        return await collect_system_info(gateway, detect=detect, ram=ram, cpu=cpu)
 
     return router

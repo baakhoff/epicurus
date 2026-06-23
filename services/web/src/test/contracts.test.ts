@@ -347,6 +347,7 @@ describe("contracts", () => {
       global_default: "llama3.2",
       global_embed_default: null,
       global_context_window: 16384,
+      kv_cache_type: null,
       hidden: [],
     });
     expect(prefs.global_context_window).toBe(16384);
@@ -355,6 +356,7 @@ describe("contracts", () => {
       global_default: null,
       global_embed_default: null,
       global_context_window: null,
+      kv_cache_type: null,
       hidden: [],
     });
     expect(unset.global_context_window).toBeNull();

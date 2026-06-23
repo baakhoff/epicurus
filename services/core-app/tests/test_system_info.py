@@ -261,3 +261,52 @@ def _no_file(path: str) -> str:
 
 def _no_glob(pattern: str) -> list[str]:
     return []
+
+
+# ── read_cpu_info (injectable reader) ───────────────────────────────────────────────
+
+
+def test_read_cpu_info_parses_model_and_cores() -> None:
+    from epicurus_core_app.system_info import read_cpu_info
+
+    cpuinfo = (
+        "processor\t: 0\nmodel name\t: AMD Ryzen 9 5900X\ncpu cores\t: 12\nphysical id\t: 0\n\n"
+        "processor\t: 1\nmodel name\t: AMD Ryzen 9 5900X\ncpu cores\t: 12\nphysical id\t: 0\n\n"
+    )
+    info = read_cpu_info(reader=lambda _p: cpuinfo)
+    assert info is not None
+    assert info.model == "AMD Ryzen 9 5900X"
+    assert info.logical_cores == 2  # two "processor" blocks
+    assert info.physical_cores == 12  # cpu cores * 1 socket
+
+
+def test_read_cpu_info_degrades_when_proc_unreadable() -> None:
+    from epicurus_core_app.system_info import read_cpu_info
+
+    def boom(_p: str) -> str:
+        raise FileNotFoundError("/proc/cpuinfo")
+
+    info = read_cpu_info(reader=boom)
+    # Non-Linux fallback: a logical count from os.cpu_count(), model "CPU" (or None if unknown).
+    assert info is None or info.model == "CPU"
+
+
+async def test_collect_system_info_includes_cpu() -> None:
+    class _Gateway:
+        async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
+            return []
+
+        async def effective_default(self, tenant_id: str | None = None) -> str:
+            return "llama3.2"
+
+    from epicurus_core_app.system_info import CpuInfo
+
+    info = await collect_system_info(
+        _Gateway(),
+        detect=lambda: None,
+        ram=lambda: 16000,
+        cpu=lambda: CpuInfo(model="Test CPU", physical_cores=8, logical_cores=16),
+    )
+    assert info.cpu is not None
+    assert info.cpu.model == "Test CPU"
+    assert info.cpu.logical_cores == 16

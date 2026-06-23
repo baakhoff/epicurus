@@ -48,6 +48,8 @@ class LlmPrefsResponse(BaseModel):
     global_embed_default: str | None
     # Operator-chosen Ollama context window (num_ctx); NULL means the env/runtime default.
     global_context_window: int | None
+    # Operator-chosen Ollama KV-cache type ("f16"|"q8_0"|"q4_0"); NULL = runtime default.
+    kv_cache_type: str | None
     hidden: list[str]
 
 
@@ -76,12 +78,20 @@ class SetHiddenRequest(BaseModel):
     hidden: bool
 
 
+class SetKvCacheTypeRequest(BaseModel):
+    """Body for PUT /llm/prefs/kv-cache-type."""
+
+    value: str | None
+
+
 class SetModelSettingsRequest(BaseModel):
     """Body for PUT /llm/model-settings — one model's per-model tuning."""
 
     model: str
     context_window: int | None = None
     keep_alive: str | None = None
+    # "gpu" | "cpu" | null (auto). Mapped to Ollama num_gpu; local models only.
+    device: str | None = None
 
 
 def create_llm_router(
@@ -185,16 +195,19 @@ def create_llm_router(
                 global_default=None,
                 global_embed_default=None,
                 global_context_window=None,
+                kv_cache_type=None,
                 hidden=[],
             )
         stored_default = await prefs.get_default(default_tenant)
         stored_embed_default = await prefs.get_embed_default(default_tenant)
         stored_context_window = await prefs.get_context_window(default_tenant)
+        stored_kv_cache_type = await prefs.get_kv_cache_type(default_tenant)
         hidden = await prefs.get_hidden(default_tenant)
         return LlmPrefsResponse(
             global_default=stored_default,
             global_embed_default=stored_embed_default,
             global_context_window=stored_context_window,
+            kv_cache_type=stored_kv_cache_type,
             hidden=hidden,
         )
 
@@ -220,6 +233,18 @@ def create_llm_router(
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_context_window(default_tenant, request.value)
+        return {"status": "ok", "value": request.value}
+
+    @router.put("/prefs/kv-cache-type")
+    async def set_kv_cache_type(request: SetKvCacheTypeRequest) -> dict[str, str | None]:
+        """Set or clear the operator's preferred Ollama KV-cache type for this tenant.
+
+        Persists the choice; it is applied via the Ollama container's `OLLAMA_KV_CACHE_TYPE`
+        env and takes effect only after the runtime restarts (the core cannot restart Ollama
+        — ADR-0046). The UI surfaces the restart requirement."""
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        await prefs.set_kv_cache_type(default_tenant, request.value)
         return {"status": "ok", "value": request.value}
 
     @router.put("/prefs/hidden")
@@ -250,14 +275,18 @@ def create_llm_router(
 
     @router.put("/model-settings")
     async def set_model_settings(request: SetModelSettingsRequest) -> dict[str, object]:
-        """Set or clear one model's context window + keep-alive (an all-``None`` body
-        removes the override, returning the model to the inherited defaults)."""
+        """Set or clear one model's context window, keep-alive, and device (an all-``None``
+        body removes the override, returning the model to the inherited defaults)."""
         if model_settings is None:
             raise HTTPException(status_code=503, detail="model-settings store not available")
         await model_settings.set(
             default_tenant,
             request.model,
-            ModelSettings(context_window=request.context_window, keep_alive=request.keep_alive),
+            ModelSettings(
+                context_window=request.context_window,
+                keep_alive=request.keep_alive,
+                device=request.device,
+            ),
         )
         return {"status": "ok", "model": request.model}
 

@@ -301,7 +301,7 @@ async def test_get_model_settings_defaults_to_inherit() -> None:
     ) as client:
         resp = await client.get("/platform/v1/llm/model-settings", params={"model": "llama3.2"})
     assert resp.status_code == 200
-    assert resp.json() == {"context_window": None, "keep_alive": None}
+    assert resp.json() == {"context_window": None, "keep_alive": None, "device": None}
 
 
 async def test_put_then_get_model_settings_round_trips() -> None:
@@ -318,7 +318,7 @@ async def test_put_then_get_model_settings_round_trips() -> None:
         got = await client.get(
             "/platform/v1/llm/model-settings", params={"model": "llama3.2:latest"}
         )
-    assert got.json() == {"context_window": 8192, "keep_alive": "30m"}
+    assert got.json() == {"context_window": 8192, "keep_alive": "30m", "device": None}
 
 
 async def test_put_model_settings_without_store_is_503() -> None:
@@ -342,3 +342,27 @@ async def test_model_details_route_returns_show() -> None:
     body = resp.json()
     assert body["quantization"] == "Q4_K_M"
     assert body["context_length"] == 131072
+
+
+async def test_kv_cache_type_route_present_and_round_trips() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        put = await client.put("/platform/v1/llm/prefs/kv-cache-type", json={"value": "q8_0"})
+        assert put.status_code == 200
+        got = await client.get("/platform/v1/llm/prefs")
+    assert got.json()["kv_cache_type"] == "q8_0"
+
+
+async def test_model_settings_device_round_trips() -> None:
+    ms = await _fresh_model_settings()
+    app = _app(model_settings=ms)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.put(
+            "/platform/v1/llm/model-settings", json={"model": "llama3.2", "device": "cpu"}
+        )
+        got = await client.get("/platform/v1/llm/model-settings", params={"model": "llama3.2"})
+    assert got.json()["device"] == "cpu"

@@ -14,6 +14,12 @@ services:
       # Unload a model this long after its last use to free memory / VRAM at idle
       # (ADR-0005). The core also sets keep_alive per request.
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      # KV-cache quantization — trades a little quality for much less VRAM at long contexts
+      # (ADR-0046). Server-wide and read at startup, so the core can't change it live; the
+      # Models page surfaces the operator's choice + a "restart Ollama to apply" prompt.
+      # q8_0 / q4_0 require flash attention; default off (f16) keeps stock behavior.
+      OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-0}
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-f16}
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:

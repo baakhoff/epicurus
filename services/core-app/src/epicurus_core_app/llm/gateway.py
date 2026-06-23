@@ -213,6 +213,13 @@ class LlmGateway:
             if num_ctx is not None:
                 config["num_ctx"] = num_ctx
             config["keep_alive"] = settings.keep_alive or self._keep_alive
+            # device → Ollama num_gpu (layers offloaded to the GPU): "cpu" = 0 (all CPU),
+            # "gpu" = 999 (all layers; the runtime clamps to the model's count), "auto"/unset
+            # = omit so the runtime decides. Lets the operator pin where a model runs (#293).
+            if settings.device == "cpu":
+                config["num_gpu"] = 0
+            elif settings.device == "gpu":
+                config["num_gpu"] = 999
         if provider.secret_path is not None:
             tenant = tenant_id or self._default_tenant
             secret = await self._secrets.get(provider.secret_path, tenant)
@@ -459,6 +466,10 @@ class LlmGateway:
             options["num_ctx"] = settings.context_window
         if settings.keep_alive:
             options["keep_alive"] = settings.keep_alive
+        if settings.device == "cpu":
+            options["num_gpu"] = 0
+        elif settings.device == "gpu":
+            options["num_gpu"] = 999
         start = time.monotonic()
         response = await litellm.aembedding(
             model=embed_model,

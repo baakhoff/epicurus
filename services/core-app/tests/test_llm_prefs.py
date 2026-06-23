@@ -208,3 +208,12 @@ async def test_init_migrates_legacy_table_missing_context_window() -> None:
     assert await store.get_context_window("t1") is None  # the read that would otherwise 500
     await store.set_context_window("t1", 8192)
     assert await store.get_context_window("t1") == 8192
+
+
+async def test_kv_cache_type_round_trips() -> None:
+    store, _ = await _fresh_store()
+    assert await store.get_kv_cache_type("t1") is None
+    await store.set_kv_cache_type("t1", "q8_0")
+    assert await store.get_kv_cache_type("t1") == "q8_0"
+    await store.set_kv_cache_type("t1", None)
+    assert await store.get_kv_cache_type("t1") is None

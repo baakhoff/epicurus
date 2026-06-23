@@ -14,6 +14,12 @@ images to GHCR.
 
 ### Added
 
+- **The chat composer keeps your unsent draft when you leave the page** — the message you're
+  typing now lives in the chat store rather than the screen's local state, so switching to
+  Models / Modules / a module page and back (which unmounts the chat screen) no longer discards
+  it. The draft is restored with its auto-grown height intact and is cleared only when the
+  message is actually sent. It persists for the app session (not across a full reload) (#278)
+  (`web` → 0.25.0).
 - **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
   (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
   a 128K–256K context window. They show up in the Models screen and pull like any other entry

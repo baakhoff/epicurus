@@ -219,6 +219,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
+  (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
+  So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,
+  its overflow escaped to `<body>` and a wheel event anywhere over the rail dragged the entire
+  UI — most visible on the Models screen. The shell now sets `overflow-hidden` (every region
+  already owns its scroll) and the rail scrolls its own links; the rail also gained an
+  accessible name (`aria-label="Primary"`) (`web` → 0.25.1).
 - **The UI "Embedding model" choice now actually drives memory embedding** — core memory
   recall hard-coded `settings.memory_embed_model` and ignored the operator's `embed_default`
   pref, so picking an embedding model in the UI had no effect and recall 404'd if the env

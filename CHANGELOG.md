@@ -14,6 +14,10 @@ images to GHCR.
 
 ### Added
 
+- **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
+  (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
+  a 128K–256K context window. They show up in the Models screen and pull like any other entry
+  (`web` → 0.24.0).
 - **Calendar: all-day events (fixes events showing a day early) + per-create calendar picker**
   — all-day events are now modeled as a floating date range end-to-end. Google returns them
   date-only; the module coerced that to a UTC-midnight instant, which the shell then shifted

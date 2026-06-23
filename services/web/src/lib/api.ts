@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   AccountsView,
   AttachmentUploaded,
+  CatalogResponse,
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
@@ -74,6 +75,8 @@ export const api = {
     }),
 
   models: () => request(z.array(ModelInfo), "/platform/v1/llm/models"),
+  // The browsable model catalog the core parses from upstream on a schedule (#269).
+  catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>
     request(z.object({ status: z.string() }), `/platform/v1/llm/models?name=${encodeURIComponent(name)}`, {
       method: "DELETE",

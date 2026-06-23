@@ -69,6 +69,30 @@ export const ProviderInfo = z.object({
 });
 export type ProviderInfo = z.infer<typeof ProviderInfo>;
 
+// One browsable, pullable model in the catalog the core parses from upstream (#269).
+// `tags` stays a loose string array (not an enum) so a new upstream capability never
+// fails the whole response; the UI just ignores tags it has no chip for.
+export const CatalogEntry = z.object({
+  id: z.string(),
+  family: z.string(),
+  params: z.string().default(""),
+  size_gb: z.number().nullish(),
+  description: z.string().default(""),
+  tags: z.array(z.string()).default([]),
+  pulls: z.string().nullish(),
+});
+export type CatalogEntry = z.infer<typeof CatalogEntry>;
+
+// The catalog snapshot from GET /platform/v1/llm/catalog. `stale` flags a seed /
+// last-good list served after a failed or skipped upstream refresh.
+export const CatalogResponse = z.object({
+  entries: z.array(CatalogEntry),
+  source: z.string(),
+  updated_at: z.coerce.date().nullable(),
+  stale: z.boolean().default(false),
+});
+export type CatalogResponse = z.infer<typeof CatalogResponse>;
+
 export const SessionSummary = z.object({
   id: z.string(),
   title: z.string(),

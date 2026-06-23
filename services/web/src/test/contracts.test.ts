@@ -8,6 +8,7 @@ import {
   BrowserData,
   CalendarData,
   CalendarEvent,
+  CatalogResponse,
   LlmPrefs,
   MessageRecord,
   ModuleSnapshot,
@@ -304,6 +305,41 @@ describe("contracts", () => {
     const allDay = parseEventDate("2026-06-15", true);
     expect(allDay.getDate()).toBe(15);
     expect(allDay.getMonth()).toBe(5);
+  });
+
+  it("parses the model catalog snapshot, coercing updated_at to a Date (#269)", () => {
+    const snap = CatalogResponse.parse({
+      source: "https://ollama.com/library",
+      updated_at: "2026-06-23T12:00:00Z",
+      stale: false,
+      entries: [
+        {
+          id: "llama3.1:8b",
+          family: "llama3.1",
+          params: "8b",
+          description: "A general assistant.",
+          tags: ["general"],
+          pulls: "116.3M",
+        },
+      ],
+    });
+    expect(snap.updated_at instanceof Date).toBe(true);
+    expect(snap.entries[0].id).toBe("llama3.1:8b");
+    expect(snap.entries[0].size_gb ?? null).toBeNull(); // omitted upstream
+  });
+
+  it("defaults catalog entry fields and accepts a seeded/stale snapshot", () => {
+    const snap = CatalogResponse.parse({
+      source: "https://ollama.com/library",
+      updated_at: null,
+      stale: true,
+      entries: [{ id: "nomic-embed-text", family: "nomic-embed-text" }],
+    });
+    expect(snap.stale).toBe(true);
+    expect(snap.updated_at).toBeNull();
+    // params/description/tags fall back to their defaults for a sparse entry.
+    expect(snap.entries[0].params).toBe("");
+    expect(snap.entries[0].tags).toEqual([]);
   });
 
   it("parses LLM prefs including the context-window setting", () => {

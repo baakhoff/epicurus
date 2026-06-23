@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core_app.llm.catalog import CatalogEntry, ModelCatalog
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
 
@@ -26,10 +27,15 @@ async def _fresh_prefs() -> LlmPrefsStore:
     return prefs
 
 
-def _app(prefs: LlmPrefsStore | None = None) -> FastAPI:
+def _app(prefs: LlmPrefsStore | None = None, catalog: ModelCatalog | None = None) -> FastAPI:
     app = FastAPI()
     app.include_router(
-        create_llm_router(_StubGateway(), prefs=prefs, default_tenant="local")  # type: ignore[arg-type]
+        create_llm_router(
+            _StubGateway(),  # type: ignore[arg-type]
+            prefs=prefs,
+            default_tenant="local",
+            catalog=catalog,
+        )
     )
     return app
 
@@ -44,6 +50,34 @@ def test_management_routes_remain() -> None:
     assert "/platform/v1/llm/models" in paths
     assert "/platform/v1/llm/providers" in paths
     assert "/platform/v1/llm/pull" in paths
+    assert "/platform/v1/llm/catalog" in paths
+
+
+async def test_catalog_route_without_catalog_returns_empty_stale() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(catalog=None)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/llm/catalog")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["entries"] == []
+    assert body["stale"] is True
+
+
+async def test_catalog_route_serves_the_snapshot() -> None:
+    seed = [CatalogEntry(id="llama3.2:3b", family="llama3.2", params="3b", tags=["general"])]
+    catalog = ModelCatalog(
+        source_url="http://example/library", refresh_seconds=3600, enabled=False, seed=seed
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(catalog=catalog)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/llm/catalog")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "http://example/library"
+    assert [e["id"] for e in body["entries"]] == ["llama3.2:3b"]
+    assert body["entries"][0]["tags"] == ["general"]
 
 
 def test_prefs_routes_present() -> None:

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.models import ModelInfo, PowerState, ProviderInfo
 from epicurus_core_app.llm.power import PowerController
@@ -78,8 +79,10 @@ def create_llm_router(
     gateway: LlmGateway,
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
+    catalog: ModelCatalog | None = None,
 ) -> APIRouter:
-    """Gateway management routes — model catalog, providers, pulls, and prefs.
+    """Gateway management routes — installed models, the browse catalog, providers,
+    pulls, and prefs.
 
     Chat completions go through the single module-facing path
     ``POST /platform/v1/chat`` (ADR-0021); the gateway no longer exposes its own
@@ -90,6 +93,18 @@ def create_llm_router(
     @router.get("/models", response_model=list[ModelInfo])
     async def list_models() -> list[ModelInfo]:
         return await gateway.models()
+
+    @router.get("/catalog", response_model=CatalogResponse)
+    async def get_catalog() -> CatalogResponse:
+        """The browsable model catalog the core parses from upstream (#269).
+
+        Returns the cached snapshot (entries + provenance); ``stale`` flags a seed /
+        last-good list served after a failed or skipped refresh. An empty list with
+        ``stale=True`` means the catalog isn't wired (it should always be in the app).
+        """
+        if catalog is None:
+            return CatalogResponse(entries=[], source="", updated_at=None, stale=True)
+        return await catalog.snapshot()
 
     @router.delete("/models")
     async def delete_model(name: str) -> dict[str, str]:

@@ -56,6 +56,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/llm/models` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). |
+| `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
@@ -63,6 +64,24 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
+
+#### Model catalog (#269)
+
+The model browser's "Browse models" list is parsed by the core, not hand-maintained in
+the web build. A `ModelCatalog` (`llm/catalog.py`) fetches a configurable source
+(`LLM_CATALOG_URL`, the public Ollama library by default), parses each model's sizes,
+description, capabilities (→ the browser's tag vocabulary) and popularity into
+`CatalogEntry` rows (one per pullable size), caches the snapshot, and **refreshes it on a
+background loop** (`LLM_CATALOG_REFRESH_SECONDS`, default 6h). `GET …/llm/catalog` returns
+the cached snapshot — it never blocks on the network.
+
+It degrades gracefully: a failed or empty parse keeps the last-good snapshot and flags it
+`stale`; before any successful fetch (cold start, or an air-gapped build with
+`LLM_CATALOG_ENABLED=false`) it serves a small built-in **seed**, so the browser is never
+empty. The catalog is **global, not tenant-scoped** — it mirrors a public registry, holds
+no tenant data, and is identical for every tenant (like the provider registry). The web
+shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
+older core).
 
 ### Power (ADR-0005)
 

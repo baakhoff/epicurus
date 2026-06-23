@@ -21,7 +21,7 @@ import {
 } from "@/components/ui";
 import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag } from "@/data/catalog";
 import { api } from "@/lib/api";
-import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
+import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
 import type { ProviderInfo } from "@/lib/contracts";
 import { useDownloads } from "@/stores/downloads";
 
@@ -91,7 +91,12 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
   const [query, setQuery] = useState("");
   const [activeTag, setActiveTag] = useState<CatalogTag | null>(null);
 
-  const entries = filterCatalog(CATALOG, query, activeTag);
+  // The live list comes from the core, which parses it from upstream on a schedule (#269).
+  // Fall back to the bundled seed when that endpoint is unreachable (e.g. an older core),
+  // so the browser is never empty.
+  const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
+  const source = catalog.data;
+  const entries = filterCatalog(source?.entries ?? CATALOG, query, activeTag);
 
   const startPull = (id: string) => {
     void pull(id, () => queryClient.invalidateQueries({ queryKey: ["models"] }));
@@ -99,7 +104,18 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
 
   return (
     <Card>
-      <h3 className="mb-3 font-serif text-base text-ink">Browse models</h3>
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <h3 className="font-serif text-base text-ink">Browse models</h3>
+      </div>
+      <p className="mb-3 text-[11px] text-ink-faint">
+        {catalog.isError || source?.stale
+          ? "Showing the built-in list — couldn't reach the model library."
+          : source
+            ? `From ${source.source.replace(/^https?:\/\//, "")}${
+                source.updated_at ? ` · updated ${relativeTime(source.updated_at)}` : ""
+              }`
+            : "Loading the latest models…"}
+      </p>
 
       {/* Search */}
       <div className="relative mb-3">
@@ -157,8 +173,11 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="font-mono text-sm text-ink">{entry.id}</span>
-                    <Badge tone="dim">{entry.params}</Badge>
-                    <span className="text-xs text-ink-faint">{formatGb(entry.size_gb)}</span>
+                    {entry.params && <Badge tone="dim">{entry.params}</Badge>}
+                    {entry.size_gb != null && (
+                      <span className="text-xs text-ink-faint">{formatGb(entry.size_gb)}</span>
+                    )}
+                    {entry.pulls && <span className="text-xs text-ink-faint">{entry.pulls} pulls</span>}
                   </div>
                   <p className="mt-0.5 text-xs leading-relaxed text-ink-dim">{entry.description}</p>
                   <div className="mt-1.5 flex flex-wrap gap-1">
@@ -167,7 +186,7 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
                         key={t}
                         className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-ink-faint"
                       >
-                        {TAG_LABELS[t]}
+                        {TAG_LABELS[t as CatalogTag] ?? t}
                       </span>
                     ))}
                   </div>

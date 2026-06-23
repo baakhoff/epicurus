@@ -12,8 +12,9 @@ own MCP tool server (ADR-0004 / ADR-0009).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
@@ -29,6 +30,7 @@ from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -86,6 +88,13 @@ def create_app() -> FastAPI:
         top_p=settings.llm_top_p,
         num_ctx=settings.llm_num_ctx,
         prefs=prefs,
+    )
+
+    catalog = ModelCatalog(
+        source_url=settings.llm_catalog_url,
+        refresh_seconds=settings.llm_catalog_refresh_seconds,
+        max_models=settings.llm_catalog_max_models,
+        enabled=settings.llm_catalog_enabled,
     )
 
     async def embed(texts: list[str]) -> list[list[float]]:
@@ -158,10 +167,16 @@ def create_app() -> FastAPI:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades
             log.error("memory init failed; cross-chat memory disabled", error=str(exc))
+        # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
+        # startup never blocks on the network; the task self-heals on transient failures.
+        catalog_task = asyncio.create_task(catalog.run_periodic())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
         finally:
+            catalog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await catalog_task
             await bus.close()
             await engine.dispose()
             await qdrant.close()
@@ -177,7 +192,9 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(
-        create_llm_router(gateway, prefs=prefs, default_tenant=settings.default_tenant_id)
+        create_llm_router(
+            gateway, prefs=prefs, default_tenant=settings.default_tenant_id, catalog=catalog
+        )
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(

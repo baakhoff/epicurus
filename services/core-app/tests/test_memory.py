@@ -18,6 +18,7 @@ class _FakeStore:
         self._next_id = 0
         self.last_refs: list[dict[str, Any]] | None = None
         self.last_attachments: list[dict[str, Any]] | None = None
+        self.last_activity: dict[str, Any] | None = None
         self.meta: dict[int, tuple[str, MessageMeta]] = {}  # id -> (tenant, meta)
 
     async def append(
@@ -29,10 +30,12 @@ class _FakeStore:
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> int:
         self.rows.append((tenant, session_id, role, content))
         self.last_refs = entity_refs
         self.last_attachments = attachments
+        self.last_activity = activity
         self._next_id += 1
         self.meta[self._next_id] = (
             tenant,
@@ -152,6 +155,16 @@ async def test_remember_passes_attachments_to_the_store() -> None:
         tenant="t", session_id="s", role="user", content="see notes", attachments=atts
     )
     assert store.last_attachments == atts
+
+
+async def test_remember_passes_activity_to_the_store() -> None:
+    store, recall = _FakeStore(), _FakeRecall()
+    memory = Memory(store, recall)
+    activity = {"thinking": "weighed it", "steps": [{"tool": "echo", "status": "ok"}]}
+    await memory.remember(
+        tenant="t", session_id="s", role="assistant", content="done", activity=activity
+    )
+    assert store.last_activity == activity
 
 
 async def test_memories_returns_corpus_newest_first_with_role_and_time() -> None:

@@ -112,6 +112,30 @@ async def test_attachments_persist_and_round_trip() -> None:
     assert record.attachments[0].source == "file"
 
 
+async def test_activity_persists_and_round_trips() -> None:
+    store, _ = await _fresh_store()
+    activity = {
+        "thinking": "weighed it",
+        "steps": [{"tool": "knowledge_search", "status": "ok", "detail": '{"q": "x"}'}],
+    }
+    await store.append(
+        tenant="t", session_id="s", role="assistant", content="here", activity=activity
+    )
+    record = (await store.messages(tenant="t", session_id="s"))[0]
+    assert record.activity is not None
+    assert record.activity.thinking == "weighed it"
+    assert record.activity.steps[0].tool == "knowledge_search"
+    assert record.activity.steps[0].status == "ok"
+    assert record.activity.steps[0].detail == '{"q": "x"}'
+
+
+async def test_messages_without_activity_default_to_none() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s", role="assistant", content="plain")
+    record = (await store.messages(tenant="t", session_id="s"))[0]
+    assert record.activity is None
+
+
 async def test_attachment_store_save_and_get_is_tenant_scoped() -> None:
     _, engine = await _fresh_store()
     blobs = AttachmentStore(engine)
@@ -139,15 +163,17 @@ async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
             "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
         )
     store = ConversationStore(engine)
-    await store.init()  # must add the entity_refs + attachments columns in place, not raise
+    await store.init()  # must add entity_refs + attachments + activity columns in place, not raise
     await store.append(
         tenant="t",
         session_id="s",
-        role="user",
+        role="assistant",
         content="hi",
         entity_refs=[{"ref_id": "e1", "module": "m", "kind": "k", "title": "T"}],
         attachments=[{"att_id": "a1", "source": "file", "title": "n"}],
+        activity={"thinking": "hmm", "steps": []},
     )
     record = (await store.messages(tenant="t", session_id="s"))[0]
     assert record.entity_refs[0].ref_id == "e1"
     assert record.attachments[0].att_id == "a1"
+    assert record.activity is not None and record.activity.thinking == "hmm"

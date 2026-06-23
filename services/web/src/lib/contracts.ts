@@ -142,12 +142,32 @@ export const ModuleAttachmentItem = z.object({
 });
 export type ModuleAttachmentItem = z.infer<typeof ModuleAttachmentItem>;
 
+/** One tool call the agent made this turn, in the activity timeline (#121, ADR-0041). */
+export const ToolStep = z.object({
+  tool: z.string(),
+  status: z.enum(["running", "ok", "error"]).default("ok"),
+  detail: z.string().nullish(),
+});
+export type ToolStep = z.infer<typeof ToolStep>;
+
+/**
+ * The assistant turn's process — its thinking and its tool steps — persisted alongside the
+ * message so the folded activity timeline survives a reopen, not only the live stream
+ * (ADR-0041). Null on user messages and on pre-v0.19 assistant rows.
+ */
+export const MessageActivity = z.object({
+  thinking: z.string().default(""),
+  steps: z.array(ToolStep).default([]),
+});
+export type MessageActivity = z.infer<typeof MessageActivity>;
+
 export const MessageRecord = z.object({
   role: z.string(),
   content: z.string(),
   created_at: z.coerce.date(),
   entity_refs: z.array(EntityRef).default([]),
   attachments: z.array(Attachment).default([]),
+  activity: MessageActivity.nullish(),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
@@ -195,7 +215,8 @@ export type Readiness = z.infer<typeof Readiness>;
 
 /** One SSE event of a streaming agent turn (event name == `type`). */
 export const AgentEvent = z.object({
-  type: z.enum(["delta", "tool", "done", "error", "readiness"]),
+  // `thinking` carries a chain-of-thought token, shown in the activity timeline (ADR-0041).
+  type: z.enum(["delta", "tool", "done", "error", "readiness", "thinking"]),
   text: z.string().nullish(),
   tool: z.string().nullish(),
   status: z.enum(["running", "ok", "error"]).nullish(),

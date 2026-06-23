@@ -27,6 +27,10 @@ interface ChatState {
   pendingUser: string | null;
   /** The assistant turn under construction, in order. */
   segments: ChatSegment[];
+  /** The live turn's thinking (chain-of-thought), accumulated across `thinking` events
+   *  (ADR-0041). Shown in the activity timeline while streaming; cleared on `done`, when
+   *  the server-stored turn (which carries its own persisted activity) takes over. */
+  thinking: string;
   streaming: boolean;
   /** Warming progress emitted before the first token (ADR-0027); null once answered. */
   readiness: Readiness | null;
@@ -58,6 +62,7 @@ export const useChat = create<ChatState>()((set, get) => ({
   draft: "",
   pendingUser: null,
   segments: [],
+  thinking: "",
   streaming: false,
   readiness: null,
   error: null,
@@ -72,6 +77,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       sessionId: freshId(),
       pendingUser: null,
       segments: [],
+      thinking: "",
       streaming: false,
       readiness: null,
       error: null,
@@ -86,6 +92,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       sessionId: id,
       pendingUser: null,
       segments: [],
+      thinking: "",
       streaming: false,
       readiness: null,
       error: null,
@@ -101,6 +108,7 @@ export const useChat = create<ChatState>()((set, get) => ({
       draft: "",
       pendingUser: text,
       segments: [],
+      thinking: "",
       streaming: true,
       readiness: null,
       error: null,
@@ -149,6 +157,8 @@ export const useChat = create<ChatState>()((set, get) => ({
         const event = AgentEvent.parse(JSON.parse(message.data));
         if (event.type === "readiness" && event.readiness) set({ readiness: event.readiness });
         else if (event.type === "delta" && event.text) appendText(event.text);
+        else if (event.type === "thinking" && event.text)
+          set({ thinking: get().thinking + event.text });
         else if (event.type === "tool" && event.tool && event.status)
           setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
         else if (event.type === "error") {
@@ -159,9 +169,17 @@ export const useChat = create<ChatState>()((set, get) => ({
         }
       }
       if (completed) {
-        // The server now owns this turn: refetch history, then drop the live copy.
+        // The server now owns this turn: refetch history, then drop the live copy
+        // (the stored turn carries its own persisted activity, incl. thinking).
         await onDone();
-        set({ streaming: false, abort: null, pendingUser: null, segments: [], readiness: null });
+        set({
+          streaming: false,
+          abort: null,
+          pendingUser: null,
+          segments: [],
+          thinking: "",
+          readiness: null,
+        });
       } else {
         set({ streaming: false, abort: null });
       }

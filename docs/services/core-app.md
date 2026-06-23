@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer, `AGENT_MAX_STEPS` rounds). Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (tokens) · `tool` (a tool ran) · `done` (final turn) · `error`. The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `done` (final turn) · `error`. The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
@@ -179,7 +179,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 ## Data model
 
 - **Postgres `agent_messages`** — append-only conversation history: `id`, `tenant`,
-  `session_id`, `role`, `content`, `created_at`. Tenant-scoped.
+  `session_id`, `role`, `content`, `created_at`, plus JSON `entity_refs` / `attachments`
+  (ADR-0019) and `activity` — the assistant turn's persisted thinking + tool steps, rendered
+  as the folded activity timeline on reopen (ADR-0041). Tenant-scoped; post-release columns
+  are added in place at startup (no migration framework).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `hidden_models` (JSON list). A missing row
   means all defaults are `null` (fall back to env settings).

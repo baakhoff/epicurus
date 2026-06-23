@@ -24,11 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import Attachment, EntityRef
+from epicurus_core_app.agent.activity import MessageActivity
 
 # JSON columns added to agent_messages after the table's first release (v0.2). On an
 # existing deployment these are added in place at init (the store has no migration
-# framework — see ``ConversationStore._ensure_columns``).
-_ADDED_JSON_COLUMNS = ("entity_refs", "attachments")
+# framework — see ``ConversationStore._ensure_columns``). ``activity`` joined them in v0.19
+# (ADR-0041: the assistant turn's persisted thinking + tool steps).
+_ADDED_JSON_COLUMNS = ("entity_refs", "attachments", "activity")
 
 
 class SessionSummary(BaseModel):
@@ -50,6 +52,9 @@ class MessageRecord(BaseModel):
     entity_refs: list[EntityRef] = Field(default_factory=list)
     # Context the user attached to this message (ADR-0019) — rendered as pills.
     attachments: list[Attachment] = Field(default_factory=list)
+    # The assistant turn's process — thinking + tool steps (ADR-0041) — rendered as the
+    # folded activity timeline. None on user messages and on pre-v0.19 assistant rows.
+    activity: MessageActivity | None = None
 
 
 class MessageMeta(BaseModel):
@@ -78,6 +83,8 @@ class StoredMessage(Base):
     entity_refs: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     # User-supplied attachments for this message (ADR-0019); null for old rows.
     attachments: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    # The assistant turn's thinking + tool steps (ADR-0041); null for user/old rows.
+    activity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class StoredAttachment(Base):
@@ -137,6 +144,7 @@ class ConversationStore:
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> int:
         """Persist a message; returns its id (used as the recall point id)."""
         async with self._session() as session:
@@ -147,6 +155,7 @@ class ConversationStore:
                 content=content,
                 entity_refs=entity_refs,
                 attachments=attachments,
+                activity=activity,
             )
             session.add(message)
             await session.commit()
@@ -212,6 +221,7 @@ class ConversationStore:
                     created_at=m.created_at,
                     entity_refs=[EntityRef.model_validate(r) for r in (m.entity_refs or [])],
                     attachments=[Attachment.model_validate(a) for a in (m.attachments or [])],
+                    activity=MessageActivity.model_validate(m.activity) if m.activity else None,
                 )
                 for m in rows
             ]

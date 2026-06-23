@@ -38,7 +38,26 @@ describe("ProcessTimeline (#121)", () => {
     expect(screen.getByText("Reading calendar")).toBeInTheDocument();
   });
 
-  it("renders nothing without steps", () => {
+  it("shows the thinking block alongside the steps (ADR-0041)", () => {
+    render(<ProcessTimeline runs={RUNS} thinking="weighing the options" />);
+    expect(screen.getByText("Thinking")).toBeInTheDocument();
+    expect(screen.getByText("weighing the options")).toBeInTheDocument();
+  });
+
+  it("renders with thinking only and no tool steps", () => {
+    render(<ProcessTimeline runs={[]} thinking="just pondering" />);
+    expect(screen.getByRole("button", { name: /thought process/i })).toBeInTheDocument();
+    expect(screen.getByText("just pondering")).toBeInTheDocument();
+  });
+
+  it("hides the thinking text once the reader collapses it", () => {
+    render(<ProcessTimeline runs={[]} thinking="secret reasoning" />);
+    expect(screen.getByText("secret reasoning")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Thinking$/ }));
+    expect(screen.queryByText("secret reasoning")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing without steps or thinking", () => {
     const { container } = render(<ProcessTimeline runs={[]} />);
     expect(container).toBeEmptyDOMElement();
   });

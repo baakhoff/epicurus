@@ -14,6 +14,15 @@ images to GHCR.
 
 ### Added
 
+- **Chat: the activity timeline persists and now shows the model's thinking** — the agent's
+  process (its tool steps) used to disappear the instant a turn finished. Now the turn's
+  **thinking + tool steps** are persisted with the message: the timeline **folds** to its
+  summary rather than vanishing, and reappears folded when you reopen the conversation. The
+  model's chain-of-thought is surfaced in a collapsible **Thinking** block — captured both
+  from a provider's native reasoning field and from inline `<think>…</think>` spans (local
+  reasoning models), and kept out of the answer. Adds a `thinking` SSE event and an additive
+  `activity` JSON column on `agent_messages` (ADR-0041) (`epicurus-core` → 0.13.0,
+  `core-app` → 0.23.0, `web` → 0.31.0).
 - **Memory view — see and curate what epicurus remembers about you** — the cross-chat
   semantic-recall corpus (every user/assistant turn is embedded into Qdrant and the most
   similar past snippets are pulled into future chats as context) is now visible in a new

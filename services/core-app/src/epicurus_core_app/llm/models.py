@@ -29,11 +29,14 @@ __all__ = [
 class StreamEvent(BaseModel):
     """One increment of a streaming completion.
 
-    ``delta`` events carry a content token; the final event carries the assembled
-    ``result`` (full content plus any tool calls accumulated from the stream).
+    ``delta`` events carry a content token; ``reasoning`` events carry a chain-of-thought
+    token (kept separate so the UI shows thinking without polluting the answer, ADR-0041);
+    the final event carries the assembled ``result`` (full content, reasoning, and any tool
+    calls accumulated from the stream).
     """
 
     delta: str | None = None
+    reasoning: str | None = None
     result: ChatResult | None = None
 
 

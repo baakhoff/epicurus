@@ -53,12 +53,14 @@ class Memory:
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> None:
         """Persist a message and index user/assistant turns for recall.
 
-        ``entity_refs`` (assistant-emitted) and ``attachments`` (user-supplied) are stored
-        alongside the message so the transcript can render them again (ADR-0019); neither
-        is indexed for recall.
+        ``entity_refs`` (assistant-emitted), ``attachments`` (user-supplied) and ``activity``
+        (the assistant turn's thinking + tool steps, ADR-0041) are stored alongside the
+        message so the transcript can render them again; none of the three is indexed for
+        recall.
         """
         if not content:
             return
@@ -69,6 +71,7 @@ class Memory:
             content=content,
             entity_refs=entity_refs,
             attachments=attachments,
+            activity=activity,
         )
         if role in _INDEXED_ROLES:
             await self._recall.index(

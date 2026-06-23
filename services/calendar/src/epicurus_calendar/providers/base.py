@@ -113,6 +113,15 @@ class CalendarProvider(ABC):
     async def is_available(self, *, tenant_id: str) -> bool:
         """True when the provider is configured and reachable for *tenant_id*."""
 
+    async def get_timezone(self, *, tenant_id: str) -> str | None:
+        """The provider's IANA timezone for *tenant_id*, or ``None`` (ADR-0039).
+
+        Default ``None`` (the local store has no inherent timezone). Google overrides this
+        to report the user's Google Calendar timezone, which the core's ``now`` tool uses to
+        flag a mismatch with the configured timezone. Best-effort — never raises.
+        """
+        return None
+
     @abstractmethod
     async def list_collections(self, *, tenant_id: str) -> list[Collection]:
         """The collections (calendars) this provider exposes for *tenant_id* (ADR-0030).

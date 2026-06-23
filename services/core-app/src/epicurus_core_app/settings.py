@@ -64,6 +64,10 @@ class CoreAppSettings(CoreSettings):
     qdrant_url: str = "http://localhost:6333"
     # Ollama embedding model used to vectorize conversation text for recall.
     memory_embed_model: str = "nomic-embed-text"
+    # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
+    # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
+    # deployment sets its own in the Settings screen (persisted) or via this env.
+    default_timezone: str = "UTC"
 
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.

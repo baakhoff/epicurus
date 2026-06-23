@@ -14,6 +14,14 @@ images to GHCR.
 
 ### Added
 
+- **The assistant knows the current time and your timezone** — the agent gained a built-in
+  `now` tool (its first non-module tool) so it stops guessing the date from its training
+  cutoff; combined with a new **Timezone** setting (Settings → Timezone, default `UTC`,
+  editable; env `DEFAULT_TIMEZONE`) it creates calendar events at the right local date and
+  time. `now` also surfaces the connected Google Calendar's timezone and flags a mismatch
+  with your setting. Previously, "add it at 19:00" could land on the wrong day at the wrong
+  hour. ADR-0039 (`core-app` → 0.19.0, `calendar` → 0.9.0 for the `/status` timezone,
+  `web` → 0.24.0 for the Settings card).
 - **Calendar: all-day events (fixes events showing a day early) + per-create calendar picker**
   — all-day events are now modeled as a floating date range end-to-end. Google returns them
   date-only; the module coerced that to a UTC-midnight instant, which the shell then shifted

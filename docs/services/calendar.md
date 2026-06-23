@@ -216,7 +216,7 @@ referenced event resolves wherever it lives.
 | `GET` | `/health` | Readiness probe (standard ops surface). |
 | `GET` | `/metrics` | Prometheus metrics (standard ops surface). |
 | `GET` | `/manifest` | Module manifest (tools, events, UI descriptor, `collections` spec). |
-| `GET` | `/status` | Live status: `google_connected` (best-effort) and `local_events` (local store count). |
+| `GET` | `/status` | Live status: `google_connected` (best-effort), `google_timezone` (the Google Calendar's IANA timezone when connected, else `null` — read by the core's `now` tool, ADR-0039), and `local_events` (local store count). |
 | `GET` | `/accounts` | Connected accounts + their calendars for the picker (ADR-0030). The core proxies + merges this at `GET /platform/v1/modules/calendar/collections`. |
 | `GET` | `/pages/{page_id}` | Calendar archetype page data (ADR-0018). Accepts `start`/`end` (ISO-8601) query params bounding the window; defaults to the current month. The core proxies this — the shell never calls it directly. |
 | `GET` | `/resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced event (ADR-0019); `kind` is `event`. Returns a `HoverCard`; unknown kind / missing event is `404`. Core-proxied. |

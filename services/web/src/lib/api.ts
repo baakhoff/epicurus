@@ -26,6 +26,7 @@ import {
   ProviderInfo,
   Readiness,
   SessionSummary,
+  TimezonePrefs,
   type PowerState,
 } from "@/lib/contracts";
 import { parseFrame } from "@/lib/sse";
@@ -93,6 +94,13 @@ export const api = {
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",
       body: JSON.stringify({ name, hidden }),
+    }),
+
+  timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
+  setTimezone: (timezone: string) =>
+    request(z.object({ status: z.string(), timezone: z.string() }), "/platform/v1/timezone", {
+      method: "PUT",
+      body: JSON.stringify({ timezone }),
     }),
 
   providers: () => request(z.array(ProviderInfo), "/platform/v1/llm/providers"),

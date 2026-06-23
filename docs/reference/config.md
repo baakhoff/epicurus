@@ -83,6 +83,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `database_url` | `DATABASE_URL` | `str` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for conversation persistence. |
 | `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
 | `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |
+| `default_timezone` | `DEFAULT_TIMEZONE` | `str` | `UTC` | Fallback IANA timezone the agent's `now` tool reports when the operator hasn't set one in Settings (ADR-0039). |
 
 ### Properties
 

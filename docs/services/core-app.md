@@ -46,6 +46,24 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
+### Built-in agent tools (ADR-0039)
+
+Besides the modules' MCP tools, the core offers **built-in tools** the agent can call,
+dispatched in-process (no module round-trip). They're registered on the `McpHost`
+(`register_builtin`) and routed via a `"__builtin__"` sentinel; they respect the same
+per-tool disable filter as module tools.
+
+- **`now(timezone?)`** — the current date/time. The agent has no inherent clock, so it
+  calls this for anything date/time-relative ("tomorrow", "at 19:00"). Returns the time
+  in the operator's configured timezone (or the `timezone` argument) plus UTC and the
+  weekday; when a connected calendar uses a *different* timezone, that is reported with a
+  note so events land in the intended zone. The configured timezone is read from:
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`). |
+| `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise). Edited in the web **Settings → Timezone** card. |
+
 ### LLM gateway (ADR-0010)
 
 The gateway's HTTP surface is **model/provider management** (consumed by the web UI).
@@ -133,6 +151,7 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
+| `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 
 Provider keys are **not** configured here — they go through the UI into OpenBao.
 
@@ -150,6 +169,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   account/collection selection (`{enabled, active}` JSON, ADR-0030). A module with no row
   defaults to enabled, not-removed, core-default models, all tools on, and the local default
   collection. Post-release columns are added in place at startup (no migration framework).
+- **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
+  `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
   (768-dim, cosine), one collection per tenant.
 

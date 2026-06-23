@@ -19,7 +19,27 @@ images to GHCR.
   Models / Modules / a module page and back (which unmounts the chat screen) no longer discards
   it. The draft is restored with its auto-grown height intact and is cleared only when the
   message is actually sent. It persists for the app session (not across a full reload) (#278)
-  (`web` → 0.25.0).
+  (`web` → 0.26.0).
+- **Context-window management (hardware-aware, UI-settable)** — the local runtime's context
+  window (Ollama `num_ctx`) is now a persisted, per-tenant preference set from a new **Context
+  window** card on the Models screen, instead of an env-var-only knob. This fixes empty replies:
+  the agent's system prompt (instructions + every module's tool schemas + recalled memory) is
+  sizeable, and at the default 4096-token context it filled the window with no room left to
+  generate. The card probes the host — `GET /platform/v1/system/info` reports the GPU
+  (multi-vendor: NVIDIA via `nvidia-smi`, AMD via `rocm-smi`/`/sys`, Intel via `/sys`, all
+  best-effort and graceful) or, with no GPU, system RAM, plus the active model's on-disk size —
+  and offers a **suggested range** from a documented, conservative KV-cache-per-token estimate
+  (explicitly labelled an estimate, not a measured maximum). A number input + slider bound to the
+  pref and a **Use suggested** button apply it; the gateway resolves the value **per turn**
+  (`effective_context_window`: the pref if set, else the env default), local models only, stored
+  alongside the existing defaults via the same additive `_ensure_columns` migration. The optional
+  NVIDIA GPU overlay (`infra/ollama/gpu.yaml`) now also reserves the GPU for `core-app` so the
+  probe can read VRAM (AMD/Intel need their own `/dev/dri` + `/dev/kfd` mounts — out of scope;
+  detection degrades to system RAM without them). The chat model picker now also drives the
+  warming/readiness bar for the model the turn will actually run on (not the global default), and
+  the Models screen drops the confusing duplicate `chatting` badge — the persisted **default** is
+  shown there, while the per-session override lives only in the chat picker (`core-app` → 0.19.0,
+  `web` → 0.25.0).
 - **Gemma 4 in the model browser** — the curated Ollama catalog now lists the Gemma 4 family
   (`gemma4:e2b` / `e4b` / `12b` / `26b` / `31b`), Google's multimodal (text + image) models with
   a 128K–256K context window. They show up in the Models screen and pull like any other entry
@@ -205,6 +225,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
+  (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
+  So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,
+  its overflow escaped to `<body>` and a wheel event anywhere over the rail dragged the entire
+  UI — most visible on the Models screen. The shell now sets `overflow-hidden` (every region
+  already owns its scroll) and the rail scrolls its own links; the rail also gained an
+  accessible name (`aria-label="Primary"`) (`web` → 0.25.1).
 - **The UI "Embedding model" choice now actually drives memory embedding** — core memory
   recall hard-coded `settings.memory_embed_model` and ignored the operator's `embed_default`
   pref, so picking an embedding model in the UI had no effect and recall 404'd if the env

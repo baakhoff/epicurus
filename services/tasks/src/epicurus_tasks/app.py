@@ -72,8 +72,25 @@ def create_app() -> FastAPI:
     external: dict[str, TasksProvider] = {"google": GoogleTasksProvider(platform=platform)}
     provider: TasksProvider = TasksRouter(local=local_provider, external=external, prefs=platform)
 
+    async def _list_categories() -> list[tuple[str, str]]:
+        """The enabled writable lists ``(id, title)`` for the ``tasks_lists`` tool.
+
+        Best-effort: any prefs/discovery error yields ``[]`` so the tool degrades to
+        "only the default list" rather than failing the agent.
+        """
+        try:
+            prefs = await platform.get_collections()
+            lists, _ = await enabled_write_lists(
+                external, prefs, tenant_id=settings.default_tenant_id
+            )
+            return lists
+        except Exception:  # a discovery hiccup must not break the tool
+            return []
+
     bus = EventBus.from_settings(settings)
-    module = build_module(provider, tenant_id=settings.default_tenant_id)
+    module = build_module(
+        provider, tenant_id=settings.default_tenant_id, categories=_list_categories
+    )
     mcp_app = module.http_app()
 
     @asynccontextmanager

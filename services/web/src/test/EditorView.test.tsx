@@ -38,7 +38,7 @@ beforeEach(() => {
 });
 
 describe("EditorView", () => {
-  it("lists documents and opens one into the editor", async () => {
+  it("lists documents and opens one rendered, then edits via the toggle", async () => {
     mockModulePage.mockResolvedValue({
       title: "Knowledge",
       docs: [{ id: "a.md", title: "a", path: "a.md" }],
@@ -48,9 +48,15 @@ describe("EditorView", () => {
 
     fireEvent.click(await screen.findByText("a"));
 
+    // A document opens rendered (ADR-0042) — the preview shows, the raw source does not.
+    expect(await screen.findByTestId("preview")).toHaveTextContent("# Hello");
+    expect(screen.queryByLabelText("Edit a.md")).toBeNull();
+    expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
+
+    // The Edit toggle drops into the raw source.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
     expect(textarea.value).toBe("# Hello");
-    expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
   });
 
   it("saves edited content through the core proxy", async () => {
@@ -60,6 +66,7 @@ describe("EditorView", () => {
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
 
     fireEvent.click(await screen.findByText("a"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     const textarea = await screen.findByLabelText("Edit a.md");
 
     // Unchanged → save is disabled; editing enables it.
@@ -70,6 +77,53 @@ describe("EditorView", () => {
     await waitFor(() =>
       expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "a.md", "new body"),
     );
+  });
+
+  it("auto-saves the draft a beat after editing stops, with no Save click", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "old" });
+    mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByLabelText("Edit a.md");
+    fireEvent.change(textarea, { target: { value: "auto body" } });
+
+    // No Save click — the debounced auto-save fires on its own (ADR-0042).
+    await waitFor(
+      () => expect(mockSave).toHaveBeenCalledWith("notes", "notes", "a.md", "auto body"),
+      { timeout: 2500 },
+    );
+  });
+
+  it("never auto-saves stale content to a newly-selected document", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "a.md", title: "a", path: "a.md" },
+        { id: "b.md", title: "b", path: "b.md" },
+      ],
+    });
+    // A resolves; B never does — we sit in the window where the buffer still holds A.
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      path === "a.md"
+        ? Promise.resolve({ path: "a.md", title: "a", content: "AAA" })
+        : new Promise(() => {}),
+    );
+    mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    // Open A, edit it (a save is now pending on the debounce), then jump to B.
+    fireEvent.click(await screen.findByText("a"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.change(await screen.findByLabelText("Edit a.md"), {
+      target: { value: "AAA-edited" },
+    });
+    fireEvent.click(screen.getByText("b"));
+
+    // Past the debounce, nothing was written — A's stale draft must not land on B's path.
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+    expect(mockSave).not.toHaveBeenCalled();
   });
 
   it("renders read-only when the vault is externally owned (#232)", async () => {
@@ -83,25 +137,33 @@ describe("EditorView", () => {
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
 
     fireEvent.click(await screen.findByText("a"));
-    const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
-    // The buffer is shown but not editable, and there is no Save path.
-    expect(textarea.readOnly).toBe(true);
-    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-    // A read-only badge + banner make the externally-owned mode legible.
-    expect(screen.getByText("read-only")).toBeInTheDocument();
+    // A read-only badge + banner make the externally-owned mode legible, and there is
+    // no Save path in either view.
+    expect(await screen.findByText("read-only")).toBeInTheDocument();
     expect(screen.getByText(/managed externally/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    // The raw source is shown but not editable.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(true);
   });
 
-  it("toggles to a rendered preview of the current draft", async () => {
+  it("toggles between the rendered preview and the raw source", async () => {
     mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
     mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "# Hi" });
+    mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
 
     fireEvent.click(await screen.findByText("a"));
-    await screen.findByLabelText("Edit a.md");
-    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    // Default is the rendered preview.
+    expect(await screen.findByTestId("preview")).toHaveTextContent("# Hi");
 
-    expect(screen.getByTestId("preview")).toHaveTextContent("# Hi");
+    // Edit → raw source; type; Preview reflects the new draft.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByLabelText("Edit a.md");
+    fireEvent.change(textarea, { target: { value: "# Bye" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByTestId("preview")).toHaveTextContent("# Bye");
   });
 
   it("shows an empty-vault hint when there are no documents", async () => {
@@ -127,7 +189,8 @@ describe("EditorView", () => {
   it("creates a note: seeds an H1 title and saves to a fresh slug", async () => {
     mockModulePage.mockResolvedValue({ title: "Notes", docs: [], can_create: true });
     mockSave.mockResolvedValue({ path: "my-idea", indexed: true, chunk_count: 1 });
-    // After a create-save the editor re-syncs the now-saved note from the server.
+    // After a create-save the now-saved note may be fetched, but the local buffer is
+    // authoritative (seeded by path) so the fetch never clobbers in-flight edits.
     mockModulePageDoc.mockResolvedValue({
       path: "my-idea",
       title: "My Idea",
@@ -176,9 +239,8 @@ describe("EditorView", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    // Opens the document with no click — the deep link selected it.
-    const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
-    expect(textarea.value).toBe("# Deep");
+    // Opens the document rendered, with no click — the deep link selected it.
+    expect(await screen.findByTestId("preview")).toHaveTextContent("# Deep");
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
   });
 });

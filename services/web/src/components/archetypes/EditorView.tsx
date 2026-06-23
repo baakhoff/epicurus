@@ -31,7 +31,7 @@ import {
   MoreHorizontal,
   Plus,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -40,6 +40,10 @@ import { ApiError } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
 import type { EditorDoc } from "@/lib/contracts";
+
+/** Debounce before an edit auto-saves (ADR-0042) — long enough that a burst of typing
+ *  is one save, short enough to feel immediate. Each save re-indexes, so don't go lower. */
+const AUTOSAVE_MS = 1200;
 
 /** A filesystem-safe, readable slug for a note title (the editor `path`). */
 function slugify(name: string): string {
@@ -358,27 +362,57 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     enabled: selectedPath != null && !isNew,
   });
 
-  // Seed the editor buffer when a document loads; track the saved baseline so we
-  // know when there are unsaved changes. Adjust state during render keyed on the
-  // loaded doc's identity (the React-blessed alternative to a setState-in-effect).
-  const [seededDoc, setSeededDoc] = useState<typeof doc.data>(undefined);
-  if (doc.data && doc.data !== seededDoc) {
-    setSeededDoc(doc.data);
+  // Seed the editor buffer when a document opens. Key the seed on the *path*, not the
+  // query object: a background refetch (the list/doc re-reads after an auto-save) hands
+  // back a fresh object that must NOT clobber keystrokes typed since. A document opens
+  // in `preview` — it renders straight away (ADR-0042); the Edit toggle drops to source.
+  // Adjust state during render (the React-blessed alternative to a setState-in-effect).
+  const [seededPath, setSeededPath] = useState<string | null>(null);
+  if (doc.data && selectedPath !== seededPath) {
+    setSeededPath(selectedPath);
     setDraft(doc.data.content);
     setBaseline(doc.data.content);
-    setMode("edit");
+    setMode("preview");
   }
 
   const save = useMutation({
-    mutationFn: () => api.saveModulePageDoc(module, pageId, selectedPath as string, draft),
-    onSuccess: () => {
-      setBaseline(draft);
+    mutationFn: (content: string) =>
+      api.saveModulePageDoc(module, pageId, selectedPath as string, content),
+    // Mark the baseline as exactly what was persisted (the mutation variable), not a
+    // closed-over `draft` — keystrokes made *during* the save round-trip then stay dirty
+    // and queue the next auto-save instead of being silently marked clean.
+    onSuccess: (_result, content) => {
+      setBaseline(content);
       setIsNew(false);
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
     },
   });
 
   const dirty = draft !== baseline;
+  // react-query's `mutate` is referentially stable; depending on it (not the whole `save`
+  // object, which is a new reference every render) keeps the auto-save timer from resetting.
+  const { mutate: saveMutate } = save;
+
+  // ── Auto-save (ADR-0042) ───────────────────────────────────────────────────
+  // Persist a short beat after typing stops. A read-only (watched Obsidian) vault never
+  // auto-saves. A save already in flight defers the next one — `savingRef` skips it, and
+  // the trailing draft reschedules when the baseline lands. `isNew` notes auto-create on
+  // the first beat just like any other edit (the slug is already chosen). The
+  // `selectedPath === seededPath` guard is the safety: between opening a document and its
+  // content loading, `draft` still holds the *previous* doc — without it the timer could
+  // write that stale content to the newly-selected path.
+  const readOnly = Boolean(list.data?.read_only);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    savingRef.current = save.isPending;
+  }, [save.isPending]);
+  useEffect(() => {
+    if (!selectedPath || selectedPath !== seededPath || readOnly || draft === baseline) return;
+    const id = window.setTimeout(() => {
+      if (!savingRef.current) saveMutate(draft);
+    }, AUTOSAVE_MS);
+    return () => window.clearTimeout(id);
+  }, [draft, baseline, selectedPath, seededPath, readOnly, saveMutate]);
 
   // ── Folder / file tree mutations ──────────────────────────────────────────
 
@@ -472,6 +506,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     const slug = uniqueSlug(folderPrefix + slugify(name), taken);
     setIsNew(true);
     setSelectedPath(slug);
+    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
     setDraft(`# ${name}\n\n`);
     setBaseline("");
     setMode("edit");
@@ -487,6 +522,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     const slug = uniqueSlug(`${folderPath}/new-note.md`, taken);
     setIsNew(true);
     setSelectedPath(slug);
+    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
     setDraft("");
     setBaseline("");
     setMode("edit");
@@ -564,11 +600,11 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   };
 
   return (
-    <div className="grid h-full min-h-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
+    <div className="grid h-full min-h-0 min-w-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
       {/* document list — hidden on phone once a document is open */}
       <div
         className={cn(
-          "flex min-h-0 flex-col overflow-y-auto border-edge sm:border-r",
+          "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain border-edge sm:border-r",
           selectedPath && "hidden sm:flex",
         )}
       >
@@ -664,7 +700,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
       </div>
 
       {/* editor — hidden on phone until a document is open */}
-      <div className={cn("flex min-h-0 flex-col", !selectedPath && "hidden sm:flex")}>
+      <div className={cn("flex min-h-0 min-w-0 flex-col", !selectedPath && "hidden sm:flex")}>
         {!selectedPath ? (
           <div className="hidden h-full items-center justify-center sm:flex">
             <EmptyState quote="Select a document to read or edit it." />
@@ -681,14 +717,14 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           </div>
         ) : (
           <>
-            {/* toolbar */}
-            <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
+            {/* toolbar — pinned above the scrolling body so it never scrolls away */}
+            <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
               <button
                 onClick={() => {
                   setSelectedPath(null);
                   setIsNew(false);
                 }}
-                className="inline-flex items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
+                className="inline-flex shrink-0 items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
               >
                 <ChevronLeft size={15} /> back
               </button>
@@ -696,10 +732,19 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 {selectedPath}
                 {isNew && <span className="ml-1 text-ink-faint">(new)</span>}
               </span>
-              {save.data && !save.data.indexed && <Badge tone="warn">saved · not indexed</Badge>}
-              {save.isSuccess && !dirty && save.data?.indexed && <Badge tone="ok">saved</Badge>}
-              {dirty && <span className="text-xs text-ink-faint">unsaved</span>}
-              <div className="inline-flex overflow-hidden rounded-(--radius-field) border border-edge">
+              {/* Save status: auto-save (ADR-0042) keeps this live; the button is an explicit flush. */}
+              {save.isPending ? (
+                <span className="shrink-0 text-xs text-ink-faint">Saving…</span>
+              ) : save.isError ? (
+                <Badge tone="danger">save failed</Badge>
+              ) : dirty ? (
+                <span className="shrink-0 text-xs text-ink-faint">Unsaved…</span>
+              ) : save.isSuccess && !save.data?.indexed ? (
+                <Badge tone="warn">saved · not indexed</Badge>
+              ) : save.isSuccess ? (
+                <Badge tone="ok">saved</Badge>
+              ) : null}
+              <div className="inline-flex shrink-0 overflow-hidden rounded-(--radius-field) border border-edge">
                 {(["edit", "preview"] as const).map((m) => (
                   <button
                     key={m}
@@ -721,7 +766,8 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
               ) : (
                 <Button
                   variant="primary"
-                  onClick={() => save.mutate()}
+                  className="shrink-0"
+                  onClick={() => save.mutate(draft)}
                   disabled={!dirty}
                   busy={save.isPending}
                 >
@@ -738,21 +784,26 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
               </div>
             )}
 
-            {/* body */}
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            {/* body — the sole scroller; `overscroll-contain` keeps a phone's momentum
+                scroll from chaining into the bottom tab bar (the "lower panel") */}
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {mode === "edit" ? (
                 <TextArea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
+                  onBlur={() => {
+                    // Leaving the field flushes the pending auto-save immediately.
+                    if (!data.read_only && dirty && !save.isPending) save.mutate(draft);
+                  }}
                   onKeyDown={(e) => {
                     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
                       e.preventDefault();
-                      if (!data.read_only && dirty) save.mutate();
+                      if (!data.read_only && dirty) save.mutate(draft);
                     }
                   }}
                   readOnly={data.read_only}
                   spellCheck={false}
-                  className="h-full min-h-full rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
+                  className="h-full min-h-full overscroll-contain rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
                   aria-label={`Edit ${selectedPath}`}
                 />
               ) : (

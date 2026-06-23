@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fastapi import HTTPException
+from pydantic import BaseModel
+
 from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
 from epicurus_storage.db import FileEntry, FileIndex
 from epicurus_storage.object_store import ObjectStore
@@ -172,6 +175,47 @@ async def load_object_download(
     return ObjectDownload(name=entry.name, data=stored.data, content_type=stored.content_type)
 
 
+# ── Inline text read (split-screen reader, #KB-refactor req 6) ────────────────
+
+
+class TextContent(BaseModel):
+    """A text file's contents for the right-panel reader: ``{path, name, content}``."""
+
+    path: str
+    name: str
+    content: str
+
+
+def load_text_file(root: Path, path: str) -> TextContent:
+    """Read a UTF-8 text file under *root* for inline preview (the Files split-screen).
+
+    Path-safety mirrors ``storage_read``. Raises ``HTTPException``: 400 (bad/traversal
+    path or not a file), 404 (absent), 413 (larger than ``READ_MAX_BYTES``), 415 (binary
+    / non-UTF-8). The read-only tree is the source — uploaded objects are handled by the
+    route, which checks the object store first.
+    """
+    root_resolved = root.resolve()
+    try:
+        resolved = (root_resolved / path).resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid path") from exc
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="path escapes storage root") from exc
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    if not resolved.is_file():
+        raise HTTPException(status_code=400, detail="path is not a file")
+    if resolved.stat().st_size > READ_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file is too large to preview")
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
+    return TextContent(path=path, name=resolved.name, content=text)
+
+
 def build_module(
     index: FileIndex,
     objects: ObjectStore,
@@ -182,10 +226,11 @@ def build_module(
     """Build the storage module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.3.0",
+        version="0.4.0",
         description=(
-            "File-tree index (list, search, read) over the operator's HDD, "
-            "plus app-managed object storage via MinIO and durable chat-upload ingest."
+            "File-tree index (list, search, read) over the shared file space, plus "
+            "app-managed object storage via MinIO, durable chat-upload ingest, and "
+            "inline text preview for the Files split-screen reader."
         ),
         ui=UiSection(
             icon="folder",

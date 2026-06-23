@@ -7,7 +7,7 @@
 import { create } from "zustand";
 
 /** The bounded set of views the panel can host. Extends only in core. */
-export type PanelView = "entity-detail" | "email-reader";
+export type PanelView = "entity-detail" | "email-reader" | "doc-reader";
 
 export interface PanelEntry {
   view: PanelView;

@@ -9,11 +9,13 @@ import { EditorView } from "@/components/archetypes/EditorView";
 const mockModulePage = vi.fn();
 const mockModulePageDoc = vi.fn();
 const mockSave = vi.fn();
+const mockCreateProject = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
     modulePageDoc: (...args: unknown[]) => mockModulePageDoc(...args),
     saveModulePageDoc: (...args: unknown[]) => mockSave(...args),
+    createModuleProject: (...args: unknown[]) => mockCreateProject(...args),
   },
 }));
 
@@ -35,6 +37,7 @@ beforeEach(() => {
   mockModulePage.mockReset();
   mockModulePageDoc.mockReset();
   mockSave.mockReset();
+  mockCreateProject.mockReset();
 });
 
 describe("EditorView", () => {
@@ -180,5 +183,94 @@ describe("EditorView", () => {
     const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
     expect(textarea.value).toBe("# Deep");
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
+  });
+});
+
+// ── projects / knowledge-base scopes (#KB-refactor) ──────────────────────────
+
+const SCOPED = {
+  title: "Knowledge",
+  docs: [{ id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const }],
+  scopes: [
+    { id: "kb", title: "kb", kind: "project" as const },
+    { id: "work", title: "work", kind: "project" as const },
+    { id: "__docs__", title: "Platform docs", kind: "reference" as const },
+  ],
+  scope: "kb",
+  scope_noun: "knowledge base",
+  can_manage_files: true,
+  can_create_scope: true,
+};
+
+describe("EditorView — knowledge bases (scopes)", () => {
+  it("shows the switcher and prefixes the active scope onto document paths", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    mockModulePageDoc.mockResolvedValue({ path: "kb/alpha.md", title: "alpha", content: "# A" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    // The switcher shows the active knowledge base.
+    expect(await screen.findByRole("button", { name: "kb" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("alpha"));
+    await waitFor(() =>
+      expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md"),
+    );
+  });
+
+  it("refetches with the scope param when another knowledge base is selected", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: "kb" })); // open the switcher
+    fireEvent.click(await screen.findByText("work")); // pick another knowledge base
+    await waitFor(() =>
+      expect(mockModulePage).toHaveBeenCalledWith("knowledge", "vault", { scope: "work" }),
+    );
+  });
+
+  it("New document creates at the scope root and saves with the scope prefix", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    mockSave.mockResolvedValue({ path: "kb/new-note.md", indexed: true, chunk_count: 0 });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    const ta = await screen.findByLabelText("Edit new-note.md");
+    fireEvent.change(ta, { target: { value: "# Fresh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "kb/new-note.md", "# Fresh"),
+    );
+  });
+
+  it("creates a knowledge base via the switcher", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    mockCreateProject.mockResolvedValue({ id: "research", title: "research", kind: "project" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: "kb" })); // open the switcher
+    fireEvent.click(await screen.findByRole("button", { name: /new knowledge base/i }));
+    fireEvent.change(screen.getByLabelText("New knowledge base name"), {
+      target: { value: "Research" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(mockCreateProject).toHaveBeenCalledWith("knowledge", "vault", "Research"),
+    );
+  });
+
+  it("renders the platform-docs reference scope as read-only", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      scope: "__docs__",
+      read_only: true,
+      can_manage_files: false,
+      docs: [{ id: "index.md", title: "index", path: "index.md", type: "file" as const }],
+    });
+    mockModulePageDoc.mockResolvedValue({
+      path: "__docs__/index.md",
+      title: "index",
+      content: "# Docs",
+    });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByText("index"));
+    const ta = (await screen.findByLabelText("Edit index.md")) as HTMLTextAreaElement;
+    expect(ta.readOnly).toBe(true);
+    expect(screen.getByText(/read-only reference/i)).toBeInTheDocument();
+    expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "__docs__/index.md");
   });
 });

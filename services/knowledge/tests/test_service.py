@@ -85,3 +85,73 @@ async def test_manifest_declares_embedding_model_slot() -> None:
     assert "embedding" in slots
     assert slots["embedding"].role == "embedding"
     assert slots["embedding"].label  # non-empty — shown on the Modules page
+
+
+# ── navigation tools over a real vault (#KB-refactor) ─────────────────────────
+
+
+def _nav_module(vault_path: Path) -> EpicurusModule:
+    """A module whose vault is a real directory, for the read-only navigation tools."""
+    from epicurus_knowledge.module_docs import ModuleDocsIndexer
+
+    vault = AsyncMock(spec=KnowledgeIndexer)
+    docs = AsyncMock(spec=KnowledgeIndexer)
+    module_docs = AsyncMock(spec=ModuleDocsIndexer)
+    suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    return build_module(vault, docs, module_docs, suggestions, tenant="test", vault_path=vault_path)
+
+
+def _text(content: list) -> str:  # type: ignore[type-arg]
+    # The navigation tools return plain text, not a ToolEnvelope.
+    return content[0].text  # type: ignore[attr-defined,no-any-return]
+
+
+async def test_list_projects_lists_top_level_folders(tmp_path: Path) -> None:
+    (tmp_path / "personal").mkdir()
+    (tmp_path / "work").mkdir()
+    (tmp_path / "_reserved").mkdir()  # underscore-prefixed: never a project
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_list_projects", {})
+    out = _text(content)
+    assert "personal" in out and "work" in out
+    assert "_reserved" not in out
+
+
+async def test_list_projects_empty(tmp_path: Path) -> None:
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_list_projects", {})
+    assert "No knowledge bases" in _text(content)
+
+
+async def test_tree_shows_structure(tmp_path: Path) -> None:
+    (tmp_path / "kb" / "sub").mkdir(parents=True)
+    (tmp_path / "kb" / "alpha.md").write_text("# A\n", encoding="utf-8")
+    (tmp_path / "kb" / "sub" / "beta.md").write_text("# B\n", encoding="utf-8")
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_tree", {"project": "kb"})
+    out = _text(content)
+    assert "kb/" in out
+    assert "sub/" in out
+    assert "alpha.md" in out
+    assert "beta.md" in out
+
+
+async def test_read_document_returns_content(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "a.md").write_text("# Hello\nbody\n", encoding="utf-8")
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "kb/a.md"})
+    assert "# Hello" in _text(content)
+
+
+async def test_read_document_missing(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "kb/missing.md"})
+    assert "No such document" in _text(content)
+
+
+async def test_read_document_rejects_traversal(tmp_path: Path) -> None:
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "../escape.md"})
+    assert "cannot read" in _text(content).lower()

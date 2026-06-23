@@ -29,8 +29,9 @@ from epicurus_storage.service import (
     build_page_data,
     ingest_object,
     load_object_download,
+    load_text_file,
 )
-from epicurus_storage.settings import StorageSettings
+from epicurus_storage.settings import READ_MAX_BYTES, StorageSettings
 
 
 def _attachment_disposition(name: str) -> str:
@@ -165,6 +166,33 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="path is not a file")
 
         return FileResponse(str(resolved), filename=resolved.name)
+
+    @app.get("/read")
+    async def read_text(
+        path: str = Query(..., description="Path relative to the storage root"),
+    ) -> dict[str, object]:
+        """Return a text file's contents for the Files split-screen reader (#KB-refactor).
+
+        A catalogued ``uploads/…`` object is decoded from MinIO; every other *path* is read
+        from the read-only tree. 400 traversal, 404 missing, 413 too large, 415 binary.
+        """
+        if path == UPLOADS_PREFIX or path.startswith(f"{UPLOADS_PREFIX}/"):
+            try:
+                obj = await load_object_download(
+                    index=index, objects=objects, tenant=_tenant, path=path
+                )
+            except Exception as exc:  # an index/object hiccup must not break fs reads
+                log.warning("object read lookup failed", path=path, error=str(exc))
+                obj = None
+            if obj is not None:
+                if len(obj.data) > READ_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="file is too large to preview")
+                try:
+                    text = obj.data.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
+                return {"path": path, "name": obj.name, "content": text}
+        return load_text_file(_root, path).model_dump()
 
     @app.get("/pages/{page_id}")
     async def page(

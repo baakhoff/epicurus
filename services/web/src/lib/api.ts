@@ -11,7 +11,9 @@ import {
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
+  EditorScope,
   EmailMessage,
+  FileText,
   HoverCard,
   LlmPrefs,
   LogEntry,
@@ -235,6 +237,13 @@ export const api = {
       { method: "POST" },
     );
   },
+  // Create a new knowledge base (project) — a top-level scope (#KB-refactor).
+  createModuleProject: (name: string, pageId: string, projectName: string) =>
+    request(
+      EditorScope,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/project?project=${encodeURIComponent(projectName)}`,
+      { method: "POST" },
+    ),
   // Delete a document from an editor page's store (#216).
   deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
     const response = await fetch(
@@ -267,11 +276,17 @@ export const api = {
       { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
     ),
   // Approve a staged suggestion on a `review` page — applies + indexes it (#220).
-  approveSuggestion: (name: string, pageId: string, suggestionId: string) =>
+  // `content` (optional) is the operator's per-hunk-merged result for an edit (#KB-refactor).
+  approveSuggestion: (
+    name: string,
+    pageId: string,
+    suggestionId: string,
+    content?: string,
+  ) =>
     request(
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/approve`,
-      { method: "POST" },
+      { method: "POST", body: JSON.stringify(content === undefined ? {} : { content }) },
     ),
   // Reject a staged suggestion on a `review` page — discards it (#220).
   rejectSuggestion: (name: string, pageId: string, suggestionId: string) =>
@@ -297,6 +312,12 @@ export const api = {
     request(
       EmailMessage,
       `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
+    ),
+  // A text file's contents for the Files split-screen reader (#KB-refactor, req 6).
+  readModuleText: (module: string, path: string) =>
+    request(
+      FileText,
+      `/platform/v1/modules/${encodeURIComponent(module)}/read?path=${encodeURIComponent(path)}`,
     ),
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).

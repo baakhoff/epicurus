@@ -1,13 +1,26 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserView } from "@/components/archetypes/BrowserView";
+import { usePanel } from "@/stores/panel";
 
 const mockModulePage = vi.fn();
+const mockReadText = vi.fn();
 vi.mock("@/lib/api", () => ({
-  api: { modulePage: (...args: unknown[]) => mockModulePage(...args) },
+  ApiError: class ApiError extends Error {
+    constructor(
+      public status: number,
+      public detail: string,
+    ) {
+      super(detail);
+    }
+  },
+  api: {
+    modulePage: (...args: unknown[]) => mockModulePage(...args),
+    readModuleText: (...args: unknown[]) => mockReadText(...args),
+  },
 }));
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -15,7 +28,11 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
-beforeEach(() => mockModulePage.mockReset());
+beforeEach(() => {
+  mockModulePage.mockReset();
+  mockReadText.mockReset();
+  usePanel.getState().close();
+});
 
 describe("BrowserView", () => {
   it("renders the module's items, then reveals detail on select", async () => {
@@ -40,5 +57,31 @@ describe("BrowserView", () => {
     render(<BrowserView module="files" pageId="browse" />, { wrapper });
     await screen.findByText(/nothing here yet/i);
     expect(mockModulePage).toHaveBeenCalledWith("files", "browse", undefined);
+  });
+
+  it("opens a text file in the split-screen reader (#KB-refactor)", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Files",
+      items: [{ id: "kb/a.md", title: "a.md", subtitle: "1 KB", href: "/dl?path=kb/a.md" }],
+    });
+    mockReadText.mockResolvedValue({ path: "kb/a.md", name: "a.md", content: "# Hi" });
+    render(<BrowserView module="storage" pageId="files" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a.md"));
+    fireEvent.click(await screen.findByRole("button", { name: /open/i }));
+
+    await waitFor(() => expect(mockReadText).toHaveBeenCalledWith("storage", "kb/a.md"));
+    await waitFor(() => expect(usePanel.getState().stack.at(-1)?.view).toBe("doc-reader"));
+  });
+
+  it("offers Download but not Open for a non-text file", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Files",
+      items: [{ id: "img.png", title: "img.png", href: "/dl?path=img.png" }],
+    });
+    render(<BrowserView module="storage" pageId="files" />, { wrapper });
+    fireEvent.click(await screen.findByText("img.png"));
+    expect(await screen.findByText("Download")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open/i })).toBeNull();
   });
 });

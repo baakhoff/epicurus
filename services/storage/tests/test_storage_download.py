@@ -81,6 +81,61 @@ async def test_download_directory_rejected(storage_app: object) -> None:
 # build_page_data() directly.
 
 
+# ── /read (split-screen reader, #KB-refactor req 6) ──────────────────────────
+
+
+@pytest.mark.anyio
+async def test_read_returns_text(storage_app: object, file_tree: Path) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/read", params={"path": "hello.txt"})
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "hello.txt", "name": "hello.txt", "content": "hello world"}
+
+
+@pytest.mark.anyio
+async def test_read_missing_is_404(storage_app: object) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/read", params={"path": "nope.txt"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_read_traversal_rejected(storage_app: object) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/read", params={"path": "../../etc/passwd"})
+    assert resp.status_code in {400, 404}
+
+
+@pytest.mark.anyio
+async def test_read_directory_rejected(storage_app: object) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/read", params={"path": "sub"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_read_binary_rejected(storage_app: object, file_tree: Path) -> None:
+    (file_tree / "blob.bin").write_bytes(b"\xff\xfe\x00\x01")
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/read", params={"path": "blob.bin"})
+    assert resp.status_code == 415
+
+
 @pytest.mark.anyio
 async def test_pages_unknown_id_returns_404(storage_app: object) -> None:
     async with AsyncClient(

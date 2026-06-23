@@ -106,7 +106,13 @@ def create_app() -> FastAPI:
     # Watch mode (#232, ADR-0035) marks the vault externally owned: the editor goes
     # read-only and agent suggestions can't be applied, so Obsidian stays the sole author.
     vault_read_only = settings.vault_read_only
-    vault_pages = VaultPages(settings.vault_path, vault_indexer, read_only=vault_read_only)
+    vault_pages = VaultPages(
+        settings.vault_path,
+        vault_indexer,
+        read_only=vault_read_only,
+        # Surface the bundled platform docs as the read-only "__docs__" scope (#KB-refactor).
+        docs_path=settings.docs_path,
+    )
     suggestion_review = SuggestionReview(
         suggestion_store,
         vault_pages,

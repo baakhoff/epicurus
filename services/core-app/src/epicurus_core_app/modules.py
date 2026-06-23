@@ -110,6 +110,13 @@ class MoveRequest(BaseModel):
     to_path: str
 
 
+class ApproveRequest(BaseModel):
+    """Optional approve body (#KB-refactor): the operator's per-hunk-merged content for an
+    edit. Absent ⇒ apply the agent's full proposal."""
+
+    content: str | None = None
+
+
 class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
@@ -608,6 +615,21 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def create_page_project(
+        self, name: str, page_id: str, project_name: str
+    ) -> dict[str, Any]:
+        """Proxy ``POST /pages/{page_id}/project`` to the module (#KB-refactor).
+
+        Creates a new knowledge base (a top-level scope). 409 if it already exists,
+        400 for an invalid name; the module enforces name-safety.
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.post(f"/pages/{page_id}/project", params={"name": project_name})
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
     async def delete_page_doc(self, name: str, page_id: str, path: str) -> None:
         """Proxy ``DELETE /pages/{page_id}/doc`` to the module (#216).
 
@@ -662,7 +684,12 @@ class ModuleRegistry:
         return base
 
     async def review_action(
-        self, name: str, page_id: str, suggestion_id: str, action: str
+        self,
+        name: str,
+        page_id: str,
+        suggestion_id: str,
+        action: str,
+        content: str | None = None,
     ) -> dict[str, Any]:
         """Proxy an operator's approve/reject of a staged suggestion to the module (#220).
 
@@ -671,15 +698,36 @@ class ModuleRegistry:
         module never exposes them as agent tools. The timeout is generous because approve
         triggers a write + embed round-trip back through the core. *action* is supplied by
         the core's own route handlers (never the caller), so it needs no segment guard.
+
+        On *approve*, *content* (optional) is the operator's per-hunk-merged result for an
+        edit (#KB-refactor) — forwarded so only the approved part is written.
         """
         _safe_segment(page_id, label="page_id")
         _safe_segment(suggestion_id, label="suggestion_id")
         base = await self._resolve_review_page(name, page_id)
+        kwargs: dict[str, Any] = {}
+        if content is not None:
+            kwargs["json"] = {"content": content}
         async with httpx.AsyncClient(base_url=base, timeout=60) as client:
-            resp = await client.post(f"/pages/{page_id}/suggestions/{suggestion_id}/{action}")
+            resp = await client.post(
+                f"/pages/{page_id}/suggestions/{suggestion_id}/{action}", **kwargs
+            )
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
             return data
+
+    async def read_text(self, name: str, path: str) -> dict[str, Any]:
+        """Proxy a module's inline text-read endpoint (#KB-refactor): ``GET /read?path=``.
+
+        Returns ``{path, name, content}`` for a UTF-8 text file — used by the Files
+        split-screen reader. Upstream 4xx pass through (415 binary, 413 too large, 404
+        missing); an unreachable module is a controlled 502.
+        """
+        base, _ = await self._resolve(name)
+        data: dict[str, Any] = await self._get_json(
+            base, "/read", params={"path": path}, op=f"{name} read"
+        )
+        return data
 
     async def download(self, name: str, path: str) -> httpx.Response:
         """Proxy a binary file download from a module's ``/download`` endpoint.
@@ -891,10 +939,24 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         """Move or rename a file or folder within an editor page's store (#216)."""
         return await registry.move_page_item(name, page_id, body.from_path, body.to_path)
 
+    @router.post("/{name}/pages/{page_id}/project")
+    async def create_module_project(
+        name: str, page_id: str, project: str = Query(...)
+    ) -> dict[str, Any]:
+        """Create a new knowledge base (project) in an editor page's store (#KB-refactor)."""
+        return await registry.create_page_project(name, page_id, project)
+
     @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/approve")
-    async def approve_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
-        """Approve a staged suggestion: the module applies + indexes it (#220, ADR-0033)."""
-        return await registry.review_action(name, page_id, suggestion_id, "approve")
+    async def approve_suggestion(
+        name: str, page_id: str, suggestion_id: str, body: ApproveRequest | None = None
+    ) -> dict[str, Any]:
+        """Approve a staged suggestion: the module applies + indexes it (#220, ADR-0033).
+
+        ``body.content`` (optional) is the operator's per-hunk-merged result (#KB-refactor).
+        """
+        return await registry.review_action(
+            name, page_id, suggestion_id, "approve", content=body.content if body else None
+        )
 
     @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/reject")
     async def reject_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
@@ -919,6 +981,11 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
             media_type=content_type,
             headers=headers,
         )
+
+    @router.get("/{name}/read")
+    async def read_module_text(name: str, path: str = Query(...)) -> dict[str, Any]:
+        """Read a text file's contents from a module for the split-screen reader (#KB-refactor)."""
+        return await registry.read_text(name, path)
 
     @router.get("/{name}/resolve/{kind}/{ref_id}")
     async def resolve_entity(name: str, kind: str, ref_id: str) -> dict[str, Any]:

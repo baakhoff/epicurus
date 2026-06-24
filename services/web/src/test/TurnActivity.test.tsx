@@ -3,16 +3,16 @@ import { describe, expect, it } from "vitest";
 
 import { ProcessTimeline, ReadinessBar, ThinkingIndicator } from "@/components/TurnActivity";
 import type { Readiness } from "@/lib/contracts";
-import type { ToolRun } from "@/stores/chat";
+import type { ActivityItem } from "@/stores/chat";
 
-const RUNS: ToolRun[] = [
-  { tool: "calendar.list_events", status: "ok" },
-  { tool: "knowledge_search", status: "running", detail: '{"q":"abundance"}' },
+const ITEMS: ActivityItem[] = [
+  { kind: "tool", run: { tool: "calendar.list_events", status: "ok" } },
+  { kind: "tool", run: { tool: "knowledge_search", status: "running", detail: '{"q":"abundance"}' } },
 ];
 
 describe("ProcessTimeline (#121)", () => {
   it("renders a humanized step per tool with its status", () => {
-    render(<ProcessTimeline runs={RUNS} />);
+    render(<ProcessTimeline items={ITEMS} />);
     expect(screen.getByText("Reading calendar")).toBeInTheDocument();
     expect(screen.getByText("Searching knowledge")).toBeInTheDocument();
     // A running step surfaces in the header.
@@ -20,46 +20,70 @@ describe("ProcessTimeline (#121)", () => {
   });
 
   it("summarizes a finished run by step count", () => {
-    render(<ProcessTimeline runs={[{ tool: "a.b", status: "ok" }, { tool: "c_d", status: "ok" }]} />);
+    render(
+      <ProcessTimeline
+        items={[
+          { kind: "tool", run: { tool: "a.b", status: "ok" } },
+          { kind: "tool", run: { tool: "c_d", status: "ok" } },
+        ]}
+      />,
+    );
     expect(screen.getByRole("button", { name: /2 steps/i })).toBeInTheDocument();
   });
 
   it("reveals a step's detail when clicked", () => {
-    render(<ProcessTimeline runs={RUNS} />);
+    render(<ProcessTimeline items={ITEMS} />);
     expect(screen.queryByText(/abundance/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Searching knowledge/ }));
     expect(screen.getByText(/abundance/)).toBeInTheDocument();
   });
 
   it("starts collapsed when the answer has begun, and the reader can reopen it", () => {
-    render(<ProcessTimeline runs={RUNS} collapsed />);
+    render(<ProcessTimeline items={ITEMS} collapsed />);
     expect(screen.queryByText("Reading calendar")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /working/i }));
     expect(screen.getByText("Reading calendar")).toBeInTheDocument();
   });
 
-  it("shows the thinking block alongside the steps (ADR-0041)", () => {
-    render(<ProcessTimeline runs={RUNS} thinking="weighing the options" />);
+  it("shows a thinking block alongside the steps (ADR-0041)", () => {
+    render(
+      <ProcessTimeline items={[{ kind: "thinking", text: "weighing the options" }, ...ITEMS]} />,
+    );
     expect(screen.getByText("Thinking")).toBeInTheDocument();
     expect(screen.getByText("weighing the options")).toBeInTheDocument();
   });
 
   it("renders with thinking only and no tool steps", () => {
-    render(<ProcessTimeline runs={[]} thinking="just pondering" />);
+    render(<ProcessTimeline items={[{ kind: "thinking", text: "just pondering" }]} />);
     expect(screen.getByRole("button", { name: /thought process/i })).toBeInTheDocument();
     expect(screen.getByText("just pondering")).toBeInTheDocument();
   });
 
   it("hides the thinking text once the reader collapses it", () => {
-    render(<ProcessTimeline runs={[]} thinking="secret reasoning" />);
+    render(<ProcessTimeline items={[{ kind: "thinking", text: "secret reasoning" }]} />);
     expect(screen.getByText("secret reasoning")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^Thinking$/ }));
     expect(screen.queryByText("secret reasoning")).not.toBeInTheDocument();
   });
 
-  it("renders nothing without steps or thinking", () => {
-    const { container } = render(<ProcessTimeline runs={[]} />);
+  it("renders nothing for an empty timeline", () => {
+    const { container } = render(<ProcessTimeline items={[]} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders thinking and tools in chronological order (think → call → think, #300)", () => {
+    const items: ActivityItem[] = [
+      { kind: "thinking", text: "first I plan" },
+      { kind: "tool", run: { tool: "knowledge_search", status: "ok" } },
+      { kind: "thinking", text: "then I refine" },
+    ];
+    render(<ProcessTimeline items={items} />);
+    const plan = screen.getByText("first I plan");
+    const tool = screen.getByText("Searching knowledge");
+    const refine = screen.getByText("then I refine");
+    // DOM order matches the timeline order: plan, then the tool, then refine.
+    expect(plan.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tool.compareDocumentPosition(refine) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

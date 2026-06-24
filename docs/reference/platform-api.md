@@ -132,6 +132,86 @@ it as a real IANA zone (**400** otherwise) and persists it; edited in the web Se
 
 ---
 
+## Knowledge-base / notes / suggestions endpoints (shell-facing)
+
+These are consumed by the web shell, not the `PlatformClient`. The full module-registry
+surface is documented in [core-app](../services/core-app.md); the #KB-refactor additions are
+(the suggestion endpoints below are generic — they serve any module with a `review` page,
+i.e. knowledge **and** private notes):
+
+### `GET /platform/v1/suggestions`
+
+The **cross-module pending-suggestions feed**: every enabled module that declares a `review`
+page, aggregated into one list. Each item is a review suggestion plus its owning `module` and
+`page_id`, so the chat composer's suggestion bubble and the Suggestions page can act on it
+from anywhere. This spans **all** such modules — the knowledge base (`module: "knowledge"`,
+`page_id: "review"`) and private **notes** (`module: "notes"`, `page_id: "review"`) both
+surface here, with no special-casing. Best-effort — a down, disabled, or erroring module is
+skipped, not fatal.
+
+```json
+[
+  {
+    "id": "9f2c…",
+    "title": "goals",
+    "path": "projects/goals.md",
+    "operation": "update",
+    "origin": "agent",
+    "note": "",
+    "created_at": "2026-06-24T10:00:00+00:00",
+    "diff": "--- a/projects/goals.md\n+++ b/projects/goals.md\n…",
+    "to_path": "",
+    "current": "…",
+    "content": "…",
+    "module": "knowledge",
+    "page_id": "review"
+  }
+]
+```
+
+`operation` is one of `create` / `update` / `append` / `delete` / `move` / `mkdir` /
+`mkproject`. The content ops (`create` / `update` / `append`) carry a `diff` and full
+`current` / `content` for per-hunk review; structural ops (`move` / `mkdir` / `mkproject`)
+leave those empty, with `to_path` carrying a `move`'s destination. `append` is **notes**-only
+(the agent supplies just the text to add; the server concatenates it on approval) and is
+content-like — its diff shows the added text.
+
+### `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled`
+
+The per-module **review on/off** toggle (#KB-refactor) — `{ "enabled": true }`. When **on**
+(the default; a missing or NULL pref reads as `true`) the module stages agent changes on its
+`review` page for approval. When **off**, the module applies them directly (it reads this via
+`PlatformClient.get_suggestions_enabled` and, when off, approves its own staged suggestion
+through the normal apply path). The review-page header reads `GET` and writes `PUT`; `PUT`
+**404**s an unknown module. Persisted in `module_prefs`. Generic across any module with a
+`review` page — today knowledge and notes.
+
+### `GET /platform/v1/modules/storage/read?path=…`
+
+Proxy the storage module's text-file read for the Files split-screen reader →
+`{path, name, content}`. Upstream errors pass through: **415** binary / non-UTF-8, **413**
+larger than 256 KB, **404** missing, **400** traversal; an unreachable module is **502**.
+
+### `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…`
+
+Create a new knowledge base (project / top-level scope) in an editor page's store →
+`{id, title, kind}`. **409** if it already exists, **400** for an invalid name (a single
+folder segment — no separators, `..`, or `.`/`_` prefix). The operator's "New knowledge base"
+control; the agent's equivalent (`knowledge_propose_project`) goes through the review queue.
+
+### `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve`
+
+Approve a staged suggestion: the module applies + indexes it (ADR-0033). Generic across any
+module that declares a `review` page — both **knowledge** (`page_id: "review"`) and private
+**notes** (`page_id: "review"`) expose this surface. The body is **optional** `{content}` — the
+operator's **per-hunk-merged** result for a content op (an edit, or a notes `append`), forwarded
+so only the approved changes are written; absent ⇒ apply the module's full proposal (for notes,
+the server composes the body — `append` concatenates onto the current note). Operator-only
+(paired with `…/reject`, which discards). **409** for knowledge when the target vault is
+externally owned (watch mode, #232); notes have no external-owner mode.
+
+---
+
 ## `PlatformClient`
 
 `epicurus_core.PlatformClient` — the typed client for the above endpoints.

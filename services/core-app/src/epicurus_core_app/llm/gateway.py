@@ -24,6 +24,11 @@ import litellm
 
 from epicurus_core import EventBus, SecretError, SecretStore, get_logger
 from epicurus_core_app.llm import providers as registry
+from epicurus_core_app.llm.compaction import (
+    compact_messages,
+    estimate_tools_tokens,
+    reply_reserve,
+)
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import (
     ChatMessage,
@@ -44,6 +49,10 @@ litellm.drop_params = True
 log = get_logger("epicurus_core_app.llm")
 
 USAGE_SUBJECT = "llm.usage"
+
+# Inserted in place of dropped history when a turn is trimmed to fit the context window, so the
+# model knows earlier messages were cut rather than never said.
+_TRIM_NOTE = "(Earlier messages in this conversation were trimmed to fit the context window.)"
 
 
 class UnknownProviderError(LookupError):
@@ -217,9 +226,7 @@ class LlmGateway:
         if provider.is_local:
             config["api_base"] = self._ollama_url
             settings = await self._settings_for(model, tenant_id)
-            num_ctx = settings.context_window
-            if num_ctx is None:
-                num_ctx = await self.effective_context_window(tenant_id)
+            num_ctx = await self._effective_num_ctx(model, tenant_id, settings=settings)
             # num_ctx is an Ollama runtime option — local models only.
             if num_ctx is not None:
                 config["num_ctx"] = num_ctx
@@ -245,6 +252,44 @@ class LlmGateway:
             config["top_p"] = self._top_p
         return config
 
+    async def _effective_num_ctx(
+        self, model: str, tenant_id: str | None, *, settings: ModelSettings | None = None
+    ) -> int | None:
+        """The Ollama context window for ``model``: per-model setting, else global pref, else env.
+
+        One source of truth for both the runtime ``num_ctx`` option and the context-fit budget.
+        ``None`` means no explicit window (the runtime's own default applies).
+        """
+        if settings is None:
+            settings = await self._settings_for(model, tenant_id)
+        if settings.context_window is not None:
+            return settings.context_window
+        return await self.effective_context_window(tenant_id)
+
+    async def _fit_to_context(
+        self,
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None,
+        tenant_id: str | None,
+    ) -> list[ChatMessage]:
+        """Trim ``messages`` to fit ``model``'s context window — local models only.
+
+        The local runtime silently drops tokens past ``num_ctx``, evicting the oldest (the
+        system prompt + recalled context). We pre-trim instead (see :mod:`compaction`): keep the
+        system prefix and the most-recent turns within ``num_ctx`` minus a reply reserve and the
+        tool schemas' footprint. Hosted providers (large contexts, handled server-side) and calls
+        with no known window are left untouched.
+        """
+        _, provider = registry.resolve(model)
+        if not provider.is_local:
+            return messages
+        num_ctx = await self._effective_num_ctx(model, tenant_id)
+        if not num_ctx:
+            return messages
+        budget = num_ctx - reply_reserve(num_ctx) - estimate_tools_tokens(tools)
+        return compact_messages(messages, budget=budget, note=_TRIM_NOTE)
+
     async def _complete(
         self,
         model: str,
@@ -253,6 +298,7 @@ class LlmGateway:
         tenant_id: str | None,
     ) -> ChatResult:
         config = await self._call_config(model, tenant_id)
+        messages = await self._fit_to_context(model, messages, tools, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -323,6 +369,7 @@ class LlmGateway:
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
         config = await self._call_config(candidate, tenant_id)
+        messages = await self._fit_to_context(candidate, messages, None, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -362,6 +409,7 @@ class LlmGateway:
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
         config = await self._call_config(candidate, tenant_id)
+        messages = await self._fit_to_context(candidate, messages, tools, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],

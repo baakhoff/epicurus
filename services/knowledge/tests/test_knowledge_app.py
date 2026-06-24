@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.13.0"
+    assert manifest.version == "0.16.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -59,18 +59,29 @@ def _indexer_stub() -> object:
 def _module():  # type: ignore[no-untyped-def]
     """Build the module for manifest assertions (suggestion store never exercised here)."""
     from pathlib import Path
+    from unittest.mock import AsyncMock
 
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from epicurus_core import PlatformClient
+    from epicurus_knowledge.pages import VaultPages
     from epicurus_knowledge.service import build_module
-    from epicurus_knowledge.suggestions import SuggestionStore
+    from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore
 
     store = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    vault = _indexer_stub()
+    review = SuggestionReview(
+        store, VaultPages(Path("/vault"), vault), vault, vault_path=Path("/vault"), tenant="test"
+    )
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=True)
     return build_module(
-        _indexer_stub(),
+        vault,
         _indexer_stub(),
         _indexer_stub(),
         store,
+        review,
+        platform,
         tenant="test",
         vault_path=Path("/vault"),
     )
@@ -96,3 +107,22 @@ def test_settings_docs_path_default() -> None:
     from pathlib import Path
 
     assert isinstance(s.docs_path, Path)
+
+
+def test_vault_root_is_tenant_scoped() -> None:
+    """The on-disk vault is <files-root>/<tenant>/knowledge (constraint #1).
+
+    Guards the path arithmetic in create_app: a regression that drops the tenant
+    segment (or mis-orders .parent/.name) would put the vault back at the global
+    /data/knowledge, breaking per-tenant isolation of the shared file space.
+    """
+    from pathlib import Path
+
+    from epicurus_knowledge.settings import KnowledgeSettings
+
+    s = KnowledgeSettings(service_name="knowledge", vault_path=Path("/data/knowledge"))
+    vault_root = s.vault_path.parent / s.default_tenant_id / s.vault_path.name
+    assert vault_root == Path("/data") / s.default_tenant_id / "knowledge"
+    assert s.default_tenant_id in vault_root.parts  # the tenant segment is present
+    # The bundled platform docs stay shared/read-only — never tenant-scoped.
+    assert s.default_tenant_id not in s.docs_path.parts

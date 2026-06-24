@@ -22,6 +22,35 @@ Dev credentials are intentionally weak and for a local, private box. OpenBao is 
 credential source — provider API keys set via the UI survive full stack restarts.
 Details: [`infra/compose/README.md`](../../infra/compose/README.md).
 
+### Shared file space
+
+The file-owning modules share **one** file tree — the **shared file space** (#KB-refactor).
+It is a single volume mounted at `/data` in each of them, set by one env var
+**`EPICURUS_FILES_ROOT`** (default an empty named volume, `epicurus-files`; point it at a host
+directory to expose real files — never the host home dir). The on-disk tree is
+**tenant-scoped** (constraint #1): every module inserts a `<tenant>/` segment so the layout is
+`/data/<tenant>/…`, where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The mount stays
+`/data`; only the in-container path carries the segment. Each module owns a subtree:
+
+- **storage** mounts it **read-only** and indexes the tenant subtree `/data/<tenant>` as the
+  unified **Files** view.
+- **knowledge** mounts it **read-write** and owns `/data/<tenant>/knowledge` (each top-level
+  folder is a knowledge base / project).
+- **notes** mounts it **read-write** and owns `/data/<tenant>/notes` (the read-only `.md` mirror
+  of authored notes; Postgres stays the source of truth).
+
+`EPICURUS_FILES_ROOT` **replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and
+`STORAGE_HOST_ROOT`; existing deployments move old vault contents into
+`<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`).
+
+A one-shot **`files-init`** container prepares the tree before any module starts (it is a
+`depends_on: service_completed_successfully` of storage / knowledge / notes, mirroring
+`qdrant-init` and the OpenBao chown). A fresh named volume is created **root-owned**, but the
+modules run as uid 10001 — so without this they would hit `PermissionError` (HTTP 500)
+creating folders or saving documents. `files-init` creates `/data/<tenant>/knowledge` and
+`/data/<tenant>/notes` and chowns **only those** to uid 10001, leaving the rest of a
+bind-mounted tree (e.g. an operator's Obsidian vault) untouched.
+
 ## Edge gateway
 
 **Traefik** routes to services by Docker label, with **no authentication baked in** and no
@@ -29,10 +58,15 @@ assumed ingress — the operator layers their own perimeter (Tailscale, a revers
 auth proxy) in front (ADR-0008). Host ports **8088** (web entrypoint) and **8089**
 (dashboard). Details: [`infra/edge/README.md`](../../infra/edge/README.md).
 
-## Observability
+## Observability (opt-in)
 
 **Grafana / Loki / Prometheus / Tempo** with an **Alloy** collector (OTel) give logs,
-metrics, and traces for every container. Open Grafana at `http://localhost:3000`.
+metrics, and traces for every container — but the whole stack is **opt-in**, gated behind
+the `observability` compose profile. A plain `docker compose up` runs without it; bring it
+up with `docker compose --profile observability up -d` and open Grafana at
+`http://localhost:3000`. Nothing in epicurus depends on it at runtime: every service exposes
+`/metrics` and `/health` regardless, so you can also point your **own** Prometheus/Grafana
+(or any monitoring you prefer) at those endpoints and never enable this stack at all.
 Alert rules for service health, OpenBao sealed, and disk usage are pre-configured and
 evaluated by Prometheus; Alertmanager routes notifications (edit
 `infra/observability/alertmanager/alertmanager.yml` to add a receiver).

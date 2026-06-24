@@ -41,6 +41,7 @@ class _FakeIndexer:
     def __init__(self) -> None:
         self.indexed: list[str] = []
         self.removed: list[str] = []
+        self.ran = 0
 
     async def index_path(self, rel: str) -> int:
         self.indexed.append(rel)
@@ -48,6 +49,11 @@ class _FakeIndexer:
 
     async def remove_path(self, rel: str) -> None:
         self.removed.append(rel)
+
+    async def run(self) -> dict[str, int]:
+        # A folder move reconciles via a full incremental pass (#KB-refactor).
+        self.ran += 1
+        return {"indexed": 0, "deleted": 0, "unchanged": 0}
 
 
 async def _store() -> SuggestionStore:
@@ -65,6 +71,7 @@ async def _add(
     origin: str = "agent",
     note: str = "",
     tenant: str = TENANT,
+    to_path: str = "",
 ) -> str:
     s = await store.add(
         tenant=tenant,
@@ -73,6 +80,7 @@ async def _add(
         proposed_content=content,
         origin=origin,
         note=note,
+        to_path=to_path,
     )
     return s.sid
 
@@ -337,13 +345,22 @@ async def test_reject_endpoint_discards(tmp_path: Path) -> None:
 # ── the knowledge_propose_edit tool ───────────────────────────────────────────
 
 
-def _module_with_store(store: SuggestionStore, vault_path: Path):  # type: ignore[no-untyped-def]
+def _module_with_store(store: SuggestionStore, vault_path: Path, *, review_on: bool = True):  # type: ignore[no-untyped-def]
+    from epicurus_core import PlatformClient
     from epicurus_knowledge.module_docs import ModuleDocsIndexer
 
     vault = AsyncMock(spec=KnowledgeIndexer)
+    vault.index_path = AsyncMock(return_value=1)
+    vault.remove_path = AsyncMock(return_value=None)
     docs = AsyncMock(spec=KnowledgeIndexer)
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
-    return build_module(vault, docs, module_docs, store, tenant=TENANT, vault_path=vault_path)
+    pages = VaultPages(vault_path, vault)  # type: ignore[arg-type]
+    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant=TENANT)  # type: ignore[arg-type]
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=review_on)
+    return build_module(
+        vault, docs, module_docs, store, review, platform, tenant=TENANT, vault_path=vault_path
+    )
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
@@ -408,3 +425,200 @@ async def test_manifest_declares_review_page(tmp_path: Path) -> None:
     review_pages = [p for p in manifest.pages if p.archetype == "review"]
     assert len(review_pages) == 1
     assert review_pages[0].id == "review"
+
+
+# ── new operations: move / mkdir / mkproject + content override (#KB-refactor) ─
+
+
+@pytest.mark.parametrize("op", ["move", "mkdir", "mkproject"])
+def test_validate_operation_accepts_structural(op: str) -> None:
+    assert validate_operation(op) == op
+
+
+async def test_store_roundtrips_to_path() -> None:
+    store = await _store()
+    s = await store.add(
+        tenant=TENANT,
+        path="a.md",
+        operation="move",
+        proposed_content="",
+        origin="agent",
+        note="",
+        to_path="b.md",
+    )
+    got = await store.get(tenant=TENANT, sid=s.sid)
+    assert got is not None and got.to_path == "b.md"
+
+
+async def test_review_move_has_empty_diff_and_to_path(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
+    review, store, _ = await _review(tmp_path)
+    await _add(store, path="kb/a.md", operation="move", to_path="kb/b.md")
+    s = (await review.list_review()).suggestions[0]
+    assert s.operation == "move"
+    assert s.to_path == "kb/b.md"
+    assert s.diff == ""  # structural ops carry no content diff
+
+
+async def test_approve_move_file_relocates_and_reindexes(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
+    review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="kb/a.md", operation="move", to_path="kb/b.md")
+    result = await review.approve(sid)
+    assert result.status == "approved"
+    assert result.path == "kb/b.md"
+    assert not (tmp_path / "kb" / "a.md").exists()
+    assert (tmp_path / "kb" / "b.md").is_file()
+    assert "kb/a.md" in indexer.removed
+    assert "kb/b.md" in indexer.indexed
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_approve_move_folder_reconciles_index(tmp_path: Path) -> None:
+    (tmp_path / "kb" / "old").mkdir(parents=True)
+    (tmp_path / "kb" / "old" / "c.md").write_text("# C\n", encoding="utf-8")
+    review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="kb/old", operation="move", to_path="kb/new")
+    await review.approve(sid)
+    assert (tmp_path / "kb" / "new" / "c.md").is_file()
+    assert not (tmp_path / "kb" / "old").exists()
+    assert indexer.ran == 1  # a folder move triggers a full incremental reconcile
+
+
+async def test_approve_mkdir_creates_folder(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="kb/ideas", operation="mkdir")
+    await review.approve(sid)
+    assert (tmp_path / "kb" / "ideas").is_dir()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_approve_mkproject_creates_top_level_folder(tmp_path: Path) -> None:
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="research", operation="mkproject")
+    result = await review.approve(sid)
+    assert result.status == "approved"
+    assert (tmp_path / "research").is_dir()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_approve_update_honours_content_override(tmp_path: Path) -> None:
+    # Per-hunk review (#KB-refactor): the operator approves a merged result, not the
+    # agent's full proposal.
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="kb/doc.md", operation="update", content="full proposal\n")
+    await review.approve(sid, content="operator merged\n")
+    assert (tmp_path / "kb" / "doc.md").read_text(encoding="utf-8") == "operator merged\n"
+
+
+async def test_approve_endpoint_accepts_content_body(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
+    review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="kb/doc.md", operation="update", content="proposal\n")
+    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
+    client = _app(review, pages)
+    resp = client.post(f"/pages/review/suggestions/{sid}/approve", json={"content": "merged\n"})
+    assert resp.status_code == 200
+    assert (tmp_path / "kb" / "doc.md").read_text(encoding="utf-8") == "merged\n"
+
+
+# ── the structural propose tools ──────────────────────────────────────────────
+
+
+async def test_propose_move_stages_suggestion(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_move", {"from_path": "kb/a.md", "to_path": "kb/sub/a.md"}
+    )
+    env = _envelope(content)
+    assert "pending your review" in env.text.lower()
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1
+    assert rows[0].operation == "move"
+    assert rows[0].path == "kb/a.md"
+    assert rows[0].to_path == "kb/sub/a.md"
+
+
+async def test_propose_folder_stages_suggestion(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_propose_folder", {"path": "kb/ideas"})
+    _envelope(content)
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1 and rows[0].operation == "mkdir" and rows[0].path == "kb/ideas"
+
+
+async def test_propose_project_stages_suggestion(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_propose_project", {"name": "research"})
+    _envelope(content)
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1 and rows[0].operation == "mkproject" and rows[0].path == "research"
+
+
+async def test_propose_project_rejects_bad_name(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_propose_project", {"name": "a/b"})
+    env = _envelope(content)
+    assert "cannot propose" in env.text.lower()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_edit", {"path": "kb/a.md", "content": "x", "operation": "move"}
+    )
+    env = _envelope(content)
+    assert "structural" in env.text.lower()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_propose_rename_stages_a_move(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "b"}
+    )
+    env = _envelope(content)
+    assert "pending your review" in env.text.lower()
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1
+    assert rows[0].operation == "move"
+    assert rows[0].path == "kb/a.md"
+    assert rows[0].to_path == "kb/b.md"  # same folder, .md suffix preserved
+
+
+async def test_propose_rename_rejects_a_slash(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "sub/b"}
+    )
+    env = _envelope(content)
+    assert "bare name" in env.text.lower()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None:
+    # With review turned off, the agent's change is applied directly — nothing left pending.
+    store = await _store()
+    module = _module_with_store(store, tmp_path, review_on=False)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_edit",
+        {"path": "kb/new.md", "content": "# Auto\n", "operation": "create"},
+    )
+    env = _envelope(content)
+    assert "applied directly" in env.text.lower()
+    assert (tmp_path / "kb" / "new.md").read_text(encoding="utf-8") == "# Auto\n"
+    assert await store.list(tenant=TENANT) == []

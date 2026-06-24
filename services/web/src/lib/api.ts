@@ -17,7 +17,9 @@ import {
   LogEntry,
   MemoryListing,
   MessageRecord,
+  ModelDetails,
   ModelInfo,
+  ModelSettings,
   ModuleAttachmentItem,
   ModuleSnapshot,
   OAuthClientStatus,
@@ -100,11 +102,31 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
+  // Agent loop bound (tool rounds per turn); null = the env default. The core clamps 1-12.
+  setAgentMaxSteps: (value: number | null) =>
+    request(
+      z.object({ status: z.string(), value: z.number().nullable() }),
+      "/platform/v1/llm/prefs/agent-max-steps",
+      { method: "PUT", body: JSON.stringify({ value }) },
+    ),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",
       body: JSON.stringify({ name, hidden }),
     }),
+
+  // Per-model settings (context window + keep-alive). `model` is a query param —
+  // names carry ":" and "/" which proxies may mangle in a path.
+  modelSettings: (model: string) =>
+    request(ModelSettings, `/platform/v1/llm/model-settings?model=${encodeURIComponent(model)}`),
+  setModelSettings: (model: string, settings: { context_window: number | null; keep_alive: string | null }) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/model-settings", {
+      method: "PUT",
+      body: JSON.stringify({ model, ...settings }),
+    }),
+  // Read-only facts (quantization, parameter size, trained context length) for the sheet.
+  modelDetails: (model: string) =>
+    request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),
 
   timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
   setTimezone: (timezone: string) =>

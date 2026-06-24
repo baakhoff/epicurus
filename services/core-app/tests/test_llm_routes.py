@@ -8,12 +8,22 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.llm.catalog import CatalogEntry, ModelCatalog
+from epicurus_core_app.llm.model_settings import ModelSettingsStore
+from epicurus_core_app.llm.models import ModelDetails
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
 
 
 class _StubGateway:
-    """Only needs to exist — these tests inspect routes, not call behavior."""
+    """Only needs to exist — most tests inspect routes, not call behavior.
+
+    ``show`` backs the /models/details route; it returns canned details.
+    """
+
+    async def show(self, model: str) -> ModelDetails:
+        return ModelDetails(
+            quantization="Q4_K_M", parameter_size="8.0B", context_length=131072, family="llama"
+        )
 
 
 async def _fresh_prefs() -> LlmPrefsStore:
@@ -27,7 +37,22 @@ async def _fresh_prefs() -> LlmPrefsStore:
     return prefs
 
 
-def _app(prefs: LlmPrefsStore | None = None, catalog: ModelCatalog | None = None) -> FastAPI:
+async def _fresh_model_settings() -> ModelSettingsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = ModelSettingsStore(engine)
+    await store.init()
+    return store
+
+
+def _app(
+    prefs: LlmPrefsStore | None = None,
+    catalog: ModelCatalog | None = None,
+    model_settings: ModelSettingsStore | None = None,
+) -> FastAPI:
     app = FastAPI()
     app.include_router(
         create_llm_router(
@@ -35,6 +60,7 @@ def _app(prefs: LlmPrefsStore | None = None, catalog: ModelCatalog | None = None
             prefs=prefs,
             default_tenant="local",
             catalog=catalog,
+            model_settings=model_settings,
         )
     )
     return app
@@ -257,3 +283,88 @@ async def test_prefs_context_window_no_store_returns_503() -> None:
     ) as client:
         resp = await client.put("/platform/v1/llm/prefs/context-window", json={"value": 8192})
     assert resp.status_code == 503
+
+
+async def test_agent_max_steps_route_clamps_and_round_trips() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        # Over the ceiling → clamped to 12.
+        put = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": 99})
+        assert put.status_code == 200
+        assert put.json()["value"] == 12
+        got = await client.get("/platform/v1/llm/prefs")
+    assert got.json()["global_agent_max_steps"] == 12
+
+
+async def test_agent_max_steps_floor_and_clear() -> None:
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
+    ) as client:
+        floored = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": 0})
+        assert floored.json()["value"] == 1  # clamped up to the floor
+        cleared = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": None})
+        assert cleared.json()["value"] is None
+        got = await client.get("/platform/v1/llm/prefs")
+    assert got.json()["global_agent_max_steps"] is None
+
+
+# ── per-model settings + model details (#model-settings) ─────────────────────
+
+
+def test_model_settings_routes_present() -> None:
+    paths = _app().openapi()["paths"]
+    assert "/platform/v1/llm/model-settings" in paths
+    assert "/platform/v1/llm/models/details" in paths
+
+
+async def test_get_model_settings_defaults_to_inherit() -> None:
+    ms = await _fresh_model_settings()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(model_settings=ms)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/llm/model-settings", params={"model": "llama3.2"})
+    assert resp.status_code == 200
+    assert resp.json() == {"context_window": None, "keep_alive": None}
+
+
+async def test_put_then_get_model_settings_round_trips() -> None:
+    ms = await _fresh_model_settings()
+    app = _app(model_settings=ms)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        put = await client.put(
+            "/platform/v1/llm/model-settings",
+            json={"model": "llama3.2:latest", "context_window": 8192, "keep_alive": "30m"},
+        )
+        assert put.status_code == 200
+        got = await client.get(
+            "/platform/v1/llm/model-settings", params={"model": "llama3.2:latest"}
+        )
+    assert got.json() == {"context_window": 8192, "keep_alive": "30m"}
+
+
+async def test_put_model_settings_without_store_is_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(model_settings=None)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/llm/model-settings", json={"model": "llama3.2", "context_window": 4096}
+        )
+    assert resp.status_code == 503
+
+
+async def test_model_details_route_returns_show() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app()), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/platform/v1/llm/models/details", params={"model": "llama3.2:latest"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["quantization"] == "Q4_K_M"
+    assert body["context_length"] == 131072

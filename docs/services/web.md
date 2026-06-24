@@ -107,12 +107,14 @@ tool call's `running`→`ok`/`error`), `done` (the final `AgentTurn`), `error`.
 
 Before the first token the shell shows the turn's *process*, not a bare caret: a
 **readiness bar** while the system warms (`readiness` events, #122), a **"Thinking…"** cue
-once it is ready and a token is pending, then an **activity timeline** that shows the
-model's thinking (a collapsible block) and lists each tool step with a human-readable label
-and live status (#121, ADR-0041). The timeline folds to a one-line summary as the answer
-streams in. On `done` the live turn is replaced by the clean server-stored answer — which
-**keeps its folded activity**, persisted on the message (`MessageRecord.activity`), so a
-reopened conversation still shows the timeline (thinking + tool steps).
+once it is ready and a token is pending, then an **activity timeline** that interleaves the
+model's thinking (collapsible blocks) and its tool steps **in the order they happened** —
+think → call → think — each tool step with a human-readable label and live status (#121,
+ADR-0041, ordering #300). The timeline folds to a one-line summary as the answer streams in.
+On `done` the live turn is replaced by the clean server-stored answer — which **keeps its
+folded activity**, persisted on the message (`MessageRecord.activity.timeline`), so a
+reopened conversation still shows the same ordered timeline. Older turns saved before the
+ordered timeline fall back to a thinking-then-steps render.
 
 ## Configuration
 

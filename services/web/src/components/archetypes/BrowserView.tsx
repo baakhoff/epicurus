@@ -12,13 +12,22 @@
  * Responsive: two panes side-by-side on wide screens; on phones the list fills the
  * view and selecting an item slides to its detail (with a back affordance).
  */
-import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Download, Folder, Search, X } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { BookOpen, ChevronLeft, ChevronRight, Download, Folder, Search, X } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { EmptyState, Spinner, cn } from "@/components/ui";
-import { api } from "@/lib/api";
+import { Button, EmptyState, Spinner, cn } from "@/components/ui";
+import { ApiError, api } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
+import { usePanel } from "@/stores/panel";
+
+/** File extensions the Files browser can open inline in the split-screen reader (req 6). */
+const TEXT_EXT =
+  /\.(md|markdown|mdx|txt|text|log|json|ya?ml|toml|ini|cfg|conf|csv|tsv|xml|html?|css|s?css|jsx?|tsx?|py|rb|go|rs|java|kt|c|h|cpp|sh|bash|sql|env)$/i;
+
+function isTextFile(name: string): boolean {
+  return TEXT_EXT.test(name);
+}
 
 /** Breadcrumb segment for directory navigation. */
 interface Crumb {
@@ -43,6 +52,17 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
   const [activeQuery, setActiveQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // Open a text file in the right-panel split-screen reader (#KB-refactor, req 6).
+  const panelOpen = usePanel((s) => s.open);
+  const openInPanel = useMutation({
+    mutationFn: (path: string) => api.readModuleText(module, path),
+    onSuccess: (file) => panelOpen("doc-reader", file, file.name),
+    onError: (err) =>
+      window.alert(
+        err instanceof ApiError ? `Could not open: ${err.detail}` : "Could not open this file.",
+      ),
+  });
 
   // Reset selection when the path or query changes — adjust state during render
   // (the React-blessed alternative to a setState-in-effect, no extra commit).
@@ -227,14 +247,25 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
                 </p>
               )}
               {selected.href && (
-                <a
-                  href={selected.href}
-                  download={selected.title}
-                  className="mt-5 inline-flex items-center gap-2 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 transition-colors"
-                >
-                  <Download size={14} />
-                  Download
-                </a>
+                <div className="mt-5 flex flex-wrap items-center gap-2">
+                  {isTextFile(selected.title) && (
+                    <Button
+                      variant="primary"
+                      busy={openInPanel.isPending}
+                      onClick={() => openInPanel.mutate(selected.id)}
+                    >
+                      <BookOpen size={14} /> Open
+                    </Button>
+                  )}
+                  <a
+                    href={selected.href}
+                    download={selected.title}
+                    className="inline-flex items-center gap-2 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 transition-colors"
+                  >
+                    <Download size={14} />
+                    Download
+                  </a>
+                </div>
               )}
             </article>
           ) : (

@@ -19,16 +19,18 @@
  * back affordance. Edit shows the markdown source; Preview renders it with the shell's
  * prose styler. Saving persists through the core, which (for knowledge/notes) re-indexes.
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
   FileText,
+  FilePlus,
   Folder,
   FolderOpen,
   History,
+  Library,
   MoreHorizontal,
   Plus,
 } from "lucide-react";
@@ -40,7 +42,7 @@ import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/c
 import { ApiError } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
-import type { EditorDoc, EditorVersionContent } from "@/lib/contracts";
+import type { EditorDoc, EditorScope, EditorVersionContent } from "@/lib/contracts";
 import { relativeTime } from "@/lib/format";
 
 /** Idle delay before an unsaved edit is flushed (ADR-0042). Saving re-embeds, so we do NOT
@@ -318,6 +320,120 @@ function TreeItem({
   );
 }
 
+// ── Scope (knowledge-base) switcher ────────────────────────────────────────────
+
+/**
+ * The project/knowledge-base switcher (#KB-refactor): picks the active scope and offers a
+ * "New {noun}" control. Projects and the read-only reference scope (platform docs) are
+ * grouped. Shown only when the page declares a `scope_noun` (knowledge does; notes doesn't).
+ */
+function ScopeSwitcher({
+  scopes,
+  active,
+  noun,
+  canCreate,
+  creating,
+  onSelect,
+  onStartCreate,
+}: {
+  scopes: EditorScope[];
+  active: string;
+  noun: string;
+  canCreate: boolean;
+  creating: boolean;
+  onSelect: (id: string) => void;
+  onStartCreate: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const projects = scopes.filter((s) => s.kind === "project");
+  const refs = scopes.filter((s) => s.kind === "reference");
+  const activeScope = scopes.find((s) => s.id === active);
+
+  return (
+    <div className="relative border-b border-edge p-2">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-2 rounded-(--radius-field) border border-edge px-2.5 py-1.5 text-sm text-ink transition-colors hover:bg-surface-2"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Library size={14} className="shrink-0 text-ink-faint" />
+          <span className="truncate">{activeScope?.title ?? `Select a ${noun}`}</span>
+        </span>
+        <ChevronDown size={14} className="shrink-0 text-ink-faint" />
+      </button>
+      {open && (
+        <>
+          <button
+            type="button"
+            aria-hidden
+            tabIndex={-1}
+            className="fixed inset-0 z-10 cursor-default"
+            onClick={() => setOpen(false)}
+          />
+          <div className="absolute inset-x-2 top-full z-20 mt-1 max-h-80 overflow-y-auto overscroll-contain rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)">
+            {projects.length > 0 && (
+              <div className="px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+                {noun}s
+              </div>
+            )}
+            {projects.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => {
+                  onSelect(s.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
+                  s.id === active ? "bg-accent-dim text-accent-strong" : "text-ink hover:bg-surface-2",
+                )}
+              >
+                <Library size={13} className="shrink-0 text-ink-faint" />
+                <span className="truncate">{s.title}</span>
+              </button>
+            ))}
+            {refs.length > 0 && (
+              <div className="mt-1 border-t border-edge px-3 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+                Reference
+              </div>
+            )}
+            {refs.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => {
+                  onSelect(s.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
+                  s.id === active ? "bg-accent-dim text-accent-strong" : "text-ink hover:bg-surface-2",
+                )}
+              >
+                <FileText size={13} className="shrink-0 text-ink-faint" />
+                <span className="truncate">{s.title}</span>
+              </button>
+            ))}
+            {canCreate && (
+              <button
+                onClick={() => {
+                  onStartCreate();
+                  setOpen(false);
+                }}
+                disabled={creating}
+                className="mt-1 flex w-full items-center gap-2 border-t border-edge px-3 py-1.5 text-left text-sm text-ink-dim hover:bg-surface-2 hover:text-ink"
+              >
+                <Plus size={13} className="shrink-0" /> New {noun}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export function EditorView({ module, pageId }: { module: string; pageId: string }) {
@@ -342,31 +458,53 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   // The folder inside which a new file is being created (null = root)
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
 
+  // The active scope (knowledge base / project, #KB-refactor). Empty = let the module
+  // default to the first project; the switcher and create-project flow drive it. Paths in
+  // the tree are scope-relative; `toModulePath` prepends the scope at the API boundary.
+  const [activeScope, setActiveScope] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+
   // Version history (ADR-0046): the dropdown's open state and the past version being
   // previewed (read-only) in place of the live buffer. `null` = editing the current doc.
   const [historyOpen, setHistoryOpen] = useState(false);
   const [viewingVersion, setViewingVersion] = useState<EditorVersionContent | null>(null);
 
-  // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's
-  // "Open in Knowledge" link, #143). Re-applies if the param changes while mounted.
+  const list = useQuery({
+    queryKey: ["module-page", module, pageId, activeScope],
+    queryFn: () => api.modulePage(module, pageId, activeScope ? { scope: activeScope } : undefined),
+    // Keep the previous scope's tree on screen while the new one loads (no flicker).
+    placeholderData: keepPreviousData,
+  });
+
+  const listData = list.data ? EditorData.parse(list.data) : null;
+  // The resolved scope: the operator's pick, else the module's default (first project).
+  const scope = activeScope || listData?.scope || "";
+  // Tree paths are scope-relative; the module's doc/folder/move endpoints want the
+  // knowledge-root-relative `<scope>/<path>`.
+  const toModulePath = (p: string): string => (scope ? `${scope}/${p}` : p);
+
+  // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's "Open in
+  // Knowledge" link, #143). The link carries a root-relative `<project>/<path>`; split the
+  // leading scope so we select the right knowledge base. Adjust state during render.
   const [searchParams] = useSearchParams();
   const docParam = searchParams.get("doc");
-  // Apply the `?doc=` deep-link when it changes — adjust state during render
-  // (the React-blessed alternative to a setState-in-effect).
   const [appliedDoc, setAppliedDoc] = useState<string | null>(null);
   if (docParam && docParam !== appliedDoc) {
     setAppliedDoc(docParam);
-    setSelectedPath(docParam);
+    const slash = docParam.indexOf("/");
+    if (slash > 0) {
+      setActiveScope(docParam.slice(0, slash));
+      setSelectedPath(docParam.slice(slash + 1));
+    } else {
+      setSelectedPath(docParam);
+    }
+    setIsNew(false);
   }
 
-  const list = useQuery({
-    queryKey: ["module-page", module, pageId],
-    queryFn: () => api.modulePage(module, pageId),
-  });
-
   const doc = useQuery({
-    queryKey: ["module-doc", module, pageId, selectedPath],
-    queryFn: () => api.modulePageDoc(module, pageId, selectedPath as string),
+    queryKey: ["module-doc", module, pageId, scope, selectedPath],
+    queryFn: () => api.modulePageDoc(module, pageId, toModulePath(selectedPath as string)),
     enabled: selectedPath != null && !isNew,
   });
 
@@ -386,9 +524,10 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const save = useMutation({
     // The path travels with the save (not via a `selectedPath` closure) so a flush fired as
     // we navigate away still targets the doc the draft belongs to, even though the selection
-    // has already moved on.
+    // has already moved on. The path is scope-relative; `toModulePath` prepends the active
+    // knowledge base at the API boundary (#KB-refactor).
     mutationFn: ({ path, content }: { path: string; content: string }) =>
-      api.saveModulePageDoc(module, pageId, path, content),
+      api.saveModulePageDoc(module, pageId, toModulePath(path), content),
     onSuccess: (_result, { path, content }) => {
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
       // Every save snapshots a version (ADR-0046) — refresh the open doc's history.
@@ -485,7 +624,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
 
   const createFolder = useMutation({
-    mutationFn: (path: string) => api.createModuleFolder(module, pageId, path),
+    mutationFn: (path: string) => api.createModuleFolder(module, pageId, toModulePath(path)),
     onSuccess: () => {
       setNewFolderCreating(false);
       setNewFolderName("");
@@ -497,8 +636,25 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
   });
 
+  const createProject = useMutation({
+    mutationFn: (name: string) => api.createModuleProject(module, pageId, name),
+    onSuccess: (created) => {
+      setCreatingProject(false);
+      setNewProjectName("");
+      // Switch into the new knowledge base.
+      setActiveScope(created.id);
+      setSelectedPath(null);
+      setIsNew(false);
+      invalidateList();
+    },
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.detail : String(err);
+      window.alert(`Could not create knowledge base: ${msg}`);
+    },
+  });
+
   const deleteDoc = useMutation({
-    mutationFn: (path: string) => api.deleteModuleDoc(module, pageId, path),
+    mutationFn: (path: string) => api.deleteModuleDoc(module, pageId, toModulePath(path)),
     onSuccess: (_, path) => {
       if (selectedPath === path) {
         setSelectedPath(null);
@@ -513,7 +669,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   });
 
   const deleteFolder = useMutation({
-    mutationFn: (path: string) => api.deleteModuleFolder(module, pageId, path),
+    mutationFn: (path: string) => api.deleteModuleFolder(module, pageId, toModulePath(path)),
     onSuccess: invalidateList,
     onError: (err) => {
       const msg = err instanceof ApiError ? err.detail : String(err);
@@ -523,9 +679,10 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
 
   const moveItem = useMutation({
     mutationFn: ({ from, to }: { from: string; to: string }) =>
-      api.moveModuleItem(module, pageId, from, to),
-    onSuccess: (result, { from }) => {
-      if (selectedPath === from) setSelectedPath(result.path);
+      api.moveModuleItem(module, pageId, toModulePath(from), toModulePath(to)),
+    onSuccess: (_result, { from, to }) => {
+      // State is scope-relative; follow the moved doc to its new scope-relative path.
+      if (selectedPath === from) setSelectedPath(to);
       setRenamingPath(null);
       setRenameValue("");
       invalidateList();
@@ -553,8 +710,30 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     );
   }
 
-  const data = EditorData.parse(list.data ?? {});
+  const data = listData ?? EditorData.parse({});
   const tree = buildTree(data.docs);
+
+  // Scope (knowledge base) state derived from the page data (#KB-refactor).
+  const showSwitcher = data.scope_noun !== "";
+  const hasProjects = data.scopes.some((s) => s.kind === "project");
+  const isReferenceScope = data.scopes.find((s) => s.id === scope)?.kind === "reference";
+
+  const handleSelectScope = (id: string) => {
+    if (id === scope) return;
+    setActiveScope(id);
+    setSelectedPath(null);
+    setIsNew(false);
+    setNewFolderCreating(false);
+    setCreatingProject(false);
+    setCollapsed(new Set());
+  };
+
+  const submitNewProject = (event: FormEvent) => {
+    event.preventDefault();
+    const name = newProjectName.trim();
+    if (!name) return;
+    createProject.mutate(name);
+  };
 
   const openDoc = (path: string) => {
     flush(); // (1) leaving the current document — persist it before switching
@@ -562,6 +741,19 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setHistoryOpen(false);
     setIsNew(false);
     setSelectedPath(path);
+  };
+
+  // can_manage_files: start a new document at the scope root ("New document").
+  const handleStartNewDocument = () => {
+    const taken = new Set(data.docs.map((d) => d.path));
+    const slug = uniqueSlug("new-note.md", taken);
+    setViewingVersion(null);
+    setHistoryOpen(false);
+    setIsNew(true);
+    setSelectedPath(slug);
+    setDraft("");
+    setBaseline("");
+    setMode("edit");
   };
 
   // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
@@ -694,6 +886,52 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           selectedPath && "hidden sm:flex",
         )}
       >
+        {/* knowledge-base switcher (#KB-refactor) — only when the page declares scopes */}
+        {showSwitcher && (
+          <>
+            <ScopeSwitcher
+              scopes={data.scopes}
+              active={scope}
+              noun={data.scope_noun}
+              canCreate={data.can_create_scope}
+              creating={createProject.isPending}
+              onSelect={handleSelectScope}
+              onStartCreate={() => {
+                setCreatingProject(true);
+                setNewProjectName("");
+              }}
+            />
+            {creatingProject && (
+              <form
+                onSubmit={submitNewProject}
+                className="flex items-center gap-2 border-b border-edge p-2"
+              >
+                <TextInput
+                  autoFocus
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setCreatingProject(false);
+                      setNewProjectName("");
+                    }
+                  }}
+                  placeholder={`New ${data.scope_noun}…`}
+                  aria-label={`New ${data.scope_noun} name`}
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={!newProjectName.trim()}
+                  busy={createProject.isPending}
+                >
+                  Create
+                </Button>
+              </form>
+            )}
+          </>
+        )}
+
         {/* can_create toolbar (Notes module) */}
         {data.can_create && (
           <div className="border-b border-edge p-2">
@@ -756,21 +994,36 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 </Button>
               </form>
             ) : (
-              <Button
-                variant="ghost"
-                className="w-full justify-start"
-                onClick={() => setNewFolderCreating(true)}
-              >
-                <Folder size={15} /> New folder
-              </Button>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  className="flex-1 justify-start"
+                  onClick={handleStartNewDocument}
+                >
+                  <FilePlus size={15} /> New document
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="shrink-0 px-2"
+                  onClick={() => setNewFolderCreating(true)}
+                  title="New folder"
+                  aria-label="New folder"
+                >
+                  <Folder size={15} />
+                </Button>
+              </div>
             )}
           </div>
         )}
 
         {data.docs.filter((d) => d.type === "file").length === 0 &&
         data.docs.filter((d) => d.type === "dir").length === 0 ? (
-          data.can_manage_files ? (
-            <EmptyState quote="No documents yet — create a folder or add files." />
+          showSwitcher && !hasProjects ? (
+            <EmptyState quote={`No ${data.scope_noun}s yet — create one to begin.`} />
+          ) : isReferenceScope ? (
+            <EmptyState quote="No documents in this reference set." />
+          ) : data.can_manage_files ? (
+            <EmptyState quote="No documents yet — add a document or a folder." />
           ) : data.can_create ? (
             <EmptyState quote="No notes yet — create one with New note." />
           ) : (
@@ -929,13 +1182,20 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 ))}
             </div>
 
-            {/* read-only banner: externally-owned vault (#232) — hidden while viewing a version */}
-            {data.read_only && !viewingVersion && (
-              <div className="border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
-                Read-only — this vault is managed externally (Obsidian Sync). Edit notes in
-                Obsidian; changes sync back and re-index here automatically.
-              </div>
-            )}
+            {/* read-only banner: platform docs (reference scope) or an externally-owned vault
+                (#232) — hidden while viewing a past version (ADR-0046). */}
+            {data.read_only &&
+              !viewingVersion &&
+              (isReferenceScope ? (
+                <div className="border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
+                  Platform documentation — read-only reference, bundled with the app.
+                </div>
+              ) : (
+                <div className="border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
+                  Read-only — this vault is managed externally (Obsidian Sync). Edit notes in
+                  Obsidian; changes sync back and re-index here automatically.
+                </div>
+              ))}
 
             {/* viewing a past version (ADR-0046): a read-only preview with restore / close */}
             {viewingVersion && (

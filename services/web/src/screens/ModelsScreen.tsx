@@ -783,11 +783,12 @@ const KV_CACHE_OPTIONS = [
 
 /**
  * KV-cache type — quantizes the attention cache to fit a longer context in less VRAM. It's a
- * **server-wide** Ollama start flag (and q8_0/q4_0 need flash attention), so the core can't
- * change it live (Ollama is a protected container). We persist the choice and wire the
- * compose env; applying it needs an Ollama restart, which this card spells out.
+ * **server-wide** Ollama start flag (and q8_0/q4_0 need flash attention). Picking one persists
+ * the choice and, when Docker is wired, the core writes Ollama's env file and restarts it to
+ * apply (#307) — flash attention enabled automatically. If the core can't reach Docker it falls
+ * back to spelling out the manual env + restart.
  */
-function KvCache() {
+export function KvCache() {
   const queryClient = useQueryClient();
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const current = llmPrefs.data?.kv_cache_type ?? "";
@@ -802,7 +803,7 @@ function KvCache() {
       <h3 className="mb-1 font-serif text-base text-ink">KV-cache type</h3>
       <p className="mb-3 text-xs leading-relaxed text-ink-dim">
         Quantize the attention cache to fit a longer context in less VRAM (a small quality
-        trade-off). Applies to all local models.
+        trade-off). Applies to all local models; flash attention is enabled automatically.
       </p>
       {llmPrefs.isLoading ? (
         <Spinner />
@@ -823,13 +824,21 @@ function KvCache() {
           </select>
         </label>
       )}
-      <p className="mt-2 text-[11px] leading-relaxed text-warn">
-        Takes effect after the Ollama container restarts — the core can't restart it. Set{" "}
-        <code className="font-mono">OLLAMA_KV_CACHE_TYPE</code>
-        {current && current !== "" ? ` (${current})` : ""} and{" "}
-        <code className="font-mono">OLLAMA_FLASH_ATTENTION=1</code> in your environment, then
-        restart Ollama.
-      </p>
+      {save.isPending ? (
+        <p className="mt-2 text-[11px] text-ink-faint">Applying — restarting Ollama…</p>
+      ) : save.isSuccess && save.data.applied ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-ink-dim">
+          Applied — Ollama restarted with the new cache type (a few seconds to warm back up).
+        </p>
+      ) : save.isSuccess && !save.data.applied ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-warn">
+          Saved, but the core couldn’t restart Ollama (no Docker access). Set{" "}
+          <code className="font-mono">OLLAMA_KV_CACHE_TYPE</code>
+          {current ? ` (${current})` : ""} and{" "}
+          <code className="font-mono">OLLAMA_FLASH_ATTENTION=1</code> in your environment, then
+          restart Ollama.
+        </p>
+      ) : null}
       {save.isError && <p className="mt-1 text-sm text-danger">{(save.error as Error).message}</p>}
     </Card>
   );

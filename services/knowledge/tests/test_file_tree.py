@@ -116,12 +116,15 @@ def test_iter_tree_nodes_skips_hidden_dirs(tmp_path: Path) -> None:
 
 
 def test_list_docs_includes_dirs_and_files(tmp_path: Path) -> None:
+    # The vault's top-level "projects" folder is now a knowledge base (project); list_docs
+    # defaults to it and returns its contents scope-relative (#KB-refactor).
     pages = VaultPages(_vault(tmp_path), _FakeIndexer())
     data = pages.list_docs()
+    assert data.scope == "projects"
     types = {d.path: d.type for d in data.docs}
-    assert types["projects"] == "dir"
-    assert types["projects/archived"] == "dir"
-    assert types["alpha.md"] == "file"
+    assert types["archived"] == "dir"
+    assert types["archived/gamma.md"] == "file"
+    assert types["beta.md"] == "file"
     assert data.can_manage_files is True
 
 

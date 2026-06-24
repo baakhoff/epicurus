@@ -31,8 +31,10 @@ from epicurus_knowledge.db import VersionStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.refs import (
     doc_title,
+    iter_projects,
     iter_tree_nodes,
     safe_dir_relative,
+    safe_project,
     safe_relative,
 )
 
@@ -40,6 +42,17 @@ log = get_logger("knowledge.pages")
 
 # The single editor page id this module declares (see service.py manifest `pages`).
 VAULT_PAGE_ID = "vault"
+
+# The reserved, read-only scope that surfaces the bundled platform docs in the editor's
+# knowledge-base switcher (#KB-refactor, req 3) — "make a service's documentation visible
+# in the knowledge base". The ``_`` prefix can never collide with a real project name
+# (see :func:`~epicurus_knowledge.refs.safe_project`), so the path scheme stays unambiguous.
+DOCS_SCOPE_ID = "__docs__"
+DOCS_SCOPE_TITLE = "Platform docs"
+
+# The noun the shell shows on the scope switcher and its "New …" control. Knowledge sets
+# it; Notes leaves it empty (no switcher), keeping the shared editor archetype generic.
+SCOPE_NOUN = "knowledge base"
 
 # Surfaced to the shell and raised as HTTP 409 when the vault is externally owned (#232,
 # ADR-0035): in watch mode Obsidian (or whatever syncs the folder) is the sole author, so
@@ -60,6 +73,18 @@ class EditorDoc(BaseModel):
     type: str = "file"  # "file" | "dir"
 
 
+class EditorScope(BaseModel):
+    """One selectable scope in the editor's switcher (#KB-refactor).
+
+    A ``project`` is a writable knowledge base (a top-level folder); a ``reference`` scope
+    (the bundled platform docs) is read-only.
+    """
+
+    id: str
+    title: str
+    kind: str = "project"  # "project" | "reference"
+
+
 class EditorData(BaseModel):
     """The ``editor`` archetype's list payload — the browsable document/folder tree."""
 
@@ -67,6 +92,14 @@ class EditorData(BaseModel):
     docs: list[EditorDoc] = Field(default_factory=list)
     can_manage_files: bool = False  # True → the shell shows folder CRUD controls (#216)
     read_only: bool = False  # True → editor is view-only; vault is externally owned (#232)
+    # Projects/scopes (#KB-refactor): the knowledge bases the switcher lists, the active
+    # one, the noun for its "New …" control, and whether the operator may create another.
+    # ``docs`` paths are scope-relative — the shell prepends ``scope`` for read/save/CRUD.
+    # An empty ``scope_noun`` means "no switcher" (Notes), keeping the archetype generic.
+    scopes: list[EditorScope] = Field(default_factory=list)
+    scope: str = ""
+    scope_noun: str = ""
+    can_create_scope: bool = False
     versioned: bool = True  # True → each save snapshots a version the shell can browse (#ADR-0046)
 
 
@@ -133,6 +166,7 @@ class VaultPages:
         indexer: KnowledgeIndexer,
         *,
         read_only: bool = False,
+        docs_path: Path | None = None,
         versions: VersionStore | None = None,
         tenant: str = "default",
     ) -> None:
@@ -141,6 +175,9 @@ class VaultPages:
         # Watch mode (#232): the vault is externally owned, so every write is refused and
         # the file-tree CRUD is hidden (the shell honours read_only / can_manage_files).
         self._read_only = read_only
+        # The bundled platform docs (read-only), surfaced under the reserved DOCS scope so a
+        # service's documentation is readable inside the knowledge base (#KB-refactor, req 3).
+        self._docs_path = docs_path
         # Version history (#ADR-0046): each editor save snapshots content here; viewing
         # past versions is allowed even when the vault is read-only. ``None`` (tests) just
         # disables snapshotting — the editor still works.
@@ -152,29 +189,101 @@ class VaultPages:
         if self._read_only:
             raise HTTPException(status_code=409, detail=VAULT_READ_ONLY_DETAIL)
 
-    def list_docs(self) -> EditorData:
-        """Every ``.md`` document and non-hidden subdirectory in the vault (depth-first sorted)."""
+    def _is_docs(self, rel: str) -> bool:
+        """Whether *rel* targets the reserved, read-only platform-docs scope."""
+        return rel == DOCS_SCOPE_ID or rel.startswith(DOCS_SCOPE_ID + "/")
+
+    def _reject_docs_write(self, rel: str) -> None:
+        """The platform docs are read-only; refuse any write that targets them."""
+        if self._is_docs(rel):
+            raise HTTPException(status_code=409, detail="platform docs are read-only")
+
+    def list_scopes(self) -> list[EditorScope]:
+        """The knowledge bases (projects) plus the read-only platform-docs reference scope."""
+        scopes = [
+            EditorScope(id=name, title=name, kind="project") for name in iter_projects(self._vault)
+        ]
+        if self._docs_path is not None and self._docs_path.exists():
+            scopes.append(EditorScope(id=DOCS_SCOPE_ID, title=DOCS_SCOPE_TITLE, kind="reference"))
+        return scopes
+
+    def list_docs(self, scope: str = "") -> EditorData:
+        """The document/folder tree for one *scope* (knowledge base), depth-first sorted.
+
+        Paths are scope-relative — the shell prepends the active ``scope`` when reading,
+        saving, or managing files, so the editor shows a knowledge base's contents without
+        the project folder itself appearing as a node. The reserved ``__docs__`` scope
+        lists the bundled platform docs read-only (#KB-refactor).
+        """
 
         def _title(node: dict[str, str]) -> str:
             if node["type"] == "file":
                 return doc_title(node["path"])
             return node["path"].split("/")[-1]
 
-        docs = [
-            EditorDoc(id=node["path"], title=_title(node), path=node["path"], type=node["type"])
-            for node in iter_tree_nodes(self._vault)
-        ]
+        scopes = self.list_scopes()
+        project_ids = [s.id for s in scopes if s.kind == "project"]
+        # Default to the first knowledge base when none is requested.
+        active = scope or (project_ids[0] if project_ids else "")
+
+        # The read-only platform-docs scope (req 3): list the bundled docs tree.
+        if active == DOCS_SCOPE_ID and self._docs_path is not None:
+            nodes = iter_tree_nodes(self._docs_path)
+            return EditorData(
+                docs=[
+                    EditorDoc(id=n["path"], title=_title(n), path=n["path"], type=n["type"])
+                    for n in nodes
+                ],
+                can_manage_files=False,
+                read_only=True,
+                scopes=scopes,
+                scope=DOCS_SCOPE_ID,
+                scope_noun=SCOPE_NOUN,
+                can_create_scope=not self._read_only,
+            )
+
+        # A knowledge-base (project) scope: list just that project's tree, scope-relative.
+        nodes = iter_tree_nodes(self._vault, subdir=active) if active in project_ids else []
         # File CRUD is offered only when epicurus may write the vault; a watched external
         # vault is read-only here (Obsidian is the author) so the shell hides the controls.
         return EditorData(
-            docs=docs,
+            docs=[
+                EditorDoc(id=n["path"], title=_title(n), path=n["path"], type=n["type"])
+                for n in nodes
+            ],
             can_manage_files=not self._read_only,
             read_only=self._read_only,
+            scopes=scopes,
+            scope=active,
+            scope_noun=SCOPE_NOUN,
+            can_create_scope=not self._read_only,
         )
 
+    def create_project(self, name: str) -> EditorScope:
+        """Create a new knowledge base — a top-level folder under the vault root.
+
+        409 if it already exists, 400 for an invalid name, 409 when the vault is read-only.
+        """
+        self._ensure_writable()
+        target = safe_project(self._vault, name)
+        if target.exists():
+            raise HTTPException(status_code=409, detail=f"knowledge base already exists: {name}")
+        target.mkdir(parents=True, exist_ok=False)
+        log.info("knowledge base created", name=target.name)
+        return EditorScope(id=target.name, title=target.name, kind="project")
+
     def read_doc(self, rel: str) -> EditorDocContent:
-        """One document's content. 404 if it does not exist."""
-        target = safe_relative(self._vault, rel)
+        """One document's content. 404 if it does not exist.
+
+        A ``__docs__/…`` path reads from the read-only bundled platform docs; any other
+        path is a knowledge-base document under the vault root.
+        """
+        if self._is_docs(rel):
+            if self._docs_path is None:
+                raise HTTPException(status_code=404, detail="platform docs are not available")
+            target = safe_relative(self._docs_path, rel[len(DOCS_SCOPE_ID) + 1 :])
+        else:
+            target = safe_relative(self._vault, rel)
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
         content = target.read_text(encoding="utf-8", errors="replace")
@@ -190,6 +299,7 @@ class VaultPages:
         409 when the vault is externally owned (watch mode, #232) — Obsidian is the author.
         """
         self._ensure_writable()
+        self._reject_docs_write(rel)
         target = safe_relative(self._vault, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -227,6 +337,7 @@ class VaultPages:
         externally owned (watch mode, #232).
         """
         self._ensure_writable()
+        self._reject_docs_write(rel)
         target = safe_dir_relative(self._vault, rel)
         if target.exists():
             raise HTTPException(status_code=409, detail=f"folder already exists: {rel}")
@@ -241,6 +352,7 @@ class VaultPages:
         externally owned (watch mode, #232).
         """
         self._ensure_writable()
+        self._reject_docs_write(rel)
         target = safe_relative(self._vault, rel)
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
@@ -254,6 +366,7 @@ class VaultPages:
         path-safety violation, 409 when the vault is externally owned (watch mode, #232).
         """
         self._ensure_writable()
+        self._reject_docs_write(rel)
         target = safe_dir_relative(self._vault, rel)
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"no such folder: {rel}")
@@ -275,6 +388,8 @@ class VaultPages:
         any path-safety violation, 409 when the vault is externally owned (watch mode, #232).
         """
         self._ensure_writable()
+        self._reject_docs_write(from_rel)
+        self._reject_docs_write(to_rel)
         from_target = safe_dir_relative(self._vault, from_rel)
         to_target = safe_dir_relative(self._vault, to_rel)
         if not from_target.exists():
@@ -343,9 +458,18 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"no such page: {page_id}")
 
     @router.get("/pages/{page_id}", response_model=EditorData)
-    async def get_page(page_id: str) -> EditorData:
+    async def get_page(page_id: str, scope: str = Query(default="")) -> EditorData:
+        # ``scope`` selects the knowledge base (project) to list; empty = the first one,
+        # or the reserved ``__docs__`` for the read-only platform docs (#KB-refactor).
         _require_known_page(page_id)
-        return pages.list_docs()
+        return pages.list_docs(scope)
+
+    @router.post("/pages/{page_id}/project", response_model=EditorScope)
+    async def post_project(page_id: str, name: str = Query(...)) -> EditorScope:
+        # Create a new knowledge base (top-level folder) — the operator's "New knowledge
+        # base" control. The agent's equivalent goes through the review queue instead.
+        _require_known_page(page_id)
+        return pages.create_project(name)
 
     @router.get("/pages/{page_id}/doc", response_model=EditorDocContent)
     async def get_doc(page_id: str, path: str = Query(...)) -> EditorDocContent:

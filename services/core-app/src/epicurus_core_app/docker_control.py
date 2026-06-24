@@ -53,6 +53,11 @@ PROTECTED: frozenset[str] = frozenset(
     }
 )
 
+# Allowlisted for a non-destructive **restart** (never removal): infra containers that read a
+# setting only at startup, so applying an operator's choice means bouncing them. A restart keeps
+# the container, its volumes, and config — the only effect is re-reading env (#307, ADR-0046).
+RESTARTABLE: frozenset[str] = frozenset({"ollama"})
+
 _SERVICE_LABEL = "com.docker.compose.service"
 _PROJECT_LABEL = "com.docker.compose.project"
 
@@ -134,3 +139,28 @@ class DockerController:
             raise
         except Exception as exc:
             raise DockerError(f"failed to remove {name!r}: {exc}") from exc
+
+    def restart_service(self, name: str) -> bool:
+        """Restart an allowlisted infra container in this Compose project; ``True`` if one was.
+
+        Non-destructive (the container, its volumes and config survive) and far narrower than
+        :meth:`remove_module`: only a name in :data:`RESTARTABLE` is permitted, so this can bounce
+        Ollama to apply a start-up setting (#307) but nothing else. A name with no matching
+        container is a no-op (``False``).
+        """
+        if name not in RESTARTABLE:
+            raise DockerError(f"{name!r} is not restartable")
+        label_filters = [f"{_SERVICE_LABEL}={name}"]
+        if self._project:
+            label_filters.append(f"{_PROJECT_LABEL}={self._project}")
+        try:
+            containers = self._client.containers.list(all=True, filters={"label": label_filters})
+            restarted = 0
+            for container in containers:
+                if container.labels.get(_SERVICE_LABEL) != name:
+                    continue  # defence-in-depth: only the exact allowlisted service
+                container.restart(timeout=10)
+                restarted += 1
+            return restarted > 0
+        except Exception as exc:
+            raise DockerError(f"failed to restart {name!r}: {exc}") from exc

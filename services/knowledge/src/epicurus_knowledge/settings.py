@@ -10,8 +10,10 @@ from epicurus_core import CoreSettings
 class KnowledgeSettings(CoreSettings):
     """Adds vault path, Qdrant, database, and platform-API URL to shared settings."""
 
-    # Absolute path inside the container to the Obsidian vault.
-    vault_path: Path = Path("/vault")
+    # Knowledge's root inside the shared file space (#KB-refactor): each top-level folder
+    # under it is a "project" (knowledge base). Lives under the same /data tree the storage
+    # module indexes read-only, so knowledge documents show up in the Files view.
+    vault_path: Path = Path("/data/knowledge")
     # Absolute path inside the container to the bundled platform docs (self-documentation).
     # Defaults to /docs, which is populated by COPY docs/ /docs in the Dockerfile.
     # Override with DOCS_PATH to bind-mount a live docs tree (repo-based stacks).

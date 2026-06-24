@@ -16,9 +16,11 @@ services:
       # Base URL of the core service on the internal Docker network (service name
       # is `core-app`, not `core`).
       PLATFORM_URL: http://core-app:8080
-      # Absolute path inside the container to the Obsidian vault.
-      # Mount your vault directory here (e.g. KNOWLEDGE_HOST_VAULT in .env).
-      VAULT_PATH: ${VAULT_PATH:-/vault}
+      # Knowledge's home inside the shared file space (#KB-refactor): the on-disk tree is
+      # tenant-scoped (constraint #1) to <files-root>/<tenant>/knowledge — VAULT_PATH is the
+      # base path; the service inserts the DEFAULT_TENANT_ID segment. Each top-level folder
+      # under it is a "project" (knowledge base). Storage indexes the same tree read-only.
+      VAULT_PATH: ${VAULT_PATH:-/data/knowledge}
       # Live vault sync (#232): watch the bind-mounted vault and re-index on change, so
       # edits Obsidian Sync lands on disk show up in search without a manual re-index.
       # Off by default. Enabling it makes the vault **externally owned** — the Knowledge
@@ -28,14 +30,19 @@ services:
       VAULT_WATCH: ${VAULT_WATCH:-false}
       VAULT_WATCH_DEBOUNCE_MS: ${VAULT_WATCH_DEBOUNCE_MS:-1500}
     volumes:
-      # By default an empty named volume — nothing is exposed until you opt in.
-      # Set KNOWLEDGE_HOST_VAULT in .env to a host directory (your Obsidian vault).
-      # Read-write so the Knowledge editor page (#130) can save edits back to the
-      # vault; mount a host directory the container user (uid 10001) can write.
-      - ${KNOWLEDGE_HOST_VAULT:-knowledge-vault-data}:/vault
+      # The SHARED file space (#KB-refactor), read-write: knowledge owns the tenant-scoped
+      # /data/<tenant>/knowledge (projects live under it). storage mounts the same volume
+      # read-only for the Files view. files-init makes /data/<tenant>/knowledge writable by
+      # uid 10001. Default an empty named volume; set EPICURUS_FILES_ROOT to a host dir.
+      # Replaces KNOWLEDGE_HOST_VAULT.
+      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${KNOWLEDGE_PORT:-8085}:8080"
     depends_on:
+      # files-init (data plane) creates + chowns /data/<tenant>/knowledge before knowledge
+      # starts, so the editor's create-folder / new-document writes don't hit a root-owned volume.
+      files-init:
+        condition: service_completed_successfully
       nats:
         condition: service_started
       postgres:
@@ -56,6 +63,5 @@ services:
       - epicurus.metrics.port=8080
     networks: [epicurus]
 
-# Default vault target: an empty named volume (overridden by KNOWLEDGE_HOST_VAULT).
-volumes:
-  knowledge-vault-data:
+# The shared `epicurus-files` volume is declared in the data plane
+# (infra/compose/docker-compose.yml); storage mounts the same volume read-only.

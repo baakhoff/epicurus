@@ -12,6 +12,11 @@ class CoreAppSettings(CoreSettings):
 
     # Ollama, the local LLM runtime. On the internal Docker network: http://ollama:11434.
     ollama_url: str = "http://localhost:11434"
+    # KV-cache apply (#307): the core writes Ollama's start-up env file here (a named volume
+    # both containers share; the Ollama entrypoint sources it), then restarts this service so it
+    # re-reads it. Defaults match the compose wiring; override only if you remap either.
+    ollama_runtime_env_path: str = "/etc/epicurus/ollama.env"
+    ollama_service_name: str = "ollama"
     # Default Ollama model used when a request does not name one.
     llm_default_model: str = "llama3.2"
     # How long Ollama keeps a model loaded after its last use (idle unload, ADR-0005).

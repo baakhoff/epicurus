@@ -39,6 +39,7 @@ from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
+from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
@@ -129,15 +130,22 @@ def create_app() -> FastAPI:
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
     mcp_host = McpHost(settings.module_mcp_urls)
+    # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
+    # restart-only path for Ollama's KV-cache apply (#307). None when the socket isn't mounted —
+    # removal returns 503, and a KV-cache change saves but isn't applied (manual restart).
+    docker = DockerController.from_env()
     registry = ModuleRegistry(
         settings.module_base_urls,
         mcp=mcp_host,
         secrets=secrets,
         tenant=settings.default_tenant_id,
         prefs=module_prefs,
-        # Privileged, tightly-scoped Docker access for confirmed module removal (#127,
-        # ADR-0028); None when the socket isn't mounted, in which case removal returns 503.
-        docker=DockerController.from_env(),
+        docker=docker,
+    )
+    ollama_runtime = OllamaRuntime(
+        docker,
+        env_path=settings.ollama_runtime_env_path,
+        service=settings.ollama_service_name,
     )
     # Agent tool discovery scans only enabled modules (#126); wired after the registry
     # exists (the host needs the registry and the registry needs the host).
@@ -250,6 +258,7 @@ def create_app() -> FastAPI:
             default_tenant=settings.default_tenant_id,
             catalog=catalog,
             model_settings=model_settings,
+            ollama_runtime=ollama_runtime,
         )
     )
     app.include_router(

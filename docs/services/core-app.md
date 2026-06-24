@@ -95,7 +95,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
-| `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "f16"\|"q8_0"\|"q4_0"\|null}`). Server-wide; persisted but **applied via the Ollama container env on restart** — the core can't restart Ollama (ADR-0046). |
+| `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied}`; `applied` is `false` when Docker isn't wired, and the UI then shows the manual-restart path. |
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
@@ -171,11 +171,13 @@ unchanged.
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 
-> **Privileged surface (ADR-0028).** Module removal needs the Docker socket, mounted
-> read-write on `core-app` **only**. The core touches it through a single `DockerController`
-> that stops/removes **only a configured module's own container** — scoped to this Compose
-> project, and never core-app / web / a data-plane service. Drop the socket mount to disable
-> removal entirely (the endpoint then returns `503`).
+> **Privileged surface (ADR-0028, #307).** Module removal — and applying the Ollama KV-cache
+> type — needs the Docker socket, mounted read-write on `core-app` **only**. The core touches it
+> through a single `DockerController`: it stops/removes **only a configured module's own
+> container**, and separately **restarts only an allowlisted infra container** (`ollama`, which is
+> never removable). Both are scoped to this Compose project and never touch core-app / web / a
+> data-plane service. Drop the socket mount to disable both (removal returns `503`; a KV-cache
+> change then saves without applying).
 
 Caller-supplied path segments the registry interpolates into a module request —
 `ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a

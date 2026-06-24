@@ -47,6 +47,7 @@ import { activityTimeline } from "@/lib/activity";
 import { ApiError, api } from "@/lib/api";
 import type { Attachment, EntityRef, MessageRecord, PendingSuggestion } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
+import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
@@ -395,16 +396,6 @@ function Welcome() {
 
 /* ── suggestion bubble (#KB-refactor) ───────────────────────────────────────── */
 
-const SUGGESTION_VERB: Record<PendingSuggestion["operation"], string> = {
-  create: "add",
-  update: "edit",
-  append: "append to",
-  delete: "delete",
-  move: "move",
-  mkdir: "add a folder",
-  mkproject: "add a knowledge base",
-};
-
 /**
  * A bubble above the composer when the assistant has filed suggestions (ADR-0033). A
  * one-tap structural op (move / new folder / new knowledge base) can be approved inline;
@@ -435,7 +426,7 @@ function SuggestionBubble() {
     latest.operation === "move" ||
     latest.operation === "mkdir" ||
     latest.operation === "mkproject";
-  const target = latest.operation === "move" ? `${latest.path} → ${latest.to_path}` : latest.path;
+  const target = suggestionTarget(latest);
 
   return (
     <>

@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
-from epicurus_core_app.llm.models import ModelInfo, PowerState, ProviderInfo
+from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
+from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, ProviderInfo
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 
@@ -83,11 +84,20 @@ class SetHiddenRequest(BaseModel):
     hidden: bool
 
 
+class SetModelSettingsRequest(BaseModel):
+    """Body for PUT /llm/model-settings — one model's per-model tuning."""
+
+    model: str
+    context_window: int | None = None
+    keep_alive: str | None = None
+
+
 def create_llm_router(
     gateway: LlmGateway,
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
     catalog: ModelCatalog | None = None,
+    model_settings: ModelSettingsStore | None = None,
 ) -> APIRouter:
     """Gateway management routes — installed models, the browse catalog, providers,
     pulls, and prefs.
@@ -121,6 +131,13 @@ def create_llm_router(
         in a path."""
         await gateway.delete_model(name)
         return {"status": "ok", "model": name}
+
+    @router.get("/models/details", response_model=ModelDetails)
+    async def model_details(model: str) -> ModelDetails:
+        """Read-only facts about a local model (quantization, parameter size, trained
+        context length) from the runtime's ``/api/show``, for the model-settings sheet.
+        ``model`` is a query param for the same name-mangling reason as ``delete``."""
+        return await gateway.show(model)
 
     @router.get("/providers", response_model=list[ProviderInfo])
     async def list_providers() -> list[ProviderInfo]:
@@ -244,6 +261,29 @@ def create_llm_router(
             updated = current
         await prefs.set_hidden(default_tenant, updated)
         return {"status": "ok", "hidden": updated}
+
+    # ── Per-model settings (context window + keep-alive) ──────────────────────
+
+    @router.get("/model-settings", response_model=ModelSettings)
+    async def get_model_settings(model: str) -> ModelSettings:
+        """One model's stored settings (all-``None`` = inherit). ``model`` is a query
+        param — names contain ``:``/``/`` which proxies may mangle in a path."""
+        if model_settings is None:
+            return ModelSettings()
+        return await model_settings.get(default_tenant, model)
+
+    @router.put("/model-settings")
+    async def set_model_settings(request: SetModelSettingsRequest) -> dict[str, object]:
+        """Set or clear one model's context window + keep-alive (an all-``None`` body
+        removes the override, returning the model to the inherited defaults)."""
+        if model_settings is None:
+            raise HTTPException(status_code=503, detail="model-settings store not available")
+        await model_settings.set(
+            default_tenant,
+            request.model,
+            ModelSettings(context_window=request.context_window, keep_alive=request.keep_alive),
+        )
+        return {"status": "ok", "model": request.model}
 
     return router
 

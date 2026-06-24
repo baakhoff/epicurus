@@ -295,6 +295,57 @@ export function TimezoneCard() {
   );
 }
 
+/** Agent cycles — how many tool-calling rounds a turn runs before it must answer (#297). */
+export function AgentCard() {
+  const queryClient = useQueryClient();
+  const prefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const save = useMutation({
+    mutationFn: (value: number | null) => api.setAgentMaxSteps(value),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
+  });
+  const current = prefs.data?.global_agent_max_steps ?? null;
+
+  return (
+    <Card>
+      <h3 className="mb-2 font-serif text-base text-ink">Agent cycles</h3>
+      <p className="mb-3 text-sm text-ink-dim">
+        How many tool-calling rounds the assistant runs before it must answer. Higher lets it
+        chain more steps (search → read → summarize) but a turn takes longer; lower keeps
+        replies snappy. Leave blank for the default (4); the range is 1–12.
+      </p>
+      {prefs.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={12}
+            step={1}
+            key={current ?? "default"}
+            defaultValue={current ?? ""}
+            placeholder="4"
+            aria-label="Agent cycles"
+            onBlur={(e) => {
+              const raw = e.currentTarget.value.trim();
+              const next = raw === "" ? null : Number(raw);
+              if (next !== current) save.mutate(next);
+            }}
+            className="w-24 rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          {current !== null && (
+            <Button variant="ghost" onClick={() => save.mutate(null)}>
+              Reset to default
+            </Button>
+          )}
+          {save.isError && <p className="text-xs text-danger">{(save.error as Error).message}</p>}
+          {save.isSuccess && <p className="text-xs text-ok">Saved.</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function SettingsScreen() {
   const theme = usePrefs((s) => s.theme);
   const setTheme = usePrefs((s) => s.setTheme);
@@ -382,6 +433,8 @@ export function SettingsScreen() {
         </Card>
 
         <TimezoneCard />
+
+        <AgentCard />
 
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Platform</h3>

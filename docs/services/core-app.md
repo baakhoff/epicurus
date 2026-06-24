@@ -37,7 +37,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer, `AGENT_MAX_STEPS` rounds). Returns `AgentTurn`. |
+| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `done` (final turn) · `error`. The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
@@ -81,10 +81,11 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
-| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `hidden` (model list). |
+| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
+| `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window + keep-alive) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive}` (each `null` = inherit); `PUT` body `{model, context_window, keep_alive}` (an all-`null` body clears the override). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 
@@ -212,8 +213,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   those). Tenant-scoped; post-release columns are added in place at startup (no migration).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
-  `hidden_models` (JSON list). A missing row means all defaults are `null` (fall back to env
-  settings).
+  `agent_max_steps` (agent loop bound, #297), `hidden_models` (JSON list). A missing row
+  means all defaults are `null` (fall back to env settings).
 - **Postgres `model_settings`** — per-`(tenant, model)` tuning (ADR-0044): `context_window`
   and `keep_alive`, both nullable (`null` = inherit). Drives the per-model resolution chain in
   the gateway (see **Per-model settings**). A missing row means the model inherits the global

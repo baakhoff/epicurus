@@ -25,7 +25,7 @@ images to GHCR.
   from `/api/show`; (3) the catalog browser gains **Tools** and surfaces **Vision** as search
   filters (the upstream `tools` capability is now mapped into the tag vocabulary); (4) the
   **chat model picker shows each model's size**. `ModelInfo`/`ModelDetails` gain `capabilities`
-  (`core-app` → 0.32.0, `web` → 0.42.0).
+  (`core-app` → 0.35.0, `web` → 0.45.0).
 
 - **Chat: the activity timeline persists and now shows the model's thinking** — the agent's
   process (its tool steps) used to disappear the instant a turn finished. Now the turn's
@@ -287,8 +287,53 @@ images to GHCR.
   attach proxy and web attach menu render it unchanged — the module only supplies data
   (ADR-0019) (closes #139) (`tasks` → 0.3.0).
 
+### Changed
+
+- **The context-window suggestion now reflects your KV-cache type and the model's real
+  limits — and is no longer clipped to 32k** — the Models-page estimate of "how big a context
+  can this box hold?" assumed a fixed f16 KV cache and capped at a flat 32,768, ignoring two
+  things the operator can already set/observe: the **KV-cache type** (a quantized cache
+  `q8_0`/`q4_0` stores fewer bytes per token, so the same VRAM buys roughly 2×/4× the context)
+  and the model's **trained context length**. The suggestion now scales the per-token KV cost
+  by the active `kv_cache_type` and uses the model's trained `context_length` (read from
+  `/api/show`) as the ceiling — so a long-context model on a roomy GPU can be suggested well
+  past 32k, while a short-context model is never suggested beyond what it was trained for. The
+  flat 32,768 survives only as the fallback when the trained length is unknown (and the lower
+  CPU cap is unchanged). `GET /platform/v1/system/info` gains `kv_cache_type` and
+  `model.{context_length, quantization}`; the Models page shows the model's quantization +
+  trained limit and lets the token field/slider exceed 32k when supported (`core-app` →
+  0.34.0, `web` → 0.44.0).
+- **Long conversations are trimmed to fit the model's context window instead of overflowing
+  it** — a local runtime (Ollama) silently drops whatever spills past `num_ctx`, and what
+  spills first is the *oldest* context: the agent's instructions and recalled memory. With the
+  default 4096 window that happens within a few turns, quietly degrading replies. The gateway
+  now **compacts** every local prompt to fit before sending it (`llm/compaction.py`, applied in
+  `_fit_to_context` across the blocking + streaming paths): the leading **system** messages are
+  kept whole, the **most-recent** turns that fit within `num_ctx` (minus a reply reserve and the
+  tool-schema footprint) are kept, older history is dropped first, a `tool` result is never
+  orphaned from its `assistant` call, and the final message is always kept; a short `system`
+  note marks the cut so the model knows earlier turns existed. Token counts are a conservative
+  character-based estimate (no tokenizer dependency). Hosted providers (large contexts, handled
+  server-side) and short chats are untouched — the latter a no-op (`core-app` → 0.33.0).
+- **The observability stack (Grafana / Prometheus / Loki / Tempo / Alloy / Alertmanager) is now
+  opt-in** — a self-hosted box that isn't running dashboards shouldn't pay for eight extra
+  containers it never opens. Every observability service is gated behind the `observability`
+  compose profile, so `docker compose up` (and `task up`) now runs a lean stack without them;
+  bring them up with `docker compose --profile observability up -d` (or `task obs-up`). Nothing
+  in epicurus depends on the stack at runtime — services still expose `/metrics` and `/health`,
+  so an operator who prefers `docker logs` or their own monitoring can point it at those
+  endpoints and never enable the profile. Infra-only; no component version change.
+
 ### Fixed
 
+- **Markdown now renders headings and lists instead of plain indented text** — assistant
+  replies (and the editor preview) typeset through the shared `.ep-prose` styles, but Tailwind's
+  preflight resets `h1–h6` to body size/weight and strips `list-style` from `ul`/`ol`, and the
+  prose rules never restored them. So `#`/`##` headings looked like ordinary paragraphs and `-`
+  / `1.` lists showed as a bare indent with no bullet or number. Restored an explicit heading
+  scale + weight (h1–h6) and per-type list markers (disc / decimal / nested circle), with
+  GFM task-list checkboxes, `hr`, and trimmed first/last margins. Pure styling — the markdown
+  DOM was already correct (`web` → 0.41.0).
 - **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
   (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
   So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,

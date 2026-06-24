@@ -94,9 +94,26 @@ prefs = await client.get_collections()
 targets = prefs.enabled or [CollectionRef(account="local")]   # overlay, or local default
 ```
 
+### `await client.get_suggestions_enabled() -> bool`
+
+Whether the operator wants the agent's changes **reviewed** for this module (#KB-refactor),
+or applied directly. `True` (the default) ⇒ stage a suggestion for approval; `False` ⇒ apply
+the change immediately. Construct the client with `module=<name>`. Backed by
+`GET /platform/v1/modules/{module}/suggestions-enabled` — a Postgres-only read in the core. A
+module with a `review` page reads this in its propose tools and, when it returns `False`,
+approves its own staged suggestion through the normal apply path.
+
+```python
+client = PlatformClient(base_url=..., tenant_id=..., module="notes")
+if await client.get_suggestions_enabled():
+    stage_for_review(change)            # default: operator approves
+else:
+    apply_directly(change)              # review turned off
+```
+
 ## Errors
 
-Both methods raise `httpx.HTTPStatusError` on a non-2xx response — notably **`503`** when
+These methods raise `httpx.HTTPStatusError` on a non-2xx response — notably **`503`** when
 the gateway is paused (ADR-0005). A module should treat inference as best-effort and
 degrade gracefully.
 

@@ -1,8 +1,17 @@
 # Observability
 
 The observability stack — a compose fragment assembled into the top-level stack
-(ADR-0006). Brought up with the rest via
-`docker compose up -d` / `task up`.
+(ADR-0006). **Opt-in:** every service here is gated behind the `observability` compose
+profile, so a plain `docker compose up -d` / `task up` runs a lean stack *without* it.
+
+```sh
+docker compose --profile observability up -d   # with Grafana/Prometheus/Loki/Tempo
+docker compose up -d                            # without (the default)
+```
+
+Nothing in epicurus depends on this stack at runtime — every service exposes `/metrics` and
+`/health` regardless — so if you'd rather use `docker logs` or point your **own**
+Prometheus/Grafana at those endpoints, you can leave the profile off entirely.
 
 | Service | Image | Role |
 | --- | --- | --- |

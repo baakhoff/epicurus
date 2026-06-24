@@ -413,6 +413,7 @@ export function ContextWindow() {
   const cpu = system.data?.cpu ?? null;
   const ram = system.data?.ram_total_mb ?? null;
   const model = system.data?.model ?? null;
+  const kvCacheType = system.data?.kv_cache_type ?? null;
 
   // The in-progress edit. `undefined` = untouched (show the stored/suggested value);
   // a number = the operator is editing; deriving the displayed value (rather than seeding
@@ -481,6 +482,18 @@ export function ContextWindow() {
             {model ? model.name : "—"}
             {model?.size_mb ? ` · ${formatMb(model.size_mb)}` : ""}
           </p>
+          {model && (model.quantization || model.context_length) && (
+            <p className="mt-0.5 truncate text-xs text-ink-dim">
+              {[
+                model.quantization,
+                model.context_length
+                  ? `trained ${model.context_length.toLocaleString()} ctx`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )}
         </div>
       </div>
 
@@ -506,7 +519,9 @@ export function ContextWindow() {
         </div>
       )}
       <p className="mb-3 text-[11px] italic leading-relaxed text-ink-faint">
-        The suggestion is a rough estimate from your VRAM and the model's size — a sensible
+        The suggestion is a rough estimate from your VRAM, the model's size, and its trained
+        context limit
+        {kvCacheType ? `, with your ${kvCacheType} KV cache factored in` : ""} — a sensible
         starting point, not a measured maximum. Tune it if replies run short or the runtime
         complains.
       </p>
@@ -521,7 +536,7 @@ export function ContextWindow() {
             <TextInput
               type="number"
               min={CTX_FLOOR}
-              max={CTX_CEILING}
+              max={sliderMax}
               step={CTX_STEP}
               value={value}
               aria-label="Context window tokens"

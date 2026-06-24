@@ -30,8 +30,10 @@ __all__ = [
     "doc_title",
     "encode_ref",
     "iter_md_files",
+    "iter_projects",
     "iter_tree_nodes",
     "safe_dir_relative",
+    "safe_project",
     "safe_relative",
 ]
 
@@ -109,8 +111,13 @@ def iter_md_files(root: Path) -> list[str]:
     return paths
 
 
-def iter_tree_nodes(root: Path) -> list[dict[str, str]]:
-    """Every ``.md`` file and non-hidden subdirectory under *root*, as ``{path, type}`` dicts.
+def iter_tree_nodes(root: Path, subdir: str = "") -> list[dict[str, str]]:
+    """Every ``.md`` file and non-hidden subdirectory under *root*/*subdir*, as dicts.
+
+    When *subdir* is given (e.g. a project/knowledge-base name) the walk is confined to
+    that subtree and the returned ``path`` values are relative to it — so the editor can
+    show one project's contents without the project itself appearing as a node. With no
+    *subdir* the whole *root* is walked (back-compatible).
 
     The list is depth-first with **directories before files** at every level, both
     alphabetically sorted within their group. This matches the visual tree the shell
@@ -118,8 +125,9 @@ def iter_tree_nodes(root: Path) -> list[dict[str, str]]:
     whose name starts with ``"."``) are skipped entirely — they are not indexed and
     are not part of the vault UI.
     """
+    start = (root / subdir) if subdir else root
     nodes: list[dict[str, str]] = []
-    if not root.exists():
+    if not start.exists():
         return nodes
 
     def _walk(directory: Path) -> None:
@@ -136,14 +144,55 @@ def iter_tree_nodes(root: Path) -> list[dict[str, str]]:
             key=lambda e: e.name,
         )
         # Emit dirs before files at this level, then recurse into each dir.
-        for subdir in subdirs:
-            nodes.append({"path": subdir.relative_to(root).as_posix(), "type": "dir"})
-            _walk(subdir)
+        for sub in subdirs:
+            nodes.append({"path": sub.relative_to(start).as_posix(), "type": "dir"})
+            _walk(sub)
         for f in files:
-            nodes.append({"path": f.relative_to(root).as_posix(), "type": "file"})
+            nodes.append({"path": f.relative_to(start).as_posix(), "type": "file"})
 
-    _walk(root)
+    _walk(start)
     return nodes
+
+
+def iter_projects(root: Path) -> list[str]:
+    """The knowledge bases ("projects") — the non-hidden top-level folders under *root*.
+
+    Names starting with ``"."`` or ``"_"`` are skipped: dotted dirs are hidden, and the
+    ``_``-prefix is reserved so a real folder can never collide with a virtual scope id
+    such as the read-only platform-docs view (see :data:`safe_project`).
+    """
+    if not root.exists():
+        return []
+    return sorted(
+        e.name
+        for e in root.iterdir()
+        if e.is_dir() and not e.name.startswith(".") and not e.name.startswith("_")
+    )
+
+
+def safe_project(root: Path, name: str) -> Path:
+    """Resolve a project/knowledge-base *name* to a single top-level folder under *root*.
+
+    A project is exactly one path segment: no separators, no traversal, and no ``.``/``_``
+    prefix (``_`` is reserved for virtual scopes). 400 on anything else. Returns the
+    would-be directory path (the caller checks existence).
+    """
+    cleaned = name.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="knowledge base name is required")
+    if (
+        "/" in cleaned
+        or "\\" in cleaned
+        or ".." in cleaned
+        or cleaned.startswith(".")
+        or cleaned.startswith("_")
+    ):
+        raise HTTPException(status_code=400, detail=f"invalid knowledge base name: {name!r}")
+    root_resolved = root.resolve()
+    target = (root_resolved / cleaned).resolve()
+    if target.parent != root_resolved:
+        raise HTTPException(status_code=400, detail=f"invalid knowledge base name: {name!r}")
+    return target
 
 
 def safe_dir_relative(root: Path, rel: str) -> Path:

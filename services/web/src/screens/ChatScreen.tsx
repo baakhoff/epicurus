@@ -12,6 +12,7 @@ import {
   History,
   Pencil,
   RefreshCw,
+  Sparkles,
   SquarePen,
   Square,
   SendHorizonal,
@@ -29,6 +30,7 @@ import {
   refsById,
 } from "@/components/EntityRef";
 import { Markdown } from "@/components/Markdown";
+import { SuggestionReviewModal } from "@/components/SuggestionReviewModal";
 import { ProcessTimeline, ReadinessBar, ThinkingIndicator } from "@/components/TurnActivity";
 import {
   Badge,
@@ -42,8 +44,8 @@ import {
   cn,
 } from "@/components/ui";
 import { activityTimeline } from "@/lib/activity";
-import { api } from "@/lib/api";
-import type { Attachment, EntityRef, MessageRecord } from "@/lib/contracts";
+import { ApiError, api } from "@/lib/api";
+import type { Attachment, EntityRef, MessageRecord, PendingSuggestion } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
@@ -391,6 +393,99 @@ function Welcome() {
   );
 }
 
+/* ── suggestion bubble (#KB-refactor) ───────────────────────────────────────── */
+
+const SUGGESTION_VERB: Record<PendingSuggestion["operation"], string> = {
+  create: "add",
+  update: "edit",
+  append: "append to",
+  delete: "delete",
+  move: "move",
+  mkdir: "add a folder",
+  mkproject: "add a knowledge base",
+};
+
+/**
+ * A bubble above the composer when the assistant has filed suggestions (ADR-0033). A
+ * one-tap structural op (move / new folder / new knowledge base) can be approved inline;
+ * a richer change opens the review overlay. Ignore leaves it on the Suggestions page.
+ */
+function SuggestionBubble() {
+  const qc = useQueryClient();
+  const pending = useQuery({
+    queryKey: ["suggestions"],
+    queryFn: api.suggestions,
+    staleTime: 30_000,
+  });
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [reviewing, setReviewing] = useState<PendingSuggestion | null>(null);
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["suggestions"] });
+
+  const approveSimple = useMutation({
+    mutationFn: (s: PendingSuggestion) => api.approveSuggestion(s.module, s.page_id, s.id),
+    onSuccess: invalidate,
+    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not approve."),
+  });
+
+  const active = (pending.data ?? []).filter((s) => !dismissed.has(s.id));
+  const latest = active.at(-1);
+  if (!latest) return null;
+
+  const simple =
+    latest.operation === "move" ||
+    latest.operation === "mkdir" ||
+    latest.operation === "mkproject";
+  const target = latest.operation === "move" ? `${latest.path} → ${latest.to_path}` : latest.path;
+
+  return (
+    <>
+      <div className="mx-auto mb-2 flex max-w-2xl items-center gap-2 rounded-(--radius-card) border border-accent/40 bg-accent-dim px-3 py-2 text-sm">
+        <Sparkles size={15} className="shrink-0 text-accent" />
+        <span className="min-w-0 flex-1 truncate text-ink">
+          {active.length > 1 && (
+            <span className="text-ink-faint">{active.length} suggestions · </span>
+          )}
+          The assistant wants to {SUGGESTION_VERB[latest.operation]}{" "}
+          <span className="font-mono text-xs">{target}</span>
+        </span>
+        {simple ? (
+          <Button
+            variant="primary"
+            className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            busy={approveSimple.isPending}
+            onClick={() => approveSimple.mutate(latest)}
+          >
+            Approve
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            onClick={() => setReviewing(latest)}
+          >
+            Open
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          className="h-7 shrink-0 px-2.5 py-0 text-xs"
+          onClick={() => setDismissed((p) => new Set(p).add(latest.id))}
+        >
+          Ignore
+        </Button>
+      </div>
+      {reviewing && (
+        <SuggestionReviewModal
+          key={reviewing.id}
+          suggestion={reviewing}
+          onClose={() => setReviewing(null)}
+          onResolved={invalidate}
+        />
+      )}
+    </>
+  );
+}
+
 /* ── the screen ─────────────────────────────────────────────────────────── */
 
 export function ChatScreen() {
@@ -478,6 +573,8 @@ export function ChatScreen() {
       async () => {
         await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        // A turn may have filed knowledge-base suggestions — refresh the composer bubble.
+        void queryClient.invalidateQueries({ queryKey: ["suggestions"] });
       },
       sent,
     );
@@ -679,6 +776,7 @@ export function ChatScreen() {
             </span>
           </div>
         )}
+        <SuggestionBubble />
         {attachments.length > 0 && (
           <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
             {attachments.map((a) => (

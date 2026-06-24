@@ -20,6 +20,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
 
+    // TS 6 deprecates `baseUrl` (still resolves `paths`); silence until TS 7 removes it.
+    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] }
   },

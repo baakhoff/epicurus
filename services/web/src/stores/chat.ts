@@ -33,6 +33,9 @@ interface ChatState {
   draft: string;
   /** The user message currently being answered (optimistic echo). */
   pendingUser: string | null;
+  /** Attachments staged with that optimistic message, shown as pills beside it until the
+   *  server-stored turn (which carries its own copy) takes over. Cleared with `pendingUser`. */
+  pendingAttachments: Attachment[];
   /** The assistant turn under construction, in order — text (answer), tool steps, and
    *  thinking blocks interleaved exactly as they streamed (#300). The activity timeline is
    *  derived from the thinking + tool segments; cleared on `done` when the server-stored turn
@@ -141,6 +144,7 @@ export const useChat = create<ChatState>()((set, get) => {
           streaming: false,
           abort: null,
           pendingUser: null,
+          pendingAttachments: [],
           segments: [],
           readiness: null,
         });
@@ -168,6 +172,7 @@ export const useChat = create<ChatState>()((set, get) => {
   sessionId: freshId(),
   draft: "",
   pendingUser: null,
+  pendingAttachments: [],
   segments: [],
   streaming: false,
   readiness: null,
@@ -182,6 +187,7 @@ export const useChat = create<ChatState>()((set, get) => {
     set({
       sessionId: freshId(),
       pendingUser: null,
+      pendingAttachments: [],
       segments: [],
       streaming: false,
       readiness: null,
@@ -196,6 +202,7 @@ export const useChat = create<ChatState>()((set, get) => {
     set({
       sessionId: id,
       pendingUser: null,
+      pendingAttachments: [],
       segments: [],
       streaming: false,
       readiness: null,
@@ -207,7 +214,7 @@ export const useChat = create<ChatState>()((set, get) => {
 
   send: async (text, model, onDone, attachments) => {
     if (get().streaming) return;
-    set({ draft: "", pendingUser: text });
+    set({ draft: "", pendingUser: text, pendingAttachments: attachments ?? [] });
     await runTurn(
       "/platform/v1/agent/chat/stream",
       {
@@ -229,7 +236,7 @@ export const useChat = create<ChatState>()((set, get) => {
     if (get().streaming) return;
     // No optimistic user echo — the user message is unchanged; the caller has already
     // dropped the stale answer from the displayed transcript.
-    set({ pendingUser: null });
+    set({ pendingUser: null, pendingAttachments: [] });
     const sid = encodeURIComponent(get().sessionId);
     await runTurn(
       `/platform/v1/agent/sessions/${sid}/regenerate`,
@@ -240,7 +247,7 @@ export const useChat = create<ChatState>()((set, get) => {
 
   editAndRerun: async (content, model, onDone) => {
     if (get().streaming) return;
-    set({ pendingUser: null });
+    set({ pendingUser: null, pendingAttachments: [] });
     const sid = encodeURIComponent(get().sessionId);
     await runTurn(
       `/platform/v1/agent/sessions/${sid}/edit`,

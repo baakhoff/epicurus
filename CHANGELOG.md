@@ -276,6 +276,16 @@ images to GHCR.
 
 ### Fixed
 
+- **A just-attached file now shows its pill immediately, not only after a reload** — when you
+  attached a file and sent it, the message echoed back without the attachment pill; the pill
+  only appeared once the page was reloaded (the server *had* persisted it). The optimistic
+  user message carried only the text — the staged attachments were sent to the backend but
+  never kept in client state — so there was nothing to render beside the bubble until the
+  server transcript was refetched. The chat store now holds the staged attachments on a
+  `pendingAttachments` field alongside `pendingUser` (set on send, cleared when the
+  server-stored turn takes over or the session changes), and the optimistic bubble renders
+  their pills exactly like the persisted message — a seamless hand-off, no reload (`web` →
+  0.41.0).
 - **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
   (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
   So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,

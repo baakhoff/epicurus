@@ -619,10 +619,17 @@ export function ChatScreen() {
             ),
           )}
           {showPending && (
-            <div className="flex justify-end">
+            <div className="flex flex-col items-end gap-1">
               <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
                 {chat.pendingUser}
               </div>
+              {chat.pendingAttachments.length > 0 && (
+                <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+                  {chat.pendingAttachments.map((a) => (
+                    <AttachmentPill key={a.att_id} attachment={a} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
           <LiveTurn />

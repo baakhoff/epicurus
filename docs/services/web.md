@@ -103,7 +103,10 @@ context to a turn: upload a **file** (`POST /platform/v1/agent/attachments`), re
 **another chat**, or pick an entity from an **enabled, attachable module** (its picker is
 proxied at `GET /platform/v1/modules/{name}/attachments`). Choices appear as pills above
 the input and are sent on the message as `attachments`; the agent expands them into the
-turn's context. Persisted attachments render as pills under the user's message. An
+turn's context. They render as pills under the user's message — beside the **optimistic
+echo from the moment it is sent** (the chat store carries them on `pendingAttachments`
+alongside `pendingUser`), then handed off seamlessly to the server-stored copy once the
+turn lands. An
 uploaded file is also kept durably in the storage module and shown in the Files page (the
 upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
 

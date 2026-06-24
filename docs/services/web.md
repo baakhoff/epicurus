@@ -24,7 +24,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
-| **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`) programmatically (ADR-0018). |
+| **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`, `doc-reader`) programmatically (ADR-0018). |
 
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
@@ -55,8 +55,9 @@ Zustand store) opened programmatically — `open(view, payload, title)` — e.g.
 entity-reference click (ADR-0019). It is a **resizable right column** on wide screens and a
 **bottom sheet** on phones, with a back-stack (`back()`) and `close()`. Views are a
 **bounded, core-defined vocabulary** — `entity-detail` (the hover-card envelope in full
-form) and `email-reader` (read-only, used by the 3.8 mail reader). The panel never runs
-module markup.
+form), `email-reader` (read-only, used by the 3.8 mail reader), and `doc-reader` (a text/`.md`
+file rendered as markdown, opened from the Files browser via `GET /platform/v1/modules/storage/read`
+— the split-screen reader, #KB-refactor). The panel never runs module markup.
 
 A hover-card's optional `href` is rendered by the shared `CardLink` (`src/components/CardLink.tsx`):
 an **in-app path** (`/m/…`) becomes a same-tab router navigation — e.g. a cited knowledge
@@ -85,6 +86,35 @@ the input and are sent on the message as `attachments`; the agent expands them i
 turn's context. Persisted attachments render as pills under the user's message. An
 uploaded file is also kept durably in the storage module and shown in the Files page (the
 upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
+
+### Reviewing suggested changes (#KB-refactor, ADR-0033)
+
+Every agent change to the knowledge base is **staged for operator review**, never applied
+directly. The shell surfaces the pending queue in two places, both reading the cross-module
+feed `GET /platform/v1/suggestions` (each item tagged with its `module` + `page_id`):
+
+- A **suggestion bubble** above the chat composer (`SuggestionBubble` in
+  `src/screens/ChatScreen.tsx`) appears when the assistant has filed suggestions. It names the
+  latest one ("The assistant wants to …") and shows the count when several are pending. A
+  one-tap structural change (move / new folder / new knowledge base) offers **Approve** inline;
+  a richer change offers **Open** (the review window). **Ignore** dismisses the bubble while the
+  suggestion stays on the Suggestions page.
+- The **Suggestions page** (the module's `review` archetype) opens the same review window.
+
+The **review window** (`src/components/SuggestionReviewModal.tsx`) is a core-owned overlay
+shaped by the operation, with three actions — **Approve**, **Reject**, **Ignore**:
+
+- **edit** (`update`/`create`) → a **diff with per-hunk checkboxes**: each change can be
+  ticked or unticked, the accepted hunks are merged client-side (`src/lib/linediff.ts`) and
+  sent as the approve `{content}` so only the chosen part is written; a `create` also offers a
+  rendered preview.
+- **delete** → a confirmation showing the document body that will be removed.
+- **move** → a `from → to` confirmation; **new folder** / **new knowledge base** → a simple
+  "create this?" confirmation.
+
+Approve/reject post to `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/{action}`
+(the core proxies to the module); these are operator-only — the agent never approves its own
+proposals.
 
 ### The chat SSE protocol
 

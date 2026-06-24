@@ -96,6 +96,24 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 - **`module_mcp_urls -> list[str]`** — each module's `<base>/mcp` endpoint.
 - **`attachment_allowed_type_list -> list[str]`** — the `attachment_allowed_types`, parsed + lowercased.
 
+## Shared file space (per-module storage roots)
+
+The file-owning modules (storage, knowledge, notes) share **one** file tree — the *shared
+file space* (#KB-refactor). One deployment-level env var mounts it; the module settings below
+are the in-container paths under it.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for storage (read-only), knowledge (read-write), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. A one-shot `files-init` container creates `/data/knowledge` + `/data/notes` and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
+| `STORAGE_ROOT` | `/data` | storage | In-container path of the tree storage indexes read-only (the shared-file-space mount). |
+| `VAULT_PATH` | `/data/knowledge` | knowledge | Knowledge's root inside the shared file space; each top-level folder is a project (knowledge base). Was `/vault` before #KB-refactor. |
+| `NOTES_ROOT` | `/data/notes` | notes | Notes' folder in the shared file space; each saved note is mirrored here as `<slug>.md`. Postgres stays the source of truth (#KB-refactor). |
+
+**Migration note for existing deployments.** `EPICURUS_FILES_ROOT` replaces
+`KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. Move old vault contents into
+`<files-root>/knowledge/<project>/` (each project is a top-level folder) so they appear as
+knowledge bases.
+
 ## Type aliases
 
 ```python

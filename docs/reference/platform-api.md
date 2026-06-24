@@ -128,6 +128,64 @@ it as a real IANA zone (**400** otherwise) and persists it; edited in the web Se
 
 ---
 
+## Knowledge-base / suggestions endpoints (shell-facing)
+
+These are consumed by the web shell, not the `PlatformClient`. The full module-registry
+surface is documented in [core-app](../services/core-app.md); the #KB-refactor additions are:
+
+### `GET /platform/v1/suggestions`
+
+The **cross-module pending-suggestions feed**: every enabled module that declares a `review`
+page, aggregated into one list. Each item is a review suggestion plus its owning `module` and
+`page_id`, so the chat composer's suggestion bubble and the Suggestions page can act on it
+from anywhere. Best-effort — a down, disabled, or erroring module is skipped, not fatal.
+
+```json
+[
+  {
+    "id": "9f2c…",
+    "title": "goals",
+    "path": "projects/goals.md",
+    "operation": "update",
+    "origin": "agent",
+    "note": "",
+    "created_at": "2026-06-24T10:00:00+00:00",
+    "diff": "--- a/projects/goals.md\n+++ b/projects/goals.md\n…",
+    "to_path": "",
+    "current": "…",
+    "content": "…",
+    "module": "knowledge",
+    "page_id": "review"
+  }
+]
+```
+
+`operation` is one of `create` / `update` / `delete` / `move` / `mkdir` / `mkproject`;
+`diff` / `current` / `content` are empty for structural ops, and `to_path` carries a
+`move`'s destination.
+
+### `GET /platform/v1/modules/storage/read?path=…`
+
+Proxy the storage module's text-file read for the Files split-screen reader →
+`{path, name, content}`. Upstream errors pass through: **415** binary / non-UTF-8, **413**
+larger than 256 KB, **404** missing, **400** traversal; an unreachable module is **502**.
+
+### `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…`
+
+Create a new knowledge base (project / top-level scope) in an editor page's store →
+`{id, title, kind}`. **409** if it already exists, **400** for an invalid name (a single
+folder segment — no separators, `..`, or `.`/`_` prefix). The operator's "New knowledge base"
+control; the agent's equivalent (`knowledge_propose_project`) goes through the review queue.
+
+### `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve`
+
+Approve a staged suggestion: the module applies + indexes it (ADR-0033). The body is
+**optional** `{content}` — the operator's **per-hunk-merged** result for an edit, forwarded so
+only the approved changes are written; absent ⇒ apply the agent's full proposal. Operator-only
+(paired with `…/reject`, which discards). **409** when the target vault is externally owned.
+
+---
+
 ## `PlatformClient`
 
 `epicurus_core.PlatformClient` — the typed client for the above endpoints.

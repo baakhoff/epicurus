@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from epicurus_core_app.llm.catalog import CatalogEntry, ModelCatalog
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
 from epicurus_core_app.llm.models import ModelDetails
+from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
 
@@ -52,6 +53,7 @@ def _app(
     prefs: LlmPrefsStore | None = None,
     catalog: ModelCatalog | None = None,
     model_settings: ModelSettingsStore | None = None,
+    ollama_runtime: OllamaRuntime | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
@@ -61,6 +63,7 @@ def _app(
             default_tenant="local",
             catalog=catalog,
             model_settings=model_settings,
+            ollama_runtime=ollama_runtime,
         )
     )
     return app
@@ -377,8 +380,33 @@ async def test_kv_cache_type_route_present_and_round_trips() -> None:
     ) as client:
         put = await client.put("/platform/v1/llm/prefs/kv-cache-type", json={"value": "q8_0"})
         assert put.status_code == 200
+        assert put.json()["applied"] is False  # no runtime wired → manual-restart fallback
         got = await client.get("/platform/v1/llm/prefs")
     assert got.json()["kv_cache_type"] == "q8_0"
+
+
+async def test_kv_cache_type_route_applies_when_runtime_present() -> None:
+    prefs = await _fresh_prefs()
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.applied: list[str | None] = []
+
+        def apply_kv_cache_type(self, value: str | None) -> bool:
+            self.applied.append(value)
+            return True
+
+    runtime = _FakeRuntime()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=_app(prefs=prefs, ollama_runtime=runtime)  # type: ignore[arg-type]
+        ),
+        base_url="http://test",
+    ) as client:
+        put = await client.put("/platform/v1/llm/prefs/kv-cache-type", json={"value": "q4_0"})
+    assert put.status_code == 200
+    assert put.json()["applied"] is True
+    assert runtime.applied == ["q4_0"]  # the choice was pushed to the live runtime
 
 
 async def test_model_settings_device_round_trips() -> None:

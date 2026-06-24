@@ -68,6 +68,8 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | Field | Env var | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). |
+| `ollama_runtime_env_path` | `OLLAMA_RUNTIME_ENV_PATH` | `str` | `/etc/epicurus/ollama.env` | Where the core writes Ollama's start-up env file (KV-cache type) for it to source on restart (#307). A shared volume; override only if you remap the mount. |
+| `ollama_service_name` | `OLLAMA_SERVICE_NAME` | `str` | `ollama` | Compose service the core restarts to apply a KV-cache change (#307). |
 | `llm_default_model` | `LLM_DEFAULT_MODEL` | `str` | `llama3.2` | Model used when a request names none. |
 | `llm_keep_alive` | `LLM_KEEP_ALIVE` | `str` | `5m` | How long Ollama keeps a model loaded after use (ADR-0005). |
 | `llm_fallbacks` | `LLM_FALLBACKS` | `str` | `""` | Comma-separated fallback models, tried in order (e.g. `claude/claude-3-5-sonnet-latest,gpt/gpt-4o`). |

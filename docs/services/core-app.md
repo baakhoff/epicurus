@@ -142,6 +142,20 @@ the sheet shows it read-only (from `/api/show`) and offers a "pull a different v
 shortcut instead. Embedding settings are opt-in: with nothing set, the embed call is
 unchanged.
 
+### Context compaction (fitting the prompt to the window)
+
+A local runtime silently drops tokens past `num_ctx`, evicting the **oldest** — which is the
+agent's instructions and recalled context, exactly what must survive. So before every local
+call the gateway trims the prompt to fit (`llm/compaction.py`, applied in `_fit_to_context`
+across the blocking + streaming paths): it keeps the leading **system** messages whole, keeps
+the **most-recent** turns that fit within `num_ctx` minus a reply reserve (a bounded quarter)
+and the tool-schema footprint, drops older history first, never orphans a `tool` result from
+its `assistant` call, and always keeps at least the final message. When anything is dropped a
+short `system` note marks the cut so the model knows earlier turns existed. Token counts are a
+deliberately conservative character-based **estimate** (no tokenizer dependency, arbitrary
+local models). Hosted providers — large contexts, server-side overflow handling — are left
+untouched, as are calls with no known window. The common case (a short chat) is a no-op.
+
 ### Power (ADR-0005)
 
 | Method · Path | Purpose |

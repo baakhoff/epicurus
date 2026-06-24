@@ -260,8 +260,8 @@ document/folder tree (content is fetched lazily per document), and it owns sever
     { "id": "projects/a.md", "title": "a", "path": "projects/a.md", "type": "file" },
     { "id": "b.md", "title": "b", "path": "b.md", "type": "file" }
   ],
-  "can_create": false,        // true → shell shows "New note" (Notes module)
-  "can_manage_files": true,   // true → shell shows folder CRUD (Knowledge module, #216)
+  "can_create": false,        // true → shell shows a single "New note" control
+  "can_manage_files": true,   // true → shell shows folder CRUD (Knowledge + Notes, #216 / #KB-refactor)
   "versioned": true           // true → shell shows save-history browse + restore (ADR-0046)
 }
 // GET /pages/{id}/doc?path=<rel>  →  one document's content
@@ -310,10 +310,17 @@ page is the first user, #130) provides the tree + markdown source/preview + save
 module supplies only the data above. The knowledge implementation re-indexes a saved
 document so it stays agent-retrievable.
 
-`can_manage_files` tells the shell to show folder CRUD controls (Knowledge sets this
-`true`; Notes sets it `false` and uses `can_create` instead for its own authoring flow).
-`EditorDoc.type` distinguishes `"file"` entries from `"dir"` entries; the shell builds
-the nested visual tree from the flat list using the path structure.
+`can_manage_files` tells the shell to show folder CRUD controls. **Both** knowledge and
+notes set it `true` — knowledge with a project switcher, notes as a single flat space with
+no switcher (`scope_noun` empty, #KB-refactor). `can_create` is the simpler alternative (a
+single "New note" control, no folders) — no shipped module uses it now that notes have
+folders. `EditorDoc.type` distinguishes `"file"` entries from `"dir"` entries; the shell
+builds the nested visual tree from the flat list using the path structure (dir nodes are
+emitted parent-first so each child can attach).
+
+For notes the editor `path` is a Postgres **slug** (not a filesystem path); folder rows are
+persisted so empty folders survive a reload, and a `move` re-keys the slug. The trust
+boundary is still the module — it validates each path.
 
 **The `review` archetype (suggested-changes queue, #220).** A queue of agent-proposed
 changes the operator approves or rejects, each with a server-computed unified diff. Its

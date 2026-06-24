@@ -8,11 +8,17 @@ import { ChevronLeft, X } from "lucide-react";
 import { createElement, Fragment, useCallback, useRef, useState, type PointerEvent } from "react";
 
 import { CardLink } from "@/components/CardLink";
+import { Markdown } from "@/components/Markdown";
 import { Button, Sheet } from "@/components/ui";
 import { api } from "@/lib/api";
-import { EmailMessage, HoverCard, type BoardAction } from "@/lib/contracts";
+import { EmailMessage, FileText, HoverCard, type BoardAction } from "@/lib/contracts";
 import { moduleIcon } from "@/lib/icons";
 import { usePanel, usePanelCurrent, usePanelDepth, type PanelEntry } from "@/stores/panel";
+
+/** Whether a file name reads as markdown (rendered) vs. plain text (shown verbatim). */
+function isMarkdown(name: string): boolean {
+  return /\.(md|markdown|mdx)$/i.test(name);
+}
 
 /* ── views (core-defined vocabulary) ─────────────────────────────────────── */
 
@@ -118,12 +124,36 @@ function EmailReaderView({ payload }: { payload: unknown }) {
   );
 }
 
+/**
+ * The `doc-reader` view (#KB-refactor, req 6): a file opened from the Files browser, read
+ * in the split-screen panel — markdown rendered, anything else shown verbatim.
+ */
+function DocReaderView({ payload }: { payload: unknown }) {
+  const file = FileText.parse(payload);
+  return (
+    <article>
+      <p className="mb-3 truncate font-mono text-xs text-ink-faint" title={file.path}>
+        {file.path}
+      </p>
+      {isMarkdown(file.name) ? (
+        <Markdown>{file.content}</Markdown>
+      ) : (
+        <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[13px] leading-relaxed text-ink">
+          {file.content}
+        </pre>
+      )}
+    </article>
+  );
+}
+
 function PanelBody({ entry }: { entry: PanelEntry }) {
   switch (entry.view) {
     case "entity-detail":
       return <EntityDetailView payload={entry.payload} />;
     case "email-reader":
       return <EmailReaderView payload={entry.payload} />;
+    case "doc-reader":
+      return <DocReaderView payload={entry.payload} />;
     default:
       return null;
   }

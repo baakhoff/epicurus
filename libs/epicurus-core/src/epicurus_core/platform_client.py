@@ -155,6 +155,23 @@ class PlatformClient:
             model = resp.json().get("model")
             return str(model) if model else None
 
+    async def get_suggestions_enabled(self) -> bool:
+        """Whether this module's agent changes go through review (default ``True``).
+
+        Read straight from the core's Postgres (no manifest round-trip). When ``False`` the
+        operator has turned review off, so the module should apply the agent's change
+        directly instead of staging a suggestion. Requires ``PlatformClient(..., module=...)``.
+        """
+        if self._module is None:
+            raise ValueError("PlatformClient.module must be set to resolve suggestions setting")
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                f"/platform/v1/modules/{self._module}/suggestions-enabled",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            return bool(resp.json().get("enabled", True))
+
     async def get_collections(self) -> CollectionPrefs:
         """The operator's collection selection for this module (ADR-0030).
 

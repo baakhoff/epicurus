@@ -12,22 +12,28 @@ services:
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
-      # Absolute path inside the container to the directory tree to index.
-      # Mount the HDD (or any directory) here and point STORAGE_ROOT at it.
+      # In-container BASE of the shared file space (#KB-refactor). The served/indexed tree is
+      # tenant-scoped (constraint #1): storage serves STORAGE_ROOT/<tenant> (i.e.
+      # /data/<tenant>) read-only as the unified "Files" view, showing every module's folder
+      # (knowledge/, notes/) plus uploads. The service appends the DEFAULT_TENANT_ID segment.
       STORAGE_ROOT: ${STORAGE_ROOT:-/data}
       # MinIO (S3-compatible) object store for app-managed objects.
       MINIO_URL: ${MINIO_URL:-http://minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-epicurus}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-epicurus-dev}
     volumes:
-      # By default an EMPTY named volume — nothing on the host is exposed until you
-      # opt in. Set STORAGE_HOST_ROOT in .env to a host directory (e.g. your HDD) to
-      # index real files. A bare name is a named volume; a path is a host bind-mount.
-      # (Never default to the host home dir: it would index ~/.ssh etc. read-only.)
-      - ${STORAGE_HOST_ROOT:-storage-root-data}:/data:ro
+      # The SHARED file space (#KB-refactor), read-only here: storage only indexes and
+      # serves it. The same volume is mounted read-write by knowledge (and notes), which
+      # own subfolders under it. Default an empty named volume; set EPICURUS_FILES_ROOT in
+      # .env to a host directory to expose real files. (Never default to the host home
+      # dir: it would index ~/.ssh etc.) Replaces the old per-module STORAGE_HOST_ROOT.
+      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${STORAGE_PORT:-8083}:8080"
     depends_on:
+      # files-init (data plane) creates + chowns the module subdirs before anyone mounts.
+      files-init:
+        condition: service_completed_successfully
       nats:
         condition: service_started
       postgres:
@@ -48,6 +54,5 @@ services:
       - epicurus.metrics.port=8080
     networks: [epicurus]
 
-# Default index target: an empty named volume (overridden by STORAGE_HOST_ROOT).
-volumes:
-  storage-root-data:
+# The shared `epicurus-files` volume is declared in the data plane
+# (infra/compose/docker-compose.yml) and mounted read-write by knowledge/notes.

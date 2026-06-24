@@ -56,6 +56,7 @@ class _FakeModulePrefs:
         self.models: dict[tuple[str, str], dict[str, str]] = {}
         self.disabled: dict[tuple[str, str], set[str]] = {}
         self.collections: dict[tuple[str, str], CollectionPrefs] = {}
+        self.suggestions: dict[tuple[str, str], bool] = {}
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         return {m: e for (t, m), e in self.flags.items() if t == tenant}
@@ -86,6 +87,12 @@ class _FakeModulePrefs:
 
     async def set_collections(self, tenant: str, module: str, prefs: CollectionPrefs) -> None:
         self.collections[(tenant, module)] = prefs
+
+    async def get_suggestions_enabled(self, tenant: str, module: str) -> bool:
+        return self.suggestions.get((tenant, module), True)
+
+    async def set_suggestions_enabled(self, tenant: str, module: str, enabled: bool) -> None:
+        self.suggestions[(tenant, module)] = enabled
 
     async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:
         return set(self.disabled.get((tenant, module), set()))
@@ -999,3 +1006,71 @@ async def test_disconnect_clears_provider_selection() -> None:
     prefs = await registry.collection_prefs("calendar")
     assert prefs.enabled == []
     assert prefs.active is None
+
+
+# ── Cross-module pending-suggestions feed (#KB-refactor) ───────────────────────
+
+
+def _review_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="knowledge",
+        version="0.14.0",
+        pages=[PageSpec(id="review", title="Suggestions", archetype="review")],
+    )
+
+
+async def test_all_suggestions_aggregates_review_pages() -> None:
+    registry, _, _ = _registry(manifest=_review_manifest())
+    resp = MagicMock()
+    resp.json.return_value = {
+        "title": "Suggestions",
+        "suggestions": [
+            {
+                "id": "s1",
+                "title": "a",
+                "path": "kb/a.md",
+                "operation": "update",
+                "origin": "agent",
+                "note": "",
+                "created_at": "2026-06-24T00:00:00Z",
+                "diff": "",
+                "to_path": "",
+                "current": "",
+                "content": "",
+            }
+        ],
+    }
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_cls:
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        result = await registry.all_suggestions()
+    assert len(result) == 1
+    assert result[0]["module"] == "knowledge"
+    assert result[0]["page_id"] == "review"
+    assert result[0]["id"] == "s1"
+    client.get.assert_called_once_with("/pages/review")
+
+
+async def test_all_suggestions_empty_without_a_review_page() -> None:
+    # A module with only a browser page contributes nothing to the feed.
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    assert await registry.all_suggestions() == []
+
+
+# ── Suggestions review on/off toggle (#KB-refactor) ────────────────────────────
+
+
+async def test_suggestions_enabled_defaults_true_and_round_trips() -> None:
+    registry, _, _ = _registry(manifest=_review_manifest())
+    assert await registry.get_suggestions_enabled("knowledge") is True  # default on
+    await registry.set_suggestions_enabled("knowledge", False)
+    assert await registry.get_suggestions_enabled("knowledge") is False
+
+
+async def test_set_suggestions_enabled_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(manifest=_review_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_suggestions_enabled("ghost", False)
+    assert err.value.status_code == 404

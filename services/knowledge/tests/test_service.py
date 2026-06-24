@@ -19,6 +19,19 @@ def _hit(note_path: str, text: str, score: float, heading: str | None = None) ->
     return SearchHit(note_path=note_path, heading=heading, text=text, score=score)
 
 
+def _review_platform(store: SuggestionStore, vault: object, vault_path: Path):  # type: ignore[no-untyped-def]
+    """A review + a platform mock (review on) for build_module in these tests."""
+    from epicurus_core import PlatformClient
+    from epicurus_knowledge.pages import VaultPages
+    from epicurus_knowledge.suggestions import SuggestionReview
+
+    pages = VaultPages(vault_path, vault)  # type: ignore[arg-type]
+    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant="test")  # type: ignore[arg-type]
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    return review, platform
+
+
 def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> EpicurusModule:
     from epicurus_knowledge.module_docs import ModuleDocsIndexer
 
@@ -30,8 +43,16 @@ def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> Epicurus
     module_docs.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
     # The search tests never reach the suggestion store; an uninitialised one is fine.
     suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    review, platform = _review_platform(suggestions, vault, Path("/vault"))
     return build_module(
-        vault, docs, module_docs, suggestions, tenant="test", vault_path=Path("/vault")
+        vault,
+        docs,
+        module_docs,
+        suggestions,
+        review,
+        platform,
+        tenant="test",
+        vault_path=Path("/vault"),
     )
 
 
@@ -85,3 +106,83 @@ async def test_manifest_declares_embedding_model_slot() -> None:
     assert "embedding" in slots
     assert slots["embedding"].role == "embedding"
     assert slots["embedding"].label  # non-empty — shown on the Modules page
+
+
+# ── navigation tools over a real vault (#KB-refactor) ─────────────────────────
+
+
+def _nav_module(vault_path: Path) -> EpicurusModule:
+    """A module whose vault is a real directory, for the read-only navigation tools."""
+    from epicurus_knowledge.module_docs import ModuleDocsIndexer
+
+    vault = AsyncMock(spec=KnowledgeIndexer)
+    docs = AsyncMock(spec=KnowledgeIndexer)
+    module_docs = AsyncMock(spec=ModuleDocsIndexer)
+    suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    review, platform = _review_platform(suggestions, vault, vault_path)
+    return build_module(
+        vault,
+        docs,
+        module_docs,
+        suggestions,
+        review,
+        platform,
+        tenant="test",
+        vault_path=vault_path,
+    )
+
+
+def _text(content: list) -> str:  # type: ignore[type-arg]
+    # The navigation tools return plain text, not a ToolEnvelope.
+    return content[0].text  # type: ignore[attr-defined,no-any-return]
+
+
+async def test_list_projects_lists_top_level_folders(tmp_path: Path) -> None:
+    (tmp_path / "personal").mkdir()
+    (tmp_path / "work").mkdir()
+    (tmp_path / "_reserved").mkdir()  # underscore-prefixed: never a project
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_list_projects", {})
+    out = _text(content)
+    assert "personal" in out and "work" in out
+    assert "_reserved" not in out
+
+
+async def test_list_projects_empty(tmp_path: Path) -> None:
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_list_projects", {})
+    assert "No knowledge bases" in _text(content)
+
+
+async def test_tree_shows_structure(tmp_path: Path) -> None:
+    (tmp_path / "kb" / "sub").mkdir(parents=True)
+    (tmp_path / "kb" / "alpha.md").write_text("# A\n", encoding="utf-8")
+    (tmp_path / "kb" / "sub" / "beta.md").write_text("# B\n", encoding="utf-8")
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_tree", {"project": "kb"})
+    out = _text(content)
+    assert "kb/" in out
+    assert "sub/" in out
+    assert "alpha.md" in out
+    assert "beta.md" in out
+
+
+async def test_read_document_returns_content(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "kb" / "a.md").write_text("# Hello\nbody\n", encoding="utf-8")
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "kb/a.md"})
+    assert "# Hello" in _text(content)
+
+
+async def test_read_document_missing(tmp_path: Path) -> None:
+    (tmp_path / "kb").mkdir()
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "kb/missing.md"})
+    assert "No such document" in _text(content)
+
+
+async def test_read_document_rejects_traversal(tmp_path: Path) -> None:
+    module = _nav_module(tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "../escape.md"})
+    assert "cannot read" in _text(content).lower()

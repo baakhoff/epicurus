@@ -274,6 +274,17 @@ images to GHCR.
   attach proxy and web attach menu render it unchanged — the module only supplies data
   (ADR-0019) (closes #139) (`tasks` → 0.3.0).
 
+### Changed
+
+- **The observability stack (Grafana / Prometheus / Loki / Tempo / Alloy / Alertmanager) is now
+  opt-in** — a self-hosted box that isn't running dashboards shouldn't pay for eight extra
+  containers it never opens. Every observability service is gated behind the `observability`
+  compose profile, so `docker compose up` (and `task up`) now runs a lean stack without them;
+  bring them up with `docker compose --profile observability up -d` (or `task obs-up`). Nothing
+  in epicurus depends on the stack at runtime — services still expose `/metrics` and `/health`,
+  so an operator who prefers `docker logs` or their own monitoring can point it at those
+  endpoints and never enable the profile. Infra-only; no component version change.
+
 ### Fixed
 
 - **Markdown now renders headings and lists instead of plain indented text** — assistant

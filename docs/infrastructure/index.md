@@ -58,10 +58,15 @@ assumed ingress — the operator layers their own perimeter (Tailscale, a revers
 auth proxy) in front (ADR-0008). Host ports **8088** (web entrypoint) and **8089**
 (dashboard). Details: [`infra/edge/README.md`](../../infra/edge/README.md).
 
-## Observability
+## Observability (opt-in)
 
 **Grafana / Loki / Prometheus / Tempo** with an **Alloy** collector (OTel) give logs,
-metrics, and traces for every container. Open Grafana at `http://localhost:3000`.
+metrics, and traces for every container — but the whole stack is **opt-in**, gated behind
+the `observability` compose profile. A plain `docker compose up` runs without it; bring it
+up with `docker compose --profile observability up -d` and open Grafana at
+`http://localhost:3000`. Nothing in epicurus depends on it at runtime: every service exposes
+`/metrics` and `/health` regardless, so you can also point your **own** Prometheus/Grafana
+(or any monitoring you prefer) at those endpoints and never enable this stack at all.
 Alert rules for service health, OpenBao sealed, and disk usage are pre-configured and
 evaluated by Prometheus; Alertmanager routes notifications (edit
 `infra/observability/alertmanager/alertmanager.yml` to add a receiver).

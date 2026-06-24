@@ -436,7 +436,7 @@ class ModuleRegistry:
             raise HTTPException(status_code=403, detail=f"module {name!r} is disabled")
         if tool not in {t.name for t in manifest.tools}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no tool {tool!r}")
-        return await self._mcp.call(tool, arguments, f"{base}/mcp", tenant=self._tenant)
+        return await self._mcp.call(tool, arguments, f"{base}/mcp")
 
     async def get_config(self, name: str) -> dict[str, Any]:
         """The module's stored config values (empty if never saved)."""

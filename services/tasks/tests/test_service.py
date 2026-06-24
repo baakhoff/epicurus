@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.9.0"
+    assert manifest.version == "0.10.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -376,7 +376,9 @@ class _FakeGoogleTasks:
             Collection(account="google", collection="work", title="Work"),
         ]
 
-    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
+    async def list_tasks(
+        self, tenant_id: str, *, list_id: str | None = None, scope: str = "open"
+    ) -> list[Task]:
         self.last_list_id = list_id
         self.list_ids_seen.append(list_id)
         if list_id in self.fail_lists:

@@ -11,6 +11,12 @@ VALID_PRIORITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 #: Valid status values. "in_progress" is local-only; Google degrades it to "open".
 VALID_STATUSES: frozenset[str] = frozenset({"open", "in_progress", "done"})
 
+#: Which tasks a board / list read includes — distinct from a single Task's ``status``
+#: (ADR-0049). ``"open"`` excludes completed (open + in_progress), ``"done"`` is completed
+#: only, ``"all"`` is both. Backs the board's *Show* filter and the provider read seam.
+TaskScope = Literal["open", "done", "all"]
+VALID_TASK_SCOPES: frozenset[str] = frozenset({"open", "done", "all"})
+
 
 class Task(BaseModel):
     """A task in the provider-neutral domain model."""

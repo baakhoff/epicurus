@@ -518,10 +518,26 @@ export const BoardColumn = z.object({
 });
 export type BoardColumn = z.infer<typeof BoardColumn>;
 
-/** The `board` archetype's data contract: columns of cards + board-level actions. */
+/**
+ * One declarative view control a `board` surfaces (ADR-0049): a labeled selector — e.g.
+ * "Group by" (the column layout) or "Show" (a filter). The module declares the `options`
+ * and the current `value`; the shell renders a selector and re-fetches the page with
+ * `?<id>=<value>` on change, so regrouping/filtering stays module-side (the board carries
+ * no task fields to the client). Generic and reusable across board modules.
+ */
+export const BoardControl = z.object({
+  id: z.string(),
+  label: z.string(),
+  value: z.string().default(""),
+  options: z.array(z.object({ value: z.string(), label: z.string() })).default([]),
+});
+export type BoardControl = z.infer<typeof BoardControl>;
+
+/** The `board` archetype's data contract: columns of cards + view controls + actions. */
 export const BoardData = z.object({
   title: z.string().nullish(),
   columns: z.array(BoardColumn).default([]),
+  controls: z.array(BoardControl).default([]),
   actions: z.array(BoardAction).default([]),
 });
 export type BoardData = z.infer<typeof BoardData>;

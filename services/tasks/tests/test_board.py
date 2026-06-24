@@ -1,13 +1,18 @@
-"""Tests for build_tasks_board — the `board` archetype payload (ADR-0018).
+"""Tests for build_tasks_board — the `board` archetype payload (ADR-0018 / ADR-0049).
 
-Pure and deterministic given ``today``, so the due-date bucketing is exercised
-here without a database or a clock.
+Pure and deterministic given ``today``, so the grouping, view controls, and filter
+echo are exercised here without a database or a clock.
 """
 
 from __future__ import annotations
 
 from epicurus_tasks.models import Task
-from epicurus_tasks.service import TASKS_PAGE_ID, build_tasks_board
+from epicurus_tasks.service import (
+    TASKS_PAGE_ID,
+    build_tasks_board,
+    coerce_group,
+    coerce_scope,
+)
 
 TODAY = "2026-06-14"
 
@@ -18,11 +23,20 @@ def _task(
     *,
     due: str | None = None,
     notes: str | None = None,
+    status: str = "open",
+    priority: str | None = None,
     list_id: str | None = None,
     list_title: str | None = None,
 ) -> Task:
     return Task(
-        id=task_id, title=title, due=due, notes=notes, list_id=list_id, list_title=list_title
+        id=task_id,
+        title=title,
+        due=due,
+        notes=notes,
+        status=status,  # type: ignore[arg-type]
+        priority=priority,  # type: ignore[arg-type]
+        list_id=list_id,
+        list_title=list_title,
     )
 
 
@@ -197,3 +211,139 @@ def test_edit_action_has_no_move_picker_with_a_single_list() -> None:
     edit = board["columns"][0]["cards"][0]["actions"][1]
     assert "to_list_id" not in edit["fields"]
     assert "field_choices" not in edit
+
+
+# ── view controls (ADR-0049) ──────────────────────────────────────────────────
+
+
+def test_board_declares_group_and_show_controls() -> None:
+    board = build_tasks_board([], today=TODAY)
+    controls = {c["id"]: c for c in board["controls"]}
+    assert set(controls) == {"group", "show"}
+    assert controls["group"]["label"] == "Group by"
+    assert controls["group"]["value"] == "due"
+    group_values = [o["value"] for o in controls["group"]["options"]]
+    assert group_values == ["due", "status", "priority", "none"]
+    assert controls["show"]["label"] == "Show"
+    assert controls["show"]["value"] == "open"
+    assert [o["value"] for o in controls["show"]["options"]] == ["open", "done", "all"]
+
+
+def test_group_control_offers_list_option_only_with_lists() -> None:
+    no_lists = build_tasks_board([], today=TODAY)
+    group = next(c for c in no_lists["controls"] if c["id"] == "group")
+    assert "list" not in [o["value"] for o in group["options"]]
+
+    with_lists = build_tasks_board([], today=TODAY, lists=[("work", "Work"), ("home", "Home")])
+    group2 = next(c for c in with_lists["controls"] if c["id"] == "group")
+    # "List" is spliced in before the flat "None" option.
+    assert [o["value"] for o in group2["options"]] == ["due", "status", "priority", "list", "none"]
+
+
+def test_controls_echo_active_selection() -> None:
+    board = build_tasks_board([], today=TODAY, group_by="priority", scope="all")
+    values = {c["id"]: c["value"] for c in board["controls"]}
+    assert values == {"group": "priority", "show": "all"}
+
+
+# ── grouping strategies (ADR-0049) ────────────────────────────────────────────
+
+
+def test_group_by_status_columns_in_order() -> None:
+    tasks = [
+        _task("o", "Open one"),
+        _task("p", "Doing", status="in_progress"),
+        _task("d", "Done one", status="done"),
+    ]
+    board = build_tasks_board(tasks, today=TODAY, group_by="status", scope="all")
+    cols = {c["title"]: [card["title"] for card in c["cards"]] for c in board["columns"]}
+    assert list(cols.keys()) == ["Open", "In progress", "Completed"]
+    assert cols["Open"] == ["Open one"]
+    assert cols["In progress"] == ["Doing"]
+    assert cols["Completed"] == ["Done one"]
+
+
+def test_group_by_priority_orders_high_to_none() -> None:
+    tasks = [
+        _task("1", "hi", priority="high"),
+        _task("2", "lo", priority="low"),
+        _task("3", "none"),
+    ]
+    board = build_tasks_board(tasks, today=TODAY, group_by="priority")
+    assert [c["title"] for c in board["columns"]] == ["High", "Low", "No priority"]
+
+
+def test_group_by_none_is_a_single_flat_column() -> None:
+    tasks = [_task("1", "a", due="2026-06-01"), _task("2", "b")]
+    board = build_tasks_board(tasks, today=TODAY, group_by="none")
+    assert [c["title"] for c in board["columns"]] == ["All tasks"]
+    assert len(board["columns"][0]["cards"]) == 2
+
+
+def test_group_by_list_orders_by_lists_then_extras() -> None:
+    tasks = [
+        _task("1", "w", list_id="work", list_title="Work"),
+        _task("2", "h", list_id="home", list_title="Home"),
+        _task("3", "p"),  # local default → "Personal" fallback (no list_title)
+    ]
+    board = build_tasks_board(
+        tasks, today=TODAY, group_by="list", lists=[("work", "Work"), ("home", "Home")]
+    )
+    assert [c["title"] for c in board["columns"]] == ["Work", "Home", "Personal"]
+
+
+def test_group_by_list_without_lists_falls_back_to_due() -> None:
+    board = build_tasks_board([_task("1", "x", due="2026-06-01")], today=TODAY, group_by="list")
+    assert [c["title"] for c in board["columns"]] == ["Overdue"]
+    group = next(c for c in board["controls"] if c["id"] == "group")
+    assert group["value"] == "due"  # control echoes the corrected grouping
+
+
+def test_due_badge_tone_is_independent_of_grouping() -> None:
+    # Even grouped by priority, an overdue task's due badge stays "danger".
+    overdue = _task("a", "late", due="2020-01-01", priority="low")
+    board = build_tasks_board([overdue], today=TODAY, group_by="priority")
+    due_badge = board["columns"][0]["cards"][0]["badges"][0]
+    assert due_badge == {"label": "2020-01-01", "tone": "danger"}
+
+
+# ── completed cards: done flag + Reopen (ADR-0049) ────────────────────────────
+
+
+def test_completed_card_is_done_and_offers_reopen() -> None:
+    board = build_tasks_board(
+        [_task("d", "Finished", status="done")], today=TODAY, group_by="status", scope="done"
+    )
+    card = board["columns"][0]["cards"][0]
+    assert card["done"] is True
+    primary = card["actions"][0]
+    assert primary["tool"] == "tasks_update"
+    assert primary["label"] == "Reopen"
+    assert primary["args"]["status"] == "open"
+    assert primary["args"]["task_id"] == "d"
+
+
+def test_open_card_is_not_done_and_offers_complete() -> None:
+    board = build_tasks_board([_task("o", "Open")], today=TODAY)
+    card = board["columns"][0]["cards"][0]
+    assert card["done"] is False
+    primary = card["actions"][0]
+    assert primary["tool"] == "tasks_complete"
+    assert primary["label"] == "Complete"
+
+
+# ── query-param coercion (ADR-0049) ───────────────────────────────────────────
+
+
+def test_coerce_group_clamps_unknown_to_due() -> None:
+    assert coerce_group("priority") == "priority"
+    assert coerce_group("list") == "list"
+    assert coerce_group("nonsense") == "due"
+    assert coerce_group(None) == "due"
+
+
+def test_coerce_scope_clamps_unknown_to_open() -> None:
+    assert coerce_scope("all") == "all"
+    assert coerce_scope("done") == "done"
+    assert coerce_scope("bogus") == "open"
+    assert coerce_scope(None) == "open"

@@ -25,6 +25,7 @@ from epicurus_core import (
 from epicurus_notes.attachments import NotesAttachments, create_attachments_router
 from epicurus_notes.db import NotesStore
 from epicurus_notes.indexer import NotesIndexer
+from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
 from epicurus_notes.service import MODULE_NAME, SAVED_SUBJECT, build_module
 from epicurus_notes.settings import NotesSettings
@@ -63,13 +64,16 @@ def create_app() -> FastAPI:
         """Announce a saved note on NATS (tenant-scoped) for downstream consumers."""
         await bus.publish(SAVED_SUBJECT, {"slug": slug}, tenant_id=tenant)
 
-    pages = NotesPages(store, indexer, tenant=tenant, on_saved=_on_saved)
+    mirror = NotesMirror(settings.notes_root, store, tenant=tenant)
+    pages = NotesPages(store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror)
     attachments = NotesAttachments(store, tenant=tenant)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await store.init()
+            # One-time copy of pre-existing notes into the shared file space (#KB-refactor).
+            await mirror.backfill()
             await bus.connect()
             log.info("notes service ready", tenant=tenant)
             try:

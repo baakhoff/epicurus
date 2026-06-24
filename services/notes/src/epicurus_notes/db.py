@@ -91,6 +91,17 @@ class NotesStore:
             )
             return [NoteSummary(slug=r.slug, title=r.title, updated_at=r.updated_at) for r in rows]
 
+    async def list_all(self, *, tenant: str) -> list[NoteRecord]:
+        """Every note for *tenant* **with** its body — used to backfill the .md mirror."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredNote).where(_StoredNote.tenant == tenant).order_by(_StoredNote.slug)
+            )
+            return [
+                NoteRecord(slug=r.slug, title=r.title, content=r.content, updated_at=r.updated_at)
+                for r in rows
+            ]
+
     async def get(self, *, tenant: str, slug: str) -> NoteRecord | None:
         """The full note for *slug*, or ``None`` if it does not exist."""
         async with self._session() as session:

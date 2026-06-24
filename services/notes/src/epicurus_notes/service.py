@@ -25,10 +25,11 @@ def build_module() -> EpicurusModule:
     """Build the Notes module — pages + attach surface, deliberately tool-free."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.3.0",
         description=(
-            "Author Obsidian-style notes saved to a private RAG collection. Notes are"
-            " attach-only — the agent reads one only when you attach it to a turn."
+            "Author Obsidian-style notes saved to a private RAG collection and mirrored as"
+            " .md in the shared file space. Notes are attach-only — the agent reads one only"
+            " when you attach it to a turn."
         ),
         pages=[
             PageSpec(

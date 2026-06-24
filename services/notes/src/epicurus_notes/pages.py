@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from epicurus_core import get_logger
 from epicurus_notes.db import NotesStore
 from epicurus_notes.indexer import NotesIndexer
+from epicurus_notes.mirror import NotesMirror
 
 log = get_logger("notes.pages")
 
@@ -118,11 +119,15 @@ class NotesPages:
         *,
         tenant: str,
         on_saved: Callable[[str], Awaitable[None]] | None = None,
+        mirror: NotesMirror | None = None,
     ) -> None:
         self._store = store
         self._indexer = indexer
         self._tenant = tenant
         self._on_saved = on_saved
+        # Writes a read-only .md copy into the shared file space so notes show in Files
+        # (#KB-refactor, req 7). None disables it (tests / no mount).
+        self._mirror = mirror
 
     async def list_docs(self) -> EditorData:
         """Every note for the tenant, newest first (no bodies)."""
@@ -148,6 +153,11 @@ class NotesPages:
         slug = _clean_slug(slug)
         title = derive_title(content)
         await self._store.upsert(tenant=self._tenant, slug=slug, title=title, content=content)
+        # Mirror to the shared file space so the note shows in Files (#KB-refactor, req 7).
+        # Best-effort and never raises; runs before indexing so the file reflects the saved
+        # body even if the embed round-trip fails.
+        if self._mirror is not None:
+            await self._mirror.write(slug, content)
         try:
             chunk_count = await self._indexer.index_note(slug, content)
         except Exception as exc:  # the note is saved; indexing is best-effort

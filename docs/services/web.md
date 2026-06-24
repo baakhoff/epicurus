@@ -48,6 +48,18 @@ or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the
 tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
 one path, so no module ever ships its own buttons or forms.
 
+The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
+shows immediately, and an Edit/Preview toggle drops to the raw source when you want to
+write (ADR-0042). Because notes/knowledge **re-embed on every save**, the editor does not
+save on each keystroke: a save fires only when you **leave** (switch document, go back, or
+the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
+or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →
+saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only** vault — a
+watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
+and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
+toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
+bar.
+
 ### Right panel / split-screen (ADR-0018)
 
 A core-owned side panel (`src/components/Panel.tsx`, driven by the `src/stores/panel.ts`

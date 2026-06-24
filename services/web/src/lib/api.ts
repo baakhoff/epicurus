@@ -25,6 +25,7 @@ import {
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
+  PendingSuggestion,
   PlatformInfo,
   PowerStatus,
   ProviderInfo,
@@ -295,6 +296,9 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/reject`,
       { method: "POST" },
     ),
+  // The cross-module pending-suggestions feed (#KB-refactor): drives the chat composer
+  // bubble and the Suggestions page; each item carries its owning module + page id.
+  suggestions: () => request(z.array(PendingSuggestion), `/platform/v1/suggestions`),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(

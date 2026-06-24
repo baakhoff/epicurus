@@ -999,3 +999,54 @@ async def test_disconnect_clears_provider_selection() -> None:
     prefs = await registry.collection_prefs("calendar")
     assert prefs.enabled == []
     assert prefs.active is None
+
+
+# ── Cross-module pending-suggestions feed (#KB-refactor) ───────────────────────
+
+
+def _review_manifest() -> ModuleManifest:
+    return ModuleManifest(
+        name="knowledge",
+        version="0.14.0",
+        pages=[PageSpec(id="review", title="Suggestions", archetype="review")],
+    )
+
+
+async def test_all_suggestions_aggregates_review_pages() -> None:
+    registry, _, _ = _registry(manifest=_review_manifest())
+    resp = MagicMock()
+    resp.json.return_value = {
+        "title": "Suggestions",
+        "suggestions": [
+            {
+                "id": "s1",
+                "title": "a",
+                "path": "kb/a.md",
+                "operation": "update",
+                "origin": "agent",
+                "note": "",
+                "created_at": "2026-06-24T00:00:00Z",
+                "diff": "",
+                "to_path": "",
+                "current": "",
+                "content": "",
+            }
+        ],
+    }
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_cls:
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        result = await registry.all_suggestions()
+    assert len(result) == 1
+    assert result[0]["module"] == "knowledge"
+    assert result[0]["page_id"] == "review"
+    assert result[0]["id"] == "s1"
+    client.get.assert_called_once_with("/pages/review")
+
+
+async def test_all_suggestions_empty_without_a_review_page() -> None:
+    # A module with only a browser page contributes nothing to the feed.
+    registry, _, _ = _registry(manifest=_pages_manifest())
+    assert await registry.all_suggestions() == []

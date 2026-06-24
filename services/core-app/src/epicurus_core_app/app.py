@@ -42,7 +42,11 @@ from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
 from epicurus_core_app.module_prefs import ModulePrefsStore
-from epicurus_core_app.modules import ModuleRegistry, create_modules_router
+from epicurus_core_app.modules import (
+    ModuleRegistry,
+    create_modules_router,
+    create_suggestions_router,
+)
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
@@ -243,6 +247,7 @@ def create_app() -> FastAPI:
     app.include_router(create_readiness_router(readiness))
     app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
+    app.include_router(create_suggestions_router(registry))
     app.include_router(
         create_oauth_router(
             oauth,

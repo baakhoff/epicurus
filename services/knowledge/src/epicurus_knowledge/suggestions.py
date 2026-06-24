@@ -249,6 +249,10 @@ class ReviewSuggestion(BaseModel):
     created_at: str  # ISO-8601
     diff: str  # unified diff (current content → proposed); empty for non-content ops
     to_path: str = ""  # destination for a ``move`` (empty otherwise)
+    # Full texts so the shell can render a per-hunk review (#KB-refactor): ``current`` is
+    # the live document (empty for a create), ``content`` is the proposal (empty for delete).
+    current: str = ""
+    content: str = ""
 
 
 class ReviewData(BaseModel):
@@ -332,10 +336,12 @@ class SuggestionReview:
         items: list[ReviewSuggestion] = []
         for s in await self._store.list(tenant=self._tenant):
             diff = ""
+            current = ""
+            content = ""
             if s.operation in _DIFF_OPERATIONS:
-                before = self._current_content(s.path)
-                after = "" if s.operation == "delete" else s.proposed_content
-                diff = _unified_diff(s.path, before, after)
+                current = self._current_content(s.path)
+                content = "" if s.operation == "delete" else s.proposed_content
+                diff = _unified_diff(s.path, current, content)
             items.append(
                 ReviewSuggestion(
                     id=s.sid,
@@ -347,6 +353,8 @@ class SuggestionReview:
                     created_at=s.created_at.isoformat(),
                     diff=diff,
                     to_path=s.to_path,
+                    current=current,
+                    content=content,
                 )
             )
         return ReviewData(suggestions=items)

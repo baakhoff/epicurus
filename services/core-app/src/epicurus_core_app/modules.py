@@ -814,6 +814,46 @@ class ModuleRegistry:
         )
         return data
 
+    async def all_suggestions(self) -> list[dict[str, Any]]:
+        """Pending suggestions across every enabled module that declares a ``review`` page.
+
+        Each item carries ``module`` + ``page_id`` so the shell can approve/reject it — the
+        chat composer's suggestion bubble and the Suggestions page both read this feed
+        (#KB-refactor). Best-effort: a module that is down, disabled, removed, or erroring
+        is skipped rather than failing the whole feed.
+        """
+        out: list[dict[str, Any]] = []
+        for snap, base in zip(await self.snapshot(), self._bases, strict=True):
+            if snap.removed or not snap.enabled or not snap.status.healthy:
+                continue
+            for page in snap.manifest.pages:
+                if page.archetype != "review":
+                    continue
+                try:
+                    data = await self._get_json(
+                        base, f"/pages/{page.id}", op=f"{snap.manifest.name} suggestions"
+                    )
+                except HTTPException:
+                    continue
+                for item in data.get("suggestions", []):
+                    out.append({**item, "module": snap.manifest.name, "page_id": page.id})
+        return out
+
+
+def create_suggestions_router(registry: ModuleRegistry) -> APIRouter:
+    """The cross-module pending-suggestions feed the shell polls (#KB-refactor).
+
+    Separate from the modules router so it lives at ``/platform/v1/suggestions`` rather
+    than under ``/platform/v1/modules``.
+    """
+    router = APIRouter(prefix="/platform/v1", tags=["suggestions"])
+
+    @router.get("/suggestions")
+    async def list_suggestions() -> list[dict[str, Any]]:
+        return await registry.all_suggestions()
+
+    return router
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""

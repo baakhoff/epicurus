@@ -638,6 +638,10 @@ export const ReviewSuggestion = z.object({
   diff: z.string().default(""),
   /** Destination for a `move` (empty otherwise). */
   to_path: z.string().default(""),
+  /** Full texts for the per-hunk review (#KB-refactor): `current` is the live document
+   *  (empty for a create), `content` is the proposal (empty for a delete). */
+  current: z.string().default(""),
+  content: z.string().default(""),
 });
 export type ReviewSuggestion = z.infer<typeof ReviewSuggestion>;
 
@@ -647,6 +651,17 @@ export const ReviewData = z.object({
   suggestions: z.array(ReviewSuggestion).default([]),
 });
 export type ReviewData = z.infer<typeof ReviewData>;
+
+/**
+ * A pending suggestion in the cross-module feed (#KB-refactor): a `ReviewSuggestion` plus
+ * the module + page that owns it, so the chat composer bubble and the Suggestions page can
+ * approve/reject it from anywhere. Served by `GET /platform/v1/suggestions`.
+ */
+export const PendingSuggestion = ReviewSuggestion.extend({
+  module: z.string(),
+  page_id: z.string(),
+});
+export type PendingSuggestion = z.infer<typeof PendingSuggestion>;
 
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 

@@ -326,6 +326,16 @@ images to GHCR.
 
 ### Fixed
 
+- **A just-attached file now shows its pill immediately, not only after a reload** — when you
+  attached a file and sent it, the message echoed back without the attachment pill; the pill
+  only appeared once the page was reloaded (the server *had* persisted it). The optimistic
+  user message carried only the text — the staged attachments were sent to the backend but
+  never kept in client state — so there was nothing to render beside the bubble until the
+  server transcript was refetched. The chat store now holds the staged attachments on a
+  `pendingAttachments` field alongside `pendingUser` (set on send, cleared when the
+  server-stored turn takes over or the session changes), and the optimistic bubble renders
+  their pills exactly like the persisted message — a seamless hand-off, no reload (`web` →
+  0.46.0).
 - **Markdown now renders headings and lists instead of plain indented text** — assistant
   replies (and the editor preview) typeset through the shared `.ep-prose` styles, but Tailwind's
   preflight resets `h1–h6` to body size/weight and strips `list-style` from `ul`/`ol`, and the
@@ -333,7 +343,7 @@ images to GHCR.
   / `1.` lists showed as a bare indent with no bullet or number. Restored an explicit heading
   scale + weight (h1–h6) and per-type list markers (disc / decimal / nested circle), with
   GFM task-list checkboxes, `hr`, and trimmed first/last margins. Pure styling — the markdown
-  DOM was already correct (`web` → 0.41.0).
+  DOM was already correct (`web` → 0.43.0).
 - **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
   (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
   So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,

@@ -843,6 +843,60 @@ async def test_per_model_context_and_keep_alive_win(monkeypatch: pytest.MonkeyPa
     assert captured["keep_alive"] == "1h"  # overrides the "5m" env default
 
 
+# ── context compaction: fit the prompt to the window before the runtime truncates ──
+
+
+def _long_convo(n: int) -> list[ChatMessage]:
+    """A system prompt plus ``n`` chunky user turns — enough to overflow a small window."""
+    body = "x" * 340
+    return [ChatMessage(role="system", content="INSTRUCTIONS")] + [
+        ChatMessage(role="user", content=f"turn-{i} {body}") for i in range(n)
+    ]
+
+
+async def test_chat_trims_history_to_fit_a_local_context_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 2048)  # a tight local window
+    convo = _long_convo(20)
+    await _gateway(prefs=prefs).chat(convo)
+
+    sent = captured["messages"]
+    assert len(sent) < len(convo)  # history was trimmed to fit
+    assert sent[0]["content"] == "INSTRUCTIONS"  # the system prompt survived
+    assert sent[-1]["content"].startswith("turn-19")  # the newest turn survived
+    assert any("trimmed to fit the context window" in m["content"] for m in sent)  # noted
+
+
+async def test_chat_does_not_trim_a_hosted_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 2048)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    convo = _long_convo(20)
+    await _gateway(prefs=prefs, secrets=secrets).chat(
+        convo, model="claude/claude-3-5-sonnet-latest"
+    )
+    # Hosted providers have large contexts and handle overflow themselves — left untouched.
+    assert len(captured["messages"]) == len(convo)
+
+
 async def test_per_model_context_overrides_global_pref(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

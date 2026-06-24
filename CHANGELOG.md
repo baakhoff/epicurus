@@ -274,6 +274,21 @@ images to GHCR.
   attach proxy and web attach menu render it unchanged — the module only supplies data
   (ADR-0019) (closes #139) (`tasks` → 0.3.0).
 
+### Changed
+
+- **Long conversations are trimmed to fit the model's context window instead of overflowing
+  it** — a local runtime (Ollama) silently drops whatever spills past `num_ctx`, and what
+  spills first is the *oldest* context: the agent's instructions and recalled memory. With the
+  default 4096 window that happens within a few turns, quietly degrading replies. The gateway
+  now **compacts** every local prompt to fit before sending it (`llm/compaction.py`, applied in
+  `_fit_to_context` across the blocking + streaming paths): the leading **system** messages are
+  kept whole, the **most-recent** turns that fit within `num_ctx` (minus a reply reserve and the
+  tool-schema footprint) are kept, older history is dropped first, a `tool` result is never
+  orphaned from its `assistant` call, and the final message is always kept; a short `system`
+  note marks the cut so the model knows earlier turns existed. Token counts are a conservative
+  character-based estimate (no tokenizer dependency). Hosted providers (large contexts, handled
+  server-side) and short chats are untouched — the latter a no-op (`core-app` → 0.32.0).
+
 ### Fixed
 
 - **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height

@@ -37,6 +37,15 @@ const SYSTEM_WITH_GPU = {
   suggested_context: { min: 2048, suggested: 16384, max: 24000 },
 };
 
+// A long-context model with a quantized KV cache: the suggestion clears the old flat 32k cap.
+const SYSTEM_LONG_CTX = {
+  gpu: { vendor: "nvidia", name: "RTX 4090", vram_total_mb: 24564, vram_free_mb: 23000 },
+  ram_total_mb: 32000,
+  model: { name: "llama3.1:8b", size_mb: 4482, context_length: 131072, quantization: "Q4_K_M" },
+  suggested_context: { min: 2048, suggested: 32768, max: 65536 },
+  kv_cache_type: "q4_0",
+};
+
 beforeEach(() => {
   mockLlmPrefs.mockReset();
   mockSystemInfo.mockReset();
@@ -106,5 +115,39 @@ describe("ContextWindow card", () => {
     const reset = await screen.findByRole("button", { name: /reset to the system default/i });
     fireEvent.click(reset);
     await waitFor(() => expect(mockSetContextWindow).toHaveBeenCalledWith(null));
+  });
+
+  it("surfaces the model's quantization and trained context length", async () => {
+    mockLlmPrefs.mockResolvedValue(PREFS_UNSET);
+    mockSystemInfo.mockResolvedValue(SYSTEM_LONG_CTX);
+
+    render(<ContextWindow />, { wrapper });
+
+    expect(await screen.findByText(/Q4_K_M/)).toBeInTheDocument();
+    expect(screen.getByText(/trained 131,072 ctx/i)).toBeInTheDocument();
+  });
+
+  it("notes the active KV-cache type in the estimate caveat", async () => {
+    mockLlmPrefs.mockResolvedValue(PREFS_UNSET);
+    mockSystemInfo.mockResolvedValue(SYSTEM_LONG_CTX);
+
+    render(<ContextWindow />, { wrapper });
+
+    expect(await screen.findByText(/q4_0 KV cache factored in/i)).toBeInTheDocument();
+  });
+
+  it("allows a context above the old 32k cap when the model supports it", async () => {
+    // The flat 32,768 ceiling is gone: the input's max follows the (trained-aware) suggestion,
+    // and a value past 32k commits to the pref.
+    mockLlmPrefs.mockResolvedValue(PREFS_UNSET);
+    mockSystemInfo.mockResolvedValue(SYSTEM_LONG_CTX);
+
+    render(<ContextWindow />, { wrapper });
+
+    const input = await screen.findByRole("spinbutton", { name: /context window tokens/i });
+    expect(input).toHaveAttribute("max", "65536");
+    fireEvent.change(input, { target: { value: "49152" } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(mockSetContextWindow).toHaveBeenCalledWith(49152));
   });
 });

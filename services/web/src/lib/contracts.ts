@@ -73,10 +73,14 @@ export const CpuInfo = z.object({
 });
 export type CpuInfo = z.infer<typeof CpuInfo>;
 
-/** The currently-effective chat model and its on-disk size. */
+/** The currently-effective chat model and the facts behind the suggestion. */
 export const ModelSize = z.object({
   name: z.string(),
   size_mb: z.number().nullish(),
+  // Trained maximum context (from /api/show) — the real ceiling for the suggestion.
+  context_length: z.number().nullish(),
+  // Weight quantization (e.g. "Q4_K_M"); fixed at pull, surfaced to explain the estimate.
+  quantization: z.string().nullish(),
 });
 export type ModelSize = z.infer<typeof ModelSize>;
 
@@ -95,6 +99,8 @@ export const SystemInfo = z.object({
   ram_total_mb: z.number().nullish(),
   model: ModelSize.nullish(),
   suggested_context: SuggestedContext.nullish(),
+  // The operator's active Ollama KV-cache type, factored into the suggestion; null = default.
+  kv_cache_type: z.string().nullish(),
 });
 export type SystemInfo = z.infer<typeof SystemInfo>;
 

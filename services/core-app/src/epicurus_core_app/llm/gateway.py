@@ -124,6 +124,17 @@ class LlmGateway:
                 return stored
         return self._num_ctx
 
+    async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None:
+        """The operator's Ollama KV-cache type (``f16``/``q8_0``/``q4_0``), or ``None``.
+
+        Server-wide and applied via the Ollama container's ``OLLAMA_KV_CACHE_TYPE`` env (#310),
+        not a per-call option — but the context-window suggestion reads it here so a quantized
+        cache (which stores fewer bytes per token) is reflected as more usable context.
+        """
+        if self._prefs is None:
+            return None
+        return await self._prefs.get_kv_cache_type(tenant_id or self._default_tenant)
+
     async def _settings_for(self, model: str, tenant_id: str | None) -> ModelSettings:
         """The operator's per-model settings for ``model`` (empty when none apply).
 

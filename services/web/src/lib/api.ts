@@ -156,8 +156,9 @@ export const api = {
       method: "DELETE",
     }),
 
-  // The cross-chat recall corpus — what the model remembers. No `q` = the corpus
-  // newest-first; with `q` = what recall surfaces for that query. `total` is the full size.
+  // The cross-chat memory corpus — the durable facts the model remembers about the user.
+  // No `q` = the corpus newest-first; with `q` = what recall surfaces for that query.
+  // `total` is the full size.
   memory: (q?: string, limit?: number) => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
@@ -165,9 +166,9 @@ export const api = {
     const query = params.size ? `?${params}` : "";
     return request(MemoryListing, `/platform/v1/agent/memory${query}`);
   },
-  // Forget one remembered snippet so it stops being recalled (the conversation is kept).
-  forgetMemory: (id: number) =>
-    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${id}`, {
+  // Forget one remembered fact so it stops being recalled (the conversation is kept).
+  forgetMemory: (id: string) =>
+    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
 

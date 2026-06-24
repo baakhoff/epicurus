@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -56,7 +57,7 @@ class _FakeMcp:
     async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
         return self._specs, self._route
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
         self.called.append((name, arguments))
         return self._outputs.get(name, "tool-output")
 
@@ -144,7 +145,7 @@ async def test_agent_max_steps_falls_back_to_constructor_default() -> None:
 
 async def test_agent_handles_tool_error() -> None:
     class _FailingMcp(_FakeMcp):
-        async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
+        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
             raise RuntimeError("boom")
 
     gw = _FakeGateway(
@@ -380,3 +381,42 @@ async def test_agent_attachment_failure_degrades_to_plain_turn() -> None:
     assert turn.content == "still works"
     # no system context was injected — the model just saw the user message
     assert [m.content for m in gw.calls[0]] == ["summarize"]
+
+
+# ── background fact extraction (ADR-0045) ────────────────────────────────────────
+
+
+class _FakeExtractor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []  # tenant, user_text, assistant_text
+
+    async def extract(self, *, tenant: str, user_text: str, assistant_text: str) -> list[Any]:
+        self.calls.append((tenant, user_text, assistant_text))
+        return []
+
+
+async def _drain(extractor: _FakeExtractor) -> None:
+    """Yield to the loop until the scheduled background task has run (deterministic)."""
+    for _ in range(5):
+        if extractor.calls:
+            return
+        await asyncio.sleep(0)
+
+
+async def test_agent_schedules_fact_extraction_after_a_turn() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="Nice to meet you, Sam.")])
+    extractor = _FakeExtractor()
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor)
+    await agent.run([ChatMessage(role="user", content="My name is Sam.")])
+    await _drain(extractor)
+    assert extractor.calls == [("local", "My name is Sam.", "Nice to meet you, Sam.")]
+
+
+async def test_agent_skips_extraction_without_an_answer() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="")])
+    extractor = _FakeExtractor()
+    await Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor).run(
+        [ChatMessage(role="user", content="hi")]
+    )
+    await _drain(extractor)
+    assert extractor.calls == []

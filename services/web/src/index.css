@@ -97,6 +97,25 @@ html {
   background: var(--ep-canvas);
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* Fixed-viewport app shell. The root is pinned to the viewport and taken out of
+   normal flow so the document itself can never scroll — only the regions inside
+   the shell do. A nested overflow:auto scroller (a long Models page, say)
+   otherwise inflates the root's own scrollable height in Chromium, and a wheel
+   over the static side rail then drags the entire interface to the top. Plain
+   overflow:hidden does NOT collapse that phantom height; removing the root from
+   flow does (#273 recurred — the shell's own overflow-hidden sat below the leak). */
+#root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   background: var(--ep-canvas);

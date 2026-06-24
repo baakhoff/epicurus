@@ -40,7 +40,7 @@ class _FakeMcp:
         specs = [{"type": "function", "function": {"name": "echo"}}]
         return specs, {"echo": "http://echo:8080/mcp"}
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
         if self._fail:
             raise RuntimeError("boom")
         return self._outputs.get(name, "out")

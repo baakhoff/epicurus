@@ -41,9 +41,9 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `done` (final turn) · `error`. The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
-| `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
-| `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat recall corpus — what the model remembers and pulls into future chats. No `q`: the corpus newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` carries role + timestamp (joined from `agent_messages`) and, for a search, a match `score`. `limit` is bounded 1–500 (default 100). Backs the **Memory** screen (ADR-0040). |
-| `DELETE /platform/v1/agent/memory/{point_id}` | Forget one remembered snippet so it stops being recalled. Drops the recall **vector only** — the source message stays in its conversation. Returns `{forgotten}`. |
+| `DELETE /platform/v1/agent/sessions/{id}` | Forget a conversation — its history rows. Facts the user is remembered by are kept (ADR-0045). |
+| `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
+| `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
@@ -65,6 +65,14 @@ per-tool disable filter as module tools.
 | --- | --- |
 | `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`). |
 | `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise). Edited in the web **Settings → Timezone** card. |
+
+- **`remember(fact)`** — save a durable fact about the user to long-term memory (ADR-0045).
+  The agent's explicit, *hot-path* way to remember: it calls this when the user says
+  "remember…" or it learns a stable detail/preference. The fact is written to the user-fact
+  store (`source=tool`) for the **calling tenant** — built-in handlers receive the tenant
+  precisely so `remember` can scope its write. A near-duplicate of an existing fact is a
+  no-op. The *implicit* path is background extraction (below); together they are the corpus
+  that recall pulls into later chats.
 
 ### LLM gateway (ADR-0010)
 
@@ -228,15 +236,18 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   collection. Post-release columns are added in place at startup (no migration framework).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
-- **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
-  (768-dim, cosine), one collection per tenant. Each point's id **is** the source
-  `agent_messages.id`, and its payload carries `{session_id, text}`. The **Memory** view
-  (ADR-0040) lists and searches this collection and joins the ids back to `agent_messages`
-  for each snippet's role + timestamp; forgetting one memory deletes its vector here and
-  leaves the message row intact.
+- **Qdrant `<tenant>__facts`** — durable **facts about the user** for cross-chat recall
+  (cosine), one collection per tenant (ADR-0045). Each point is a short standalone fact
+  under an opaque UUID id, payload `{text, source, created_at}` (`source` = `tool` | `auto`).
+  Facts are written by the `remember` tool and by background extraction, deduped on write
+  (cosine ≥ 0.92); recall searches this collection, and the **Settings → Memory** box lists /
+  searches / forgets it. Raw conversation turns are **not** indexed — the verbatim transcript
+  lives only in `agent_messages`. (The pre-ADR-0045 recall collection `<tenant>__memory` is no
+  longer written; any existing vectors are simply unused.)
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
-answers — just without memory — and never blocks core startup.
+answers — just without memory — and never blocks core startup. Background fact extraction is
+likewise best-effort and runs *off* the response path, so it never adds latency to a reply.
 
 ## Dependencies
 
@@ -251,6 +262,6 @@ docker compose up -d core-app      # comes up with the full stack
 
 Source is one package, `epicurus_core_app`, split by responsibility: `agent/`
 (loop + MCP host + routes), `llm/` (gateway, providers, power, models), `memory/`
-(store + recall + facade), `modules.py` (registry), `platform_api.py` (inference
+(store + facts + extraction + facade), `modules.py` (registry), `platform_api.py` (inference
 endpoints), `app.py` (wiring). The agent targets only the gateway's interface and
 modules only through MCP — never a provider SDK.

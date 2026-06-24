@@ -18,6 +18,7 @@ from sqlalchemy import (
     func,
     inspect,
     select,
+    update,
 )
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -255,6 +256,57 @@ class ConversationStore:
             await session.commit()
             # DELETE always returns a CursorResult; the ORM types it as plain Result.
             return cast("CursorResult[Any]", result).rowcount or 0
+
+    async def last_message_id(
+        self, *, tenant: str, session_id: str, role: str | None = None
+    ) -> int | None:
+        """The id of the session's most recent message (optionally of a given ``role``).
+
+        ``id`` is autoincrement, so "highest id" is the last-inserted message — the reliable
+        anchor for regenerate/edit (truncate everything after the last user turn). Returns
+        ``None`` when the session has no matching message.
+        """
+        async with self._session() as session:
+            stmt = select(StoredMessage.id).where(
+                StoredMessage.tenant == tenant, StoredMessage.session_id == session_id
+            )
+            if role is not None:
+                stmt = stmt.where(StoredMessage.role == role)
+            return cast(
+                "int | None", await session.scalar(stmt.order_by(StoredMessage.id.desc()).limit(1))
+            )
+
+    async def update_content(self, *, tenant: str, message_id: int, content: str) -> None:
+        """Replace one message's content in place (tenant-scoped) — backs an edited turn."""
+        async with self._session() as session:
+            await session.execute(
+                update(StoredMessage)
+                .where(StoredMessage.tenant == tenant, StoredMessage.id == message_id)
+                .values(content=content)
+            )
+            await session.commit()
+
+    async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> list[int]:
+        """Delete the session's messages with ``id > after_id``; returns the removed ids.
+
+        Drops everything inserted after the anchor message — the assistant answer (and any
+        trailing turns) when regenerating or editing. The caller drops the matching recall
+        points. Returns the ids so recall stays consistent with history.
+        """
+        async with self._session() as session:
+            ids = list(
+                await session.scalars(
+                    select(StoredMessage.id).where(
+                        StoredMessage.tenant == tenant,
+                        StoredMessage.session_id == session_id,
+                        StoredMessage.id > after_id,
+                    )
+                )
+            )
+            if ids:
+                await session.execute(delete(StoredMessage).where(StoredMessage.id.in_(ids)))
+                await session.commit()
+            return ids
 
 
 class AttachmentStore:

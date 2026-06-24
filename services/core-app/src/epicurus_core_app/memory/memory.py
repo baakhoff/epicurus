@@ -104,6 +104,28 @@ class Memory:
         """A session's full transcript with timestamps."""
         return await self._store.messages(tenant=tenant, session_id=session_id)
 
+    async def last_user_message_id(self, *, tenant: str, session_id: str) -> int | None:
+        """The id of the session's most recent user message (the regenerate/edit anchor, #302)."""
+        return await self._store.last_message_id(tenant=tenant, session_id=session_id, role="user")
+
+    async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> int:
+        """Drop the session's messages after ``after_id`` from history; returns the count (#302).
+
+        Used by regenerate/edit to clear the stale answer (and any trailing turns) before
+        re-running. Remembered facts are deliberately left intact — they belong to the user
+        across chats, not to the turn that surfaced them (the same rule as :meth:`forget`).
+        """
+        removed = await self._store.truncate_after(
+            tenant=tenant, session_id=session_id, after_id=after_id
+        )
+        return len(removed)
+
+    async def revise_message(
+        self, *, tenant: str, session_id: str, message_id: int, content: str
+    ) -> None:
+        """Replace a stored message's content in place — edit-and-re-answer (#302)."""
+        await self._store.update_content(tenant=tenant, message_id=message_id, content=content)
+
     async def forget(self, *, tenant: str, session_id: str) -> int:
         """Erase a conversation's history rows.
 

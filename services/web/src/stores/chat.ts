@@ -56,6 +56,11 @@ interface ChatState {
     onDone: () => Promise<void>,
     attachments?: Attachment[],
   ) => Promise<void>;
+  /** Re-answer the session's last user turn, dropping the previous answer (#302). The
+   *  caller drops the stale answer from the displayed transcript before this streams. */
+  regenerate: (model: string | null, onDone: () => Promise<void>) => Promise<void>;
+  /** Replace the last user message with `content` and re-answer it in place (#302). */
+  editAndRerun: (content: string, model: string | null, onDone: () => Promise<void>) => Promise<void>;
   stop: () => void;
   clearError: () => void;
 }
@@ -64,60 +69,17 @@ function freshId(): string {
   return crypto.randomUUID();
 }
 
-export const useChat = create<ChatState>()((set, get) => ({
-  sessionId: freshId(),
-  draft: "",
-  pendingUser: null,
-  segments: [],
-  streaming: false,
-  readiness: null,
-  error: null,
-  paused: false,
-  abort: null,
-
-  setDraft: (text) => set({ draft: text }),
-
-  newSession: () => {
-    get().abort?.abort();
-    set({
-      sessionId: freshId(),
-      pendingUser: null,
-      segments: [],
-      streaming: false,
-      readiness: null,
-      error: null,
-      paused: false,
-      abort: null,
-    });
-  },
-
-  openSession: (id) => {
-    get().abort?.abort();
-    set({
-      sessionId: id,
-      pendingUser: null,
-      segments: [],
-      streaming: false,
-      readiness: null,
-      error: null,
-      paused: false,
-      abort: null,
-    });
-  },
-
-  send: async (text, model, onDone, attachments) => {
-    if (get().streaming) return;
+export const useChat = create<ChatState>()((set, get) => {
+  // The shared streaming core: open the SSE turn at `path` with `body`, accumulate the
+  // ordered segments, and on `done` refetch the server history then drop the live copy.
+  // `send`, `regenerate`, and `editAndRerun` all stream through here (#302).
+  const runTurn = async (
+    path: string,
+    body: Record<string, unknown>,
+    onDone: () => Promise<void>,
+  ): Promise<void> => {
     const abort = new AbortController();
-    set({
-      draft: "",
-      pendingUser: text,
-      segments: [],
-      streaming: true,
-      readiness: null,
-      error: null,
-      paused: false,
-      abort,
-    });
+    set({ segments: [], streaming: true, readiness: null, error: null, paused: false, abort });
 
     const push = (segment: ChatSegment) => set({ segments: [...get().segments, segment] });
     const appendText = (delta: string) => {
@@ -157,18 +119,7 @@ export const useChat = create<ChatState>()((set, get) => ({
 
     let completed = false;
     try {
-      const body = {
-        messages: [
-          {
-            role: "user",
-            content: text,
-            attachments: attachments && attachments.length > 0 ? attachments : undefined,
-          },
-        ],
-        model: model ?? undefined,
-        session_id: get().sessionId,
-      };
-      for await (const message of sse("/platform/v1/agent/chat/stream", body, abort.signal)) {
+      for await (const message of sse(path, body, abort.signal)) {
         const event = AgentEvent.parse(JSON.parse(message.data));
         if (event.type === "readiness" && event.readiness) set({ readiness: event.readiness });
         else if (event.type === "delta" && event.text) appendText(event.text);
@@ -211,8 +162,94 @@ export const useChat = create<ChatState>()((set, get) => ({
         paused: status === 503 || /paused/i.test(detail),
       });
     }
+  };
+
+  return {
+  sessionId: freshId(),
+  draft: "",
+  pendingUser: null,
+  segments: [],
+  streaming: false,
+  readiness: null,
+  error: null,
+  paused: false,
+  abort: null,
+
+  setDraft: (text) => set({ draft: text }),
+
+  newSession: () => {
+    get().abort?.abort();
+    set({
+      sessionId: freshId(),
+      pendingUser: null,
+      segments: [],
+      streaming: false,
+      readiness: null,
+      error: null,
+      paused: false,
+      abort: null,
+    });
+  },
+
+  openSession: (id) => {
+    get().abort?.abort();
+    set({
+      sessionId: id,
+      pendingUser: null,
+      segments: [],
+      streaming: false,
+      readiness: null,
+      error: null,
+      paused: false,
+      abort: null,
+    });
+  },
+
+  send: async (text, model, onDone, attachments) => {
+    if (get().streaming) return;
+    set({ draft: "", pendingUser: text });
+    await runTurn(
+      "/platform/v1/agent/chat/stream",
+      {
+        messages: [
+          {
+            role: "user",
+            content: text,
+            attachments: attachments && attachments.length > 0 ? attachments : undefined,
+          },
+        ],
+        model: model ?? undefined,
+        session_id: get().sessionId,
+      },
+      onDone,
+    );
+  },
+
+  regenerate: async (model, onDone) => {
+    if (get().streaming) return;
+    // No optimistic user echo — the user message is unchanged; the caller has already
+    // dropped the stale answer from the displayed transcript.
+    set({ pendingUser: null });
+    const sid = encodeURIComponent(get().sessionId);
+    await runTurn(
+      `/platform/v1/agent/sessions/${sid}/regenerate`,
+      { model: model ?? undefined },
+      onDone,
+    );
+  },
+
+  editAndRerun: async (content, model, onDone) => {
+    if (get().streaming) return;
+    set({ pendingUser: null });
+    const sid = encodeURIComponent(get().sessionId);
+    await runTurn(
+      `/platform/v1/agent/sessions/${sid}/edit`,
+      { content, model: model ?? undefined },
+      onDone,
+    );
   },
 
   stop: () => get().abort?.abort(),
   clearError: () => set({ error: null, paused: false }),
-}));
+  };
+});

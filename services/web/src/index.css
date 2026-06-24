@@ -243,22 +243,96 @@ select {
   margin: 0.45em 0;
 }
 
+/* Headings — Tailwind's preflight resets these to inherit, so restore an explicit
+   scale and weight or they render at body size and read as plain paragraphs. */
 .ep-prose h1,
 .ep-prose h2,
-.ep-prose h3 {
+.ep-prose h3,
+.ep-prose h4,
+.ep-prose h5,
+.ep-prose h6 {
   font-family: var(--font-serif);
+  font-weight: 600;
   line-height: 1.3;
-  margin: 0.8em 0 0.3em;
+  margin: 0.85em 0 0.3em;
 }
 
+.ep-prose h1 {
+  font-size: 1.6em;
+}
+
+.ep-prose h2 {
+  font-size: 1.35em;
+}
+
+.ep-prose h3 {
+  font-size: 1.17em;
+}
+
+.ep-prose h4 {
+  font-size: 1em;
+}
+
+.ep-prose h5 {
+  font-size: 0.9em;
+}
+
+.ep-prose h6 {
+  font-size: 0.85em;
+  color: var(--ep-text-dim);
+}
+
+/* No leading/trailing gap when prose opens or closes on a block element. */
+.ep-prose > :first-child {
+  margin-top: 0;
+}
+
+.ep-prose > :last-child {
+  margin-bottom: 0;
+}
+
+/* Lists — preflight strips list-style, leaving bullets/numbers invisible (the markup
+   looked like "just an indent"). Restore the markers per list type. */
 .ep-prose ul,
 .ep-prose ol {
   padding-left: 1.4em;
   margin: 0.4em 0;
 }
 
+.ep-prose ul {
+  list-style: disc;
+}
+
+.ep-prose ol {
+  list-style: decimal;
+}
+
+.ep-prose ul ul {
+  list-style: circle;
+}
+
 .ep-prose li {
   margin: 0.15em 0;
+}
+
+.ep-prose li::marker {
+  color: var(--ep-text-faint);
+}
+
+/* GFM task lists carry a checkbox, not a bullet. */
+.ep-prose li.task-list-item {
+  list-style: none;
+  margin-left: -1.25em;
+}
+
+.ep-prose li.task-list-item input {
+  margin-right: 0.45em;
+}
+
+.ep-prose hr {
+  border: 0;
+  border-top: 1px solid var(--ep-border);
+  margin: 1em 0;
 }
 
 .ep-prose blockquote {

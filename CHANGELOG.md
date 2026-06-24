@@ -276,6 +276,14 @@ images to GHCR.
 
 ### Fixed
 
+- **Markdown now renders headings and lists instead of plain indented text** — assistant
+  replies (and the editor preview) typeset through the shared `.ep-prose` styles, but Tailwind's
+  preflight resets `h1–h6` to body size/weight and strips `list-style` from `ul`/`ol`, and the
+  prose rules never restored them. So `#`/`##` headings looked like ordinary paragraphs and `-`
+  / `1.` lists showed as a bare indent with no bullet or number. Restored an explicit heading
+  scale + weight (h1–h6) and per-type list markers (disc / decimal / nested circle), with
+  GFM task-list checkboxes, `hr`, and trimmed first/last margins. Pure styling — the markdown
+  DOM was already correct (`web` → 0.41.0).
 - **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
   (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
   So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,

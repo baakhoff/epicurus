@@ -86,6 +86,17 @@ note opening in the Knowledge page (#143) — an external `http(s)` URL opens in
 and any other scheme is dropped. `CardLink` is used by both the panel's `entity-detail` view
 and the inline hover-card.
 
+### Assistant prose (markdown)
+
+Assistant replies and the editor preview render GFM markdown through `Markdown.tsx`
+(`react-markdown` + `remark-gfm`, raw HTML skipped) wrapped in `.ep-prose` — the shared
+typeset styles in `src/index.css`. Supported blocks: headings (`h1`–`h6`), unordered /
+ordered / nested / GFM task lists, tables, block quotes, horizontal rules, links (through the
+custom `a` slot, see below), and fenced code blocks with a language label + copy button
+(partial fences are auto-closed mid-stream so streaming code still renders). Because Tailwind's
+preflight resets heading sizes and list markers, `.ep-prose` restores them explicitly — keep
+new block elements styled there or they fall back to plain paragraph text.
+
 ### Entity references in chat (ADR-0019)
 
 An assistant message carries `entity_refs` — references to module entities. The shell

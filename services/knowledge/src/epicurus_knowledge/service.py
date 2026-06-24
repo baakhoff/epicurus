@@ -16,6 +16,7 @@ has no direct vault-write tool:
 
 * ``knowledge_propose_edit`` — create/update/delete a document.
 * ``knowledge_propose_move`` — move/rename a document or folder.
+* ``knowledge_propose_rename`` — rename in place (keeps the folder).
 * ``knowledge_propose_folder`` — create a folder.
 * ``knowledge_propose_project`` — create a new knowledge base.
 * ``knowledge_reindex`` — re-scan all sources (vault projects, platform docs, module docs).
@@ -178,6 +179,12 @@ Read one document's full content. ``path`` is ``<project>/<folder>/<doc>.md``.
 Propose moving/renaming a document or folder (staged for review). Parameters: ``from_path``,
 ``to_path``, optional ``note``.
 
+## knowledge_propose_rename
+
+Propose renaming a document or folder in place (staged for review). Parameters: ``path``,
+``new_name`` (a bare name, no ``/``; the ``.md`` suffix is kept for documents), optional
+``note``.
+
 ## knowledge_propose_folder
 
 Propose creating a folder (staged for review). Parameters: ``path`` (``<project>/<folder>``),
@@ -216,7 +223,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.14.0",
+        version="0.15.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -513,6 +520,53 @@ def build_module(
         return tool_envelope(
             f"Proposed move of '{src}' to '{dst}' (suggestion {suggestion.sid[:8]}). Pending"
             " your review in Knowledge → Suggestions; nothing moves until you approve it.",
+            [],
+        )
+
+    @module.tool()
+    async def knowledge_propose_rename(path: str, new_name: str, note: str = "") -> str:
+        """Propose renaming a document or folder (keeps it where it is), for review (ADR-0033).
+
+        A convenience over knowledge_propose_move: supply the item's *path* and just the new
+        leaf *new_name* (no slashes) — the same folder is kept. For a ``.md`` document the
+        ``.md`` suffix is preserved. Staged as a move suggestion; applied only on approval.
+
+        Args:
+            path: The current path, ``<project>/<…>/<name>``.
+            new_name: The new leaf name (no ``/``).
+            note: Optional short rationale shown to the operator.
+        """
+        src = path.strip()
+        leaf = new_name.strip()
+        if not src or not leaf:
+            return tool_envelope("Both path and new_name are required.", [])
+        if "/" in leaf or "\\" in leaf:
+            return tool_envelope(
+                "new_name must be a bare name (no '/'); use knowledge_propose_move to relocate.",
+                [],
+            )
+        if src.endswith(".md") and not leaf.endswith(".md"):
+            leaf = f"{leaf}.md"
+        parent = src.rsplit("/", 1)[0] if "/" in src else ""
+        dst = f"{parent}/{leaf}" if parent else leaf
+        try:
+            safe_dir_relative(vault_path, src)
+            safe_dir_relative(vault_path, dst)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose rename: {detail}", [])
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=src,
+            operation="move",
+            proposed_content="",
+            origin="agent",
+            note=note,
+            to_path=dst,
+        )
+        return tool_envelope(
+            f"Proposed rename of '{src}' to '{dst}' (suggestion {suggestion.sid[:8]}). Pending"
+            " your review in Knowledge → Suggestions.",
             [],
         )
 

@@ -89,28 +89,36 @@ upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
 
 ### Reviewing suggested changes (#KB-refactor, ADR-0033)
 
-Every agent change to the knowledge base is **staged for operator review**, never applied
-directly. The shell surfaces the pending queue in two places, both reading the cross-module
-feed `GET /platform/v1/suggestions` (each item tagged with its `module` + `page_id`):
+Every agent change to a module's content — the knowledge base **and** private **notes** — is
+**staged for operator review**, never applied directly. The shell surfaces the pending queue in
+two places, both reading the cross-module feed `GET /platform/v1/suggestions` (each item tagged
+with its `module` + `page_id`). The feed spans **every** enabled module that declares a `review`
+page, so notes suggestions (notes declares its own `review` page) surface in the same bubble and
+overlay with no special-casing:
 
 - A **suggestion bubble** above the chat composer (`SuggestionBubble` in
   `src/screens/ChatScreen.tsx`) appears when the assistant has filed suggestions. It names the
   latest one ("The assistant wants to …") and shows the count when several are pending. A
   one-tap structural change (move / new folder / new knowledge base) offers **Approve** inline;
   a richer change offers **Open** (the review window). **Ignore** dismisses the bubble while the
-  suggestion stays on the Suggestions page.
-- The **Suggestions page** (the module's `review` archetype) opens the same review window.
+  suggestion stays on its Suggestions page.
+- The **Suggestions page** (a module's `review` archetype — knowledge's *Suggestions*, notes'
+  *Note suggestions*) opens the same review window.
 
 The **review window** (`src/components/SuggestionReviewModal.tsx`) is a core-owned overlay
 shaped by the operation, with three actions — **Approve**, **Reject**, **Ignore**:
 
-- **edit** (`update`/`create`) → a **diff with per-hunk checkboxes**: each change can be
-  ticked or unticked, the accepted hunks are merged client-side (`src/lib/linediff.ts`) and
-  sent as the approve `{content}` so only the chosen part is written; a `create` also offers a
-  rendered preview.
-- **delete** → a confirmation showing the document body that will be removed.
+- **edit** (`update` / `create` / `append`) → a **diff with per-hunk checkboxes**: each change
+  can be ticked or unticked, the accepted hunks are merged client-side (`src/lib/linediff.ts`)
+  and sent as the approve `{content}` so only the chosen part is written; a `create` also offers
+  a rendered preview. `append` (notes — the agent supplies only the text to add) is content-like:
+  its diff shows the added text, so it reviews per-hunk like any edit.
+- **delete** → a confirmation showing the document/note body that will be removed.
 - **move** → a `from → to` confirmation; **new folder** / **new knowledge base** → a simple
   "create this?" confirmation.
+
+The `ReviewSuggestion` operation enum (`src/lib/contracts.ts`) carries
+`create` / `update` / `append` / `delete` / `move` / `mkdir` / `mkproject`.
 
 Approve/reject post to `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/{action}`
 (the core proxies to the module); these are operator-only — the agent never approves its own

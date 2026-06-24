@@ -78,6 +78,20 @@ describe("SuggestionReviewModal", () => {
     );
   });
 
+  it("approves an append with the merged content", async () => {
+    render(
+      <SuggestionReviewModal
+        suggestion={suggestion({ operation: "append", current: "a\n", content: "a\nb\n" })}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() =>
+      expect(mockApprove).toHaveBeenCalledWith("knowledge", "vault", "s1", "a\nb\n"),
+    );
+  });
+
   it("confirms a move from → to and approves without content", async () => {
     render(
       <SuggestionReviewModal

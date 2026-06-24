@@ -573,3 +573,29 @@ async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None
     env = _envelope(content)
     assert "structural" in env.text.lower()
     assert await store.list(tenant=TENANT) == []
+
+
+async def test_propose_rename_stages_a_move(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "b"}
+    )
+    env = _envelope(content)
+    assert "pending your review" in env.text.lower()
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1
+    assert rows[0].operation == "move"
+    assert rows[0].path == "kb/a.md"
+    assert rows[0].to_path == "kb/b.md"  # same folder, .md suffix preserved
+
+
+async def test_propose_rename_rejects_a_slash(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "sub/b"}
+    )
+    env = _envelope(content)
+    assert "bare name" in env.text.lower()
+    assert await store.list(tenant=TENANT) == []

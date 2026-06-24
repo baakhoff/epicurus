@@ -66,6 +66,9 @@ def create_app() -> FastAPI:
         objects,
         storage_root=str(settings.storage_root),
         tenant=settings.default_tenant_id,
+        hidden_prefixes=tuple(
+            p.strip() for p in settings.agent_hidden_prefixes.split(",") if p.strip()
+        ),
     )
     mcp_app = module.http_app()
 

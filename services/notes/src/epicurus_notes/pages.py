@@ -170,6 +170,23 @@ class NotesPages:
                 log.warning("notes.saved publish failed", slug=slug, error=str(exc))
         return EditorSaveResult(path=slug, indexed=True, chunk_count=chunk_count)
 
+    async def delete_doc(self, slug: str) -> None:
+        """Delete a note — its Postgres row, its vectors, and its ``.md`` mirror.
+
+        404 if it does not exist. Used by an approved ``delete`` suggestion (#KB-refactor);
+        de-index and mirror removal are best-effort, the row delete is the source of truth.
+        """
+        slug = _clean_slug(slug)
+        deleted = await self._store.delete(tenant=self._tenant, slug=slug)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"no such note: {slug}")
+        try:
+            await self._indexer.delete_note(slug)
+        except Exception as exc:  # the note is gone from the store; vectors are derived
+            log.warning("note deleted but de-index failed", slug=slug, error=str(exc))
+        if self._mirror is not None:
+            await self._mirror.delete(slug)
+
 
 def create_pages_router(pages: NotesPages) -> APIRouter:
     """The HTTP surface the core proxies for the editor page (ADR-0018)."""

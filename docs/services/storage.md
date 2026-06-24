@@ -1,6 +1,6 @@
 # storage — file-tree index + object store
 
-**`epicurus-storage`** v0.4.0 is a sidecar module that gives the agent access to a file
+**`epicurus-storage`** v0.5.0 is a sidecar module that gives the agent access to a file
 tree on disk — a **read-only index** it can list, search, and read — plus **app-managed
 object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
@@ -8,6 +8,15 @@ The indexed tree is the **shared file space** (`/data`, `EPICURUS_FILES_ROOT`): 
 it read-only as the unified **Files** view, showing every file-owning module's folder —
 `knowledge/` (knowledge bases) and `notes/` (the `.md` mirror of authored notes) — plus chat
 uploads (#KB-refactor). The object store covers generated files, exports, and attachments.
+
+**Private subtrees are hidden from the agent (#KB-refactor).** Some folders are
+operator-only: the `notes/` mirror holds **private** note bodies the agent must never read.
+The agent's **file tools** (`storage_list`/`storage_search`/`storage_read`) therefore exclude
+the subtrees named in `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`), while the
+**operator-facing** surfaces — the Files page, `GET /read`, `GET /download` — show and read
+everything. So a note stays browsable and readable in the Files UI but invisible to the agent
+through the file tools (its content reaches the agent only when the user attaches it; see
+[notes](notes.md)).
 
 v0.2.0 adds a **Files** left-nav page (the `browser` archetype, ADR-0018): browse the
 indexed tree by directory, search by name, and download files — all core-rendered from
@@ -21,15 +30,25 @@ v0.4.0 indexes the shared file space (so notes and knowledge bases show in Files
 **split-screen reader** — `GET /read` returns a UTF-8 text file's contents so the shell can
 open a `.md` or text file in the core's right panel beside the list (#KB-refactor).
 
+v0.5.0 **hides private subtrees from the agent's file tools** (#KB-refactor): the `notes/`
+mirror (private note bodies) is excluded from `storage_list`/`storage_search`/`storage_read`,
+configurable via `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`). The operator's Files page,
+`/read`, and `/download` are unchanged — notes stay browsable and readable for the human.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
 
+> The three **file-tree** tools below never see the subtrees in
+> `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`): `storage_list`/`storage_search` filter
+> them out and `storage_read` refuses them with `Error: not available` (#KB-refactor). The
+> operator-facing Files page / `/read` / `/download` are unaffected.
+
 | Tool | Purpose |
 | --- | --- |
-| `storage_list(path="")` | List the direct children of `path` (dirs before files). |
-| `storage_search(query, limit=50)` | Case-insensitive name/path search (max 200). |
-| `storage_read(path)` | Return a text file's contents. Rejects files > **256 KB** and non-UTF-8 (binary) with an explanatory message. |
+| `storage_list(path="")` | List the direct children of `path` (dirs before files). A hidden subtree (e.g. `notes/`) yields nothing. |
+| `storage_search(query, limit=50)` | Case-insensitive name/path search (max 200). Hits under a hidden subtree are filtered out. |
+| `storage_read(path)` | Return a text file's contents. Rejects files > **256 KB** and non-UTF-8 (binary) with an explanatory message; a path under a hidden subtree returns `Error: not available`. |
 | `storage_status()` | Configured root + indexed file/dir counts. |
 | `storage_rescan()` | Re-walk the tree and refresh the index. |
 | `storage_object_put(key, content)` | Store a text object under `key` (tenant bucket). |
@@ -106,6 +125,7 @@ module never fails a chat upload.
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `STORAGE_ROOT` | `/data` | Absolute path (in-container) of the tree to index — the shared file space mount. |
+| `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | Comma-separated top-level subtrees hidden from the **agent's** file tools (#KB-refactor). The agent's `storage_list`/`storage_search`/`storage_read` never see them; the operator-facing Files page / `/read` / `/download` are unaffected. `notes/` holds private note bodies. Set empty to hide nothing. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | The file index. |
 | `MINIO_URL` | `http://minio:9000` | Object-store endpoint. |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `epicurus` / `epicurus-dev` | Object-store creds (dev; OpenBao later). |
@@ -143,6 +163,8 @@ EPICURUS_FILES_ROOT=/path/to/your/files docker compose up -d storage
 
 Package `epicurus_storage`: `scanner.py` (walk + incremental upsert), `db.py`
 (`storage_files` + queries + `source` column), `object_store.py` (MinIO via aioboto3 —
-text **and** binary `put_bytes`/`get_object`), `service.py` (the MCP tools + manifest UI +
-`build_page_data` + `ingest_object`/`load_object_download` + `load_text_file` for the inline
-reader), `app.py` (lifespan + `/ingest` + `/download` + `/read` + `/pages/files`).
+text **and** binary `put_bytes`/`get_object`), `service.py` (the MCP tools + the
+`hidden_prefixes` filter that keeps private subtrees out of the agent's file tools + manifest
+UI + `build_page_data` + `ingest_object`/`load_object_download` + `load_text_file` for the
+inline reader), `app.py` (lifespan + `/ingest` + `/download` + `/read` + `/pages/files`; parses
+`STORAGE_AGENT_HIDDEN_PREFIXES` into the module's `hidden_prefixes`).

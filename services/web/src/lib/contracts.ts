@@ -630,8 +630,8 @@ export const ReviewSuggestion = z.object({
   title: z.string(),
   path: z.string(),
   // Content ops carry a `diff`; structural ops (move/mkdir/mkproject) are confirmed from
-  // `path`/`to_path` (#KB-refactor).
-  operation: z.enum(["create", "update", "delete", "move", "mkdir", "mkproject"]),
+  // `path`/`to_path`. `append` (notes) is content-like — its diff shows the added text.
+  operation: z.enum(["create", "update", "append", "delete", "move", "mkdir", "mkproject"]),
   origin: z.string().default("agent"),
   note: z.string().default(""),
   created_at: z.string(),

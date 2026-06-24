@@ -222,15 +222,29 @@ def build_module(
     *,
     storage_root: str,
     tenant: str,
+    hidden_prefixes: tuple[str, ...] = (),
 ) -> EpicurusModule:
-    """Build the storage module and register its MCP tools."""
+    """Build the storage module and register its MCP tools.
+
+    ``hidden_prefixes`` are top-level subtrees the **agent's** file tools never see — e.g.
+    ``notes`` is private/attach-only, so the agent must not read note bodies through
+    ``storage_read`` even though the operator browses them in the Files page (#KB-refactor).
+    The operator-facing surfaces (the Files page, ``/read``, ``/download``) are unaffected.
+    """
+    hidden = tuple(p.strip("/") for p in hidden_prefixes if p.strip("/"))
+
+    def _is_hidden(path: str) -> bool:
+        clean = path.replace("\\", "/").strip("/")
+        return any(clean == h or clean.startswith(h + "/") for h in hidden)
+
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.5.0",
         description=(
             "File-tree index (list, search, read) over the shared file space, plus "
             "app-managed object storage via MinIO, durable chat-upload ingest, and "
-            "inline text preview for the Files split-screen reader."
+            "inline text preview for the Files split-screen reader. Private subtrees "
+            "(e.g. notes) are hidden from the agent's file tools."
         ),
         ui=UiSection(
             icon="folder",
@@ -286,7 +300,10 @@ def build_module(
         Pass an empty string (the default) to list the root.
         Returns directories before files, both sorted by name.
         """
-        return await index.browse(tenant=tenant, path=path)
+        if _is_hidden(path):
+            return []
+        entries = await index.browse(tenant=tenant, path=path)
+        return [e for e in entries if not _is_hidden(e.path)]
 
     @module.tool()
     async def storage_search(query: str, limit: int = 50) -> list[FileEntry]:
@@ -296,7 +313,8 @@ def build_module(
         """
         if not query.strip():
             return []
-        return await index.search(tenant=tenant, query=query, limit=max(1, min(limit, 200)))
+        results = await index.search(tenant=tenant, query=query, limit=max(1, min(limit, 200)))
+        return [e for e in results if not _is_hidden(e.path)]
 
     @module.tool()
     async def storage_read(path: str) -> str:
@@ -306,6 +324,9 @@ def build_module(
         Files larger than 256 KB are rejected — use the /download endpoint instead.
         Binary (non-UTF-8) files are also rejected with an explanatory message.
         """
+        # Private subtrees (e.g. notes) are never readable by the agent (#KB-refactor).
+        if _is_hidden(path):
+            return "Error: not available"
         root = Path(storage_root).resolve()
         try:
             resolved = (root / path).resolve()

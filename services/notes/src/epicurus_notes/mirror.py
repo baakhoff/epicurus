@@ -49,6 +49,15 @@ class NotesMirror:
         except Exception as exc:  # the note is already saved in Postgres
             log.warning("note mirror write failed", slug=slug, error=str(exc))
 
+    async def delete(self, slug: str) -> None:
+        """Best-effort: remove *slug*'s ``.md`` mirror (when a note is deleted). Never raises."""
+        try:
+            target = self._target(slug)
+            if target is not None and target.exists():
+                target.unlink()
+        except Exception as exc:
+            log.warning("note mirror delete failed", slug=slug, error=str(exc))
+
     async def backfill(self) -> int:
         """Write a ``.md`` for every note that does not have one yet (the one-time copy).
 

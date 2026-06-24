@@ -1,6 +1,6 @@
-"""Runnable notes service: ops endpoints, the editor + attach page surface, and the
-MCP app (tool-free), with Postgres + Qdrant + the platform API wired for the lifetime
-of the process."""
+"""Runnable notes service: ops endpoints, the editor + review + attach page surfaces, and
+the MCP app (structure + write tools; no read — notes are private), with Postgres + Qdrant
++ the platform API wired for the lifetime of the process."""
 
 from __future__ import annotations
 
@@ -29,6 +29,11 @@ from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
 from epicurus_notes.service import MODULE_NAME, SAVED_SUBJECT, build_module
 from epicurus_notes.settings import NotesSettings
+from epicurus_notes.suggestions import (
+    NoteSuggestionReview,
+    NoteSuggestionStore,
+    create_note_review_router,
+)
 
 
 def _service_version() -> str:
@@ -57,7 +62,9 @@ def create_app() -> FastAPI:
     )
 
     bus = EventBus.from_settings(settings)
-    module = build_module()
+    suggestion_store = NoteSuggestionStore(engine)
+    # The agent's write tools stage suggestions; build_module registers them + the pages.
+    module = build_module(store, suggestion_store, tenant=tenant)
     mcp_app = module.http_app()
 
     async def _on_saved(slug: str) -> None:
@@ -67,11 +74,14 @@ def create_app() -> FastAPI:
     mirror = NotesMirror(settings.notes_root, store, tenant=tenant)
     pages = NotesPages(store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror)
     attachments = NotesAttachments(store, tenant=tenant)
+    # Applies/discards agent-proposed note changes on the operator's word (ADR-0033).
+    review = NoteSuggestionReview(suggestion_store, pages, store, tenant=tenant)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await store.init()
+            await suggestion_store.init()
             # One-time copy of pre-existing notes into the shared file space (#KB-refactor).
             await mirror.backfill()
             await bus.connect()
@@ -87,6 +97,9 @@ def create_app() -> FastAPI:
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
 
+    # The review page (#KB-refactor): registered BEFORE the editor pages router so its
+    # literal /pages/review route wins over the editor's /pages/{page_id} path param.
+    app.include_router(create_note_review_router(review))
     # The editor page (#134) and the chat-attachment surface — the shell renders both;
     # this module supplies note data only (ADR-0018 / ADR-0019).
     app.include_router(create_pages_router(pages))

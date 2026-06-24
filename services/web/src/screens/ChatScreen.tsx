@@ -386,6 +386,7 @@ function Welcome() {
 const SUGGESTION_VERB: Record<PendingSuggestion["operation"], string> = {
   create: "add",
   update: "edit",
+  append: "append to",
   delete: "delete",
   move: "move",
   mkdir: "add a folder",

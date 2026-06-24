@@ -25,6 +25,7 @@ type Op = PendingSuggestion["operation"];
 const OP_META: Record<Op, { label: string; icon: ComponentType<{ size?: number }>; tone: "ok" | "accent" | "danger" | "dim" }> = {
   create: { label: "New document", icon: FilePlus, tone: "ok" },
   update: { label: "Edit", icon: Pencil, tone: "accent" },
+  append: { label: "Append", icon: Pencil, tone: "accent" },
   delete: { label: "Delete", icon: Trash2, tone: "danger" },
   move: { label: "Move", icon: Pencil, tone: "accent" },
   mkdir: { label: "New folder", icon: FolderPlus, tone: "ok" },
@@ -129,7 +130,9 @@ export function SuggestionReviewModal({
 }) {
   const { module, page_id: pageId, id, operation, current, content } = suggestion;
   const meta = OP_META[operation];
-  const isEdit = operation === "update" || operation === "create";
+  // update/create/append all show a diff with per-hunk approval (append's diff is the
+  // added text); move/mkdir/mkproject/delete are confirmations.
+  const isEdit = operation === "update" || operation === "create" || operation === "append";
 
   const diff = useMemo(
     () => (isEdit ? diffLines(current, content) : []),

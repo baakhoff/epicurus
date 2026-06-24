@@ -128,17 +128,22 @@ it as a real IANA zone (**400** otherwise) and persists it; edited in the web Se
 
 ---
 
-## Knowledge-base / suggestions endpoints (shell-facing)
+## Knowledge-base / notes / suggestions endpoints (shell-facing)
 
 These are consumed by the web shell, not the `PlatformClient`. The full module-registry
-surface is documented in [core-app](../services/core-app.md); the #KB-refactor additions are:
+surface is documented in [core-app](../services/core-app.md); the #KB-refactor additions are
+(the suggestion endpoints below are generic — they serve any module with a `review` page,
+i.e. knowledge **and** private notes):
 
 ### `GET /platform/v1/suggestions`
 
 The **cross-module pending-suggestions feed**: every enabled module that declares a `review`
 page, aggregated into one list. Each item is a review suggestion plus its owning `module` and
 `page_id`, so the chat composer's suggestion bubble and the Suggestions page can act on it
-from anywhere. Best-effort — a down, disabled, or erroring module is skipped, not fatal.
+from anywhere. This spans **all** such modules — the knowledge base (`module: "knowledge"`,
+`page_id: "review"`) and private **notes** (`module: "notes"`, `page_id: "review"`) both
+surface here, with no special-casing. Best-effort — a down, disabled, or erroring module is
+skipped, not fatal.
 
 ```json
 [
@@ -160,9 +165,12 @@ from anywhere. Best-effort — a down, disabled, or erroring module is skipped, 
 ]
 ```
 
-`operation` is one of `create` / `update` / `delete` / `move` / `mkdir` / `mkproject`;
-`diff` / `current` / `content` are empty for structural ops, and `to_path` carries a
-`move`'s destination.
+`operation` is one of `create` / `update` / `append` / `delete` / `move` / `mkdir` /
+`mkproject`. The content ops (`create` / `update` / `append`) carry a `diff` and full
+`current` / `content` for per-hunk review; structural ops (`move` / `mkdir` / `mkproject`)
+leave those empty, with `to_path` carrying a `move`'s destination. `append` is **notes**-only
+(the agent supplies just the text to add; the server concatenates it on approval) and is
+content-like — its diff shows the added text.
 
 ### `GET /platform/v1/modules/storage/read?path=…`
 
@@ -179,10 +187,14 @@ control; the agent's equivalent (`knowledge_propose_project`) goes through the r
 
 ### `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve`
 
-Approve a staged suggestion: the module applies + indexes it (ADR-0033). The body is
-**optional** `{content}` — the operator's **per-hunk-merged** result for an edit, forwarded so
-only the approved changes are written; absent ⇒ apply the agent's full proposal. Operator-only
-(paired with `…/reject`, which discards). **409** when the target vault is externally owned.
+Approve a staged suggestion: the module applies + indexes it (ADR-0033). Generic across any
+module that declares a `review` page — both **knowledge** (`page_id: "review"`) and private
+**notes** (`page_id: "review"`) expose this surface. The body is **optional** `{content}` — the
+operator's **per-hunk-merged** result for a content op (an edit, or a notes `append`), forwarded
+so only the approved changes are written; absent ⇒ apply the module's full proposal (for notes,
+the server composes the body — `append` concatenates onto the current note). Operator-only
+(paired with `…/reject`, which discards). **409** for knowledge when the target vault is
+externally owned (watch mode, #232); notes have no external-owner mode.
 
 ---
 

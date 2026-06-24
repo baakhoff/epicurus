@@ -1,40 +1,62 @@
-"""Manifest tests — the notes module's declared surface.
+"""Manifest + tool-surface tests for the notes module.
 
-The defining property of Notes (#134): it is **attach-only**, so it must expose an
-editor page and an attach surface but **no agent tools**.
+Notes are **private**: the agent may list titles and *propose* changes, but has **no
+read/get tool** for a note's body (#KB-refactor). It exposes the editor + review pages and
+the attach surface.
 """
 
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from epicurus_core import EpicurusModule
+from epicurus_notes.db import NotesStore
 from epicurus_notes.service import SAVED_SUBJECT, build_module
+from epicurus_notes.suggestions import NoteSuggestionStore
+
+
+def _module() -> EpicurusModule:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    # manifest()/tool listing don't touch the DB, so uninitialised stores are fine here.
+    return build_module(NotesStore(engine), NoteSuggestionStore(engine), tenant="test")
 
 
 async def test_manifest_identity() -> None:
-    manifest = await build_module().manifest()
+    manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.3.0"
+    assert manifest.version == "0.4.0"
 
 
-async def test_exposes_no_tools() -> None:
-    # Attach-only: the agent has no automatic access to notes.
-    manifest = await build_module().manifest()
-    assert manifest.tools == []
+async def test_exposes_write_and_list_tools_but_no_read() -> None:
+    manifest = await _module().manifest()
+    names = {t.name for t in manifest.tools}
+    assert {
+        "notes_list",
+        "notes_tree",
+        "notes_create",
+        "notes_propose_edit",
+        "notes_append",
+        "notes_delete",
+    } <= names
+    # Notes are private: there must be NO tool that returns a note's body.
+    assert not any("get" in n or "read" in n for n in names)
 
 
 async def test_is_attachable() -> None:
-    manifest = await build_module().manifest()
+    manifest = await _module().manifest()
     assert manifest.attachable is True
 
 
-async def test_declares_editor_page() -> None:
-    manifest = await build_module().manifest()
-    page = next(p for p in manifest.pages if p.id == "notes")
-    assert page.archetype == "editor"
-    assert page.title == "Notes"
+async def test_declares_editor_and_review_pages() -> None:
+    manifest = await _module().manifest()
+    by_id = {p.id: p for p in manifest.pages}
+    assert by_id["notes"].archetype == "editor"
+    assert by_id["notes"].title == "Notes"
+    assert by_id["review"].archetype == "review"
 
 
 async def test_has_ui_and_emits_saved_event() -> None:
-    manifest = await build_module().manifest()
+    manifest = await _module().manifest()
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     assert any(e.subject == SAVED_SUBJECT for e in manifest.events_emitted)

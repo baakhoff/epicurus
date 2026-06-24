@@ -68,6 +68,8 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | Field | Env var | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). |
+| `ollama_runtime_env_path` | `OLLAMA_RUNTIME_ENV_PATH` | `str` | `/etc/epicurus/ollama.env` | Where the core writes Ollama's start-up env file (KV-cache type) for it to source on restart (#307). A shared volume; override only if you remap the mount. |
+| `ollama_service_name` | `OLLAMA_SERVICE_NAME` | `str` | `ollama` | Compose service the core restarts to apply a KV-cache change (#307). |
 | `llm_default_model` | `LLM_DEFAULT_MODEL` | `str` | `llama3.2` | Model used when a request names none. |
 | `llm_keep_alive` | `LLM_KEEP_ALIVE` | `str` | `5m` | How long Ollama keeps a model loaded after use (ADR-0005). |
 | `llm_fallbacks` | `LLM_FALLBACKS` | `str` | `""` | Comma-separated fallback models, tried in order (e.g. `claude/claude-3-5-sonnet-latest,gpt/gpt-4o`). |
@@ -80,7 +82,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_catalog_max_models` | `LLM_CATALOG_MAX_MODELS` | `int` | `0` | Cap on model families kept (the most-popular survive); `0` = unlimited. |
 | `llm_catalog_enabled` | `LLM_CATALOG_ENABLED` | `bool` | `true` | When false, no outbound fetch — the built-in seed is served as-is (the endpoint still works). |
 | `module_urls` | `MODULE_URLS` | `str` | `http://echo:8080` | Comma-separated module base URLs; each serves MCP at `<base>/mcp` and its manifest at `<base>/manifest`. |
-| `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | Max tool-calling rounds per agent turn. |
+| `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | **Default** max tool-calling rounds per agent turn; the operator can override it at runtime (`llm_prefs.agent_max_steps`, set via the Models/Settings UI — #297) without a restart. |
 | `attachment_sink_url` | `ATTACHMENT_SINK_URL` | `str` | `http://storage:8080` | Base URL of the module that durably keeps chat uploads (ADR-0025); the upload route best-effort POSTs bytes to `<url>/ingest`. Empty disables the sink (uploads stay core-side only); a failed push never breaks the upload. |
 | `attachment_max_bytes` | `ATTACHMENT_MAX_BYTES` | `int` | `10485760` (10 MiB) | Max size of a single chat upload; the route returns **413** above it. Keep the web container's nginx `client_max_body_size` at or above this. |
 | `attachment_allowed_types` | `ATTACHMENT_ALLOWED_TYPES` | `str` | `text/*,image/*,application/pdf,application/json` | Allowed upload content-types (comma-separated; `type/*` wildcards, `*/*` disables the allowlist). A disallowed type is rejected with **415**. |

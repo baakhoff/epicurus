@@ -4,7 +4,17 @@
  * (key entry → core → OpenBao; the key never comes back).
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Cpu, Eye, EyeOff, KeyRound, Search, Sparkles, Star, Trash2 } from "lucide-react";
+import {
+  Cpu,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Search,
+  Sparkles,
+  SlidersHorizontal,
+  Star,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -22,8 +32,31 @@ import {
 import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag } from "@/data/catalog";
 import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
-import type { ProviderInfo } from "@/lib/contracts";
+import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
+import { assessFit } from "@/lib/modelFit";
 import { useDownloads } from "@/stores/downloads";
+
+// ── "Good for your system?" badge ───────────────────────────────────────────────
+
+/** A suitability chip (hover for the reason). `sizeMb` is a known size; pass null + the
+ *  params label to estimate (download catalog). Renders nothing when there's no verdict. */
+function FitBadge({
+  system,
+  sizeMb,
+  params,
+}: {
+  system: SystemInfo | undefined;
+  sizeMb: number | null;
+  params?: string | null;
+}) {
+  const fit = assessFit(system, sizeMb, params);
+  if (!fit.label) return null;
+  return (
+    <span title={fit.reason} className="cursor-help">
+      <Badge tone={fit.tone}>{fit.label}</Badge>
+    </span>
+  );
+}
 
 // ── Download tray ─────────────────────────────────────────────────────────────
 
@@ -95,6 +128,7 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
   // Fall back to the bundled seed when that endpoint is unreachable (e.g. an older core),
   // so the browser is never empty.
   const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
+  const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const source = catalog.data;
   const entries = filterCatalog(source?.entries ?? CATALOG, query, activeTag);
 
@@ -158,11 +192,13 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
         ))}
       </div>
 
-      {/* Entries */}
+      {/* Entries — capped to roughly five rows tall with its own scroll so the full
+          catalog (dozens of models) never pushes the rest of the page away. The search
+          and tag filters above stay put; only this list scrolls. */}
       {entries.length === 0 ? (
         <p className="py-4 text-center text-sm text-ink-dim">No models match your search.</p>
       ) : (
-        <div className="flex flex-col divide-y divide-edge">
+        <div className="flex max-h-[30rem] flex-col divide-y divide-edge overflow-y-auto overscroll-contain">
           {entries.map((entry) => {
             const dl = active[entry.id];
             const inProgress = dl && !dl.done;
@@ -177,6 +213,11 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
                     {entry.size_gb != null && (
                       <span className="text-xs text-ink-faint">{formatGb(entry.size_gb)}</span>
                     )}
+                    <FitBadge
+                      system={system.data}
+                      sizeMb={entry.size_gb != null ? Math.round(entry.size_gb * 1024) : null}
+                      params={entry.params}
+                    />
                     {entry.pulls && <span className="text-xs text-ink-faint">{entry.pulls} pulls</span>}
                   </div>
                   <p className="mt-0.5 text-xs leading-relaxed text-ink-dim">{entry.description}</p>
@@ -221,7 +262,9 @@ function LocalModels() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
 
   const globalDefault = llmPrefs.data?.global_default ?? null;
 
@@ -270,8 +313,16 @@ function LocalModels() {
               {model.loaded && <Badge tone="ok">loaded</Badge>}
               {globalDefault === model.name && <Badge tone="accent">default</Badge>}
               {model.hidden && <Badge tone="dim">hidden</Badge>}
+              <FitBadge system={system.data} sizeMb={model.size ? Math.round(model.size / (1024 * 1024)) : null} />
             </div>
             <span className="text-xs text-ink-faint">{formatBytes(model.size)}</span>
+            <button
+              aria-label={`Settings for ${model.name}`}
+              onClick={() => setSettingsFor(model.name)}
+              className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+            >
+              <SlidersHorizontal size={15} />
+            </button>
             <button
               aria-label={globalDefault === model.name ? "Clear global default" : `Set ${model.name} as global default`}
               onClick={() => setDefault.mutate(globalDefault === model.name ? null : model.name)}
@@ -312,6 +363,7 @@ function LocalModels() {
           setConfirming(null);
         }}
       />
+      <ModelSettingsSheet model={settingsFor} onClose={() => setSettingsFor(null)} />
     </Card>
   );
 }
@@ -342,6 +394,8 @@ export function ContextWindow() {
   const stored = llmPrefs.data?.global_context_window ?? null;
   const suggestion = system.data?.suggested_context ?? null;
   const gpu = system.data?.gpu ?? null;
+  const cpu = system.data?.cpu ?? null;
+  const ram = system.data?.ram_total_mb ?? null;
   const model = system.data?.model ?? null;
 
   // The in-progress edit. `undefined` = untouched (show the stored/suggested value);
@@ -377,22 +431,32 @@ export function ContextWindow() {
       {/* detected hardware + active model */}
       <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2">
-          <p className="text-[11px] uppercase tracking-wide text-ink-faint">Detected</p>
+          <p className="text-[11px] uppercase tracking-wide text-ink-faint">Your system</p>
           {system.isLoading ? (
             <Spinner className="mt-1" />
-          ) : gpu ? (
-            <p className="mt-0.5 flex items-center gap-1.5 text-sm text-ink">
-              <Cpu size={14} className="shrink-0 text-accent" />
-              <span className="truncate">
-                {gpu.name} · {formatMb(gpu.vram_total_mb)} VRAM
-              </span>
-            </p>
           ) : (
-            <p className="mt-0.5 flex items-center gap-1.5 text-sm text-ink">
-              <Cpu size={14} className="shrink-0 text-ink-faint" />
-              No GPU detected — CPU
-              {system.data?.ram_total_mb ? ` · ${formatMb(system.data.ram_total_mb)} RAM` : ""}
-            </p>
+            <div className="mt-0.5 flex flex-col gap-0.5 text-sm text-ink">
+              {gpu ? (
+                <span className="flex items-center gap-1.5">
+                  <Cpu size={14} className="shrink-0 text-accent" />
+                  <span className="truncate">
+                    {gpu.name} · {formatMb(gpu.vram_total_mb)} VRAM
+                  </span>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <Cpu size={14} className="shrink-0 text-ink-faint" />
+                  No GPU — CPU inference
+                </span>
+              )}
+              {cpu && (
+                <span className="truncate text-xs text-ink-dim">
+                  {cpu.model}
+                  {cpu.physical_cores ? ` · ${cpu.physical_cores} cores` : ""}
+                </span>
+              )}
+              {ram && <span className="text-xs text-ink-dim">{formatMb(ram)} RAM</span>}
+            </div>
           )}
         </div>
         <div className="rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2">
@@ -489,12 +553,304 @@ export function ContextWindow() {
   );
 }
 
+// ── Per-model settings sheet ────────────────────────────────────────────────────
+
+/**
+ * Model settings — per-model tuning for any local model (chat or embedding), opened from a
+ * model row. Context window and keep-alive are live runtime knobs (resolved per model:
+ * this value → the global default → the env). Quantization is read-only — it's baked in when
+ * the model is pulled, so changing it means pulling a different variant, which this sheet
+ * offers as a shortcut.
+ */
+export function ModelSettingsSheet({
+  model,
+  onClose,
+}: {
+  model: string | null;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const pull = useDownloads((s) => s.pull);
+  const settings = useQuery({
+    queryKey: ["modelSettings", model],
+    queryFn: () => api.modelSettings(model!),
+    enabled: model !== null,
+  });
+  const details = useQuery({
+    queryKey: ["modelDetails", model],
+    queryFn: () => api.modelDetails(model!),
+    enabled: model !== null,
+  });
+
+  // Draft form state, seeded once per opened model (adjust-state-during-render, not an
+  // effect — the React-recommended way to reset state when a prop changes).
+  const [ctx, setCtx] = useState("");
+  const [keepAlive, setKeepAlive] = useState("");
+  const [device, setDevice] = useState<string>(""); // "" = auto
+  const [variant, setVariant] = useState("");
+  const [seeded, setSeeded] = useState<string | null>(null);
+
+  if (model === null) {
+    if (seeded !== null) setSeeded(null); // reset so the next open re-seeds fresh
+  } else if (settings.data && seeded !== model) {
+    setCtx(settings.data.context_window != null ? String(settings.data.context_window) : "");
+    setKeepAlive(settings.data.keep_alive ?? "");
+    setDevice(settings.data.device ?? "");
+    setVariant(model.split(":")[0]);
+    setSeeded(model);
+  }
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.setModelSettings(model!, {
+        context_window: ctx.trim() === "" ? null : Number(ctx),
+        keep_alive: keepAlive.trim() === "" ? null : keepAlive.trim(),
+        device: device || null,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["modelSettings", model] });
+      onClose();
+    },
+  });
+
+  if (model === null) return null;
+
+  const trainedMax = details.data?.context_length ?? null;
+  const sliderMax = Math.max(CTX_CEILING, trainedMax ?? 0, Number(ctx) || 0);
+  const ctxNum = ctx.trim() === "" ? null : Number(ctx);
+
+  const startPull = () => {
+    const tag = variant.trim();
+    if (!tag) return;
+    void pull(tag, () => queryClient.invalidateQueries({ queryKey: ["models"] }));
+    onClose();
+  };
+
+  return (
+    <Sheet open onClose={onClose} title="Model settings">
+      <div className="flex flex-col gap-5">
+        <p className="-mt-1 font-mono text-sm break-all text-ink">{model}</p>
+
+        {/* read-only facts from the runtime */}
+        <div className="flex flex-wrap gap-1.5">
+          {details.isLoading ? (
+            <Spinner />
+          ) : (
+            <>
+              {details.data?.quantization && <Badge tone="dim">{details.data.quantization}</Badge>}
+              {details.data?.parameter_size && (
+                <Badge tone="dim">{details.data.parameter_size}</Badge>
+              )}
+              {trainedMax != null && (
+                <Badge tone="dim">trained {trainedMax.toLocaleString()} ctx</Badge>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* context window */}
+        <div>
+          <Label hint="Ollama num_ctx for this model. Leave blank to inherit the global default.">
+            Context window
+          </Label>
+          <div className="flex items-center gap-3">
+            <TextInput
+              type="number"
+              min={CTX_FLOOR}
+              max={trainedMax ?? CTX_CEILING}
+              step={CTX_STEP}
+              value={ctx}
+              placeholder="inherit"
+              aria-label="Per-model context window tokens"
+              className="w-32"
+              onChange={(e) => setCtx(e.target.value)}
+            />
+            {ctxNum != null && (
+              <input
+                type="range"
+                min={CTX_FLOOR}
+                max={sliderMax}
+                step={CTX_STEP}
+                value={Math.min(Math.max(ctxNum, CTX_FLOOR), sliderMax)}
+                aria-label="Per-model context window slider"
+                className="flex-1 accent-accent"
+                onChange={(e) => setCtx(e.target.value)}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* keep-alive */}
+        <div>
+          <Label hint="How long the runtime keeps this model loaded after use — e.g. 5m, 30m, 0 (unload now), -1 (forever). Blank inherits the default.">
+            Keep-alive
+          </Label>
+          <TextInput
+            value={keepAlive}
+            placeholder="inherit"
+            aria-label="Keep-alive"
+            className="w-40"
+            onChange={(e) => setKeepAlive(e.target.value)}
+          />
+        </div>
+
+        {/* run on: GPU / CPU / auto */}
+        <div>
+          <Label hint="Where this model runs. Auto lets the runtime decide; GPU offloads all layers; CPU keeps it off the GPU. Local models only.">
+            Run on
+          </Label>
+          <div className="flex gap-1.5" role="group" aria-label="Run on">
+            {[
+              { value: "", label: "Auto" },
+              { value: "gpu", label: "GPU" },
+              { value: "cpu", label: "CPU" },
+            ].map((opt) => (
+              <button
+                key={opt.value || "auto"}
+                type="button"
+                aria-pressed={device === opt.value}
+                onClick={() => setDevice(opt.value)}
+                className={cn(
+                  "rounded-full border px-4 py-1 text-xs transition-colors",
+                  device === opt.value
+                    ? "border-accent bg-accent-dim text-accent-strong"
+                    : "border-edge text-ink-dim hover:border-edge-strong hover:text-ink",
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {save.isError && <p className="text-sm text-danger">{(save.error as Error).message}</p>}
+        <div className="flex items-center gap-2">
+          <Button variant="primary" busy={save.isPending} onClick={() => save.mutate()}>
+            Save
+          </Button>
+          {(settings.data?.context_window != null ||
+            settings.data?.keep_alive ||
+            settings.data?.device) && (
+            <Button
+              variant="ghost"
+              disabled={save.isPending}
+              onClick={() => {
+                setCtx("");
+                setKeepAlive("");
+                setDevice("");
+                save.mutate();
+              }}
+            >
+              Reset to defaults
+            </Button>
+          )}
+        </div>
+
+        {/* quantization — read-only + re-pull shortcut */}
+        <div className="border-t border-edge pt-4">
+          <Label hint="Quantization is fixed when a model is pulled. To change it, pull a different variant tag (e.g. model:8b-q8_0) — it downloads alongside this one.">
+            Quantization
+          </Label>
+          <p className="mb-2 text-sm text-ink">
+            {details.data?.quantization ?? "unknown"}
+            <span className="text-ink-faint"> · read-only</span>
+          </p>
+          <div className="flex items-center gap-2">
+            <TextInput
+              value={variant}
+              aria-label="Variant tag to pull"
+              placeholder="model:tag"
+              className="flex-1 font-mono"
+              onChange={(e) => setVariant(e.target.value)}
+            />
+            <Button variant="outline" onClick={startPull} disabled={!variant.trim()}>
+              Pull variant
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+// ── KV-cache type (global runtime setting) ──────────────────────────────────────
+
+const KV_CACHE_OPTIONS = [
+  { value: "", label: "Default (f16)" },
+  { value: "q8_0", label: "q8_0 — half the cache VRAM" },
+  { value: "q4_0", label: "q4_0 — quarter the cache VRAM" },
+];
+
+/**
+ * KV-cache type — quantizes the attention cache to fit a longer context in less VRAM. It's a
+ * **server-wide** Ollama start flag (and q8_0/q4_0 need flash attention). Picking one persists
+ * the choice and, when Docker is wired, the core writes Ollama's env file and restarts it to
+ * apply (#307) — flash attention enabled automatically. If the core can't reach Docker it falls
+ * back to spelling out the manual env + restart.
+ */
+export function KvCache() {
+  const queryClient = useQueryClient();
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const current = llmPrefs.data?.kv_cache_type ?? "";
+
+  const save = useMutation({
+    mutationFn: (value: string | null) => api.setKvCacheType(value),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
+  });
+
+  return (
+    <Card>
+      <h3 className="mb-1 font-serif text-base text-ink">KV-cache type</h3>
+      <p className="mb-3 text-xs leading-relaxed text-ink-dim">
+        Quantize the attention cache to fit a longer context in less VRAM (a small quality
+        trade-off). Applies to all local models; flash attention is enabled automatically.
+      </p>
+      {llmPrefs.isLoading ? (
+        <Spinner />
+      ) : (
+        <label className="block">
+          <span className="sr-only">KV-cache type</span>
+          <select
+            className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+            value={current}
+            disabled={save.isPending}
+            onChange={(e) => save.mutate(e.target.value || null)}
+          >
+            {KV_CACHE_OPTIONS.map((opt) => (
+              <option key={opt.value || "default"} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {save.isPending ? (
+        <p className="mt-2 text-[11px] text-ink-faint">Applying — restarting Ollama…</p>
+      ) : save.isSuccess && save.data.applied ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-ink-dim">
+          Applied — Ollama restarted with the new cache type (a few seconds to warm back up).
+        </p>
+      ) : save.isSuccess && !save.data.applied ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-warn">
+          Saved, but the core couldn’t restart Ollama (no Docker access). Set{" "}
+          <code className="font-mono">OLLAMA_KV_CACHE_TYPE</code>
+          {current ? ` (${current})` : ""} and{" "}
+          <code className="font-mono">OLLAMA_FLASH_ATTENTION=1</code> in your environment, then
+          restart Ollama.
+        </p>
+      ) : null}
+      {save.isError && <p className="mt-1 text-sm text-danger">{(save.error as Error).message}</p>}
+    </Card>
+  );
+}
+
 // ── Embedding default ─────────────────────────────────────────────────────────
 
 function EmbedDefault() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const current = llmPrefs.data?.global_embed_default ?? "";
   const available = (models.data ?? []).filter((m) => !m.hidden);
@@ -514,26 +870,42 @@ function EmbedDefault() {
       {llmPrefs.isLoading ? (
         <Spinner />
       ) : (
-        <label className="block">
-          <span className="sr-only">Global embedding model</span>
-          <select
-            className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
-            value={current}
-            disabled={setEmbedDefault.isPending}
-            onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
-          >
-            <option value="">System default</option>
-            {available.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="block flex-1">
+            <span className="sr-only">Global embedding model</span>
+            <select
+              className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+              value={current}
+              disabled={setEmbedDefault.isPending}
+              onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
+            >
+              <option value="">System default</option>
+              {available.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {current && (
+            <Button
+              variant="ghost"
+              aria-label={`Settings for ${current}`}
+              onClick={() => setSettingsOpen(true)}
+            >
+              <SlidersHorizontal size={14} />
+              Settings
+            </Button>
+          )}
+        </div>
       )}
       {setEmbedDefault.isError && (
         <p className="mt-2 text-sm text-danger">{(setEmbedDefault.error as Error).message}</p>
       )}
+      <ModelSettingsSheet
+        model={settingsOpen && current ? current : null}
+        onClose={() => setSettingsOpen(false)}
+      />
     </Card>
   );
 }
@@ -682,6 +1054,7 @@ export function ModelsScreen() {
         <DownloadTray />
         <LocalModels />
         <ContextWindow />
+        <KvCache />
         <EmbedDefault />
         <Providers />
       </div>

@@ -69,6 +69,23 @@ async def test_complete_unknown_raises(provider: LocalTasksProvider) -> None:
         await provider.complete_task(TENANT, "nonexistent-id")
 
 
+async def test_list_scope_selects_open_done_or_all(provider: LocalTasksProvider) -> None:
+    """scope filters the read: open (default) / done / all (ADR-0049)."""
+    open_t = await provider.add_task(TENANT, "Still open")
+    done_t = await provider.add_task(TENANT, "Finished")
+    await provider.complete_task(TENANT, done_t.id)
+
+    open_only = await provider.list_tasks(TENANT)  # default scope="open"
+    assert [t.id for t in open_only] == [open_t.id]
+
+    done_only = await provider.list_tasks(TENANT, scope="done")
+    assert [t.id for t in done_only] == [done_t.id]
+    assert done_only[0].completed
+
+    everything = await provider.list_tasks(TENANT, scope="all")
+    assert {t.id for t in everything} == {open_t.id, done_t.id}
+
+
 async def test_tenant_isolation(provider: LocalTasksProvider) -> None:
     await provider.add_task("tenant-a", "Task A")
     await provider.add_task("tenant-b", "Task B")

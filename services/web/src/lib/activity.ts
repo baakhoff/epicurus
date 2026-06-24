@@ -2,7 +2,36 @@
  * Pure helpers for the chat process display (#121) and the readiness bar (#122).
  * Kept free of React so they unit-test in isolation.
  */
-import type { Readiness } from "@/lib/contracts";
+import type { MessageActivity, Readiness } from "@/lib/contracts";
+import type { ActivityItem } from "@/stores/chat";
+
+/**
+ * The ordered activity timeline (think → call → think) for a persisted message's activity.
+ * Prefers the stored `timeline`; for older rows that predate it, falls back to the flat
+ * shape — the thinking block first, then the tool steps (#300).
+ */
+export function activityTimeline(activity: MessageActivity | null | undefined): ActivityItem[] {
+  if (!activity) return [];
+  if (activity.timeline.length > 0) {
+    return activity.timeline.map((item) =>
+      item.kind === "thinking"
+        ? { kind: "thinking", text: item.text }
+        : {
+            kind: "tool",
+            run: { tool: item.tool, status: item.status, detail: item.detail ?? undefined },
+          },
+    );
+  }
+  const items: ActivityItem[] = [];
+  if (activity.thinking) items.push({ kind: "thinking", text: activity.thinking });
+  for (const step of activity.steps) {
+    items.push({
+      kind: "tool",
+      run: { tool: step.tool, status: step.status, detail: step.detail ?? undefined },
+    });
+  }
+  return items;
+}
 
 /** A friendly verb for a tool's leading action word. */
 const ACTION_VERBS: Record<string, string> = {

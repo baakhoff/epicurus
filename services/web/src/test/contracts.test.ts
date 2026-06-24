@@ -347,14 +347,19 @@ describe("contracts", () => {
       global_default: "llama3.2",
       global_embed_default: null,
       global_context_window: 16384,
+      kv_cache_type: null,
+      global_agent_max_steps: 6,
       hidden: [],
     });
     expect(prefs.global_context_window).toBe(16384);
+    expect(prefs.global_agent_max_steps).toBe(6);
     // null = follow the env/runtime default
     const unset = LlmPrefs.parse({
       global_default: null,
       global_embed_default: null,
       global_context_window: null,
+      kv_cache_type: null,
+      global_agent_max_steps: null,
       hidden: [],
     });
     expect(unset.global_context_window).toBeNull();

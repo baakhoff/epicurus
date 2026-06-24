@@ -1,16 +1,18 @@
 """Tasks module — provider-agnostic MCP tool surface (ADR-0016).
 
 Also serves the **Tasks** left-nav page: a core-rendered ``board`` archetype
-(ADR-0018). The module supplies data only — :func:`build_tasks_board` groups open
-tasks into due-date columns and attaches per-card actions that invoke the module's
-own MCP tools through the core (complete / edit) plus a board-level add — and the
-shell renders it. No markup ever leaves this module.
+(ADR-0018). The module supplies data only — :func:`build_tasks_board` groups tasks
+into columns by the operator's chosen dimension (due date / status / priority / list,
+or a flat list) and *Show* filter (open / completed / all), declares those choices as
+**view controls** (ADR-0049), and attaches per-card actions that invoke the module's
+own MCP tools through the core (complete / reopen / edit) plus a board-level add — and
+the shell renders it. No markup ever leaves this module.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from epicurus_core import (
     LOCAL_ACCOUNT,
@@ -28,7 +30,13 @@ from epicurus_core import (
     tool_envelope,
 )
 from epicurus_tasks.google_provider import GoogleTasksError
-from epicurus_tasks.models import VALID_PRIORITIES, VALID_STATUSES, Task
+from epicurus_tasks.models import (
+    VALID_PRIORITIES,
+    VALID_STATUSES,
+    VALID_TASK_SCOPES,
+    Task,
+    TaskScope,
+)
 from epicurus_tasks.providers import TasksProvider
 
 log = get_logger("epicurus_tasks.service")
@@ -93,7 +101,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.9.0",
+        version="0.10.0",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -377,15 +385,44 @@ async def enabled_write_lists(
     return lists, default
 
 
-# ── Tasks page: the `board` archetype data (ADR-0018) ───────────────────────────
+# ── Tasks page: the `board` archetype data (ADR-0018 / ADR-0049) ─────────────────
 #
-# The module supplies data only; the core shell renders it. The board groups OPEN
-# tasks into due-date columns and attaches per-card actions that the shell turns
-# into buttons — each invokes one of this module's MCP tools through the core
-# (validated against the manifest), so mutations never bypass the contract.
+# The module supplies data only; the core shell renders it. The board groups tasks into
+# columns by the operator's chosen *group-by* dimension and *Show* filter — declared as
+# **view controls** the shell renders as a toolbar (ADR-0049) — and attaches per-card
+# actions that the shell turns into buttons, each invoking one of this module's MCP tools
+# through the core (validated against the manifest), so mutations never bypass the contract.
 
 _BUCKET_ORDER = ("Overdue", "Today", "Upcoming", "No date")
 _BUCKET_TONE = {"Overdue": "danger", "Today": "accent"}
+
+# Grouping dimensions (ADR-0049). Each is a board column layout the operator can switch to.
+# "list" is offered only when there are named lists (categories) to group by; "none" is a
+# single flat column (a plain list view).
+_PRIORITY_ORDER = ("High", "Medium", "Low", "No priority")
+_STATUS_COLUMN = {"open": "Open", "in_progress": "In progress", "done": "Completed"}
+_STATUS_ORDER = ("Open", "In progress", "Completed")
+_FLAT_COLUMN = "All tasks"
+_LIST_FALLBACK = "Personal"  # category label for the silent local default (mirrors the router)
+
+# Group-by options the *Group by* control offers, in display order. The "List" option is
+# spliced in (before "None") only when the board has named lists to group by.
+_GROUP_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("due", "Due date"),
+    ("status", "Status"),
+    ("priority", "Priority"),
+    ("none", "None"),
+)
+_GROUP_LIST_OPTION = ("list", "List")
+_VALID_GROUPS: frozenset[str] = frozenset({"due", "status", "priority", "list", "none"})
+_DEFAULT_GROUP = "due"
+
+# Show-filter options the *Show* control offers (the task scope passed to the providers).
+_SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("open", "Open"),
+    ("done", "Completed"),
+    ("all", "All"),
+)
 
 # field_options teaches the shell's SchemaForm which values are valid for enum-like
 # string fields.  The shell overlays these onto the tool's raw JSON schema so it
@@ -394,6 +431,21 @@ _TASK_FIELD_OPTIONS: dict[str, list[str]] = {
     "priority": ["low", "medium", "high"],
     "status": ["open", "in_progress", "done"],
 }
+
+
+def coerce_group(value: str | None) -> str:
+    """Clamp a ``group`` query param to a known grouping, defaulting to due-date (ADR-0049)."""
+    return value if value in _VALID_GROUPS else _DEFAULT_GROUP
+
+
+def coerce_scope(value: str | None) -> TaskScope:
+    """Clamp a ``show`` query param to a known task scope, defaulting to open (ADR-0049)."""
+    return cast(TaskScope, value) if value in VALID_TASK_SCOPES else "open"
+
+
+def _slug(title: str) -> str:
+    """A stable column id from a human title (ids aren't user-visible)."""
+    return title.lower().replace(" ", "-")
 
 
 def _bucket_for(task: Task, today: str) -> str:
@@ -411,20 +463,90 @@ def _bucket_for(task: Task, today: str) -> str:
     return "Upcoming"
 
 
-def _task_card(
-    task: Task, bucket: str, *, move_lists: list[tuple[str, str]] | None = None
-) -> dict[str, Any]:
-    """One board card: the task plus its complete / edit actions.
+def _column_of(task: Task, group_by: str, today: str) -> str:
+    """The column title *task* falls under for the active *group_by* (ADR-0049)."""
+    if group_by == "status":
+        return _STATUS_COLUMN.get(task.status, task.status)
+    if group_by == "priority":
+        return task.priority.capitalize() if task.priority else "No priority"
+    if group_by == "list":
+        return task.list_title or _LIST_FALLBACK
+    if group_by == "none":
+        return _FLAT_COLUMN
+    return _bucket_for(task, today)
 
-    Each card carries ``list_id`` (the list the task belongs to) in its action args so a
-    Complete / Edit routes back to the owning list when the board aggregates several lists
-    (ADR-0036); a per-card category tag names that list. When *move_lists* is given (more
-    than one writable list exists) the Edit form gains a **List** picker, prefilled to the
-    task's current list, that moves the task when changed (ADR-0038).
+
+def _column_order(group_by: str, lists: list[tuple[str, str]] | None) -> list[str] | None:
+    """Canonical column order for *group_by*, or ``None`` to order by first appearance.
+
+    Due / priority / status have a fixed, meaningful order; the flat "none" view is a single
+    column. Grouping by **list** orders columns by the operator's *lists* (their enabled
+    order), with any extra category (e.g. the local "Personal" column) appended as it appears.
     """
+    if group_by == "status":
+        return list(_STATUS_ORDER)
+    if group_by == "priority":
+        return list(_PRIORITY_ORDER)
+    if group_by == "none":
+        return [_FLAT_COLUMN]
+    if group_by == "list":
+        seed = [title for _, title in (lists or [])]
+        return seed or None  # extras (Personal / untitled) are appended in _group_columns
+    return list(_BUCKET_ORDER)
+
+
+def _group_columns(
+    tasks: list[Task],
+    *,
+    group_by: str,
+    today: str,
+    move_lists: list[tuple[str, str]] | None,
+    lists: list[tuple[str, str]] | None,
+) -> list[dict[str, Any]]:
+    """Group *tasks* into ordered board columns by the active *group_by* (ADR-0049).
+
+    Empty columns are dropped. Columns follow the dimension's canonical order; for the
+    *list* grouping any category not in the operator's *lists* (e.g. "Personal") is appended
+    in first-seen order so nothing is lost.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    appeared: list[str] = []
+    for task in tasks:
+        title = _column_of(task, group_by, today)
+        if title not in grouped:
+            grouped[title] = []
+            appeared.append(title)
+        grouped[title].append(_task_card(task, today=today, move_lists=move_lists))
+
+    base = _column_order(group_by, lists)
+    # Canonical order first; any category not in it (e.g. "Personal" for list grouping) is
+    # appended in first-seen order so nothing is dropped.
+    order = appeared if base is None else [*base, *(t for t in appeared if t not in base)]
+    return [
+        {"id": _slug(title), "title": title, "cards": grouped[title]}
+        for title in order
+        if grouped.get(title)
+    ]
+
+
+def _task_card(
+    task: Task, *, today: str, move_lists: list[tuple[str, str]] | None = None
+) -> dict[str, Any]:
+    """One board card: the task plus its primary (complete / reopen) and edit actions.
+
+    The due-date badge tone always reflects the task's *own* due bucket (overdue / today),
+    independent of the active grouping. Each card carries ``list_id`` (the list the task
+    belongs to) in its action args so a mutation routes back to the owning list when the
+    board aggregates several lists (ADR-0036); a per-card category tag names that list. A
+    **completed** card offers *Reopen* in place of *Complete* (both one-tap) and is marked
+    ``done`` so the shell strikes it through. When *move_lists* is given (more than one
+    writable list exists) the Edit form gains a **List** picker, prefilled to the task's
+    current list, that moves the task when changed (ADR-0038).
+    """
+    due_bucket = _bucket_for(task, today)
     badges: list[dict[str, str]] = []
     if task.due:
-        badges.append({"label": task.due[:10], "tone": _BUCKET_TONE.get(bucket, "dim")})
+        badges.append({"label": task.due[:10], "tone": _BUCKET_TONE.get(due_bucket, "dim")})
     if task.priority:
         badges.append({"label": task.priority.capitalize(), "tone": _PRIORITY_TONE[task.priority]})
     for tag in task.tags:
@@ -465,56 +587,89 @@ def _task_card(
             "to_list_id": [{"value": list_id, "label": title} for list_id, title in move_lists],
         }
         edit_action["form_values"]["to_list_id"] = task.list_id or ""
+
+    done = task.status == "done"
+    # Open → Complete (flip done); completed → Reopen (edit status back to open). Both one-tap.
+    primary_action: dict[str, Any] = (
+        {
+            "tool": "tasks_update",
+            "label": "Reopen",
+            "icon": "rotate",
+            "args": {**args, "status": "open"},
+        }
+        if done
+        else {"tool": "tasks_complete", "label": "Complete", "icon": "check", "args": args}
+    )
     return {
         "id": task.id,
         "title": task.title,
         "subtitle": task.notes or None,
         "badges": badges,
-        "actions": [
-            {
-                "tool": "tasks_complete",
-                "label": "Complete",
-                "icon": "check",
-                "args": args,
-            },
-            edit_action,
-        ],
+        "done": done,
+        "actions": [primary_action, edit_action],
     }
+
+
+def _board_controls(
+    *, group_by: str, scope: str, lists: list[tuple[str, str]] | None
+) -> list[dict[str, Any]]:
+    """The board's declarative view controls (ADR-0049): *Group by* and *Show*.
+
+    The module declares the selectable options and the current value; the shell renders
+    each as a labeled selector and re-fetches the page with ``?<id>=<value>`` on change.
+    The *List* grouping is offered only when there are named lists to group by.
+    """
+    group_options = list(_GROUP_OPTIONS)
+    if lists:
+        group_options.insert(len(group_options) - 1, _GROUP_LIST_OPTION)  # before "None"
+    return [
+        {
+            "id": "group",
+            "label": "Group by",
+            "value": group_by,
+            "options": [{"value": value, "label": label} for value, label in group_options],
+        },
+        {
+            "id": "show",
+            "label": "Show",
+            "value": scope,
+            "options": [{"value": value, "label": label} for value, label in _SCOPE_OPTIONS],
+        },
+    ]
 
 
 def build_tasks_board(
     tasks: list[Task],
     *,
     today: str,
+    group_by: str = _DEFAULT_GROUP,
+    scope: str = "open",
     lists: list[tuple[str, str]] | None = None,
     default_list_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build the ``board`` archetype payload for the Tasks page (ADR-0018/0036).
+    """Build the ``board`` archetype payload for the Tasks page (ADR-0018 / 0036 / 0047).
 
     Pure and deterministic given *today* (an ISO date, e.g. ``"2026-06-14"``) so the
-    bucketing is unit-testable without a clock. Empty columns are dropped; a board-level
-    **Add task** action is always offered. When *lists* (``(list_id, title)`` pairs for the
-    operator's enabled writable lists) is given, the Add form gains a list (category) picker
-    preselecting *default_list_id*; with none, adds go to the default list. With **two or
-    more** lists each task's Edit form also gains a List picker that moves it (ADR-0038).
+    grouping is unit-testable without a clock. *group_by* picks the column layout (``"due"``
+    default, ``"status"``, ``"priority"``, ``"list"``, or ``"none"`` for a flat list) and
+    *scope* the *Show* filter echoed into the controls (the caller has already fetched the
+    matching tasks). Empty columns are dropped; the board always declares its **view
+    controls** and a board-level **Add task** action. When *lists* (``(list_id, title)``
+    pairs for the operator's enabled writable lists) is given, the Add form gains a list
+    (category) picker preselecting *default_list_id*, and the *Group by* control offers
+    **List**; with two or more lists each task's Edit form also gains a List picker that
+    moves it (ADR-0038).
     """
+    # Grouping by list needs named lists; with none, fall back to the due-date layout so the
+    # control and the columns stay consistent.
+    if group_by == "list" and not lists:
+        group_by = _DEFAULT_GROUP
     # A move needs somewhere to move to, so the per-task List picker appears only with ≥2
     # writable lists. (Local-only tasks never reach here with a picker — see ADR-0038.)
     move_lists = lists if lists and len(lists) >= 2 else None
-    grouped: dict[str, list[dict[str, Any]]] = {bucket: [] for bucket in _BUCKET_ORDER}
-    for task in tasks:
-        bucket = _bucket_for(task, today)
-        grouped[bucket].append(_task_card(task, bucket, move_lists=move_lists))
-
-    columns = [
-        {
-            "id": bucket.lower().replace(" ", "-"),
-            "title": bucket,
-            "cards": grouped[bucket],
-        }
-        for bucket in _BUCKET_ORDER
-        if grouped[bucket]
-    ]
+    columns = _group_columns(
+        tasks, group_by=group_by, today=today, move_lists=move_lists, lists=lists
+    )
     add_action: dict[str, Any] = {
         "tool": "tasks_add",
         "label": "Add task",
@@ -537,6 +692,7 @@ def build_tasks_board(
     return {
         "title": "Tasks",
         "columns": columns,
+        "controls": _board_controls(group_by=group_by, scope=scope, lists=lists),
         "actions": [add_action],
     }
 

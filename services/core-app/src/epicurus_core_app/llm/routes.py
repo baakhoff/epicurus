@@ -11,7 +11,9 @@ from pydantic import BaseModel
 
 from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
-from epicurus_core_app.llm.models import ModelInfo, PowerState, ProviderInfo
+from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
+from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, ProviderInfo
+from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 
@@ -47,6 +49,10 @@ class LlmPrefsResponse(BaseModel):
     global_embed_default: str | None
     # Operator-chosen Ollama context window (num_ctx); NULL means the env/runtime default.
     global_context_window: int | None
+    # Operator-chosen Ollama KV-cache type ("f16"|"q8_0"|"q4_0"); NULL = runtime default.
+    kv_cache_type: str | None
+    # Operator-chosen agent loop bound (tool rounds per turn); NULL = the env default.
+    global_agent_max_steps: int | None
     hidden: list[str]
 
 
@@ -68,6 +74,12 @@ class SetContextWindowRequest(BaseModel):
     value: int | None
 
 
+class SetAgentMaxStepsRequest(BaseModel):
+    """Body for PUT /llm/prefs/agent-max-steps."""
+
+    value: int | None
+
+
 class SetHiddenRequest(BaseModel):
     """Body for PUT /llm/prefs/hidden — toggle one model's hidden state."""
 
@@ -75,11 +87,29 @@ class SetHiddenRequest(BaseModel):
     hidden: bool
 
 
+class SetKvCacheTypeRequest(BaseModel):
+    """Body for PUT /llm/prefs/kv-cache-type."""
+
+    value: str | None
+
+
+class SetModelSettingsRequest(BaseModel):
+    """Body for PUT /llm/model-settings — one model's per-model tuning."""
+
+    model: str
+    context_window: int | None = None
+    keep_alive: str | None = None
+    # "gpu" | "cpu" | null (auto). Mapped to Ollama num_gpu; local models only.
+    device: str | None = None
+
+
 def create_llm_router(
     gateway: LlmGateway,
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
     catalog: ModelCatalog | None = None,
+    model_settings: ModelSettingsStore | None = None,
+    ollama_runtime: OllamaRuntime | None = None,
 ) -> APIRouter:
     """Gateway management routes — installed models, the browse catalog, providers,
     pulls, and prefs.
@@ -113,6 +143,13 @@ def create_llm_router(
         in a path."""
         await gateway.delete_model(name)
         return {"status": "ok", "model": name}
+
+    @router.get("/models/details", response_model=ModelDetails)
+    async def model_details(model: str) -> ModelDetails:
+        """Read-only facts about a local model (quantization, parameter size, trained
+        context length) from the runtime's ``/api/show``, for the model-settings sheet.
+        ``model`` is a query param for the same name-mangling reason as ``delete``."""
+        return await gateway.show(model)
 
     @router.get("/providers", response_model=list[ProviderInfo])
     async def list_providers() -> list[ProviderInfo]:
@@ -168,16 +205,22 @@ def create_llm_router(
                 global_default=None,
                 global_embed_default=None,
                 global_context_window=None,
+                kv_cache_type=None,
+                global_agent_max_steps=None,
                 hidden=[],
             )
         stored_default = await prefs.get_default(default_tenant)
         stored_embed_default = await prefs.get_embed_default(default_tenant)
         stored_context_window = await prefs.get_context_window(default_tenant)
+        stored_kv_cache_type = await prefs.get_kv_cache_type(default_tenant)
+        stored_agent_max_steps = await prefs.get_agent_max_steps(default_tenant)
         hidden = await prefs.get_hidden(default_tenant)
         return LlmPrefsResponse(
             global_default=stored_default,
             global_embed_default=stored_embed_default,
             global_context_window=stored_context_window,
+            kv_cache_type=stored_kv_cache_type,
+            global_agent_max_steps=stored_agent_max_steps,
             hidden=hidden,
         )
 
@@ -205,6 +248,34 @@ def create_llm_router(
         await prefs.set_context_window(default_tenant, request.value)
         return {"status": "ok", "value": request.value}
 
+    @router.put("/prefs/kv-cache-type")
+    async def set_kv_cache_type(request: SetKvCacheTypeRequest) -> dict[str, str | bool | None]:
+        """Set the operator's Ollama KV-cache type and apply it to the live runtime.
+
+        Persists the choice, then — when Docker is wired — writes Ollama's start-up env file and
+        restarts the container so it takes effect; flash attention is enabled automatically for
+        the quantized types (#307, amends ADR-0046). ``applied`` is ``False`` when Docker is
+        unavailable, in which case the UI falls back to the manual-restart instructions.
+        """
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        await prefs.set_kv_cache_type(default_tenant, request.value)
+        applied = ollama_runtime.apply_kv_cache_type(request.value) if ollama_runtime else False
+        return {"status": "ok", "value": request.value, "applied": applied}
+
+    @router.put("/prefs/agent-max-steps")
+    async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | None | str]:
+        """Set or clear the agent loop bound (tool rounds per turn) for this tenant.
+
+        Clamped to 1-12: at least one round to be useful, and a ceiling so a misconfigured
+        value can't let a turn run away. ``null`` clears the override (back to the env default).
+        """
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        value = None if request.value is None else max(1, min(12, request.value))
+        await prefs.set_agent_max_steps(default_tenant, value)
+        return {"status": "ok", "value": value}
+
     @router.put("/prefs/hidden")
     async def set_hidden(request: SetHiddenRequest) -> dict[str, object]:
         """Toggle one model's hidden state; returns the updated hidden list."""
@@ -220,6 +291,33 @@ def create_llm_router(
             updated = current
         await prefs.set_hidden(default_tenant, updated)
         return {"status": "ok", "hidden": updated}
+
+    # ── Per-model settings (context window + keep-alive) ──────────────────────
+
+    @router.get("/model-settings", response_model=ModelSettings)
+    async def get_model_settings(model: str) -> ModelSettings:
+        """One model's stored settings (all-``None`` = inherit). ``model`` is a query
+        param — names contain ``:``/``/`` which proxies may mangle in a path."""
+        if model_settings is None:
+            return ModelSettings()
+        return await model_settings.get(default_tenant, model)
+
+    @router.put("/model-settings")
+    async def set_model_settings(request: SetModelSettingsRequest) -> dict[str, object]:
+        """Set or clear one model's context window, keep-alive, and device (an all-``None``
+        body removes the override, returning the model to the inherited defaults)."""
+        if model_settings is None:
+            raise HTTPException(status_code=503, detail="model-settings store not available")
+        await model_settings.set(
+            default_tenant,
+            request.model,
+            ModelSettings(
+                context_window=request.context_window,
+                keep_alive=request.keep_alive,
+                device=request.device,
+            ),
+        )
+        return {"status": "ok", "model": request.model}
 
     return router
 

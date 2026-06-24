@@ -50,6 +50,17 @@ in the target list and deletes the source — it gets a new id, and subtasks/ord
 carried. Moves operate between external lists (the local "Personal" store is the silent
 default and only shows when no external list is enabled).
 
+**v0.10.0** gives the board **view controls** (ADR-0049, #298): the operator can change how
+tasks are laid out and surface completed ones. A **Group by** control switches the column
+layout — **Due date** (default), **Status**, **Priority**, **List** (when there are named
+lists), or **None** (a single flat list) — and a **Show** filter chooses the task scope —
+**Open** (default), **Completed**, or **All**. The controls are declared in the board data
+(`controls`) and rendered by the shell as a toolbar; selecting one re-fetches the page with a
+forwarded query param (`group` / `show`), so grouping and filtering stay module-side with no
+core change. Completed cards are struck through and offer **Reopen** in place of **Complete**.
+The provider read seam gains a `scope` (`open` / `done` / `all`) so completed tasks can be
+fetched (local filters the `completed` flag; Google sets `showCompleted`/`showHidden`).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -98,7 +109,7 @@ board so each card knows its category and routes its mutations to the owning lis
 | `GET /manifest` | Module manifest (tools, UI declaration, `collections` spec). |
 | `GET /status` | `{"google_connected": bool}` (best-effort live OAuth check). |
 | `GET /accounts` | Connected accounts + their task lists for the picker (ADR-0030). The core proxies + merges this at `GET /platform/v1/modules/tasks/collections`. |
-| `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). 404 for an unknown id. |
+| `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). Accepts forwarded `group` (due/status/priority/list/none) and `show` (open/done/all) query params (ADR-0049), each clamped to a known value. 404 for an unknown id. |
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
@@ -118,12 +129,20 @@ board so each card knows its category and routes its mutations to the owning lis
 The module declares one page — `{id: "board", title: "Tasks", archetype: "board"}` — and
 serves its data at `GET /pages/board`. The core renders it; the module ships **no markup**.
 
-- **Columns** group the **open** tasks **aggregated across every enabled list** by due date:
-  **Overdue**, **Today**, **Upcoming**, **No date** (empty columns are dropped). Each card
-  carries a **category tag** naming the list it came from (ADR-0036). Completing a task removes
-  it from the board, mirroring the provider's open-tasks semantics. Bucketing is a pure
-  function, `build_tasks_board(tasks, today=…, lists=…, default_list_id=…)`, so it is unit-tested
-  without a clock — ISO date strings compare lexicographically, so no parsing is needed.
+- **Columns** group the tasks **aggregated across every enabled list** by the operator's
+  chosen **Group by** dimension (ADR-0049): **Due date** (default — Overdue / Today / Upcoming
+  / No date), **Status**, **Priority**, **List** (one column per category), or **None** (a
+  single flat list). Empty columns are dropped, and each card carries a **category tag** naming
+  the list it came from (ADR-0036). Layout is a pure function,
+  `build_tasks_board(tasks, today=…, group_by=…, scope=…, lists=…, default_list_id=…)`, so it
+  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing.
+- **View controls** (`controls` in the board data) are a **Group by** selector and a **Show**
+  filter (Open / Completed / All), rendered by the shell as a toolbar; changing one re-fetches
+  the page with a forwarded query param (`group` / `show`, each clamped to a known value). The
+  *Show* filter chooses the **scope** the providers read (`open` / `done` / `all`), so the
+  operator can review completed work. Completing an open task removes it from the open view;
+  in the Completed/All views a completed card is struck through (`done: true`) and offers
+  **Reopen** (`tasks_update status=open`) in place of **Complete**.
 - **Mutations are declarative actions** that name an MCP tool; the shell invokes it through
   the core (validated against the manifest) and refetches. Each card offers **Complete**
   (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card),
@@ -233,7 +252,7 @@ and routes to the connected Google list the operator selects, which lives in the
 | `priority` | `VARCHAR(16) \| NULL` | `low` / `medium` / `high`; local-only (added v0.5.0). |
 | `tags` | `TEXT \| NULL` | JSON array of labels; local-only (added v0.5.0). |
 
-Unique constraint on `(tenant_id, id)`. `tasks_list` returns only rows with `completed = FALSE`, ordered by `created_at DESC`.
+Unique constraint on `(tenant_id, id)`. A read's `scope` selects the rows by the `completed` flag (ADR-0049): `open` (the default, `completed = FALSE`), `done` (`completed = TRUE`), or `all` (no filter); all ordered by `created_at DESC`. `tasks_list` always reads the `open` scope; the board's *Show* filter passes the chosen scope.
 
 Schema is created automatically by `TaskStore.init()` at startup, which also **reconciles
 columns added after the table's first release** — there is no migration framework, so `init()`
@@ -273,11 +292,11 @@ Package `epicurus_tasks`:
 | Module | Responsibility |
 | --- | --- |
 | `models.py` | `Task` domain model (provider-neutral). |
-| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list/add/complete/update/delete + `get_task` + `is_available`/`list_collections`). |
+| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default). |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete). |
 | `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038). |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls** and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
 | `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

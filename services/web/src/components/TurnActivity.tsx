@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { Spinner, cn } from "@/components/ui";
 import { readinessProgress, readinessSummary, toolLabel } from "@/lib/activity";
 import type { Readiness } from "@/lib/contracts";
-import type { ToolRun } from "@/stores/chat";
+import type { ActivityItem, ToolRun } from "@/stores/chat";
 
 /* ── thinking (model warm, first token pending) ─────────────────────────── */
 
@@ -76,7 +76,7 @@ function TimelineStep({ run }: { run: ToolRun }) {
   const [open, setOpen] = useState(false);
   const hasDetail = Boolean(run.detail);
   return (
-    <li>
+    <div>
       <button
         type="button"
         onClick={() => hasDetail && setOpen((v) => !v)}
@@ -107,7 +107,7 @@ function TimelineStep({ run }: { run: ToolRun }) {
           {run.detail}
         </pre>
       )}
-    </li>
+    </div>
   );
 }
 
@@ -141,13 +141,11 @@ function ThinkingBlock({ text }: { text: string }) {
 }
 
 export function ProcessTimeline({
-  runs,
-  thinking = "",
+  items,
   collapsed = false,
 }: {
-  runs: ToolRun[];
-  /** The turn's chain-of-thought, shown as a collapsible block above the steps (ADR-0041). */
-  thinking?: string;
+  /** The turn's *process* — thinking blocks and tool steps in chronological order (#300). */
+  items: ActivityItem[];
   /** Fold to the summary header once the answer is flowing; the reader can still toggle. */
   collapsed?: boolean;
 }) {
@@ -158,9 +156,11 @@ export function ProcessTimeline({
     if (!userToggled.current) setOpen(!collapsed);
   }, [collapsed]);
 
-  if (runs.length === 0 && !thinking) return null;
-  const running = runs.some((run) => run.status === "running");
-  const stepLabel = runs.length > 0 ? `${runs.length} step${runs.length > 1 ? "s" : ""}` : "Thought process";
+  if (items.length === 0) return null;
+  const toolCount = items.filter((i) => i.kind === "tool").length;
+  const running = items.some((i) => i.kind === "tool" && i.run.status === "running");
+  const stepLabel =
+    toolCount > 0 ? `${toolCount} step${toolCount > 1 ? "s" : ""}` : "Thought process";
   const toggle = () => {
     userToggled.current = true;
     setOpen((v) => !v);
@@ -174,19 +174,18 @@ export function ProcessTimeline({
         className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs text-ink-dim hover:text-ink"
         aria-expanded={open}
       >
-        {running ? <Spinner className="size-3" /> : runs.length > 0 ? <Wrench size={12} /> : <Brain size={12} />}
+        {running ? <Spinner className="size-3" /> : toolCount > 0 ? <Wrench size={12} /> : <Brain size={12} />}
         <span>{running ? "Working…" : stepLabel}</span>
         <ChevronDown size={12} className={cn("ml-auto transition-transform", open && "rotate-180")} />
       </button>
       {open && (
         <div className="flex flex-col border-t border-edge px-2.5 pb-1">
-          {thinking && <ThinkingBlock text={thinking} />}
-          {runs.length > 0 && (
-            <ol className="flex flex-col">
-              {runs.map((run, i) => (
-                <TimelineStep key={i} run={run} />
-              ))}
-            </ol>
+          {items.map((item, i) =>
+            item.kind === "thinking" ? (
+              <ThinkingBlock key={i} text={item.text} />
+            ) : (
+              <TimelineStep key={i} run={item.run} />
+            ),
           )}
         </div>
       )}

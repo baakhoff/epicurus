@@ -29,11 +29,12 @@ import {
   FilePlus,
   Folder,
   FolderOpen,
+  History,
   Library,
   MoreHorizontal,
   Plus,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -41,7 +42,13 @@ import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/c
 import { ApiError } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
-import type { EditorDoc, EditorScope } from "@/lib/contracts";
+import type { EditorDoc, EditorScope, EditorVersionContent } from "@/lib/contracts";
+import { relativeTime } from "@/lib/format";
+
+/** Idle delay before an unsaved edit is flushed (ADR-0042). Saving re-embeds, so we do NOT
+ *  save on every keystroke — only once the doc has been still this long (plus on leaving the
+ *  page and on explicit Save). Long enough to mean "stopped editing", short enough to be safe. */
+const IDLE_SAVE_MS = 4000;
 
 /** A filesystem-safe, readable slug for a note title (the editor `path`). */
 function slugify(name: string): string {
@@ -458,6 +465,11 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [creatingProject, setCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
 
+  // Version history (ADR-0046): the dropdown's open state and the past version being
+  // previewed (read-only) in place of the live buffer. `null` = editing the current doc.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [viewingVersion, setViewingVersion] = useState<EditorVersionContent | null>(null);
+
   const list = useQuery({
     queryKey: ["module-page", module, pageId, activeScope],
     queryFn: () => api.modulePage(module, pageId, activeScope ? { scope: activeScope } : undefined),
@@ -496,28 +508,115 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     enabled: selectedPath != null && !isNew,
   });
 
-  // Seed the editor buffer when a document loads; track the saved baseline so we
-  // know when there are unsaved changes. Adjust state during render keyed on the
-  // loaded doc's identity (the React-blessed alternative to a setState-in-effect).
-  const [seededDoc, setSeededDoc] = useState<typeof doc.data>(undefined);
-  if (doc.data && doc.data !== seededDoc) {
-    setSeededDoc(doc.data);
+  // Seed the editor buffer when a document opens. Key the seed on the *path*, not the
+  // query object: a background refetch (the list/doc re-reads after an auto-save) hands
+  // back a fresh object that must NOT clobber keystrokes typed since. A document opens
+  // in `preview` — it renders straight away (ADR-0042); the Edit toggle drops to source.
+  // Adjust state during render (the React-blessed alternative to a setState-in-effect).
+  const [seededPath, setSeededPath] = useState<string | null>(null);
+  if (doc.data && selectedPath !== seededPath) {
+    setSeededPath(selectedPath);
     setDraft(doc.data.content);
     setBaseline(doc.data.content);
-    setMode("edit");
+    setMode("preview");
   }
 
   const save = useMutation({
-    mutationFn: () =>
-      api.saveModulePageDoc(module, pageId, toModulePath(selectedPath as string), draft),
-    onSuccess: () => {
-      setBaseline(draft);
-      setIsNew(false);
+    // The path travels with the save (not via a `selectedPath` closure) so a flush fired as
+    // we navigate away still targets the doc the draft belongs to, even though the selection
+    // has already moved on. The path is scope-relative; `toModulePath` prepends the active
+    // knowledge base at the API boundary (#KB-refactor).
+    mutationFn: ({ path, content }: { path: string; content: string }) =>
+      api.saveModulePageDoc(module, pageId, toModulePath(path), content),
+    onSuccess: (_result, { path, content }) => {
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      // Every save snapshots a version (ADR-0046) — refresh the open doc's history.
+      void qc.invalidateQueries({ queryKey: ["module-doc-versions", module, pageId] });
+      // Reconcile the buffer only if we're still on the doc we saved — a leave-flush of the
+      // *previous* doc must not stamp its content onto the now-open one's baseline. Setting
+      // the baseline to exactly what was persisted keeps edits made mid-save dirty.
+      if (path === selectedPath) {
+        setBaseline(content);
+        setIsNew(false);
+      }
+    },
+  });
+
+  // Version history (ADR-0046): the save snapshots are fetched lazily when the History
+  // dropdown opens; viewing one previews it read-only in place of the live buffer.
+  const versioned = Boolean(list.data?.versioned);
+  const versions = useQuery({
+    queryKey: ["module-doc-versions", module, pageId, selectedPath],
+    queryFn: () => api.modulePageDocVersions(module, pageId, selectedPath as string),
+    enabled: historyOpen && versioned && selectedPath != null && !isNew,
+  });
+  const viewVersion = useMutation({
+    mutationFn: (versionId: string) =>
+      api.modulePageDocVersion(module, pageId, selectedPath as string, versionId),
+    onSuccess: (v) => {
+      setViewingVersion(v);
+      setHistoryOpen(false);
     },
   });
 
   const dirty = draft !== baseline;
+  // react-query's `mutate` is referentially stable; depending on it (not the whole `save`
+  // object, which is a new reference every render) keeps timers/callbacks from churning.
+  const { mutate: saveMutate } = save;
+
+  // ── Save policy (ADR-0042) ─────────────────────────────────────────────────
+  // Notes/knowledge re-embed on every save, so we deliberately do NOT save on each
+  // keystroke. A save (and its re-index) happens only when the user (1) leaves the page,
+  // (2) idles — leaves the document unchanged for IDLE_SAVE_MS — or (3) saves explicitly
+  // (the Save button / Ctrl-S). A read-only (watched Obsidian) vault never saves.
+  const readOnly = Boolean(list.data?.read_only);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    savingRef.current = save.isPending;
+  }, [save.isPending]);
+
+  // Latest values for the leave-the-page flushes below — a listener or unmount cleanup
+  // captures a stale closure otherwise. Refreshed after every commit.
+  const flushRef = useRef({ draft, baseline, selectedPath, seededPath, readOnly });
+  useEffect(() => {
+    flushRef.current = { draft, baseline, selectedPath, seededPath, readOnly };
+  });
+  // Persist the buffer iff it has unsaved changes for the path it belongs to. The
+  // `selectedPath === seededPath` guard is the safety: between selecting a document and its
+  // content loading, `draft` still holds the *previous* doc — without it a flush could write
+  // that stale content onto the newly-selected path.
+  const flush = useCallback(() => {
+    const s = flushRef.current;
+    if (
+      s.selectedPath &&
+      s.selectedPath === s.seededPath &&
+      !s.readOnly &&
+      s.draft !== s.baseline &&
+      !savingRef.current
+    ) {
+      saveMutate({ path: s.selectedPath, content: s.draft });
+    }
+  }, [saveMutate]);
+
+  // (2) Idle: flush once the document has gone untouched for IDLE_SAVE_MS.
+  useEffect(() => {
+    if (!selectedPath || selectedPath !== seededPath || readOnly || draft === baseline) return;
+    const id = window.setTimeout(flush, IDLE_SAVE_MS);
+    return () => window.clearTimeout(id);
+  }, [draft, baseline, selectedPath, seededPath, readOnly, flush]);
+
+  // (1) Leave the page: flush when the tab is hidden (closing / backgrounding — the reliable
+  // "about to leave" hook) and on unmount (navigating away from the editor screen).
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      flush();
+    };
+  }, [flush]);
 
   // ── Folder / file tree mutations ──────────────────────────────────────────
 
@@ -637,6 +736,9 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   };
 
   const openDoc = (path: string) => {
+    flush(); // (1) leaving the current document — persist it before switching
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(false);
     setSelectedPath(path);
   };
@@ -645,11 +747,27 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const handleStartNewDocument = () => {
     const taken = new Set(data.docs.map((d) => d.path));
     const slug = uniqueSlug("new-note.md", taken);
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(true);
     setSelectedPath(slug);
     setDraft("");
     setBaseline("");
     setMode("edit");
+  };
+
+  // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
+  // as a new version through the normal path. Confirms first if it would drop unsaved edits.
+  const restoreVersion = () => {
+    if (!viewingVersion || !selectedPath || data.read_only) return;
+    if (dirty && !window.confirm("Restore this version? Unsaved changes will be replaced.")) {
+      return;
+    }
+    const content = viewingVersion.content;
+    setViewingVersion(null);
+    setDraft(content);
+    setMode("preview");
+    save.mutate({ path: selectedPath, content });
   };
 
   // can_create: the existing "New note" flow (used by Notes module)
@@ -660,8 +778,11 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     const folderPrefix = newFileInFolder ? `${newFileInFolder}/` : "";
     const taken = new Set(data.docs.map((d) => d.path));
     const slug = uniqueSlug(folderPrefix + slugify(name), taken);
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(true);
     setSelectedPath(slug);
+    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
     setDraft(`# ${name}\n\n`);
     setBaseline("");
     setMode("edit");
@@ -675,8 +796,11 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setNewFileInFolder(folderPath);
     const taken = new Set(data.docs.map((d) => d.path));
     const slug = uniqueSlug(`${folderPath}/new-note.md`, taken);
+    setViewingVersion(null);
+    setHistoryOpen(false);
     setIsNew(true);
     setSelectedPath(slug);
+    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
     setDraft("");
     setBaseline("");
     setMode("edit");
@@ -754,11 +878,11 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   };
 
   return (
-    <div className="grid h-full min-h-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
+    <div className="grid h-full min-h-0 min-w-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
       {/* document list — hidden on phone once a document is open */}
       <div
         className={cn(
-          "flex min-h-0 flex-col overflow-y-auto border-edge sm:border-r",
+          "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain border-edge sm:border-r",
           selectedPath && "hidden sm:flex",
         )}
       >
@@ -915,7 +1039,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
       </div>
 
       {/* editor — hidden on phone until a document is open */}
-      <div className={cn("flex min-h-0 flex-col", !selectedPath && "hidden sm:flex")}>
+      <div className={cn("flex min-h-0 min-w-0 flex-col", !selectedPath && "hidden sm:flex")}>
         {!selectedPath ? (
           <div className="hidden h-full items-center justify-center sm:flex">
             <EmptyState quote="Select a document to read or edit it." />
@@ -932,14 +1056,15 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           </div>
         ) : (
           <>
-            {/* toolbar */}
-            <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
+            {/* toolbar — pinned above the scrolling body so it never scrolls away */}
+            <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
               <button
                 onClick={() => {
+                  flush(); // (1) leaving the document — persist it before closing
                   setSelectedPath(null);
                   setIsNew(false);
                 }}
-                className="inline-flex items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
+                className="inline-flex shrink-0 items-center gap-1 text-sm text-ink-dim hover:text-ink sm:hidden"
               >
                 <ChevronLeft size={15} /> back
               </button>
@@ -947,42 +1072,120 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 {selectedPath}
                 {isNew && <span className="ml-1 text-ink-faint">(new)</span>}
               </span>
-              {save.data && !save.data.indexed && <Badge tone="warn">saved · not indexed</Badge>}
-              {save.isSuccess && !dirty && save.data?.indexed && <Badge tone="ok">saved</Badge>}
-              {dirty && <span className="text-xs text-ink-faint">unsaved</span>}
-              <div className="inline-flex overflow-hidden rounded-(--radius-field) border border-edge">
-                {(["edit", "preview"] as const).map((m) => (
+              {/* Editing controls — hidden while previewing a past version (ADR-0046). */}
+              {!viewingVersion && (
+                <>
+                  {/* Save status: ADR-0042 keeps this live; the button is an explicit flush. */}
+                  {save.isPending ? (
+                    <span className="shrink-0 text-xs text-ink-faint">Saving…</span>
+                  ) : save.isError ? (
+                    <Badge tone="danger">save failed</Badge>
+                  ) : dirty ? (
+                    <span className="shrink-0 text-xs text-ink-faint">Unsaved…</span>
+                  ) : save.isSuccess && !save.data?.indexed ? (
+                    <Badge tone="warn">saved · not indexed</Badge>
+                  ) : save.isSuccess ? (
+                    <Badge tone="ok">saved</Badge>
+                  ) : null}
+                  <div className="inline-flex shrink-0 overflow-hidden rounded-(--radius-field) border border-edge">
+                    {(["edit", "preview"] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setMode(m)}
+                        className={cn(
+                          "px-2.5 py-1 text-xs transition-colors",
+                          mode === m
+                            ? "bg-accent-dim text-accent-strong"
+                            : "text-ink-dim hover:bg-surface-2",
+                        )}
+                      >
+                        {m === "edit" ? "Edit" : "Preview"}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* History (ADR-0046): browse + restore past saves of this document. */}
+              {versioned && !isNew && (
+                <div className="relative shrink-0">
                   <button
-                    key={m}
-                    onClick={() => setMode(m)}
+                    onClick={() => setHistoryOpen((o) => !o)}
+                    title="Version history"
+                    aria-label="Version history"
                     className={cn(
-                      "px-2.5 py-1 text-xs transition-colors",
-                      mode === m
+                      "inline-flex items-center rounded-(--radius-field) border border-edge px-2 py-1.5 transition-colors",
+                      historyOpen
                         ? "bg-accent-dim text-accent-strong"
                         : "text-ink-dim hover:bg-surface-2",
                     )}
                   >
-                    {m === "edit" ? "Edit" : "Preview"}
+                    <History size={14} />
                   </button>
-                ))}
-              </div>
-              {/* A watched external vault is read-only here (#232) — Obsidian is the author. */}
-              {data.read_only ? (
-                <Badge tone="dim">read-only</Badge>
-              ) : (
-                <Button
-                  variant="primary"
-                  onClick={() => save.mutate()}
-                  disabled={!dirty}
-                  busy={save.isPending}
-                >
-                  Save
-                </Button>
+                  {historyOpen && (
+                    <>
+                      <button
+                        type="button"
+                        aria-hidden
+                        tabIndex={-1}
+                        className="fixed inset-0 z-10 cursor-default"
+                        onClick={() => setHistoryOpen(false)}
+                      />
+                      <div className="absolute right-0 top-full z-20 mt-1 max-h-80 w-72 overflow-y-auto overscroll-contain rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)">
+                        <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">
+                          Version history
+                        </div>
+                        {versions.isLoading ? (
+                          <div className="flex justify-center py-4">
+                            <Spinner />
+                          </div>
+                        ) : versions.isError ? (
+                          <p className="px-3 py-3 text-xs text-ink-dim">Couldn’t load history.</p>
+                        ) : (versions.data?.versions.length ?? 0) === 0 ? (
+                          <p className="px-3 py-3 text-xs text-ink-faint">No past versions yet.</p>
+                        ) : (
+                          versions.data?.versions.map((v) => (
+                            <button
+                              key={v.version_id}
+                              onClick={() => viewVersion.mutate(v.version_id)}
+                              className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-xs hover:bg-surface-2"
+                            >
+                              <span className="text-ink">
+                                {relativeTime(new Date(v.created_at))}
+                              </span>
+                              <span className="shrink-0 text-ink-faint">
+                                {v.size.toLocaleString()} ch
+                              </span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
+
+              {/* A watched external vault is read-only here (#232) — Obsidian is the author. */}
+              {!viewingVersion &&
+                (data.read_only ? (
+                  <Badge tone="dim">read-only</Badge>
+                ) : (
+                  <Button
+                    variant="primary"
+                    className="shrink-0"
+                    onClick={() => save.mutate({ path: selectedPath, content: draft })}
+                    disabled={!dirty}
+                    busy={save.isPending}
+                  >
+                    Save
+                  </Button>
+                ))}
             </div>
 
-            {/* read-only banner: platform docs (reference scope) or an externally-owned vault */}
+            {/* read-only banner: platform docs (reference scope) or an externally-owned vault
+                (#232) — hidden while viewing a past version (ADR-0046). */}
             {data.read_only &&
+              !viewingVersion &&
               (isReferenceScope ? (
                 <div className="border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
                   Platform documentation — read-only reference, bundled with the app.
@@ -994,21 +1197,58 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 </div>
               ))}
 
-            {/* body */}
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {mode === "edit" ? (
+            {/* viewing a past version (ADR-0046): a read-only preview with restore / close */}
+            {viewingVersion && (
+              <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
+                <span>
+                  Viewing a version from{" "}
+                  <span className="text-ink">
+                    {relativeTime(new Date(viewingVersion.created_at))}
+                  </span>{" "}
+                  — read-only.
+                </span>
+                <div className="ml-auto flex shrink-0 items-center gap-2">
+                  {!data.read_only && (
+                    <Button
+                      variant="primary"
+                      className="h-7 px-2.5 py-0 text-xs"
+                      onClick={restoreVersion}
+                      busy={save.isPending}
+                    >
+                      Restore this version
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    className="h-7 px-2.5 py-0 text-xs"
+                    onClick={() => setViewingVersion(null)}
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* body — the sole scroller; `overscroll-contain` keeps a phone's momentum
+                scroll from chaining into the bottom tab bar (the "lower panel") */}
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              {viewingVersion ? (
+                <div className="mx-auto max-w-2xl px-5 py-4">
+                  <Markdown>{viewingVersion.content}</Markdown>
+                </div>
+              ) : mode === "edit" ? (
                 <TextArea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
                     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
                       e.preventDefault();
-                      if (!data.read_only && dirty) save.mutate();
+                      if (!data.read_only && dirty) save.mutate({ path: selectedPath, content: draft });
                     }
                   }}
                   readOnly={data.read_only}
                   spellCheck={false}
-                  className="h-full min-h-full rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
+                  className="h-full min-h-full overscroll-contain rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
                   aria-label={`Edit ${selectedPath}`}
                 />
               ) : (

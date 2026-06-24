@@ -27,6 +27,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from epicurus_core import get_logger
+from epicurus_knowledge.db import VersionStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.refs import (
     doc_title,
@@ -99,6 +100,7 @@ class EditorData(BaseModel):
     scope: str = ""
     scope_noun: str = ""
     can_create_scope: bool = False
+    versioned: bool = True  # True → each save snapshots a version the shell can browse (#ADR-0046)
 
 
 class EditorDocContent(BaseModel):
@@ -123,6 +125,31 @@ class EditorSaveResult(BaseModel):
     chunk_count: int = 0
 
 
+class EditorVersion(BaseModel):
+    """One entry in a document's version history (no body — just the metadata)."""
+
+    version_id: str  # opaque to clients = str(row PK)
+    created_at: str  # ISO-8601
+    title: str  # derived title at that version
+    size: int  # character count of the snapshotted content
+
+
+class EditorVersionList(BaseModel):
+    """A document's full version history, newest first."""
+
+    versions: list[EditorVersion] = Field(default_factory=list)
+
+
+class EditorVersionContent(BaseModel):
+    """One past version's full content, returned when the shell opens it."""
+
+    path: str
+    version_id: str
+    created_at: str
+    title: str
+    content: str
+
+
 class MoveBody(BaseModel):
     """Request body for a file/folder move or rename."""
 
@@ -140,6 +167,8 @@ class VaultPages:
         *,
         read_only: bool = False,
         docs_path: Path | None = None,
+        versions: VersionStore | None = None,
+        tenant: str = "default",
     ) -> None:
         self._vault = vault_path
         self._indexer = indexer
@@ -149,6 +178,11 @@ class VaultPages:
         # The bundled platform docs (read-only), surfaced under the reserved DOCS scope so a
         # service's documentation is readable inside the knowledge base (#KB-refactor, req 3).
         self._docs_path = docs_path
+        # Version history (#ADR-0046): each editor save snapshots content here; viewing
+        # past versions is allowed even when the vault is read-only. ``None`` (tests) just
+        # disables snapshotting — the editor still works.
+        self._versions = versions
+        self._tenant = tenant
 
     def _ensure_writable(self) -> None:
         """Reject a mutating operation when the vault is externally owned (#232, ADR-0035)."""
@@ -269,12 +303,32 @@ class VaultPages:
         target = safe_relative(self._vault, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        indexed = True
+        chunk_count = 0
         try:
             chunk_count = await self._indexer.index_path(rel)
         except Exception as exc:  # the edit is saved; indexing is best-effort here
             log.warning("save succeeded but re-index failed", path=rel, error=str(exc))
-            return EditorSaveResult(path=rel, indexed=False)
-        return EditorSaveResult(path=rel, indexed=True, chunk_count=chunk_count)
+            indexed = False
+        # Snapshot the saved content for version history (#ADR-0046). The file write above
+        # is the source of truth, so record the version even when the re-index failed —
+        # and never let a snapshot failure fail the save.
+        await self._record_version(rel, content)
+        return EditorSaveResult(path=rel, indexed=indexed, chunk_count=chunk_count)
+
+    async def _record_version(self, rel: str, content: str) -> None:
+        """Best-effort: append a version-history snapshot for *rel* (never raises)."""
+        if self._versions is None:
+            return
+        try:
+            await self._versions.add_version(
+                tenant=self._tenant,
+                note_path=rel,
+                title=doc_title(rel),
+                content=content,
+            )
+        except Exception as exc:  # version history is best-effort; the save already landed
+            log.warning("save succeeded but version snapshot failed", path=rel, error=str(exc))
 
     def create_folder(self, rel: str) -> dict[str, str]:
         """Create a directory at *rel* relative to the vault root.
@@ -347,6 +401,53 @@ class VaultPages:
         log.info("item moved", from_path=from_rel, to_path=to_rel)
         return {"path": to_rel}
 
+    async def list_versions(self, rel: str) -> EditorVersionList:
+        """The save-snapshot history for *rel*, newest first (#ADR-0046).
+
+        Viewing history is allowed even when the vault is read-only (watch mode, #232) —
+        only *writing* the vault is refused there. The path is still validated through
+        :func:`~epicurus_knowledge.refs.safe_relative`.
+        """
+        safe_relative(self._vault, rel)  # validate the path (400 on traversal / non-md)
+        if self._versions is None:
+            return EditorVersionList()
+        records = await self._versions.list_versions(tenant=self._tenant, note_path=rel)
+        return EditorVersionList(
+            versions=[
+                EditorVersion(
+                    version_id=r.version_id,
+                    created_at=r.created_at.isoformat(),
+                    title=r.title,
+                    size=r.size,
+                )
+                for r in records
+            ]
+        )
+
+    async def get_version(self, rel: str, version_id: str) -> EditorVersionContent:
+        """One past version's full content; 404 when the version does not exist (#ADR-0046).
+
+        Allowed on a read-only vault (viewing, not writing). The path is validated through
+        :func:`~epicurus_knowledge.refs.safe_relative`.
+        """
+        safe_relative(self._vault, rel)  # validate the path (400 on traversal / non-md)
+        record = (
+            None
+            if self._versions is None
+            else await self._versions.get_version(
+                tenant=self._tenant, note_path=rel, version_id=version_id
+            )
+        )
+        if record is None or record.content is None:
+            raise HTTPException(status_code=404, detail=f"no such version: {version_id}")
+        return EditorVersionContent(
+            path=rel,
+            version_id=record.version_id,
+            created_at=record.created_at.isoformat(),
+            title=record.title,
+            content=record.content,
+        )
+
 
 def create_pages_router(pages: VaultPages) -> APIRouter:
     """The HTTP surface the core proxies for the editor page (ADR-0018)."""
@@ -379,6 +480,20 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
     async def put_doc(page_id: str, body: DocBody, path: str = Query(...)) -> EditorSaveResult:
         _require_known_page(page_id)
         return await pages.write_doc(path, body.content)
+
+    @router.get("/pages/{page_id}/doc/versions", response_model=EditorVersionList)
+    async def get_doc_versions(page_id: str, path: str = Query(...)) -> EditorVersionList:
+        # Listing history is allowed even for a read-only (watched) vault — viewing only.
+        _require_known_page(page_id)
+        return await pages.list_versions(path)
+
+    @router.get("/pages/{page_id}/doc/version", response_model=EditorVersionContent)
+    async def get_doc_version(
+        page_id: str, path: str = Query(...), version: str = Query(...)
+    ) -> EditorVersionContent:
+        # Fetching a past version is allowed even for a read-only (watched) vault.
+        _require_known_page(page_id)
+        return await pages.get_version(path, version)
 
     @router.post("/pages/{page_id}/folder")
     async def post_folder(page_id: str, path: str = Query(...)) -> dict[str, str]:

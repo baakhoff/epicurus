@@ -29,7 +29,7 @@ class _FakeMcp:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any], str]] = []
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
         self.calls.append((name, arguments, url))
         return "ran"
 

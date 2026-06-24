@@ -311,3 +311,95 @@ async def test_router_folder_and_move_roundtrip() -> None:
     assert client.delete("/pages/notes/doc", params={"path": "proj/renamed"}).status_code == 204
     assert client.delete("/pages/notes/folder", params={"path": "proj"}).status_code == 204
     assert client.get("/pages/notes").json()["docs"] == []
+
+
+# ── version history (ADR-0046) ────────────────────────────────────────────────
+
+
+async def test_editor_data_is_versioned() -> None:
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    data = await pages.list_docs()
+    assert data.versioned is True
+
+
+async def test_write_records_versions_newest_first() -> None:
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    await pages.write_doc("n", "# One")
+    await pages.write_doc("n", "# Two")
+
+    listed = await pages.list_versions("n")
+    assert [v.title for v in listed.versions] == ["Two", "One"]
+    assert all(v.size > 0 for v in listed.versions)
+
+
+async def test_write_dedups_identical_resave() -> None:
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    await pages.write_doc("n", "# Same")
+    await pages.write_doc("n", "# Same")
+    assert len((await pages.list_versions("n")).versions) == 1
+
+
+async def test_write_still_versions_when_index_fails() -> None:
+    # The save committed even though the embed failed, so the snapshot must exist.
+    pages = NotesPages(await _store(), _FakeIndexer(fail=True), tenant=TENANT)
+    result = await pages.write_doc("n", "kept")
+    assert result.indexed is False
+    assert len((await pages.list_versions("n")).versions) == 1
+
+
+async def test_get_version_returns_content_then_404_for_unknown() -> None:
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    await pages.write_doc("n", "# Body\n\ntext")
+    [summary] = (await pages.list_versions("n")).versions
+
+    fetched = await pages.get_version("n", summary.version_id)
+    assert fetched.content == "# Body\n\ntext"
+    assert fetched.version_id == summary.version_id
+    assert fetched.path == "n"
+
+    with pytest.raises(HTTPException) as err:
+        await pages.get_version("n", "404404")
+    assert err.value.status_code == 404
+    with pytest.raises(HTTPException) as garbage:
+        await pages.get_version("n", "not-an-int")
+    assert garbage.value.status_code == 404
+
+
+async def test_version_router_roundtrip() -> None:
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    client = _client(pages)
+    client.put("/pages/notes/doc", params={"path": "idea"}, json={"content": "# First"})
+    client.put("/pages/notes/doc", params={"path": "idea"}, json={"content": "# Second"})
+
+    versions = client.get("/pages/notes/doc/versions", params={"path": "idea"})
+    assert versions.status_code == 200
+    body = versions.json()["versions"]
+    assert [v["title"] for v in body] == ["Second", "First"]
+
+    newest_id = body[0]["version_id"]
+    fetched = client.get("/pages/notes/doc/version", params={"path": "idea", "version": newest_id})
+    assert fetched.status_code == 200
+    assert fetched.json()["content"] == "# Second"
+
+    missing = client.get("/pages/notes/doc/version", params={"path": "idea", "version": "999999"})
+    assert missing.status_code == 404
+
+
+async def test_version_router_unknown_page_is_404() -> None:
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    resp = _client(pages).get("/pages/ghost/doc/versions", params={"path": "x"})
+    assert resp.status_code == 404
+
+
+async def test_versions_are_tenant_isolated() -> None:
+    store = await _store()
+    pages_a = NotesPages(store, _FakeIndexer(), tenant="tenant-a")
+    pages_b = NotesPages(store, _FakeIndexer(), tenant="tenant-b")
+    await pages_a.write_doc("shared", "# A only")
+    [v] = (await pages_a.list_versions("shared")).versions
+
+    # tenant-b sees none of tenant-a's versions and cannot fetch one by id.
+    assert (await pages_b.list_versions("shared")).versions == []
+    with pytest.raises(HTTPException) as err:
+        await pages_b.get_version("shared", v.version_id)
+    assert err.value.status_code == 404

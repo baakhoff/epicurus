@@ -18,7 +18,7 @@ from typing import Any, Literal
 import httpx
 
 from epicurus_core import Collection, PlatformClient
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import Task, TaskScope
 
 _TASKS_BASE = "https://tasks.googleapis.com/tasks/v1"
 _DEFAULT_LIST = "@default"
@@ -117,15 +117,28 @@ class GoogleTasksProvider:
             # priority and tags are local-only; Google has no equivalent fields.
         )
 
-    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
-        """Return incomplete tasks from the specified (or default) Google task list."""
+    async def list_tasks(
+        self, tenant_id: str, *, list_id: str | None = None, scope: TaskScope = "open"
+    ) -> list[Task]:
+        """Return tasks from the specified (or default) Google task list, filtered by *scope*.
+
+        ``"open"`` (default) asks Google for incomplete tasks only; ``"done"`` / ``"all"``
+        request completed (and hidden) tasks too — Google only surfaces completed tasks when
+        ``showCompleted`` *and* ``showHidden`` are set, since it auto-hides them. For
+        ``"done"`` the completed subset is kept client-side (ADR-0049).
+        """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
+        params = (
+            {"showCompleted": "false", "showHidden": "false"}
+            if scope == "open"
+            else {"showCompleted": "true", "showHidden": "true"}
+        )
         async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
             resp = await client.get(
                 f"/lists/{tasklist}/tasks",
                 headers=self._auth_headers(token),
-                params={"showCompleted": "false", "showHidden": "false"},
+                params=params,
             )
             if resp.status_code == 401:
                 raise GoogleTasksError(
@@ -133,7 +146,10 @@ class GoogleTasksProvider:
                 )
             resp.raise_for_status()
             items: list[dict[str, Any]] = resp.json().get("items", [])
-        return [self._parse_task(item) for item in items]
+        tasks = [self._parse_task(item) for item in items]
+        if scope == "done":
+            tasks = [t for t in tasks if t.status == "done"]
+        return tasks
 
     async def add_task(
         self,

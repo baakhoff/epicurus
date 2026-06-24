@@ -90,6 +90,51 @@ async def test_list_tasks(provider: GoogleTasksProvider) -> None:
     assert not t.completed
 
 
+async def test_list_open_scope_asks_google_for_incomplete(provider: GoogleTasksProvider) -> None:
+    """Default scope requests incomplete tasks only (ADR-0049)."""
+    client = _tasks_client({"items": [_GOOGLE_TASK]})
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        await provider.list_tasks(TENANT)
+    assert client.get.call_args.kwargs["params"] == {
+        "showCompleted": "false",
+        "showHidden": "false",
+    }
+
+
+async def test_list_done_scope_requests_and_filters_completed(
+    provider: GoogleTasksProvider,
+) -> None:
+    """scope="done" asks Google for completed+hidden tasks and keeps only completed ones."""
+    items = [
+        {"id": "open-1", "title": "Open", "status": "needsAction"},
+        {
+            "id": "done-1",
+            "title": "Done",
+            "status": "completed",
+            "completed": "2025-06-14T10:00:00Z",
+        },
+    ]
+    client = _tasks_client({"items": items})
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        tasks = await provider.list_tasks(TENANT, scope="done")
+    assert client.get.call_args.kwargs["params"] == {"showCompleted": "true", "showHidden": "true"}
+    assert [t.id for t in tasks] == ["done-1"]
+    assert tasks[0].completed
+
+
+async def test_list_all_scope_keeps_open_and_completed(provider: GoogleTasksProvider) -> None:
+    """scope="all" requests completed+hidden too and keeps everything."""
+    items = [
+        {"id": "open-1", "title": "Open", "status": "needsAction"},
+        {"id": "done-1", "title": "Done", "status": "completed"},
+    ]
+    client = _tasks_client({"items": items})
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        tasks = await provider.list_tasks(TENANT, scope="all")
+    assert client.get.call_args.kwargs["params"] == {"showCompleted": "true", "showHidden": "true"}
+    assert {t.id for t in tasks} == {"open-1", "done-1"}
+
+
 async def test_list_tasks_empty(provider: GoogleTasksProvider) -> None:
     with patch(
         "epicurus_tasks.google_provider.httpx.AsyncClient",

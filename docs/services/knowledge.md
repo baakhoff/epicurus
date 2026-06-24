@@ -82,9 +82,10 @@ No module code runs in the shell; all data flows through the core.
 The module contributes a **Knowledge** left-nav page — an Obsidian-style browse-and-edit
 view with nested folder management, declared as a `pages` entry
 `{id: "vault", archetype: "editor"}`. The **core renders** the editor from its bounded
-vocabulary (a knowledge-base switcher, a document/folder tree, a markdown source/preview
-editor, a save button, CRUD controls); the module ships **no markup** and only supplies
-data over the endpoints the core proxies.
+vocabulary (a knowledge-base switcher, a document/folder tree, a markdown editor that
+**opens rendered** and **saves on leave / idle / explicit Save** — not per keystroke, since
+each save re-embeds (ADR-0042) — a save button, CRUD controls); the module ships **no
+markup** and only supplies data over the endpoints the core proxies.
 
 **Projects / scopes (#KB-refactor).** The page is scoped to one **knowledge base** (project)
 at a time. `EditorData` carries the list of selectable scopes and which is active:
@@ -111,7 +112,8 @@ documentation is browsable alongside the operator's notes. It is listed in `scop
 that targets it is refused (**409**). The `__docs__` id is `_`-prefixed, which a real
 project name can never be (`safe_project`), so the path scheme stays unambiguous.
 
-Saving a document writes it back to the knowledge base and **re-indexes just that file** into
+Saving a document — on leaving the page, after it idles, or on an explicit Save (ADR-0042) —
+writes it back to the knowledge base and **re-indexes just that file** into
 `<tenant>__knowledge`, so an edit made in the shell is immediately retrievable by the
 agent (knowledge is agent-retrievable by default — contrast the Notes module). The
 editor component is **core-owned and shared**; Notes reuses it.
@@ -122,10 +124,10 @@ own Obsidian vault should mount it writable by the container user (uid 10001).
 
 **Read-only when the vault is externally owned (#232, ADR-0035).** With a watched external
 vault (`VAULT_WATCH=true`, see *Live vault sync* below) the page returns `read_only: true`
-and `can_manage_files: false`: the shell hides Save and the file-tree controls and shows a
-read-only banner, and every write endpoint (save, folder create, doc/folder delete, move,
-new knowledge base) returns **409**. Obsidian is the sole author; edits made there sync to
-disk and re-index automatically.
+and `can_manage_files: false`: the shell hides Save and the file-tree controls, **never
+auto-saves**, and shows a read-only banner, and every write endpoint (save, folder create,
+doc/folder delete, move, new knowledge base) returns **409**. Obsidian is the sole author;
+edits made there sync to disk and re-index automatically.
 
 **File-tree management (#216).** The Knowledge page sets `can_manage_files: true` in its
 `EditorData` response; the shell then shows CRUD controls over the tree — creating nested
@@ -133,6 +135,21 @@ folders, creating documents inside any folder, deleting files or empty folders, 
 renaming documents. Operations are gated by path-safety validation in `refs.py` (same
 `..`-traversal and symlink-escape checks as the document editor). Notes sets this flag
 `false` — it uses the separate `can_create` authoring flow instead.
+
+**Version history (#ADR-0046).** The Knowledge page is `versioned: true` in its `EditorData`
+response: **every editor save snapshots the document's content** into the
+`knowledge_versions` table (see *Data model*), so the shell can browse and **restore** a
+prior revision. Restore is **client-side** — the shell fetches a past version's content via
+the version endpoint and re-saves it through the normal `PUT .../doc` path (which snapshots
+again); the module exposes **no** restore endpoint. Consecutive byte-identical saves are
+**deduplicated** (an idle/blur auto-save that changed nothing adds no row), and the newest
+**50** versions per `(tenant, path)` are retained — older snapshots are pruned. Recording a
+snapshot is best-effort and never fails a save: the file write is the source of truth, so a
+version is recorded even if the re-index failed. Viewing history (`GET .../doc/versions`,
+`GET .../doc/version`) is allowed even on a **read-only (watched) vault** — but because every
+write 409s there (#232), **external/watched-vault edits are not versioned in v1**: only
+in-app editor saves accrue history. Browse the list newest-first; each entry carries an
+opaque `version_id`, the snapshot `title`, its `created_at`, and its `size`.
 
 ### Suggestions page (`review` archetype, ADR-0033, #220)
 
@@ -221,10 +238,12 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
-| `GET /pages/{page_id}?scope=<id>` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only, scopes:[{id, title, kind}], scope, scope_noun, can_create_scope}` (page id `vault`). `scope` selects the knowledge base (empty = the first project, or the reserved `__docs__` for the read-only platform docs). `type` is `"file"` or `"dir"`; `docs` paths are scope-relative. `can_manage_files: true` enables folder CRUD; `read_only: true` (watch mode #232, or the `__docs__` scope) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
+| `GET /pages/{page_id}?scope=<id>` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only, versioned, scopes:[{id, title, kind}], scope, scope_noun, can_create_scope}` (page id `vault`). `scope` selects the knowledge base (empty = the first project, or the reserved `__docs__` for the read-only platform docs). `type` is `"file"` or `"dir"`; `docs` paths are scope-relative. `can_manage_files: true` enables folder CRUD; `versioned: true` enables save-history browse/restore (#ADR-0046); `read_only: true` (watch mode #232, or the `__docs__` scope) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `POST /pages/{page_id}/project?name=<name>` | Create a new knowledge base — a top-level folder under the knowledge root → `{id, title, kind}` (#KB-refactor). 409 if it already exists, 400 for an invalid name (single segment, no separators / `..` / `.`/`_` prefix). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/project`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is scope-relative and strictly confined (no traversal, `.md` only); a `__docs__/…` path reads the read-only platform docs. |
-| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. **409** when the vault is externally owned (watch mode, #232) or the path targets the read-only `__docs__` scope; the folder/delete/move write routes behave likewise. |
+| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it, and records a version-history snapshot (#ADR-0046, see *Version history* below). The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. **409** when the vault is externally owned (watch mode, #232) or the path targets the read-only `__docs__` scope; the folder/delete/move write routes behave likewise. |
+| `GET /pages/{page_id}/doc/versions?path=<rel>` | A document's save-snapshot history (#ADR-0046), newest first → `{versions:[{version_id, created_at, title, size}]}`. `version_id` is opaque; `size` is the snapshot's character count. Allowed even when the vault is read-only (viewing history is not a write). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}/doc/versions`. |
+| `GET /pages/{page_id}/doc/version?path=<rel>&version=<version_id>` | One past version's full content → `{path, version_id, created_at, title, content}`. 404 if the version is unknown (a non-integer `version_id` is treated as not-found, never a 500). Allowed when read-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}/doc/version`. |
 | `POST /pages/{page_id}/folder?path=<rel>` | Create a directory at `path` → `{path}`. 409 if the directory already exists. Path goes through `safe_dir_relative` (no `..`, no absolute). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
 | `DELETE /pages/{page_id}/doc?path=<rel>` | Delete a `.md` file. 404 if absent. 400 for path-safety violations. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/doc`. |
 | `DELETE /pages/{page_id}/folder?path=<rel>` | Delete an **empty** directory. 409 if not empty, 404 if absent. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
@@ -410,6 +429,11 @@ access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-syn
   removed on approve (after the change is applied) or reject; the table only ever holds
   pending suggestions. The `to_path` column is added in place at init on a pre-#KB-refactor
   deployment (the store uses `create_all`, no migration tool — mirrors `storage_files`).
+- **Postgres `knowledge_versions`** — editor-save content snapshots (#ADR-0046): `id` (PK,
+  also the opaque `version_id`), `tenant`, `note_path`, `title`, `content` (Text — full
+  snapshot), `created_at`; indexed on `(tenant, note_path)`. One row per distinct save
+  (consecutive identical saves deduplicated); pruned to the newest 50 per `(tenant,
+  note_path)`. Shares the index ledgers' engine; created by `VersionStore.init()`.
 - **Qdrant `<tenant>__knowledge`** — vault chunk embeddings (cosine), one collection per tenant.
 - **Qdrant `<tenant>__docs`** — platform-docs + module-docs chunk embeddings (cosine), one
   collection per tenant. Module-doc points use a distinct UUID namespace from platform-doc
@@ -438,12 +462,12 @@ Package `epicurus_knowledge`:
 | Module | Responsibility |
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
-| `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
+| `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. Also `knowledge_versions` (`VersionStore`): editor-save content snapshots with dedup + 50-version retention (#ADR-0046). |
 | `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; a run-lock serialises full passes so the watcher (#232) and startup index never overlap. |
 | `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
 | `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). Started by `app.py` when `VAULT_WATCH=true`. |
 | `service.py` | MCP tools — read-only navigation (`knowledge_search` → entity-ref chips, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`), `knowledge_reindex`, and the propose tools that stage suggestions (`knowledge_propose_edit` create/update/delete, `knowledge_propose_move`, `knowledge_propose_rename` (rename-in-place → a `move` suggestion), `knowledge_propose_folder`, `knowledge_propose_project` — #KB-refactor / #220) + manifest UI + the `editor` and `review` page specs. |
-| `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. |
+| `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |
 | `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store (with the added `to_path` column), `SuggestionReview` (diff + apply on approve / discard on reject, across create/update/delete/move/mkdir/mkproject; approve takes optional per-hunk `content` — #KB-refactor), and `create_review_router`. Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
 | `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories, `safe_project` for a knowledge-base name) + walks (`iter_md_files`, `iter_tree_nodes`, `iter_projects`). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |

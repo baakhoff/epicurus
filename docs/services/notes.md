@@ -83,11 +83,12 @@ The module is an **attachment source** (`attachable: true`) — the only path fr
 
 The module contributes a **Notes** left-nav page — declared as a `pages` entry
 `{id: "notes", archetype: "editor"}`. The **core renders** the editor (a document/folder
-tree, a markdown source/preview editor, Save, and — because the page sets `can_manage_files`
-— the file-management controls: **New document**, **New folder**, new-file-in-folder,
-rename, delete); the module ships **no markup** and only supplies data over the endpoints the
-core proxies. Saving to a new slug **creates** the note; saving an existing one updates it.
-Each save re-indexes the note into `<tenant>__notes`.
+tree, a markdown editor that **opens rendered** and **saves on leave / idle / explicit Save**
+— not per keystroke, since each save re-embeds (ADR-0042) — and — because the page sets
+`can_manage_files` — the file-management controls: **New document**, **New folder**,
+new-file-in-folder, rename, delete); the module ships **no markup** and only supplies data
+over the endpoints the core proxies. Saving to a new slug **creates** the note; saving an
+existing one updates it. Each save re-indexes the note into `<tenant>__notes`.
 
 The shared `EditorView` is **core-owned**; notes reuses it (knowledge is the other user).
 The note **title** is derived from the body (its first heading / line), so the
@@ -151,6 +152,13 @@ Pending suggestions are stored in `notes_suggestions` (tenant-scoped — see *Da
 The review router is registered **before** the editor pages router so its literal
 `/pages/review` route wins over the editor's `/pages/{page_id}` path parameter.
 
+**Version history (ADR-0046).** The page is **versioned** (`versioned: true`): every save
+snapshots the note's body, and the shell offers a **browse + restore past versions**
+affordance. A byte-identical re-save is deduped (no new snapshot), and history is bounded to
+the newest **50** versions per note. **Restore is client-side** — the shell fetches a past
+version and re-saves its content through the normal save path; the module exposes **no
+restore endpoint**.
+
 ### Events (NATS)
 
 Emits **`<tenant>.notes.saved`** (`{slug}`) after a note is saved and indexed.
@@ -174,7 +182,9 @@ data flows through the core.
 | `GET /status` | Live stats `{note_count, last_updated_at}`. Proxied at `GET /platform/v1/modules/notes/status`. |
 | `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files: true}` (page id `notes`). Dir nodes (`type: "dir"`) come from `note_folders` ∪ slug prefixes, emitted parent-first before file nodes. |
 | `GET /pages/{page_id}/doc?path=<slug>` | One note's content `{path, title, content}`. |
-| `PUT /pages/{page_id}/doc?path=<slug>` | Save (create-on-absent) `{content}` → `{path, indexed, chunk_count}`. The note is the source of truth — a failed re-index returns `indexed: false`, never losing the write. |
+| `PUT /pages/{page_id}/doc?path=<slug>` | Save (create-on-absent) `{content}` → `{path, indexed, chunk_count}`. The note is the source of truth — a failed re-index returns `indexed: false`, never losing the write. Each save also snapshots the body for version history (ADR-0046). |
+| `GET /pages/{page_id}/doc/versions?path=<slug>` | A note's past versions, newest first → `{versions:[{version_id, created_at, title, size}]}` (ADR-0046, capped at 50). |
+| `GET /pages/{page_id}/doc/version?path=<slug>&version=<version_id>` | One past version's full content → `{path, version_id, created_at, title, content}`; 404 if it is not that note's version. |
 | `POST /pages/{page_id}/folder?path=<dir>` | Create an empty folder → `{path}`. 409 if it exists, 400 if the path is invalid. |
 | `DELETE /pages/{page_id}/doc?path=<slug>` | Delete a note (row + vectors + `.md` mirror). 404 if absent. Used by an approved `delete` and the editor's delete control. |
 | `DELETE /pages/{page_id}/folder?path=<dir>` | Delete an **empty** folder. 409 if a note or child folder lives under it, 404 if it doesn't exist. |
@@ -238,6 +248,9 @@ see [storage](storage.md)).
   `path`, `created_at`; unique on `(tenant, path)`. A folder is normally *implied* by a note
   slug containing `/`; this table makes an **empty** folder exist on its own so it survives a
   reload. Folders are derived from the union of these rows and every slug's prefixes.
+- **Postgres `note_versions`** — immutable per-save snapshots (ADR-0046): `id` (the opaque
+  `version_id`), `tenant`, `slug`, `title`, `content`, `created_at`; indexed on
+  `(tenant, slug)`. Deduped on the newest body and pruned to the latest 50 per note.
 - **Postgres `notes_suggestions`** — pending agent-proposed note changes (ADR-0033):
   `id`, `tenant`, `sid` (opaque uuid), `slug`, `operation`
   (`create`/`update`/`append`/`delete`), `proposed_content` (the full body for
@@ -272,10 +285,10 @@ Package `epicurus_notes`:
 | Module | Responsibility |
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
-| `db.py` | The `notes` table + CRUD (`NotesStore`) — the source of truth — and the `note_folders` table + CRUD (`NoteFolderStore`) for explicit/empty folders (#KB-refactor). |
+| `db.py` | The `notes` + `note_versions` tables + CRUD (`NotesStore`) — the source of truth, incl. version snapshots (ADR-0046) — and the `note_folders` table + CRUD (`NoteFolderStore`) for explicit/empty folders (#KB-refactor). |
 | `indexer.py` | Chunk + embed + upsert into `<tenant>__notes` (`NotesIndexer`); no search method (private + attach-only). |
 | `mirror.py` | The read-only `.md` mirror to the shared file space (#KB-refactor): `NotesMirror` (slug-confined `write` per save, `delete` on note removal, and a one-time `backfill`), best-effort throughout. |
-| `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + re-index), `delete_doc`, and the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following). |
+| `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + version snapshot + re-index), `delete_doc`, the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following), and `list_versions`/`get_version` (ADR-0046). |
 | `suggestions.py` | The `review` page surface (ADR-0033): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional per-hunk `content`), and `create_note_review_router`. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |
 | `service.py` | The manifest — `pages` (editor + review), `attachable`, the `notes.saved` event, and the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no read tool**). |

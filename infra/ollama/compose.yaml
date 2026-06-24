@@ -10,12 +10,28 @@ services:
   ollama:
     image: ollama/ollama:0.30.7
     restart: unless-stopped
+    # Source the core-managed env file (KV-cache type, #307) on every (re)start, then run the
+    # server. This is what lets a plain `docker restart` actually apply the choice — env is
+    # otherwise fixed at container create. The file (in the shared volume below) is absent until
+    # the operator picks a non-default type; until then the `environment:` defaults apply.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'set -a; [ -f /etc/epicurus/ollama.env ] && . /etc/epicurus/ollama.env; set +a; exec /bin/ollama serve'
     environment:
       # Unload a model this long after its last use to free memory / VRAM at idle
       # (ADR-0005). The core also sets keep_alive per request.
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      # KV-cache quantization defaults — trade a little quality for much less VRAM at long
+      # contexts (ADR-0046). Read at startup; these are the baseline, overridden by the
+      # core-managed env file when the operator picks a type on the Models page (#307, which
+      # writes the file + restarts this container to apply). q8_0 / q4_0 need flash attention.
+      OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-0}
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-f16}
     volumes:
       - ollama-models:/root/.ollama
+      # Read-only here; the core (RW) writes ollama.env to apply the KV-cache choice (#307).
+      - ollama-runtime:/etc/epicurus:ro
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -26,3 +42,6 @@ services:
 
 volumes:
   ollama-models:
+  # Shared with core-app (which mounts it read-write): the core-managed Ollama start-up env
+  # file (KV-cache type) the entrypoint sources, so the choice survives reconciles (#307).
+  ollama-runtime:

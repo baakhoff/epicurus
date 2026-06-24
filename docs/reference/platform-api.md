@@ -46,6 +46,10 @@ No provider key ever leaves the core.
    persisted in `llm_prefs`; #214).
 3. `MEMORY_EMBED_MODEL` env setting (`nomic-embed-text` by default).
 
+Once the embedding model is chosen, any **per-model settings** the operator set for it
+(context window, keep-alive — `PUT /platform/v1/llm/model-settings`, ADR-0044) are applied as
+Ollama runtime options. With nothing set, the embed call is unchanged.
+
 **Request body**
 
 | Field | Type | Required | Meaning |

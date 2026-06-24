@@ -24,9 +24,11 @@ import litellm
 
 from epicurus_core import EventBus, SecretError, SecretStore, get_logger
 from epicurus_core_app.llm import providers as registry
+from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import (
     ChatMessage,
     ChatResult,
+    ModelDetails,
     ModelInfo,
     ProviderInfo,
     StreamEvent,
@@ -68,6 +70,7 @@ class LlmGateway:
         top_p: float | None = None,
         num_ctx: int | None = None,
         prefs: LlmPrefsStore | None = None,
+        model_settings: ModelSettingsStore | None = None,
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
@@ -83,6 +86,7 @@ class LlmGateway:
         self._top_p = top_p
         self._num_ctx = num_ctx
         self._prefs = prefs
+        self._model_settings = model_settings
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         """The active default model: the stored pref if set, else the env default."""
@@ -119,6 +123,31 @@ class LlmGateway:
             if stored is not None:
                 return stored
         return self._num_ctx
+
+    async def _settings_for(self, model: str, tenant_id: str | None) -> ModelSettings:
+        """The operator's per-model settings for ``model`` (empty when none apply).
+
+        The store is keyed by the name the runtime reports (e.g. ``llama3.2:latest``), but a
+        request may name the model bare (``llama3.2``) or vice-versa. Match loosely: exact
+        name, then bare name, then the family (everything before the ``:tag``) — so a single
+        sheet edit reliably reaches the model however it's addressed. Hosted ids carry a
+        ``provider/`` prefix which we strip before matching (these settings are local-only).
+        """
+        if self._model_settings is None:
+            return ModelSettings()
+        stored = await self._model_settings.list(tenant_id or self._default_tenant)
+        if not stored:
+            return ModelSettings()
+        bare = model.split("/", 1)[-1]
+        if model in stored:
+            return stored[model]
+        if bare in stored:
+            return stored[bare]
+        family = bare.split(":", 1)[0]
+        for key, settings in stored.items():
+            if key.split(":", 1)[0] == family:
+                return settings
+        return ModelSettings()
 
     async def model_readiness(
         self, model: str | None = None, *, tenant_id: str | None = None
@@ -162,25 +191,35 @@ class LlmGateway:
         _, provider = registry.resolve(model)
         return not (self._power.paused and provider.is_local)
 
-    async def _call_config(
-        self, model: str, tenant_id: str | None, *, num_ctx: int | None = None
-    ) -> dict[str, Any]:
+    async def _call_config(self, model: str, tenant_id: str | None) -> dict[str, Any]:
         """The LiteLLM call kwargs (model, endpoint, key, tuning) for ``model``.
 
-        For hosted providers the API key is fetched from OpenBao at call time and is
-        never logged. Tuning knobs (temperature/top_p, plus local-only num_ctx and
-        keep_alive) come from settings, so they need no code edit to change. ``num_ctx``
-        is resolved per turn by the caller (the operator's Context-window pref, else the
-        env default); it is an Ollama runtime option applied to local models only.
+        For hosted providers the API key is fetched from OpenBao at call time and is never
+        logged. For local models the Ollama runtime options are resolved **per this model**:
+        ``num_ctx`` from the operator's per-model setting, else the global context-window
+        pref, else the env default; ``keep_alive`` from the per-model setting, else the env
+        default. So a small model and a large one can carry different context windows and
+        keep-alives. Sampling knobs (temperature/top_p) come from settings.
         """
         litellm_model, provider = registry.resolve(model)
         config: dict[str, Any] = {"model": litellm_model}
         if provider.is_local:
             config["api_base"] = self._ollama_url
-            config["keep_alive"] = self._keep_alive
+            settings = await self._settings_for(model, tenant_id)
+            num_ctx = settings.context_window
+            if num_ctx is None:
+                num_ctx = await self.effective_context_window(tenant_id)
             # num_ctx is an Ollama runtime option — local models only.
             if num_ctx is not None:
                 config["num_ctx"] = num_ctx
+            config["keep_alive"] = settings.keep_alive or self._keep_alive
+            # device → Ollama num_gpu (layers offloaded to the GPU): "cpu" = 0 (all CPU),
+            # "gpu" = 999 (all layers; the runtime clamps to the model's count), "auto"/unset
+            # = omit so the runtime decides. Lets the operator pin where a model runs (#293).
+            if settings.device == "cpu":
+                config["num_gpu"] = 0
+            elif settings.device == "gpu":
+                config["num_gpu"] = 999
         if provider.secret_path is not None:
             tenant = tenant_id or self._default_tenant
             secret = await self._secrets.get(provider.secret_path, tenant)
@@ -201,9 +240,8 @@ class LlmGateway:
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None,
         tenant_id: str | None,
-        num_ctx: int | None,
     ) -> ChatResult:
-        config = await self._call_config(model, tenant_id, num_ctx=num_ctx)
+        config = await self._call_config(model, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -248,13 +286,12 @@ class LlmGateway:
     ) -> ChatResult:
         """Return a completion, walking the fallback chain on failure."""
         resolved = model or await self.effective_default(tenant_id)
-        num_ctx = await self.effective_context_window(tenant_id)
         last_error: Exception | None = None
         for candidate in self._candidates(resolved):
             if not self._is_available(candidate):
                 continue
             try:
-                return await self._complete(candidate, messages, tools, tenant_id, num_ctx)
+                return await self._complete(candidate, messages, tools, tenant_id)
             except Exception as exc:  # provider/call error -> try the next candidate
                 last_error = exc
                 log.warning("llm call failed; trying next", model=candidate, error=str(exc))
@@ -274,8 +311,7 @@ class LlmGateway:
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
-        num_ctx = await self.effective_context_window(tenant_id)
-        config = await self._call_config(candidate, tenant_id, num_ctx=num_ctx)
+        config = await self._call_config(candidate, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -314,8 +350,7 @@ class LlmGateway:
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
-        num_ctx = await self.effective_context_window(tenant_id)
-        config = await self._call_config(candidate, tenant_id, num_ctx=num_ctx)
+        config = await self._call_config(candidate, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -414,16 +449,33 @@ class LlmGateway:
     async def embed(
         self, texts: list[str], *, model: str | None = None, tenant_id: str | None = None
     ) -> list[list[float]]:
-        """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``)."""
+        """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``).
+
+        The embedding model gets the same per-model settings sheet as a chat model: when the
+        operator has set a context window or keep-alive for it, those are passed as Ollama
+        runtime options (LiteLLM drops them if the runtime doesn't take them). With nothing
+        set, the call is unchanged — embeddings stay opt-in, never silently retuned.
+        """
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
         resolved = model or await self.effective_embed_default(tenant_id)
         embed_model = f"ollama/{resolved}"
+        settings = await self._settings_for(resolved, tenant_id)
+        options: dict[str, Any] = {}
+        if settings.context_window is not None:
+            options["num_ctx"] = settings.context_window
+        if settings.keep_alive:
+            options["keep_alive"] = settings.keep_alive
+        if settings.device == "cpu":
+            options["num_gpu"] = 0
+        elif settings.device == "gpu":
+            options["num_gpu"] = 999
         start = time.monotonic()
         response = await litellm.aembedding(
             model=embed_model,
             input=texts,
             api_base=self._ollama_url,
+            **options,
         )
         self._power.mark_active()
         await self._emit_usage(
@@ -515,6 +567,46 @@ class LlmGateway:
             )
             for m in payload.get("models", [])
         ]
+
+    async def show(self, model: str) -> ModelDetails:
+        """Read-only facts about a local model from the runtime's ``/api/show``.
+
+        Returns empty details (all ``None``) rather than raising when the model isn't local or
+        the runtime is unreachable, so the model-settings sheet degrades to "unknown". The
+        trained context length lives under ``model_info`` keyed by the architecture (e.g.
+        ``llama.context_length``); fall back to any ``*.context_length`` if the arch is absent.
+        """
+        try:
+            async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
+                response = await client.post("/api/show", json={"model": model})
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            log.warning("ollama /api/show failed", model=model)
+            return ModelDetails()
+        details = payload.get("details") or {}
+        info = payload.get("model_info") or {}
+        arch = info.get("general.architecture")
+        context_length: int | None = None
+        arch_key = f"{arch}.context_length" if isinstance(arch, str) else None
+        if arch_key and isinstance(info.get(arch_key), int):
+            context_length = info[arch_key]
+        else:
+            context_length = next(
+                (
+                    value
+                    for key, value in info.items()
+                    if key.endswith(".context_length") and isinstance(value, int)
+                ),
+                None,
+            )
+        family = details.get("family")
+        return ModelDetails(
+            quantization=details.get("quantization_level") or None,
+            parameter_size=details.get("parameter_size") or None,
+            context_length=context_length,
+            family=family if isinstance(family, str) else None,
+        )
 
     async def pull(self, model: str) -> None:
         """Pull a model into the local runtime (blocks until complete)."""

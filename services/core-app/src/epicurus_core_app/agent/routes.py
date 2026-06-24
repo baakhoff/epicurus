@@ -81,7 +81,7 @@ class AttachmentUploaded(BaseModel):
 
 
 class MemoryListing(BaseModel):
-    """A page of remembered snippets plus the corpus total (so the UI can show the rest)."""
+    """A page of remembered facts plus the corpus total (so the UI can show the rest)."""
 
     items: list[MemoryItem]
     total: int
@@ -217,11 +217,11 @@ def create_agent_router(
 
     @router.get("/memory", response_model=MemoryListing)
     async def list_memory(
-        q: str | None = None, limit: int = Query(default=100, ge=1, le=500)
+        q: str | None = None, limit: int = Query(default=200, ge=1, le=500)
     ) -> MemoryListing:
-        """The cross-chat recall corpus — what the model remembers and can pull into chats.
+        """The cross-chat memory corpus — the durable facts the model remembers about the user.
 
-        Without ``q`` it returns the corpus newest-first; with ``q`` it returns what recall
+        Without ``q`` it returns the facts newest-first; with ``q`` it returns what recall
         surfaces for that query (the same ranking a chat turn gets). ``total`` is the full
         corpus size. A backend failure surfaces as a 5xx — an inspection view must not mask
         errors; an empty corpus is a clean ``{"items": [], "total": 0}``.
@@ -232,10 +232,10 @@ def create_agent_router(
             items, total = await memory.memories(tenant=tenant, limit=limit)
         return MemoryListing(items=items, total=total)
 
-    @router.delete("/memory/{point_id}")
-    async def forget_memory(point_id: int) -> dict[str, int]:
-        """Forget one remembered snippet so it stops being recalled (keeps the conversation)."""
-        forgotten = await memory.forget_memory(tenant=tenant, point_id=point_id)
+    @router.delete("/memory/{memory_id}")
+    async def forget_memory(memory_id: str) -> dict[str, int]:
+        """Forget one remembered fact so it stops being recalled (the conversation is kept)."""
+        forgotten = await memory.forget_memory(tenant=tenant, memory_id=memory_id)
         return {"forgotten": forgotten}
 
     @router.post("/attachments", response_model=AttachmentUploaded)

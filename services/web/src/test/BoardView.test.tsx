@@ -110,7 +110,8 @@ describe("BoardView", () => {
     expect(screen.getByRole("button", { name: "Complete" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
-    expect(mockModulePage).toHaveBeenCalledWith("tasks", "board");
+    // The page is fetched with the (empty) control params; the module's defaults apply.
+    expect(mockModulePage).toHaveBeenCalledWith("tasks", "board", {});
   });
 
   it("shows an empty state when no card has any cards", async () => {
@@ -167,5 +168,47 @@ describe("BoardView", () => {
         notes: "2 litres",
       }),
     );
+  });
+
+  it("renders module-declared view controls and refetches with the chosen query param", async () => {
+    // A board carrying view controls (ADR-0049): the shell renders each as a selector and
+    // re-fetches the page with `?<id>=<value>` on change, so regrouping stays module-side.
+    mockModulePage.mockResolvedValue({
+      ...BOARD,
+      controls: [
+        {
+          id: "group",
+          label: "Group by",
+          value: "due",
+          options: [
+            { value: "due", label: "Due date" },
+            { value: "status", label: "Status" },
+          ],
+        },
+        {
+          id: "show",
+          label: "Show",
+          value: "open",
+          options: [
+            { value: "open", label: "Open" },
+            { value: "all", label: "All" },
+          ],
+        },
+      ],
+    });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    await screen.findByText("Buy milk");
+    expect(mockModulePage).toHaveBeenCalledWith("tasks", "board", {});
+
+    const group = screen.getByLabelText("Group by") as HTMLSelectElement;
+    expect(group.value).toBe("due"); // driven by the module's declared default
+    fireEvent.change(group, { target: { value: "status" } });
+
+    // Changing a control re-fetches the page with that control's id as the query param.
+    await waitFor(() =>
+      expect(mockModulePage).toHaveBeenCalledWith("tasks", "board", { group: "status" }),
+    );
+    expect(group.value).toBe("status"); // optimistically reflected while refetching
   });
 });

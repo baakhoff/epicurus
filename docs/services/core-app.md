@@ -37,15 +37,15 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer, `AGENT_MAX_STEPS` rounds). Returns `AgentTurn`. |
+| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `done` (final turn) · `error`. The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
-| `DELETE /platform/v1/agent/sessions/{id}` | Forget a session (rows + recall vectors). |
-| `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message (history + recall), then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
-| `POST /platform/v1/agent/sessions/{id}/edit` | Replace the last user message with `{content}` (and `{model?}`) and re-answer it in place — edits, re-indexes recall, truncates the tail, then streams. An `error` event on empty content or no user turn (#302). |
-| `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat recall corpus — what the model remembers and pulls into future chats. No `q`: the corpus newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` carries role + timestamp (joined from `agent_messages`) and, for a search, a match `score`. `limit` is bounded 1–500 (default 100). Backs the **Memory** screen (ADR-0040). |
-| `DELETE /platform/v1/agent/memory/{point_id}` | Forget one remembered snippet so it stops being recalled. Drops the recall **vector only** — the source message stays in its conversation. Returns `{forgotten}`. |
+| `DELETE /platform/v1/agent/sessions/{id}` | Forget a conversation — its history rows. Facts the user is remembered by are kept (ADR-0045). |
+| `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message, then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
+| `POST /platform/v1/agent/sessions/{id}/edit` | Replace the last user message with `{content}` (and `{model?}`) and re-answer it in place — edits the message, truncates the tail, then streams. An `error` event on empty content or no user turn (#302). |
+| `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
+| `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
@@ -68,6 +68,14 @@ per-tool disable filter as module tools.
 | `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`). |
 | `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise). Edited in the web **Settings → Timezone** card. |
 
+- **`remember(fact)`** — save a durable fact about the user to long-term memory (ADR-0045).
+  The agent's explicit, *hot-path* way to remember: it calls this when the user says
+  "remember…" or it learns a stable detail/preference. The fact is written to the user-fact
+  store (`source=tool`) for the **calling tenant** — built-in handlers receive the tenant
+  precisely so `remember` can scope its write. A near-duplicate of an existing fact is a
+  no-op. The *implicit* path is background extraction (below); together they are the corpus
+  that recall pulls into later chats.
+
 ### LLM gateway (ADR-0010)
 
 The gateway's HTTP surface is **model/provider management** (consumed by the web UI).
@@ -78,14 +86,18 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/llm/models` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). |
+| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family}` (any field `null` when not reported). Backs the model-settings sheet's quantization display. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
-| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `hidden` (model list). |
+| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
+| `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
+| `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
+| `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window + keep-alive) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive}` (each `null` = inherit); `PUT` body `{model, context_window, keep_alive}` (an all-`null` body clears the override). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 
 #### Model catalog (#269)
 
@@ -104,6 +116,28 @@ empty. The catalog is **global, not tenant-scoped** — it mirrors a public regi
 no tenant data, and is identical for every tenant (like the provider registry). The web
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
+
+#### Per-model settings (ADR-0044)
+
+The global context-window pref is one knob for every model; a per-`(tenant, model)`
+`ModelSettingsStore` (`llm/model_settings.py`) lets the operator tune a single model — chat
+or embedding — without touching the others. Two live runtime knobs are stored, both
+nullable (`null` = inherit): `context_window` (Ollama `num_ctx`) and `keep_alive` (how long
+the runtime keeps the model loaded).
+
+The gateway resolves them **per call, for the model actually being used** (`_call_config`
+for chat, `embed` for embeddings):
+
+- **`num_ctx`** — the model's own `context_window` → the global `context_window` pref →
+  the `LLM_NUM_CTX` env. Local models only (hosted providers never receive it).
+- **`keep_alive`** — the model's own `keep_alive` → the `LLM_KEEP_ALIVE` env default.
+
+Lookup is loose: settings keyed by the runtime's tagged name (`llama3.2:latest`) still match
+a request for the bare default (`llama3.2`), and vice versa, by exact name → bare name →
+family. Quantization is **not** a runtime knob — it is baked in when a model is pulled, so
+the sheet shows it read-only (from `/api/show`) and offers a "pull a different variant"
+shortcut instead. Embedding settings are opt-in: with nothing set, the embed call is
+unchanged.
 
 ### Power (ADR-0005)
 
@@ -189,8 +223,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `thinking`/`steps` are derived and kept for backward compatibility (older rows have only
   those). Tenant-scoped; post-release columns are added in place at startup (no migration).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
-  `global_embed_default` (embedding model, #214), `hidden_models` (JSON list). A missing row
+  `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
+  `agent_max_steps` (agent loop bound, #297), `hidden_models` (JSON list). A missing row
   means all defaults are `null` (fall back to env settings).
+- **Postgres `model_settings`** — per-`(tenant, model)` tuning (ADR-0044): `context_window`
+  and `keep_alive`, both nullable (`null` = inherit). Drives the per-model resolution chain in
+  the gateway (see **Per-model settings**). A missing row means the model inherits the global
+  pref / env defaults.
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
   deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON
@@ -200,15 +239,18 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   collection. Post-release columns are added in place at startup (no migration framework).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
-- **Qdrant `<tenant>__memory`** — embeddings of past turns for cross-chat semantic recall
-  (768-dim, cosine), one collection per tenant. Each point's id **is** the source
-  `agent_messages.id`, and its payload carries `{session_id, text}`. The **Memory** view
-  (ADR-0040) lists and searches this collection and joins the ids back to `agent_messages`
-  for each snippet's role + timestamp; forgetting one memory deletes its vector here and
-  leaves the message row intact.
+- **Qdrant `<tenant>__facts`** — durable **facts about the user** for cross-chat recall
+  (cosine), one collection per tenant (ADR-0045). Each point is a short standalone fact
+  under an opaque UUID id, payload `{text, source, created_at}` (`source` = `tool` | `auto`).
+  Facts are written by the `remember` tool and by background extraction, deduped on write
+  (cosine ≥ 0.92); recall searches this collection, and the **Settings → Memory** box lists /
+  searches / forgets it. Raw conversation turns are **not** indexed — the verbatim transcript
+  lives only in `agent_messages`. (The pre-ADR-0045 recall collection `<tenant>__memory` is no
+  longer written; any existing vectors are simply unused.)
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
-answers — just without memory — and never blocks core startup.
+answers — just without memory — and never blocks core startup. Background fact extraction is
+likewise best-effort and runs *off* the response path, so it never adds latency to a reply.
 
 ## Dependencies
 
@@ -223,6 +265,6 @@ docker compose up -d core-app      # comes up with the full stack
 
 Source is one package, `epicurus_core_app`, split by responsibility: `agent/`
 (loop + MCP host + routes), `llm/` (gateway, providers, power, models), `memory/`
-(store + recall + facade), `modules.py` (registry), `platform_api.py` (inference
+(store + facts + extraction + facade), `modules.py` (registry), `platform_api.py` (inference
 endpoints), `app.py` (wiring). The agent targets only the gateway's interface and
 modules only through MCP — never a provider SDK.

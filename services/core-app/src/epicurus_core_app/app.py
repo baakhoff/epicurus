@@ -27,19 +27,26 @@ from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_loggi
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
-from epicurus_core_app.agent.builtins import NOW_SPEC, make_now_handler
+from epicurus_core_app.agent.builtins import (
+    NOW_SPEC,
+    REMEMBER_SPEC,
+    make_now_handler,
+    make_remember_handler,
+)
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.model_settings import ModelSettingsStore
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
+from epicurus_core_app.memory.extraction import FactExtractor
+from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
-from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
 from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import ModuleRegistry, create_modules_router
@@ -76,6 +83,7 @@ def create_app() -> FastAPI:
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
 
     prefs = LlmPrefsStore(engine)
+    model_settings = ModelSettingsStore(engine)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
@@ -91,6 +99,7 @@ def create_app() -> FastAPI:
         top_p=settings.llm_top_p,
         num_ctx=settings.llm_num_ctx,
         prefs=prefs,
+        model_settings=model_settings,
     )
 
     catalog = ModelCatalog(
@@ -106,7 +115,11 @@ def create_app() -> FastAPI:
         # what makes the UI "Embedding model" choice actually drive memory recall.
         return await gateway.embed(texts)
 
-    memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
+    # Cross-chat memory is a corpus of durable *facts* about the user (ADR-0045), written by
+    # the agent's `remember` tool and by background extraction — not a dump of raw messages.
+    facts = UserFactStore(qdrant, embed)
+    memory = Memory(ConversationStore(engine), facts)
+    extractor = FactExtractor(gateway, facts)
     attachment_store = AttachmentStore(engine)
     attachment_sink = (
         AttachmentSink(settings.attachment_sink_url)
@@ -152,6 +165,9 @@ def create_app() -> FastAPI:
             _calendar_timezone,
         ),
     )
+    # Core `remember` built-in tool (ADR-0045): the agent's explicit path for saving a durable
+    # fact about the user to long-term memory; background extraction covers the implicit path.
+    mcp_host.register_builtin("remember", REMEMBER_SPEC, make_remember_handler(memory))
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -159,6 +175,10 @@ def create_app() -> FastAPI:
         max_steps=settings.agent_max_steps,
         default_tenant=settings.default_tenant_id,
         attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
+        extractor=extractor,
+        # Resolve the loop bound per turn from the stored pref (else the env default), so the
+        # operator's UI choice takes effect without a restart (#297).
+        prefs=prefs,
     )
     oauth = OAuthService(
         secrets,
@@ -179,6 +199,10 @@ def create_app() -> FastAPI:
             await prefs.init()
         except Exception as exc:
             log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
+        try:
+            await model_settings.init()
+        except Exception as exc:
+            log.error("model settings init failed; per-model tuning disabled", error=str(exc))
         try:
             await module_prefs.init()
         except Exception as exc:
@@ -221,7 +245,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         create_llm_router(
-            gateway, prefs=prefs, default_tenant=settings.default_tenant_id, catalog=catalog
+            gateway,
+            prefs=prefs,
+            default_tenant=settings.default_tenant_id,
+            catalog=catalog,
+            model_settings=model_settings,
         )
     )
     app.include_router(

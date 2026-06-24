@@ -21,8 +21,10 @@ log = get_logger("epicurus_core_app.agent.mcp")
 # over MCP to a module (ADR-0039).
 _BUILTIN_URL = "__builtin__"
 
-#: A built-in tool: its OpenAI function spec + an async handler ``(arguments) -> text``.
-BuiltinTool = tuple[dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]]
+#: A built-in tool: its OpenAI function spec + an async handler ``(arguments, tenant) -> text``.
+#: The tenant is passed so a built-in can read or write tenant-scoped state (e.g. ``remember``).
+BuiltinHandler = Callable[[dict[str, Any], str], Awaitable[str]]
+BuiltinTool = tuple[dict[str, Any], BuiltinHandler]
 
 
 def _text(content: list[Any]) -> str:
@@ -53,9 +55,7 @@ class McpHost:
         # modules' tools and dispatched in-process (no HTTP). Empty by default.
         self._builtins: dict[str, BuiltinTool] = {}
 
-    def register_builtin(
-        self, name: str, spec: dict[str, Any], handler: Callable[[dict[str, Any]], Awaitable[str]]
-    ) -> None:
+    def register_builtin(self, name: str, spec: dict[str, Any], handler: BuiltinHandler) -> None:
         """Register a core built-in tool (ADR-0039).
 
         A setter (like ``set_url_provider``) so wiring that needs the registry — e.g. the
@@ -125,10 +125,14 @@ class McpHost:
             route[name] = _BUILTIN_URL
         return specs, route
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
-        """Call ``name`` on the module at ``url`` (or a core built-in) and return its text."""
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        """Call ``name`` on the module at ``url`` (or a core built-in) and return its text.
+
+        ``tenant`` scopes a core built-in's access to per-tenant state; it is unused for a
+        module call (the module resolves identity through the platform API).
+        """
         if url == _BUILTIN_URL:
-            return await self._builtins[name][1](arguments)
+            return await self._builtins[name][1](arguments, tenant)
         async with (
             streamablehttp_client(url) as (read, write, _),
             ClientSession(read, write) as session,

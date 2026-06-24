@@ -17,6 +17,7 @@ from epicurus_core import ChatMessage, ChatResult, Role
 __all__ = [
     "ChatMessage",
     "ChatResult",
+    "ModelDetails",
     "ModelInfo",
     "PowerState",
     "ProviderInfo",
@@ -49,6 +50,21 @@ class ModelInfo(BaseModel):
     loaded: bool = False
     # Hidden from chat pickers; still visible in the model manager so it can be toggled back.
     hidden: bool = False
+
+
+class ModelDetails(BaseModel):
+    """Read-only facts about a local model, from the runtime's ``/api/show``.
+
+    Surfaced in the model-settings sheet. Weight ``quantization`` is fixed when the model is
+    pulled (e.g. ``Q4_K_M``) — to change it the operator pulls a different variant; it is
+    *not* a runtime knob. ``context_length`` is the model's trained maximum (a ceiling for the
+    operator's per-model context-window choice). Any field is ``None`` when the runtime did
+    not report it (or the model isn't local)."""
+
+    quantization: str | None = None
+    parameter_size: str | None = None
+    context_length: int | None = None
+    family: str | None = None
 
 
 class ProviderInfo(BaseModel):

@@ -17,11 +17,31 @@ export const ModelInfo = z.object({
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
+/** Per-model tuning; null on a field means "inherit" the global / env default. */
+export const ModelSettings = z.object({
+  context_window: z.number().nullable(),
+  keep_alive: z.string().nullable(),
+});
+export type ModelSettings = z.infer<typeof ModelSettings>;
+
+/** Read-only facts about a local model from the runtime's `/api/show`. */
+export const ModelDetails = z.object({
+  // Weight quantization is fixed at pull time (e.g. "Q4_K_M") — not a runtime knob.
+  quantization: z.string().nullish(),
+  parameter_size: z.string().nullish(),
+  // The model's trained maximum context (a ceiling for the operator's choice).
+  context_length: z.number().nullish(),
+  family: z.string().nullish(),
+});
+export type ModelDetails = z.infer<typeof ModelDetails>;
+
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),
   // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
   global_context_window: z.number().nullable(),
+  // Operator-chosen agent loop bound (tool rounds per turn); null = the env default.
+  global_agent_max_steps: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
@@ -188,18 +208,19 @@ export const MessageRecord = z.object({
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 
-/** One remembered snippet in the Memory view — `score` is set only for search results. */
+/** One durable fact the assistant remembers about the user (ADR-0043).
+ *  `source` is how it was learned ("tool" = the remember tool, "auto" = background
+ *  extraction); `score` is set only for search results. */
 export const MemoryItem = z.object({
-  id: z.number(),
-  session_id: z.string(),
-  role: z.string().default(""),
+  id: z.string(),
   text: z.string(),
+  source: z.string().default("auto"),
   created_at: z.coerce.date().nullish(),
   score: z.number().nullish(),
 });
 export type MemoryItem = z.infer<typeof MemoryItem>;
 
-/** A page of remembered snippets plus the full corpus size (so the UI can show the rest). */
+/** A page of remembered facts plus the full corpus size (so the UI can show the rest). */
 export const MemoryListing = z.object({
   items: z.array(MemoryItem),
   total: z.number(),
@@ -497,10 +518,26 @@ export const BoardColumn = z.object({
 });
 export type BoardColumn = z.infer<typeof BoardColumn>;
 
-/** The `board` archetype's data contract: columns of cards + board-level actions. */
+/**
+ * One declarative view control a `board` surfaces (ADR-0049): a labeled selector — e.g.
+ * "Group by" (the column layout) or "Show" (a filter). The module declares the `options`
+ * and the current `value`; the shell renders a selector and re-fetches the page with
+ * `?<id>=<value>` on change, so regrouping/filtering stays module-side (the board carries
+ * no task fields to the client). Generic and reusable across board modules.
+ */
+export const BoardControl = z.object({
+  id: z.string(),
+  label: z.string(),
+  value: z.string().default(""),
+  options: z.array(z.object({ value: z.string(), label: z.string() })).default([]),
+});
+export type BoardControl = z.infer<typeof BoardControl>;
+
+/** The `board` archetype's data contract: columns of cards + view controls + actions. */
 export const BoardData = z.object({
   title: z.string().nullish(),
   columns: z.array(BoardColumn).default([]),
+  controls: z.array(BoardControl).default([]),
   actions: z.array(BoardAction).default([]),
 });
 export type BoardData = z.infer<typeof BoardData>;
@@ -594,6 +631,12 @@ export const EditorData = z.object({
    * this mode, so Obsidian stays the sole author.
    */
   read_only: z.boolean().default(false),
+  /**
+   * Save history (ADR-0046): when true every save snapshots the document, and the shell
+   * shows a History affordance to browse and restore past versions. Notes and knowledge
+   * set this. Restore is client-side (re-save a past version's content).
+   */
+  versioned: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 
@@ -612,6 +655,31 @@ export const EditorSaveResult = z.object({
   chunk_count: z.number().default(0),
 });
 export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
+
+/** One entry in an `editor` document's save history (ADR-0046) — metadata only, no body. */
+export const EditorVersion = z.object({
+  version_id: z.string(),
+  created_at: z.string(),
+  title: z.string().default(""),
+  size: z.number().default(0),
+});
+export type EditorVersion = z.infer<typeof EditorVersion>;
+
+/** A document's save history, newest first. */
+export const EditorVersionList = z.object({
+  versions: z.array(EditorVersion).default([]),
+});
+export type EditorVersionList = z.infer<typeof EditorVersionList>;
+
+/** One past version's full content, fetched when the operator views it (ADR-0046). */
+export const EditorVersionContent = z.object({
+  path: z.string(),
+  version_id: z.string(),
+  created_at: z.string(),
+  title: z.string().default(""),
+  content: z.string(),
+});
+export type EditorVersionContent = z.infer<typeof EditorVersionContent>;
 
 /* ── review queue (ADR-0033, #220) ───────────────────────────────────────── */
 

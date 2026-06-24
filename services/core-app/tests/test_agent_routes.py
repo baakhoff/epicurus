@@ -163,7 +163,7 @@ class _FakeMemory:
 
     def __init__(self, *, last_user: int | None = 1) -> None:
         self.searched: list[str] = []
-        self.forgotten: list[int] = []
+        self.forgotten: list[str] = []
         self._last_user = last_user
         self.truncated_after: list[int] = []
         self.revised: list[tuple[int, str]] = []
@@ -180,20 +180,20 @@ class _FakeMemory:
     ) -> None:
         self.revised.append((message_id, content))
 
-    async def memories(self, *, tenant: str, limit: int = 100) -> tuple[list[MemoryItem], int]:
+    async def memories(self, *, tenant: str, limit: int = 200) -> tuple[list[MemoryItem], int]:
         return [
-            MemoryItem(id=2, session_id="s1", role="assistant", text="hi there"),
-            MemoryItem(id=1, session_id="s1", role="user", text="hello"),
+            MemoryItem(id="f2", text="Lives in Belgrade", source="auto"),
+            MemoryItem(id="f1", text="Prefers metric units", source="tool"),
         ], 2
 
     async def search_memory(
         self, *, tenant: str, query: str, limit: int = 20
     ) -> tuple[list[MemoryItem], int]:
         self.searched.append(query)
-        return [MemoryItem(id=1, session_id="s1", role="user", text="hello", score=0.9)], 2
+        return [MemoryItem(id="f1", text="Prefers metric units", source="tool", score=0.9)], 2
 
-    async def forget_memory(self, *, tenant: str, point_id: int) -> int:
-        self.forgotten.append(point_id)
+    async def forget_memory(self, *, tenant: str, memory_id: str) -> int:
+        self.forgotten.append(memory_id)
         return 1
 
 
@@ -218,7 +218,8 @@ async def test_memory_list_returns_corpus_and_total() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 2
-    assert [item["id"] for item in body["items"]] == [2, 1]  # newest first
+    assert [item["id"] for item in body["items"]] == ["f2", "f1"]  # newest first
+    assert body["items"][0]["source"] == "auto"
     assert body["items"][0]["score"] is None  # corpus rows carry no score
 
 
@@ -241,15 +242,15 @@ async def test_memory_list_rejects_out_of_range_limit() -> None:
     assert resp.status_code == 422  # limit has ge=1
 
 
-async def test_forget_memory_deletes_one_point() -> None:
+async def test_forget_memory_deletes_one_fact() -> None:
     memory = _FakeMemory()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
     ) as client:
-        resp = await client.delete("/platform/v1/agent/memory/7")
+        resp = await client.delete("/platform/v1/agent/memory/f7")
     assert resp.status_code == 200
     assert resp.json() == {"forgotten": 1}
-    assert memory.forgotten == [7]
+    assert memory.forgotten == ["f7"]
 
 
 # ── regenerate / edit the conversation tail (#302) ───────────────────────────

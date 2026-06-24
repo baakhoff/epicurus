@@ -28,9 +28,12 @@ class ModelSettings(BaseModel):
     # How long the runtime keeps the model loaded after use (e.g. "5m", "30s", "0", "-1").
     # None falls through to the gateway's keep-alive default.
     keep_alive: str | None = None
+    # Where the model runs: "gpu" (offload all layers), "cpu" (no offload), or None = "auto"
+    # (let the runtime decide). Mapped to Ollama's num_gpu by the gateway; local models only.
+    device: str | None = None
 
     def is_empty(self) -> bool:
-        return self.context_window is None and not self.keep_alive
+        return self.context_window is None and not self.keep_alive and not self.device
 
 
 class _ModelSettingsBase(DeclarativeBase):
@@ -48,6 +51,7 @@ class _ModelSettingsRow(_ModelSettingsBase):
     model: Mapped[str] = mapped_column(String(256), primary_key=True)
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     keep_alive: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    device: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class ModelSettingsStore:
@@ -75,7 +79,7 @@ class ModelSettingsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_ModelSettingsRow.__tablename__)}
-        for name in ("context_window", "keep_alive"):
+        for name in ("context_window", "keep_alive", "device"):
             if name not in existing:
                 type_sql = _ModelSettingsRow.__table__.c[name].type.compile(
                     dialect=sync_conn.dialect
@@ -90,7 +94,9 @@ class ModelSettingsStore:
             row = await session.get(_ModelSettingsRow, (tenant, model))
             if row is None:
                 return ModelSettings()
-            return ModelSettings(context_window=row.context_window, keep_alive=row.keep_alive)
+            return ModelSettings(
+                context_window=row.context_window, keep_alive=row.keep_alive, device=row.device
+            )
 
     async def list(self, tenant: str) -> dict[str, ModelSettings]:
         """Every model with stored settings for ``tenant``, keyed by model name."""
@@ -100,7 +106,7 @@ class ModelSettingsStore:
             )
             return {
                 row.model: ModelSettings(
-                    context_window=row.context_window, keep_alive=row.keep_alive
+                    context_window=row.context_window, keep_alive=row.keep_alive, device=row.device
                 )
                 for row in rows
             }
@@ -119,4 +125,5 @@ class ModelSettingsStore:
                 session.add(row)
             row.context_window = settings.context_window
             row.keep_alive = settings.keep_alive
+            row.device = settings.device
             await session.commit()

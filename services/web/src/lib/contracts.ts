@@ -21,6 +21,8 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 export const ModelSettings = z.object({
   context_window: z.number().nullable(),
   keep_alive: z.string().nullable(),
+  // "gpu" | "cpu" | null (auto). Where the model runs (Ollama num_gpu); local models only.
+  device: z.string().nullable(),
 });
 export type ModelSettings = z.infer<typeof ModelSettings>;
 
@@ -40,6 +42,8 @@ export const LlmPrefs = z.object({
   global_embed_default: z.string().nullable(),
   // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
   global_context_window: z.number().nullable(),
+  // Operator-chosen Ollama KV-cache type ("f16"|"q8_0"|"q4_0"); null = runtime default.
+  kv_cache_type: z.string().nullable(),
   // Operator-chosen agent loop bound (tool rounds per turn); null = the env default.
   global_agent_max_steps: z.number().nullable(),
   hidden: z.array(z.string()),
@@ -61,6 +65,14 @@ export const GpuInfo = z.object({
 });
 export type GpuInfo = z.infer<typeof GpuInfo>;
 
+/** The host CPU. Core counts are null when they can't be determined. */
+export const CpuInfo = z.object({
+  model: z.string(),
+  physical_cores: z.number().nullish(),
+  logical_cores: z.number().nullish(),
+});
+export type CpuInfo = z.infer<typeof CpuInfo>;
+
 /** The currently-effective chat model and its on-disk size. */
 export const ModelSize = z.object({
   name: z.string(),
@@ -76,9 +88,10 @@ export const SuggestedContext = z.object({
 });
 export type SuggestedContext = z.infer<typeof SuggestedContext>;
 
-/** Host system + GPU snapshot backing the context-window suggestion. */
+/** Host system spec + GPU snapshot backing the spec panel and context-window suggestion. */
 export const SystemInfo = z.object({
   gpu: GpuInfo.nullish(),
+  cpu: CpuInfo.nullish(),
   ram_total_mb: z.number().nullish(),
   model: ModelSize.nullish(),
   suggested_context: SuggestedContext.nullish(),

@@ -104,6 +104,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
+  // Global Ollama KV-cache type ("f16"|"q8_0"|"q4_0"|null). Applied via the Ollama container
+  // env on restart — not live (ADR-0046); the UI surfaces the restart requirement.
+  setKvCacheType: (value: string | null) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/kv-cache-type", {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
   // Agent loop bound (tool rounds per turn); null = the env default. The core clamps 1-12.
   setAgentMaxSteps: (value: number | null) =>
     request(
@@ -121,7 +128,10 @@ export const api = {
   // names carry ":" and "/" which proxies may mangle in a path.
   modelSettings: (model: string) =>
     request(ModelSettings, `/platform/v1/llm/model-settings?model=${encodeURIComponent(model)}`),
-  setModelSettings: (model: string, settings: { context_window: number | null; keep_alive: string | null }) =>
+  setModelSettings: (
+    model: string,
+    settings: { context_window: number | null; keep_alive: string | null; device: string | null },
+  ) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/model-settings", {
       method: "PUT",
       body: JSON.stringify({ model, ...settings }),

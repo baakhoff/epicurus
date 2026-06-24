@@ -71,7 +71,7 @@ describe("ContextWindow card", () => {
 
     render(<ContextWindow />, { wrapper });
 
-    expect(await screen.findByText(/No GPU detected/i)).toBeInTheDocument();
+    expect(await screen.findByText(/No GPU/i)).toBeInTheDocument();
   });
 
   it("applies the suggestion via the Use-suggested button", async () => {

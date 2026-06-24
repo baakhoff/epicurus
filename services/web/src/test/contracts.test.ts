@@ -347,6 +347,7 @@ describe("contracts", () => {
       global_default: "llama3.2",
       global_embed_default: null,
       global_context_window: 16384,
+      kv_cache_type: null,
       global_agent_max_steps: 6,
       hidden: [],
     });
@@ -357,6 +358,7 @@ describe("contracts", () => {
       global_default: null,
       global_embed_default: null,
       global_context_window: null,
+      kv_cache_type: null,
       global_agent_max_steps: null,
       hidden: [],
     });

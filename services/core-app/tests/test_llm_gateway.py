@@ -960,3 +960,68 @@ async def test_show_parses_quantization_and_context_length(monkeypatch: pytest.M
     assert details.parameter_size == "8.0B"
     assert details.context_length == 131072
     assert details.family == "llama"
+
+
+# ── per-model device → Ollama num_gpu (GPU/CPU choice, #293) ──────────────────────
+
+
+async def test_device_cpu_sets_num_gpu_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(device="cpu"))
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_gpu"] == 0
+
+
+async def test_device_gpu_offloads_all_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(device="gpu"))
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_gpu"] == 999
+
+
+async def test_device_auto_omits_num_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(context_window=4096))  # device unset = auto
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert "num_gpu" not in captured
+
+
+async def test_embed_device_cpu_sets_num_gpu_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "nomic-embed-text", ModelSettings(device="cpu"))
+    await _gateway(model_settings=ms).embed(["hi"], model="nomic-embed-text")
+    assert captured["num_gpu"] == 0

@@ -68,6 +68,7 @@ describe("ModelSettingsSheet", () => {
       expect(mockSetModelSettings).toHaveBeenCalledWith("llama3.2:latest", {
         context_window: 4096,
         keep_alive: "30m",
+        device: null,
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -89,6 +90,29 @@ describe("ModelSettingsSheet", () => {
       expect(mockSetModelSettings).toHaveBeenCalledWith("llama3.2:latest", {
         context_window: null,
         keep_alive: null,
+        device: null,
+      }),
+    );
+  });
+
+  it("saves the chosen run-on device", async () => {
+    mockModelSettings.mockResolvedValue({ context_window: 8192, keep_alive: null, device: null });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    // Wait until the form has seeded (so a click isn't clobbered by the seed), then pick CPU.
+    const ctx = (await screen.findByLabelText(
+      "Per-model context window tokens",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(ctx.value).toBe("8192"));
+    fireEvent.click(screen.getByRole("button", { name: "CPU" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockSetModelSettings).toHaveBeenCalledWith("llama3.2:latest", {
+        context_window: 8192,
+        keep_alive: null,
+        device: "cpu",
       }),
     );
   });

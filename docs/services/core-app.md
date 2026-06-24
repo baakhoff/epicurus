@@ -91,13 +91,14 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
-| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
+| `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `kv_cache_type` (Ollama KV-cache), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
+| `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "f16"\|"q8_0"\|"q4_0"\|null}`). Server-wide; persisted but **applied via the Ollama container env on restart** — the core can't restart Ollama (ADR-0046). |
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
-| `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window + keep-alive) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive}` (each `null` = inherit); `PUT` body `{model, context_window, keep_alive}` (an all-`null` body clears the override). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
+| `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 
 #### Model catalog (#269)
 
@@ -121,9 +122,9 @@ older core).
 
 The global context-window pref is one knob for every model; a per-`(tenant, model)`
 `ModelSettingsStore` (`llm/model_settings.py`) lets the operator tune a single model — chat
-or embedding — without touching the others. Two live runtime knobs are stored, both
-nullable (`null` = inherit): `context_window` (Ollama `num_ctx`) and `keep_alive` (how long
-the runtime keeps the model loaded).
+or embedding — without touching the others. Three live runtime knobs are stored, all
+nullable (`null` = inherit): `context_window` (Ollama `num_ctx`), `keep_alive` (how long the
+runtime keeps the model loaded), and `device` (where it runs — ADR-0046).
 
 The gateway resolves them **per call, for the model actually being used** (`_call_config`
 for chat, `embed` for embeddings):
@@ -131,6 +132,8 @@ for chat, `embed` for embeddings):
 - **`num_ctx`** — the model's own `context_window` → the global `context_window` pref →
   the `LLM_NUM_CTX` env. Local models only (hosted providers never receive it).
 - **`keep_alive`** — the model's own `keep_alive` → the `LLM_KEEP_ALIVE` env default.
+- **`num_gpu`** — from `device`: `"cpu"` → `0` (all CPU), `"gpu"` → `999` (all layers,
+  clamped by the runtime), `null`/auto → omitted (the runtime decides). Local models only.
 
 Lookup is loose: settings keyed by the runtime's tagged name (`llama3.2:latest`) still match
 a request for the bare default (`llama3.2`), and vice versa, by exact name → bare name →
@@ -224,12 +227,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   those). Tenant-scoped; post-release columns are added in place at startup (no migration).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
-  `agent_max_steps` (agent loop bound, #297), `hidden_models` (JSON list). A missing row
-  means all defaults are `null` (fall back to env settings).
-- **Postgres `model_settings`** — per-`(tenant, model)` tuning (ADR-0044): `context_window`
-  and `keep_alive`, both nullable (`null` = inherit). Drives the per-model resolution chain in
-  the gateway (see **Per-model settings**). A missing row means the model inherits the global
-  pref / env defaults.
+  `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297),
+  `hidden_models` (JSON list). A missing row means all defaults are `null` (fall back to env
+  settings).
+- **Postgres `model_settings`** — per-`(tenant, model)` tuning (ADR-0044/0045):
+  `context_window`, `keep_alive`, and `device` (`"gpu"`/`"cpu"`/`null`), all nullable
+  (`null` = inherit). Drives the per-model resolution chain in the gateway (see **Per-model
+  settings**). A missing row means the model inherits the global pref / env defaults.
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
   deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON

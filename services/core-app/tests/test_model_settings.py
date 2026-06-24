@@ -82,3 +82,11 @@ async def test_ensure_columns_heals_a_pre_existing_bare_table() -> None:
     await store.init()  # must ALTER in the missing columns, not raise
     await store.set("t1", "m:latest", ModelSettings(context_window=2048, keep_alive="5m"))
     assert (await store.get("t1", "m:latest")).context_window == 2048
+
+
+async def test_device_round_trips() -> None:
+    store, _ = await _fresh_store()
+    await store.set("t1", "llama3.2:latest", ModelSettings(device="cpu"))
+    assert (await store.get("t1", "llama3.2:latest")).device == "cpu"
+    # device alone is not empty (the row persists)
+    assert "llama3.2:latest" in await store.list("t1")

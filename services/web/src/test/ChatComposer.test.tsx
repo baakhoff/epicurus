@@ -50,7 +50,6 @@ beforeEach(() => {
     streaming: false,
     segments: [],
     pendingUser: null,
-    thinking: "",
     readiness: null,
     error: null,
     paused: false,

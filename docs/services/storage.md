@@ -5,9 +5,11 @@ tree on disk — a **read-only index** it can list, search, and read — plus **
 object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
 The indexed tree is the **shared file space** (`/data`, `EPICURUS_FILES_ROOT`): storage reads
-it read-only as the unified **Files** view, showing every file-owning module's folder —
-`knowledge/` (knowledge bases) and `notes/` (the `.md` mirror of authored notes) — plus chat
-uploads (#KB-refactor). The object store covers generated files, exports, and attachments.
+the **tenant subtree** `/data/<tenant>` read-only as the unified **Files** view (tenant-scoped,
+constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`, default `local`), showing every file-owning
+module's folder — `knowledge/` (knowledge bases) and `notes/` (the `.md` mirror of authored
+notes) — plus chat uploads (#KB-refactor). The object store covers generated files, exports,
+and attachments.
 
 **Private subtrees are hidden from the agent (#KB-refactor).** Some folders are
 operator-only: the `notes/` mirror holds **private** note bodies the agent must never read.
@@ -124,7 +126,7 @@ module never fails a chat upload.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `STORAGE_ROOT` | `/data` | Absolute path (in-container) of the tree to index — the shared file space mount. |
+| `STORAGE_ROOT` | `/data` | In-container **base** of the shared-file-space mount. Storage serves and indexes the tenant subtree `STORAGE_ROOT/<tenant>` read-only (tenant-scoped, constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`). |
 | `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | Comma-separated top-level subtrees hidden from the **agent's** file tools (#KB-refactor). The agent's `storage_list`/`storage_search`/`storage_read` never see them; the operator-facing Files page / `/read` / `/download` are unaffected. `notes/` holds private note bodies. Set empty to hide nothing. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | The file index. |
 | `MINIO_URL` | `http://minio:9000` | Object-store endpoint. |
@@ -133,10 +135,12 @@ module never fails a chat upload.
 In the stack, the **shared file space** is bound to `/data` **read-only** via
 `EPICURUS_FILES_ROOT` (the single env var that mounts the same `/data` tree across storage,
 knowledge, and notes), which defaults to an **empty named volume** — nothing is exposed
-until you point it at a real directory (never the host home dir). The same volume is mounted
-**read-write** by knowledge (`/data/knowledge`) and notes (`/data/notes`), which own their
-subfolders; storage only indexes and serves it. `EPICURUS_FILES_ROOT` **replaces** the old
-per-module `STORAGE_HOST_ROOT`. See [Infrastructure](../infrastructure/index.md#shared-file-space).
+until you point it at a real directory (never the host home dir). The on-disk tree is
+**tenant-scoped** (constraint #1): storage serves `/data/<tenant>`, and the same volume is
+mounted **read-write** by knowledge (`/data/<tenant>/knowledge`) and notes
+(`/data/<tenant>/notes`), which own their subfolders; storage only indexes and serves the
+tenant subtree. `EPICURUS_FILES_ROOT` **replaces** the old per-module `STORAGE_HOST_ROOT`. See
+[Infrastructure](../infrastructure/index.md#shared-file-space).
 
 ## Data model
 

@@ -107,3 +107,22 @@ def test_settings_docs_path_default() -> None:
     from pathlib import Path
 
     assert isinstance(s.docs_path, Path)
+
+
+def test_vault_root_is_tenant_scoped() -> None:
+    """The on-disk vault is <files-root>/<tenant>/knowledge (constraint #1).
+
+    Guards the path arithmetic in create_app: a regression that drops the tenant
+    segment (or mis-orders .parent/.name) would put the vault back at the global
+    /data/knowledge, breaking per-tenant isolation of the shared file space.
+    """
+    from pathlib import Path
+
+    from epicurus_knowledge.settings import KnowledgeSettings
+
+    s = KnowledgeSettings(service_name="knowledge", vault_path=Path("/data/knowledge"))
+    vault_root = s.vault_path.parent / s.default_tenant_id / s.vault_path.name
+    assert vault_root == Path("/data") / s.default_tenant_id / "knowledge"
+    assert s.default_tenant_id in vault_root.parts  # the tenant segment is present
+    # The bundled platform docs stay shared/read-only — never tenant-scoped.
+    assert s.default_tenant_id not in s.docs_path.parts

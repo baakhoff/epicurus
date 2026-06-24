@@ -27,25 +27,29 @@ Details: [`infra/compose/README.md`](../../infra/compose/README.md).
 The file-owning modules share **one** file tree — the **shared file space** (#KB-refactor).
 It is a single volume mounted at `/data` in each of them, set by one env var
 **`EPICURUS_FILES_ROOT`** (default an empty named volume, `epicurus-files`; point it at a host
-directory to expose real files — never the host home dir). Each module owns a subtree:
+directory to expose real files — never the host home dir). The on-disk tree is
+**tenant-scoped** (constraint #1): every module inserts a `<tenant>/` segment so the layout is
+`/data/<tenant>/…`, where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The mount stays
+`/data`; only the in-container path carries the segment. Each module owns a subtree:
 
-- **storage** mounts it **read-only** and indexes it as the unified **Files** view.
-- **knowledge** mounts it **read-write** and owns `/data/knowledge` (each top-level folder is a
-  knowledge base / project).
-- **notes** mounts it **read-write** and owns `/data/notes` (the read-only `.md` mirror of
-  authored notes; Postgres stays the source of truth).
+- **storage** mounts it **read-only** and indexes the tenant subtree `/data/<tenant>` as the
+  unified **Files** view.
+- **knowledge** mounts it **read-write** and owns `/data/<tenant>/knowledge` (each top-level
+  folder is a knowledge base / project).
+- **notes** mounts it **read-write** and owns `/data/<tenant>/notes` (the read-only `.md` mirror
+  of authored notes; Postgres stays the source of truth).
 
 `EPICURUS_FILES_ROOT` **replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and
 `STORAGE_HOST_ROOT`; existing deployments move old vault contents into
-`<files-root>/knowledge/<project>/`.
+`<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`).
 
 A one-shot **`files-init`** container prepares the tree before any module starts (it is a
 `depends_on: service_completed_successfully` of storage / knowledge / notes, mirroring
 `qdrant-init` and the OpenBao chown). A fresh named volume is created **root-owned**, but the
 modules run as uid 10001 — so without this they would hit `PermissionError` (HTTP 500)
-creating folders or saving documents. `files-init` creates `/data/knowledge` and `/data/notes`
-and chowns **only those** to uid 10001, leaving the rest of a bind-mounted tree (e.g. an
-operator's Obsidian vault) untouched.
+creating folders or saving documents. `files-init` creates `/data/<tenant>/knowledge` and
+`/data/<tenant>/notes` and chowns **only those** to uid 10001, leaving the rest of a
+bind-mounted tree (e.g. an operator's Obsidian vault) untouched.
 
 ## Edge gateway
 

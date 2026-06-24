@@ -66,11 +66,17 @@ def create_app() -> FastAPI:
         module=MODULE_NAME,  # so the indexer can resolve its embedding-model slot (#128)
     )
 
+    # Tenant-scope the file tree (constraint #1): <files-root>/<tenant>/knowledge. The whole
+    # epicurus-files volume mounts at /data; the on-disk vault lives under the tenant segment
+    # so the layout stays per-tenant even on the shared volume. The bundled platform docs
+    # (settings.docs_path, /docs) are deliberately NOT scoped — they are shared & read-only.
+    vault_root = settings.vault_path.parent / settings.default_tenant_id / settings.vault_path.name
+
     vault_indexer = KnowledgeIndexer(
         note_index,
         qdrant,
         platform,
-        vault_path=settings.vault_path,
+        vault_path=vault_root,
         tenant=settings.default_tenant_id,
         collection_base="knowledge",
         chunk_max_chars=settings.chunk_max_chars,
@@ -101,7 +107,7 @@ def create_app() -> FastAPI:
     # read-only and agent suggestions can't be applied, so Obsidian stays the sole author.
     vault_read_only = settings.vault_read_only
     vault_pages = VaultPages(
-        settings.vault_path,
+        vault_root,
         vault_indexer,
         read_only=vault_read_only,
         # Surface the bundled platform docs as the read-only "__docs__" scope (#KB-refactor).
@@ -113,7 +119,7 @@ def create_app() -> FastAPI:
         suggestion_store,
         vault_pages,
         vault_indexer,
-        vault_path=settings.vault_path,
+        vault_path=vault_root,
         tenant=settings.default_tenant_id,
         read_only=vault_read_only,
     )
@@ -127,7 +133,7 @@ def create_app() -> FastAPI:
         suggestion_review,
         platform,
         tenant=settings.default_tenant_id,
-        vault_path=settings.vault_path,
+        vault_path=vault_root,
     )
     mcp_app = module.http_app()
 
@@ -147,7 +153,7 @@ def create_app() -> FastAPI:
     # a watch pass against the startup index, so the two never walk the vault at once.
     vault_watcher = (
         VaultWatcher(
-            settings.vault_path,
+            vault_root,
             vault_indexer,
             debounce_ms=settings.vault_watch_debounce_ms,
         )
@@ -166,7 +172,7 @@ def create_app() -> FastAPI:
             await bus.connect()
             log.info(
                 "knowledge service ready",
-                vault=str(settings.vault_path),
+                vault=str(vault_root),
                 docs=str(settings.docs_path),
                 tenant=settings.default_tenant_id,
                 vault_watch=settings.vault_watch,
@@ -204,13 +210,13 @@ def create_app() -> FastAPI:
     app.include_router(create_pages_router(vault_pages))
 
     # Attachment source (#137): pick a vault doc to attach to a chat turn as context.
-    app.include_router(create_attachments_router(VaultAttachments(settings.vault_path)))
+    app.include_router(create_attachments_router(VaultAttachments(vault_root)))
 
     # Hover-card resolver (#143): a cited vault note or platform doc → a HoverCard.
     app.include_router(
         create_resolver_router(
             KnowledgeResolver(
-                vault_path=settings.vault_path,
+                vault_path=vault_root,
                 docs_path=settings.docs_path,
                 note_index=note_index,
                 doc_index=doc_index,

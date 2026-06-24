@@ -106,16 +106,21 @@ are the in-container paths under it.
 
 | Env var | Default | Scope | Meaning |
 | --- | --- | --- | --- |
-| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for storage (read-only), knowledge (read-write), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. A one-shot `files-init` container creates `/data/knowledge` + `/data/notes` and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
-| `STORAGE_ROOT` | `/data` | storage | In-container path of the tree storage indexes read-only (the shared-file-space mount). |
-| `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | storage | Comma-separated top-level subtrees hidden from the **agent's** file tools (`storage_list`/`storage_search`/`storage_read`); the operator-facing Files page / `/read` / `/download` are unaffected (#KB-refactor, storage v0.5.0). `notes/` holds private note bodies the agent must not read. Set empty to hide nothing. |
-| `VAULT_PATH` | `/data/knowledge` | knowledge | Knowledge's root inside the shared file space; each top-level folder is a project (knowledge base). Was `/vault` before #KB-refactor. |
-| `NOTES_ROOT` | `/data/notes` | notes | Notes' folder in the shared file space; each saved note is mirrored here as `<slug>.md`. Postgres stays the source of truth (#KB-refactor). |
+| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for storage (read-only), knowledge (read-write), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. The on-disk tree is tenant-scoped: a one-shot `files-init` container creates `/data/<tenant>/knowledge` + `/data/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`) and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
+| `STORAGE_ROOT` | `/data` | storage | In-container **base** of the shared-file-space mount; storage serves and indexes the tenant subtree `STORAGE_ROOT/<tenant>` read-only (tenant-scoped, constraint #1). |
+| `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | storage | Comma-separated top-level subtrees (relative to the served tenant subtree) hidden from the **agent's** file tools (`storage_list`/`storage_search`/`storage_read`); the operator-facing Files page / `/read` / `/download` are unaffected (#KB-refactor, storage v0.5.0). `notes/` holds private note bodies the agent must not read. Set empty to hide nothing. |
+| `VAULT_PATH` | `/data/knowledge` | knowledge | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge`, and each top-level folder under it is a project (knowledge base). Was `/vault` before #KB-refactor. |
+| `NOTES_ROOT` | `/data/notes` | notes | Notes' path within the shared file space; the on-disk `.md` mirror is tenant-scoped to `<files-root>/<tenant>/notes`. Each saved note is mirrored as `<slug>.md`; Postgres stays the source of truth (#KB-refactor). |
+
+The on-disk file tree is **tenant-scoped** (constraint #1): the three modules build their
+roots as `<files-root>/<tenant>/{knowledge,notes}` (and storage serves `<files-root>/<tenant>`),
+where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The volume mount stays `/data` —
+only the in-container path carries the tenant segment.
 
 **Migration note for existing deployments.** `EPICURUS_FILES_ROOT` replaces
 `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. Move old vault contents into
-`<files-root>/knowledge/<project>/` (each project is a top-level folder) so they appear as
-knowledge bases.
+`<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default
+`local`; each project is a top-level folder) so they appear as knowledge bases.
 
 ## Type aliases
 

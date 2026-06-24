@@ -33,7 +33,7 @@ on first write.
 
 | Variable | Default | Description |
 |---|---|---|
-| `STORAGE_ROOT` | `/data` | Absolute path (inside the container) to index. |
+| `STORAGE_ROOT` | `/data` | In-container base of the indexed tree; storage serves the tenant subtree `STORAGE_ROOT/<tenant>` (tenant-scoped, constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`). |
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Async Postgres DSN for the file index. |
 | `NATS_URL` | `nats://localhost:4222` | NATS server (inherited from CoreSettings). |
 | `DEFAULT_TENANT_ID` | `local` | Tenant scope for all rows and object buckets. |

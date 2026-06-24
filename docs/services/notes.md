@@ -12,8 +12,9 @@ Unlike knowledge — which indexes an Obsidian vault that lives on disk — note
 in the app, so their content is **externalized state** (Postgres), not local disk
 (constraint #2). Embeddings are obtained **through the core** (no model key lives here).
 
-Each saved note is also **mirrored** as `<slug>.md` under `/data/notes` in the **shared file
-space** (#KB-refactor), so notes appear in the storage module's Files view and can be read in
+Each saved note is also **mirrored** as `<slug>.md` under `/data/<tenant>/notes` in the
+**shared file space** (tenant-scoped, constraint #1; #KB-refactor), so notes appear in the
+storage module's Files view and can be read in
 its split-screen reader alongside the knowledge base. Postgres stays the **source of truth**;
 the mirror is read-only output, kept current on every save (best-effort, never failing a
 save), with a one-time startup backfill of pre-existing notes.
@@ -227,16 +228,17 @@ collection exists so a future, opt-in retrieval feature needs no re-index.
 | `PLATFORM_URL` | `http://core-app:8080` | The core's base URL (embeddings via the platform API). |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Note bodies + the suggestion queue (source of truth). |
-| `NOTES_ROOT` | `/data/notes` | Notes' folder in the shared file space — each saved note is mirrored here as `<slug>.md` so it shows in the storage Files view (#KB-refactor). Postgres stays the source of truth; the mirror is read-only output. |
+| `NOTES_ROOT` | `/data/notes` | Notes' path within the shared file space; the on-disk `.md` mirror is tenant-scoped to `<files-root>/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`). Each saved note is mirrored as `<slug>.md` so it shows in the storage Files view (#KB-refactor). Postgres stays the source of truth; the mirror is read-only output. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
 | `NOTES_PORT` | `8092` | Host port (loopback-bound by default). |
 
 Postgres remains the source of truth — notes are authored in-app, so their bodies are
 externalized state, not local disk (constraint #2). The container does mount the **shared
 file space** (`EPICURUS_FILES_ROOT`, the same `/data` volume storage and knowledge use)
-**read-write** at `/data/notes` purely to write the `.md` mirror; the one-shot `files-init`
-container creates and chowns that folder to uid 10001 first so a save never hits a
-`PermissionError`. Losing the mirror never loses a note. The agent's view of `notes/` through
+**read-write** at `/data/<tenant>/notes` purely to write the `.md` mirror — the on-disk tree
+is tenant-scoped (constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`, the mount stays `/data`).
+The one-shot `files-init` container creates and chowns that folder to uid 10001 first so a
+save never hits a `PermissionError`. Losing the mirror never loses a note. The agent's view of `notes/` through
 the storage file tools is hidden by storage's `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`,
 see [storage](storage.md)).
 
@@ -259,8 +261,8 @@ see [storage](storage.md)).
   only ever holds pending suggestions.
 - **Qdrant `<tenant>__notes`** — note chunk embeddings (cosine), one collection per tenant.
   Each point payload: `{slug, chunk_index, heading, text}`.
-- **`/data/notes/<slug>.md`** — the read-only `.md` mirror in the shared file space (derived
-  output, not a store of record; #KB-refactor). Written best-effort on each save and on a
+- **`/data/<tenant>/notes/<slug>.md`** — the read-only `.md` mirror in the shared file space
+  (tenant-scoped, constraint #1; derived output, not a store of record; #KB-refactor). Written best-effort on each save and on a
   one-time startup backfill; slug-confined so a slug carrying `..` can never escape the
   notes folder. The storage module reads it (Files view + split-screen reader), but hides it
   from the agent's file tools.

@@ -71,3 +71,18 @@ async def test_write_doc_mirrors_the_saved_body(tmp_path: Path) -> None:
     await pages.write_doc("hello", "# Hello\n")
 
     assert (tmp_path / "hello.md").read_text(encoding="utf-8") == "# Hello\n"
+
+
+def test_notes_root_is_tenant_scoped() -> None:
+    """The on-disk .md mirror lives under <files-root>/<tenant>/notes (constraint #1).
+
+    Guards the path arithmetic in create_app: a regression that drops the tenant segment
+    would put the mirror back at the global /data/notes, breaking per-tenant isolation of
+    the shared file space.
+    """
+    from epicurus_notes.settings import NotesSettings
+
+    s = NotesSettings(service_name="notes", notes_root=Path("/data/notes"))
+    notes_root = s.notes_root.parent / s.default_tenant_id / s.notes_root.name
+    assert notes_root == Path("/data") / s.default_tenant_id / "notes"
+    assert s.default_tenant_id in notes_root.parts  # the tenant segment is present

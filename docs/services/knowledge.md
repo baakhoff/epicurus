@@ -4,8 +4,9 @@
 for retrieval-augmented generation, fully incrementally:
 
 1. **Operator knowledge bases** — markdown notes the operator keeps under the shared
-   file space at `/data/knowledge`. Each top-level folder there is a **project**
-   ("knowledge base"); documents are addressed `<project>/<path>.md` (#KB-refactor).
+   file space at `/data/<tenant>/knowledge` (tenant-scoped, constraint #1). Each top-level
+   folder there is a **project** ("knowledge base"); documents are addressed
+   `<project>/<path>.md` (#KB-refactor).
 2. **Platform docs** (self-documentation) — the `docs/` tree bundled into the image
    at `/docs`; available with **no operator setup** in any deploy. Also surfaced
    read-only inside the editor under a reserved `__docs__` scope so a service's
@@ -15,9 +16,10 @@ for retrieval-augmented generation, fully incrementally:
    purged automatically (#215).
 
 Chunks are embedded **through the core** (no model key lives here) and stored in
-tenant-scoped Qdrant collections. Knowledge documents live under `/data/knowledge` in
-the **shared file space** — the same tree the storage module indexes read-only — so they
-also appear in the unified Files view (#KB-refactor). Host port **8085**.
+tenant-scoped Qdrant collections. Knowledge documents live under `/data/<tenant>/knowledge`
+in the **shared file space** (tenant-scoped, constraint #1) — the same tree the storage
+module indexes read-only — so they also appear in the unified Files view (#KB-refactor). Host
+port **8085**.
 
 ## The contract it exposes
 
@@ -72,7 +74,7 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 | Panel | What it shows / does |
 | --- | --- |
 | **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at` · `index_phase` / `index_attempts` (background-index progress, #230). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
-| **Settings** | Vault path (`VAULT_PATH`, default `/data/knowledge`) — editable in the shell. |
+| **Settings** | Vault path (`VAULT_PATH`, default `/data/knowledge`; the on-disk tree is tenant-scoped to `/data/<tenant>/knowledge`) — editable in the shell. |
 | **Actions** | **Re-index** — triggers `knowledge_reindex` (all sources) through the core. |
 
 No module code runs in the shell; all data flows through the core.
@@ -311,7 +313,7 @@ docs all rebuild after a reset.
 By default the index refreshes at startup and on an explicit `knowledge_reindex`. Set
 **`VAULT_WATCH=true`** to also **watch the vault and re-index on change** — the path for
 keeping the knowledge base in step with an Obsidian-Sync (or Git) folder bind-mounted under
-`/data/knowledge` (`VAULT_PATH`). `watcher.VaultWatcher` runs a `watchfiles.awatch` loop; each debounced batch of
+`/data/<tenant>/knowledge` (the tenant-scoped `VAULT_PATH`). `watcher.VaultWatcher` runs a `watchfiles.awatch` loop; each debounced batch of
 changes (window `VAULT_WATCH_DEBOUNCE_MS`, default 1500 ms) triggers one incremental
 `KnowledgeIndexer.run()`. Because the indexer is hash/mtime-incremental, a watch event over
 a synced folder only re-embeds the files that actually changed.
@@ -383,7 +385,7 @@ platform services read these docs if needed.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `VAULT_PATH` | `/data/knowledge` | Knowledge's root inside the shared file space; each top-level folder is a project (knowledge base). Lives under the same `/data` tree the storage module indexes read-only (#KB-refactor). |
+| `VAULT_PATH` | `/data/knowledge` | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge` (`<tenant>` = `DEFAULT_TENANT_ID`). Each top-level folder under it is a project (knowledge base). Lives under the same `/data` tree the storage module indexes read-only (#KB-refactor). |
 | `DOCS_PATH` | `/docs` | In-container path of the platform docs (bundled in image). |
 | `PLATFORM_URL` | `http://core-app:8080` | The core's base URL (for embeddings via the platform API). |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
@@ -396,20 +398,24 @@ platform services read these docs if needed.
 | `VAULT_WATCH` | `false` | Watch the vault and re-index on change (#232). Enabling it makes the vault **externally owned** — the editor page goes read-only and Obsidian becomes the sole author (ADR-0035). See [Obsidian sync](../developer/obsidian-sync.md). |
 | `VAULT_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of vault changes before a re-index is triggered. |
 
-Knowledge documents live at `/data/knowledge` in the **shared file space** — bound
+Knowledge documents live at `/data/<tenant>/knowledge` in the **shared file space** — bound
 **read-write** via `EPICURUS_FILES_ROOT` (the single env var that mounts the whole `/data`
-tree for storage, knowledge, and notes), which defaults to an **empty named volume**. Point
-`EPICURUS_FILES_ROOT` at a host directory to expose real files; the one-shot `files-init`
-container creates `/data/knowledge` and chowns it to the container user (uid 10001) so the
-editor's create/save never hits a `PermissionError` on a fresh volume (#KB-refactor — see
+tree for storage, knowledge, and notes), which defaults to an **empty named volume**. The
+on-disk tree is **tenant-scoped** (constraint #1): knowledge inserts a `<tenant>/` segment
+(`<tenant>` = `DEFAULT_TENANT_ID`, default `local`) — the volume mount stays `/data`, only the
+in-container path carries the segment. Point `EPICURUS_FILES_ROOT` at a host directory to
+expose real files; the one-shot `files-init` container creates `/data/<tenant>/knowledge` and
+chowns it to the container user (uid 10001) so the editor's create/save never hits a
+`PermissionError` on a fresh volume (#KB-refactor — see
 [Infrastructure](../infrastructure/index.md#shared-file-space)). `EPICURUS_FILES_ROOT`
 **replaces** the old per-module `KNOWLEDGE_HOST_VAULT`; existing deployments move their old
-vault contents into `<files-root>/knowledge/<project>/`. The platform docs at `/docs` are
-always present — bundled at image build time, and are not editable from the shell.
+vault contents into `<files-root>/<tenant>/knowledge/<project>/`. The platform docs at `/docs`
+are always present — bundled at image build time, **not** tenant-scoped (shared & read-only),
+and not editable from the shell.
 
 In **watch mode** (`VAULT_WATCH=true`) epicurus only ever **reads** the vault. To watch your
-own Obsidian-synced folder, bind it under `/data/knowledge` (the container user needs read
-access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md).
+own Obsidian-synced folder, bind it under `/data/<tenant>/knowledge` (the container user needs
+read access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md).
 
 ## Data model
 
@@ -450,7 +456,7 @@ core-app (embeddings + status proxy via the platform API) · Qdrant (vectors) ·
 
 ```bash
 # With a host directory for the shared file space (knowledge bases live under
-# <root>/knowledge/<project>/; docs auto-indexed from the image):
+# <root>/<tenant>/knowledge/<project>/, tenant = DEFAULT_TENANT_ID; docs auto-indexed from the image):
 EPICURUS_FILES_ROOT=/path/to/your/files docker compose up -d knowledge
 
 # Without one (empty named volume; only platform docs are indexed until you add notes):

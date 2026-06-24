@@ -20,16 +20,17 @@ home server — and bind-mount the synced vault into the `knowledge` container. 
 watcher re-indexes incrementally whenever Obsidian Sync lands a change on disk.
 
 1. **Point the shared file space at your vault** and **turn on the watcher.** Knowledge
-   reads its projects from `/data/knowledge` (the `knowledge/` subfolder of the shared
-   file space, #KB-refactor), so make that subfolder your Obsidian-synced vault — each
-   top-level folder in the vault becomes a knowledge base. In your `.env`:
+   reads its projects from `/data/<tenant>/knowledge` (the tenant-scoped `knowledge/`
+   subfolder of the shared file space, #KB-refactor; `<tenant>` is `DEFAULT_TENANT_ID`,
+   default `local`), so make that subfolder your Obsidian-synced vault — each top-level
+   folder in the vault becomes a knowledge base. In your `.env`:
 
    ```bash
-   # The shared file space; your Obsidian vault is its `knowledge/` subfolder, e.g.
-   # /home/you/epicurus-files/knowledge → /home/you/Obsidian/MyVault (a symlink or the
-   # vault placed there directly).
+   # The shared file space; your Obsidian vault is its `<tenant>/knowledge/` subfolder, e.g.
+   # /home/you/epicurus-files/local/knowledge → /home/you/Obsidian/MyVault (a symlink or the
+   # vault placed there directly). "local" is the default DEFAULT_TENANT_ID.
    EPICURUS_FILES_ROOT=/home/you/epicurus-files
-   # Watch /data/knowledge and re-index on change.
+   # Watch /data/<tenant>/knowledge and re-index on change.
    VAULT_WATCH=true
    # Optional: how long to coalesce a burst of changes before re-indexing (ms).
    # Obsidian Sync writes many files at once; the default groups them into one pass.

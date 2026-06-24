@@ -287,10 +287,26 @@ images to GHCR.
   orphaned from its `assistant` call, and the final message is always kept; a short `system`
   note marks the cut so the model knows earlier turns existed. Token counts are a conservative
   character-based estimate (no tokenizer dependency). Hosted providers (large contexts, handled
-  server-side) and short chats are untouched — the latter a no-op (`core-app` → 0.32.0).
+  server-side) and short chats are untouched — the latter a no-op (`core-app` → 0.33.0).
+- **The observability stack (Grafana / Prometheus / Loki / Tempo / Alloy / Alertmanager) is now
+  opt-in** — a self-hosted box that isn't running dashboards shouldn't pay for eight extra
+  containers it never opens. Every observability service is gated behind the `observability`
+  compose profile, so `docker compose up` (and `task up`) now runs a lean stack without them;
+  bring them up with `docker compose --profile observability up -d` (or `task obs-up`). Nothing
+  in epicurus depends on the stack at runtime — services still expose `/metrics` and `/health`,
+  so an operator who prefers `docker logs` or their own monitoring can point it at those
+  endpoints and never enable the profile. Infra-only; no component version change.
 
 ### Fixed
 
+- **Markdown now renders headings and lists instead of plain indented text** — assistant
+  replies (and the editor preview) typeset through the shared `.ep-prose` styles, but Tailwind's
+  preflight resets `h1–h6` to body size/weight and strips `list-style` from `ul`/`ol`, and the
+  prose rules never restored them. So `#`/`##` headings looked like ordinary paragraphs and `-`
+  / `1.` lists showed as a bare indent with no bullet or number. Restored an explicit heading
+  scale + weight (h1–h6) and per-type list markers (disc / decimal / nested circle), with
+  GFM task-list checkboxes, `hr`, and trimmed first/last margins. Pure styling — the markdown
+  DOM was already correct (`web` → 0.41.0).
 - **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
   (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
   So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,

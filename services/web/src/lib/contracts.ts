@@ -621,10 +621,31 @@ export const EditorDoc = z.object({
 });
 export type EditorDoc = z.infer<typeof EditorDoc>;
 
+/**
+ * One selectable scope in the editor's switcher (#KB-refactor): a `project` is a
+ * writable knowledge base (a top-level folder); a `reference` scope (the bundled
+ * platform docs) is read-only.
+ */
+export const EditorScope = z.object({
+  id: z.string(),
+  title: z.string(),
+  kind: z.enum(["project", "reference"]).default("project"),
+});
+export type EditorScope = z.infer<typeof EditorScope>;
+
 /** The `editor` archetype's list contract: the browsable document/folder tree. */
 export const EditorData = z.object({
   title: z.string().default("Knowledge"),
   docs: z.array(EditorDoc).default([]),
+  /**
+   * Projects/scopes (#KB-refactor): the knowledge bases the switcher lists, the active
+   * one (`docs` paths are relative to it), the noun for the "New …" control, and whether
+   * the operator may create another. Empty `scope_noun` ⇒ no switcher (Notes).
+   */
+  scopes: z.array(EditorScope).default([]),
+  scope: z.string().default(""),
+  scope_noun: z.string().default(""),
+  can_create_scope: z.boolean().default(false),
   /**
    * Opt into in-app authoring (ADR-0026): when true the shared editor shows a
    * "New note" affordance that saves to a fresh path. Notes sets this; knowledge
@@ -706,11 +727,19 @@ export const ReviewSuggestion = z.object({
   id: z.string(),
   title: z.string(),
   path: z.string(),
-  operation: z.enum(["create", "update", "delete"]),
+  // Content ops carry a `diff`; structural ops (move/mkdir/mkproject) are confirmed from
+  // `path`/`to_path`. `append` (notes) is content-like — its diff shows the added text.
+  operation: z.enum(["create", "update", "append", "delete", "move", "mkdir", "mkproject"]),
   origin: z.string().default("agent"),
   note: z.string().default(""),
   created_at: z.string(),
   diff: z.string().default(""),
+  /** Destination for a `move` (empty otherwise). */
+  to_path: z.string().default(""),
+  /** Full texts for the per-hunk review (#KB-refactor): `current` is the live document
+   *  (empty for a create), `content` is the proposal (empty for a delete). */
+  current: z.string().default(""),
+  content: z.string().default(""),
 });
 export type ReviewSuggestion = z.infer<typeof ReviewSuggestion>;
 
@@ -720,6 +749,17 @@ export const ReviewData = z.object({
   suggestions: z.array(ReviewSuggestion).default([]),
 });
 export type ReviewData = z.infer<typeof ReviewData>;
+
+/**
+ * A pending suggestion in the cross-module feed (#KB-refactor): a `ReviewSuggestion` plus
+ * the module + page that owns it, so the chat composer bubble and the Suggestions page can
+ * approve/reject it from anywhere. Served by `GET /platform/v1/suggestions`.
+ */
+export const PendingSuggestion = ReviewSuggestion.extend({
+  module: z.string(),
+  page_id: z.string(),
+});
+export type PendingSuggestion = z.infer<typeof PendingSuggestion>;
 
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 
@@ -759,6 +799,14 @@ export const EmailMessage = z.object({
   actions: z.array(BoardAction).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
+
+/** A text file's contents for the right-panel `doc-reader` view (#KB-refactor, req 6). */
+export const FileText = z.object({
+  path: z.string(),
+  name: z.string(),
+  content: z.string(),
+});
+export type FileText = z.infer<typeof FileText>;
 
 export const PlatformInfo = z.object({
   contract_version: z.string(),

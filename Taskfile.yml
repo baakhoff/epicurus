@@ -47,7 +47,7 @@ tasks:
       - task: test
 
   up:
-    desc: Start the full stack (data plane + enabled modules)
+    desc: Start the full stack (data plane + enabled modules; observability is opt-in, see `obs-up`)
     cmds:
       - docker compose up -d
 
@@ -55,6 +55,16 @@ tasks:
     desc: Stop the full stack (append `-- -v` to also drop volumes)
     cmds:
       - docker compose down {{.CLI_ARGS}}
+
+  obs-up:
+    desc: Start the stack with the opt-in observability profile (Grafana/Prometheus/Loki/Tempo)
+    cmds:
+      - docker compose --profile observability up -d
+
+  obs-down:
+    desc: Stop the stack including the observability profile (append `-- -v` to drop volumes)
+    cmds:
+      - docker compose --profile observability down {{.CLI_ARGS}}
 
   smoke:
     desc: Boot an isolated copy of the stack and assert the integration last mile (mirrors the CI gate)

@@ -19,12 +19,18 @@ Run an Obsidian client (with Sync) on the same machine as epicurus — a desktop
 home server — and bind-mount the synced vault into the `knowledge` container. The
 watcher re-indexes incrementally whenever Obsidian Sync lands a change on disk.
 
-1. **Point the mount at your Obsidian vault** and **turn on the watcher.** In your `.env`:
+1. **Point the shared file space at your vault** and **turn on the watcher.** Knowledge
+   reads its projects from `/data/<tenant>/knowledge` (the tenant-scoped `knowledge/`
+   subfolder of the shared file space, #KB-refactor; `<tenant>` is `DEFAULT_TENANT_ID`,
+   default `local`), so make that subfolder your Obsidian-synced vault — each top-level
+   folder in the vault becomes a knowledge base. In your `.env`:
 
    ```bash
-   # The host path of the Obsidian vault Obsidian Sync keeps current.
-   KNOWLEDGE_HOST_VAULT=/home/you/Obsidian/MyVault
-   # Watch that folder and re-index on change.
+   # The shared file space; your Obsidian vault is its `<tenant>/knowledge/` subfolder, e.g.
+   # /home/you/epicurus-files/local/knowledge → /home/you/Obsidian/MyVault (a symlink or the
+   # vault placed there directly). "local" is the default DEFAULT_TENANT_ID.
+   EPICURUS_FILES_ROOT=/home/you/epicurus-files
+   # Watch /data/<tenant>/knowledge and re-index on change.
    VAULT_WATCH=true
    # Optional: how long to coalesce a burst of changes before re-indexing (ms).
    # Obsidian Sync writes many files at once; the default groups them into one pass.
@@ -65,9 +71,10 @@ editor is read-only in watch mode anyway, so there is no push-back to reconcile.
    bind-mount + watch it exactly as in (a):
 
    ```bash
-   git clone git@your-host:you/vault.git /srv/epicurus/vault
+   # Clone into the knowledge/ subfolder of the shared file space.
+   git clone git@your-host:you/vault.git /srv/epicurus/files/knowledge
    # .env
-   KNOWLEDGE_HOST_VAULT=/srv/epicurus/vault
+   EPICURUS_FILES_ROOT=/srv/epicurus/files
    VAULT_WATCH=true
    ```
 

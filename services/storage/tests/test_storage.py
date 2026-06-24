@@ -369,3 +369,91 @@ async def test_tenant_isolation(tmp_index: FileIndex, sample_tree: Path) -> None
     await scan(sample_tree, tmp_index, tenant="tenant-a")
     entries = await tmp_index.browse(tenant="tenant-b", path="")
     assert entries == []
+
+
+# ── Privacy: notes hidden from the AGENT's file tools (#KB-refactor) ───────────
+
+
+@pytest.fixture
+def private_tree(tmp_path: Path) -> Path:
+    """A shared tree with a public `knowledge/` and a private `notes/`."""
+    (tmp_path / "knowledge" / "kb").mkdir(parents=True)
+    (tmp_path / "knowledge" / "kb" / "pub.md").write_text("public knowledge")
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "secret.md").write_text("private note body")
+    return tmp_path
+
+
+def _names(structured: dict[str, object]) -> set[str]:
+    result = structured.get("result") or []
+    return {e["name"] for e in result}  # type: ignore[index,union-attr]
+
+
+async def test_agent_list_hides_notes(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore, private_tree: Path
+) -> None:
+    await scan(private_tree, tmp_index, tenant=TENANT)
+    module = build_module(
+        tmp_index,
+        fake_objects,
+        storage_root=str(private_tree),
+        tenant=TENANT,
+        hidden_prefixes=("notes",),
+    )
+    _c, s = await module.mcp.call_tool("storage_list", {"path": ""})
+    names = _names(s)  # type: ignore[arg-type]
+    assert "knowledge" in names
+    assert "notes" not in names
+
+
+async def test_agent_cannot_browse_into_notes(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore, private_tree: Path
+) -> None:
+    await scan(private_tree, tmp_index, tenant=TENANT)
+    module = build_module(
+        tmp_index,
+        fake_objects,
+        storage_root=str(private_tree),
+        tenant=TENANT,
+        hidden_prefixes=("notes",),
+    )
+    _c, s = await module.mcp.call_tool("storage_list", {"path": "notes"})
+    assert (s.get("result") or []) == []  # type: ignore[union-attr]
+
+
+async def test_agent_search_hides_notes(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore, private_tree: Path
+) -> None:
+    await scan(private_tree, tmp_index, tenant=TENANT)
+    module = build_module(
+        tmp_index,
+        fake_objects,
+        storage_root=str(private_tree),
+        tenant=TENANT,
+        hidden_prefixes=("notes",),
+    )
+    _c, s = await module.mcp.call_tool("storage_search", {"query": "secret"})
+    assert (s.get("result") or []) == []  # type: ignore[union-attr]
+
+
+async def test_agent_read_refuses_notes(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore, private_tree: Path
+) -> None:
+    module = build_module(
+        tmp_index,
+        fake_objects,
+        storage_root=str(private_tree),
+        tenant=TENANT,
+        hidden_prefixes=("notes",),
+    )
+    _c, s = await module.mcp.call_tool("storage_read", {"path": "notes/secret.md"})
+    payload = s.get("result") or s  # type: ignore[union-attr]
+    assert str(payload).startswith("Error:")
+
+
+async def test_operator_page_still_shows_notes(tmp_index: FileIndex, private_tree: Path) -> None:
+    # The Files page (operator UI) is NOT filtered — notes stay browsable there.
+    await scan(private_tree, tmp_index, tenant=TENANT)
+    entries = await tmp_index.browse(tenant=TENANT, path="")
+    data = build_page_data(entries, path="", query="", download_base="/proxy/download")
+    assert "notes" in {item["title"] for item in data["items"]}

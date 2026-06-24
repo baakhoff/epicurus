@@ -89,6 +89,12 @@ class ModelsUpdate(BaseModel):
     models: dict[str, str]
 
 
+class SuggestionsEnabledUpdate(BaseModel):
+    """The body of the suggestions-review on/off toggle (#KB-refactor)."""
+
+    enabled: bool
+
+
 class ToolInvocation(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -108,6 +114,13 @@ class MoveRequest(BaseModel):
 
     from_path: str
     to_path: str
+
+
+class ApproveRequest(BaseModel):
+    """Optional approve body (#KB-refactor): the operator's per-hunk-merged content for an
+    edit. Absent ⇒ apply the agent's full proposal."""
+
+    content: str | None = None
 
 
 class ModuleRegistry:
@@ -269,6 +282,20 @@ class ModuleRegistry:
         """
         models = await self._prefs.get_models(self._tenant, name)
         return models.get(slot)
+
+    async def get_suggestions_enabled(self, name: str) -> bool:
+        """Whether agent changes to *name* go through review (default True) (#KB-refactor).
+
+        Read directly from Postgres (no manifest round-trip, like ``model_for_slot``) so a
+        module can resolve its own setting cheaply via ``PlatformClient`` to decide whether to
+        stage a suggestion or apply the change directly.
+        """
+        return await self._prefs.get_suggestions_enabled(self._tenant, name)
+
+    async def set_suggestions_enabled(self, name: str, enabled: bool) -> None:
+        """Persist whether *name*'s agent changes go through review. 404 if unknown (operator)."""
+        await self._resolve(name)  # only known modules
+        await self._prefs.set_suggestions_enabled(self._tenant, name, enabled)
 
     async def accounts_view(self, name: str) -> AccountsView:
         """The module's connected accounts + collections, merged with the operator's prefs.
@@ -640,6 +667,21 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def create_page_project(
+        self, name: str, page_id: str, project_name: str
+    ) -> dict[str, Any]:
+        """Proxy ``POST /pages/{page_id}/project`` to the module (#KB-refactor).
+
+        Creates a new knowledge base (a top-level scope). 409 if it already exists,
+        400 for an invalid name; the module enforces name-safety.
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            resp = await client.post(f"/pages/{page_id}/project", params={"name": project_name})
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+            return data
+
     async def delete_page_doc(self, name: str, page_id: str, path: str) -> None:
         """Proxy ``DELETE /pages/{page_id}/doc`` to the module (#216).
 
@@ -694,7 +736,12 @@ class ModuleRegistry:
         return base
 
     async def review_action(
-        self, name: str, page_id: str, suggestion_id: str, action: str
+        self,
+        name: str,
+        page_id: str,
+        suggestion_id: str,
+        action: str,
+        content: str | None = None,
     ) -> dict[str, Any]:
         """Proxy an operator's approve/reject of a staged suggestion to the module (#220).
 
@@ -703,15 +750,36 @@ class ModuleRegistry:
         module never exposes them as agent tools. The timeout is generous because approve
         triggers a write + embed round-trip back through the core. *action* is supplied by
         the core's own route handlers (never the caller), so it needs no segment guard.
+
+        On *approve*, *content* (optional) is the operator's per-hunk-merged result for an
+        edit (#KB-refactor) — forwarded so only the approved part is written.
         """
         _safe_segment(page_id, label="page_id")
         _safe_segment(suggestion_id, label="suggestion_id")
         base = await self._resolve_review_page(name, page_id)
+        kwargs: dict[str, Any] = {}
+        if content is not None:
+            kwargs["json"] = {"content": content}
         async with httpx.AsyncClient(base_url=base, timeout=60) as client:
-            resp = await client.post(f"/pages/{page_id}/suggestions/{suggestion_id}/{action}")
+            resp = await client.post(
+                f"/pages/{page_id}/suggestions/{suggestion_id}/{action}", **kwargs
+            )
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
             return data
+
+    async def read_text(self, name: str, path: str) -> dict[str, Any]:
+        """Proxy a module's inline text-read endpoint (#KB-refactor): ``GET /read?path=``.
+
+        Returns ``{path, name, content}`` for a UTF-8 text file — used by the Files
+        split-screen reader. Upstream 4xx pass through (415 binary, 413 too large, 404
+        missing); an unreachable module is a controlled 502.
+        """
+        base, _ = await self._resolve(name)
+        data: dict[str, Any] = await self._get_json(
+            base, "/read", params={"path": path}, op=f"{name} read"
+        )
+        return data
 
     async def download(self, name: str, path: str) -> httpx.Response:
         """Proxy a binary file download from a module's ``/download`` endpoint.
@@ -798,6 +866,46 @@ class ModuleRegistry:
         )
         return data
 
+    async def all_suggestions(self) -> list[dict[str, Any]]:
+        """Pending suggestions across every enabled module that declares a ``review`` page.
+
+        Each item carries ``module`` + ``page_id`` so the shell can approve/reject it — the
+        chat composer's suggestion bubble and the Suggestions page both read this feed
+        (#KB-refactor). Best-effort: a module that is down, disabled, removed, or erroring
+        is skipped rather than failing the whole feed.
+        """
+        out: list[dict[str, Any]] = []
+        for snap, base in zip(await self.snapshot(), self._bases, strict=True):
+            if snap.removed or not snap.enabled or not snap.status.healthy:
+                continue
+            for page in snap.manifest.pages:
+                if page.archetype != "review":
+                    continue
+                try:
+                    data = await self._get_json(
+                        base, f"/pages/{page.id}", op=f"{snap.manifest.name} suggestions"
+                    )
+                except HTTPException:
+                    continue
+                for item in data.get("suggestions", []):
+                    out.append({**item, "module": snap.manifest.name, "page_id": page.id})
+        return out
+
+
+def create_suggestions_router(registry: ModuleRegistry) -> APIRouter:
+    """The cross-module pending-suggestions feed the shell polls (#KB-refactor).
+
+    Separate from the modules router so it lives at ``/platform/v1/suggestions`` rather
+    than under ``/platform/v1/modules``.
+    """
+    router = APIRouter(prefix="/platform/v1", tags=["suggestions"])
+
+    @router.get("/suggestions")
+    async def list_suggestions() -> list[dict[str, Any]]:
+        return await registry.all_suggestions()
+
+    return router
+
 
 def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
@@ -847,6 +955,19 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
         """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
         return {"model": await registry.model_for_slot(name, slot)}
+
+    @router.get("/{name}/suggestions-enabled")
+    async def get_module_suggestions_enabled(name: str) -> dict[str, bool]:
+        """Whether agent changes to the module go through review (default on, #KB-refactor)."""
+        return {"enabled": await registry.get_suggestions_enabled(name)}
+
+    @router.put("/{name}/suggestions-enabled")
+    async def set_module_suggestions_enabled(
+        name: str, body: SuggestionsEnabledUpdate
+    ) -> dict[str, str]:
+        """Turn review on/off for the module (off ⇒ the agent's changes auto-apply)."""
+        await registry.set_suggestions_enabled(name, body.enabled)
+        return {"status": "ok"}
 
     @router.get("/{name}/collections", response_model=AccountsView)
     async def get_module_collections(name: str) -> AccountsView:
@@ -935,10 +1056,24 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         """Move or rename a file or folder within an editor page's store (#216)."""
         return await registry.move_page_item(name, page_id, body.from_path, body.to_path)
 
+    @router.post("/{name}/pages/{page_id}/project")
+    async def create_module_project(
+        name: str, page_id: str, project: str = Query(...)
+    ) -> dict[str, Any]:
+        """Create a new knowledge base (project) in an editor page's store (#KB-refactor)."""
+        return await registry.create_page_project(name, page_id, project)
+
     @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/approve")
-    async def approve_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
-        """Approve a staged suggestion: the module applies + indexes it (#220, ADR-0033)."""
-        return await registry.review_action(name, page_id, suggestion_id, "approve")
+    async def approve_suggestion(
+        name: str, page_id: str, suggestion_id: str, body: ApproveRequest | None = None
+    ) -> dict[str, Any]:
+        """Approve a staged suggestion: the module applies + indexes it (#220, ADR-0033).
+
+        ``body.content`` (optional) is the operator's per-hunk-merged result (#KB-refactor).
+        """
+        return await registry.review_action(
+            name, page_id, suggestion_id, "approve", content=body.content if body else None
+        )
 
     @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/reject")
     async def reject_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
@@ -963,6 +1098,11 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
             media_type=content_type,
             headers=headers,
         )
+
+    @router.get("/{name}/read")
+    async def read_module_text(name: str, path: str = Query(...)) -> dict[str, Any]:
+        """Read a text file's contents from a module for the split-screen reader (#KB-refactor)."""
+        return await registry.read_text(name, path)
 
     @router.get("/{name}/resolve/{kind}/{ref_id}")
     async def resolve_entity(name: str, kind: str, ref_id: str) -> dict[str, Any]:

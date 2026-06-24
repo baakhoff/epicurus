@@ -182,8 +182,14 @@ untouched, as are calls with no known window. The common case (a short chat) is 
 | `PUT /platform/v1/modules/{name}/collections` | Persist the selection: `{enabled: [CollectionRef], active: CollectionRef \| null}`. Store-through (refs are not live-validated); `active` must be in `enabled` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
 | `GET /platform/v1/modules/{name}/collections/prefs` | The raw stored `{enabled, active}` (Postgres only, no module round-trip) — backs `PlatformClient.get_collections` so a module resolves its own routing (ADR-0030). |
 | `POST /platform/v1/modules/{name}/tools/{tool}/enabled` | Enable or disable one tool (#213): `{enabled: bool}`. Hides the named tool from the agent while the module keeps running and other tools remain unaffected. **404** unknown module or undeclared tool. Persisted in Postgres (`module_prefs`). |
+| `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled` | The per-module **review on/off** toggle (#KB-refactor): `{enabled: bool}`. When **on** (the default — a missing/NULL pref reads as `true`) the module stages agent changes for approval on its `review` page; when **off** the module applies them directly. The module reads this through `PlatformClient.get_suggestions_enabled()`; the shell's review-page header writes it. `PUT` **404**s an unknown module. Persisted in Postgres (`module_prefs`). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
+| `GET /platform/v1/modules/{name}/read?path=…` | Proxy a module's `GET /read` text-file endpoint for the Files split-screen reader (#KB-refactor): `{path, name, content}`. Upstream 4xx pass through (415 binary, 413 too large, 404 missing); an unreachable module is a controlled **502**. |
+| `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…` | Create a new knowledge base (project / top-level scope) in an editor page's store (#KB-refactor). 409 if it exists, 400 for an invalid name; the module enforces name-safety. |
+| `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve` | Approve a staged suggestion — the module applies + indexes it (#220, ADR-0033). Optional `{content}` body is the operator's **per-hunk-merged** result for an edit, forwarded so only the approved changes are written (#KB-refactor). Operator-only. |
+| `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/reject` | Reject a staged suggestion — the module discards it, nothing written (#220). Operator-only. |
+| `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 
 > **Privileged surface (ADR-0028, #307).** Module removal — and applying the Ollama KV-cache
 > type — needs the Docker socket, mounted read-write on `core-app` **only**. The core touches it
@@ -253,10 +259,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
   deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON
-  list of tool names the operator has toggled off (#213), and `collections` holds the
-  account/collection selection (`{enabled, active}` JSON, ADR-0030). A module with no row
-  defaults to enabled, not-removed, core-default models, all tools on, and the local default
-  collection. Post-release columns are added in place at startup (no migration framework).
+  list of tool names the operator has toggled off (#213), `collections` holds the
+  account/collection selection (`{enabled, active}` JSON, ADR-0030), and `suggestions_enabled`
+  holds the per-module review on/off toggle (#KB-refactor; NULL ⇒ on). A module with no row
+  defaults to enabled, not-removed, core-default models, all tools on, review on, and the local
+  default collection. Post-release columns are added in place at startup (no migration framework).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Qdrant `<tenant>__facts`** — durable **facts about the user** for cross-chat recall

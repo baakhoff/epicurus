@@ -442,6 +442,11 @@ export function ChatScreen() {
     const sent = attachments;
     setAttachments([]); // chat.send clears the draft itself
     pinnedRef.current = true;
+    // chat.send clears the draft, but the textarea's height was grown imperatively on
+    // each keystroke — clear the inline height so an emptied composer snaps back to one
+    // line (min-h-[42px]) instead of keeping its multi-line height. Same on mobile + desktop.
+    const composer = composerRef.current;
+    if (composer) composer.style.height = "";
     void chat.send(
       text,
       model,

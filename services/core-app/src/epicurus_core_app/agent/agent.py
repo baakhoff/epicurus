@@ -19,10 +19,17 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field, ValidationError
 
 from epicurus_core import Attachment, EntityRef, ToolEnvelope, get_logger
-from epicurus_core_app.agent.activity import MessageActivity, ToolStep
+from epicurus_core_app.agent.activity import (
+    ActivityItem,
+    MessageActivity,
+    activity_from_timeline,
+    append_thinking,
+    append_tool,
+)
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
+from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.extraction import FactExtractor
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.readiness import Readiness
@@ -153,6 +160,7 @@ class Agent:
         default_tenant: str = "local",
         attachments: AttachmentExpander | None = None,
         extractor: FactExtractor | None = None,
+        prefs: LlmPrefsStore | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
@@ -164,6 +172,19 @@ class Agent:
         # the response path. None disables it. Tasks are tracked so they aren't GC'd mid-flight.
         self._extractor = extractor
         self._bg_tasks: set[asyncio.Task[Any]] = set()
+        self._prefs = prefs
+
+    async def _effective_max_steps(self, tenant_id: str | None) -> int:
+        """The active agent loop bound: the stored pref if set, else the env default.
+
+        Resolved per turn so the operator's UI choice takes effect without a restart
+        (the agent is constructed once). The route clamps the stored value's range.
+        """
+        if self._prefs is not None:
+            stored = await self._prefs.get_agent_max_steps(tenant_id or self._default_tenant)
+            if stored is not None:
+                return stored
+        return self._max_steps
 
     async def run(
         self,
@@ -202,17 +223,17 @@ class Agent:
         event rather than an exception (the HTTP response has already started).
         """
         tenant = tenant_id or self._default_tenant
+        max_steps = await self._effective_max_steps(tenant)
         messages = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
         parts: list[str] = []
-        thinking_parts: list[str] = []
+        timeline: list[ActivityItem] = []
         tools_used: list[str] = []
-        steps: list[ToolStep] = []
         refs = _RefCollector()
         stopped = "completed"
         try:
             specs, route = await self._mcp.discover()
-            for _ in range(self._max_steps):
+            for _ in range(max_steps):
                 result: ChatResult | None = None
                 async for event in self._gateway.stream_chat(
                     convo, model=model, tools=specs or None, tenant_id=tenant_id
@@ -221,7 +242,7 @@ class Agent:
                         parts.append(event.delta)
                         yield AgentEvent(type="delta", text=event.delta)
                     if event.reasoning:
-                        thinking_parts.append(event.reasoning)
+                        append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
                     if event.result is not None:
                         result = event.result
@@ -242,7 +263,7 @@ class Agent:
                     refs.add(found)
                     status = "error" if text.startswith("error:") else "ok"
                     yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
-                    steps.append(ToolStep(tool=name, status=status, detail=detail))
+                    append_tool(timeline, name, status, detail)
                     convo.append(
                         ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                     )
@@ -255,7 +276,7 @@ class Agent:
                         parts.append(event.delta)
                         yield AgentEvent(type="delta", text=event.delta)
                     if event.reasoning:
-                        thinking_parts.append(event.reasoning)
+                        append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
         except Exception as exc:  # the response already started — finish with an error event
             log.warning("streaming turn failed", error=str(exc))
@@ -266,7 +287,7 @@ class Agent:
             tools_used=tools_used,
             stopped=stopped,
             entity_refs=refs.refs,
-            activity=MessageActivity(thinking="".join(thinking_parts)[:_THINKING_CAP], steps=steps),
+            activity=activity_from_timeline(timeline, thinking_cap=_THINKING_CAP),
         )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
@@ -390,21 +411,21 @@ class Agent:
         """The tool-calling loop: ask, run tools, feed results back, until an answer."""
         specs, route = await self._mcp.discover()
         call_tenant = tenant_id or self._default_tenant
+        max_steps = await self._effective_max_steps(tenant_id)
         convo = list(messages)
         tools_used: list[str] = []
-        steps: list[ToolStep] = []
-        thinking_parts: list[str] = []
+        timeline: list[ActivityItem] = []
         refs = _RefCollector()
 
         def activity() -> MessageActivity:
-            return MessageActivity(thinking="".join(thinking_parts)[:_THINKING_CAP], steps=steps)
+            return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
 
-        for _ in range(self._max_steps):
+        for _ in range(max_steps):
             result = await self._gateway.chat(
                 convo, model=model, tools=specs or None, tenant_id=tenant_id
             )
             if result.reasoning:
-                thinking_parts.append(result.reasoning)
+                append_thinking(timeline, result.reasoning)
             if not result.tool_calls:
                 return AgentTurn(
                     content=result.content,
@@ -423,13 +444,13 @@ class Agent:
                 text, found = _extract_entities(output)
                 refs.add(found)
                 status = "error" if text.startswith("error:") else "ok"
-                steps.append(ToolStep(tool=name, status=status, detail=_tool_detail(arguments)))
+                append_tool(timeline, name, status, _tool_detail(arguments))
                 convo.append(
                     ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                 )
         final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
         if final.reasoning:
-            thinking_parts.append(final.reasoning)
+            append_thinking(timeline, final.reasoning)
         return AgentTurn(
             content=final.content,
             tools_used=tools_used,

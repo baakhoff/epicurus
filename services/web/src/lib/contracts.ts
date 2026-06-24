@@ -17,11 +17,31 @@ export const ModelInfo = z.object({
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
+/** Per-model tuning; null on a field means "inherit" the global / env default. */
+export const ModelSettings = z.object({
+  context_window: z.number().nullable(),
+  keep_alive: z.string().nullable(),
+});
+export type ModelSettings = z.infer<typeof ModelSettings>;
+
+/** Read-only facts about a local model from the runtime's `/api/show`. */
+export const ModelDetails = z.object({
+  // Weight quantization is fixed at pull time (e.g. "Q4_K_M") — not a runtime knob.
+  quantization: z.string().nullish(),
+  parameter_size: z.string().nullish(),
+  // The model's trained maximum context (a ceiling for the operator's choice).
+  context_length: z.number().nullish(),
+  family: z.string().nullish(),
+});
+export type ModelDetails = z.infer<typeof ModelDetails>;
+
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),
   // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
   global_context_window: z.number().nullable(),
+  // Operator-chosen agent loop bound (tool rounds per turn); null = the env default.
+  global_agent_max_steps: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
@@ -150,14 +170,31 @@ export const ToolStep = z.object({
 });
 export type ToolStep = z.infer<typeof ToolStep>;
 
+/** One entry on the ordered activity timeline: a run of thinking, or a tool step (#300). */
+export const ActivityItem = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("thinking"), text: z.string().default("") }),
+  z.object({
+    kind: z.literal("tool"),
+    tool: z.string(),
+    status: z.enum(["running", "ok", "error"]).default("ok"),
+    detail: z.string().nullish(),
+  }),
+]);
+export type ActivityItem = z.infer<typeof ActivityItem>;
+
 /**
  * The assistant turn's process — its thinking and its tool steps — persisted alongside the
  * message so the folded activity timeline survives a reopen, not only the live stream
  * (ADR-0041). Null on user messages and on pre-v0.19 assistant rows.
+ *
+ * `timeline` is the chronological interleaving (think → call → think, #300); the flat
+ * `thinking`/`steps` are kept for backward compatibility — older rows have only those, and
+ * the UI falls back to them when `timeline` is empty.
  */
 export const MessageActivity = z.object({
   thinking: z.string().default(""),
   steps: z.array(ToolStep).default([]),
+  timeline: z.array(ActivityItem).default([]),
 });
 export type MessageActivity = z.infer<typeof MessageActivity>;
 
@@ -579,7 +616,7 @@ export const EditorData = z.object({
    */
   read_only: z.boolean().default(false),
   /**
-   * Save history (ADR-0045): when true every save snapshots the document, and the shell
+   * Save history (ADR-0046): when true every save snapshots the document, and the shell
    * shows a History affordance to browse and restore past versions. Notes and knowledge
    * set this. Restore is client-side (re-save a past version's content).
    */
@@ -603,7 +640,7 @@ export const EditorSaveResult = z.object({
 });
 export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
 
-/** One entry in an `editor` document's save history (ADR-0045) — metadata only, no body. */
+/** One entry in an `editor` document's save history (ADR-0046) — metadata only, no body. */
 export const EditorVersion = z.object({
   version_id: z.string(),
   created_at: z.string(),
@@ -618,7 +655,7 @@ export const EditorVersionList = z.object({
 });
 export type EditorVersionList = z.infer<typeof EditorVersionList>;
 
-/** One past version's full content, fetched when the operator views it (ADR-0045). */
+/** One past version's full content, fetched when the operator views it (ADR-0046). */
 export const EditorVersionContent = z.object({
   path: z.string(),
   version_id: z.string(),

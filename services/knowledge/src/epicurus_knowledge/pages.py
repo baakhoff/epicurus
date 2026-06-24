@@ -67,7 +67,7 @@ class EditorData(BaseModel):
     docs: list[EditorDoc] = Field(default_factory=list)
     can_manage_files: bool = False  # True → the shell shows folder CRUD controls (#216)
     read_only: bool = False  # True → editor is view-only; vault is externally owned (#232)
-    versioned: bool = True  # True → each save snapshots a version the shell can browse (#ADR-0045)
+    versioned: bool = True  # True → each save snapshots a version the shell can browse (#ADR-0046)
 
 
 class EditorDocContent(BaseModel):
@@ -141,7 +141,7 @@ class VaultPages:
         # Watch mode (#232): the vault is externally owned, so every write is refused and
         # the file-tree CRUD is hidden (the shell honours read_only / can_manage_files).
         self._read_only = read_only
-        # Version history (#ADR-0045): each editor save snapshots content here; viewing
+        # Version history (#ADR-0046): each editor save snapshots content here; viewing
         # past versions is allowed even when the vault is read-only. ``None`` (tests) just
         # disables snapshotting — the editor still works.
         self._versions = versions
@@ -200,7 +200,7 @@ class VaultPages:
         except Exception as exc:  # the edit is saved; indexing is best-effort here
             log.warning("save succeeded but re-index failed", path=rel, error=str(exc))
             indexed = False
-        # Snapshot the saved content for version history (#ADR-0045). The file write above
+        # Snapshot the saved content for version history (#ADR-0046). The file write above
         # is the source of truth, so record the version even when the re-index failed —
         # and never let a snapshot failure fail the save.
         await self._record_version(rel, content)
@@ -287,7 +287,7 @@ class VaultPages:
         return {"path": to_rel}
 
     async def list_versions(self, rel: str) -> EditorVersionList:
-        """The save-snapshot history for *rel*, newest first (#ADR-0045).
+        """The save-snapshot history for *rel*, newest first (#ADR-0046).
 
         Viewing history is allowed even when the vault is read-only (watch mode, #232) —
         only *writing* the vault is refused there. The path is still validated through
@@ -310,7 +310,7 @@ class VaultPages:
         )
 
     async def get_version(self, rel: str, version_id: str) -> EditorVersionContent:
-        """One past version's full content; 404 when the version does not exist (#ADR-0045).
+        """One past version's full content; 404 when the version does not exist (#ADR-0046).
 
         Allowed on a read-only vault (viewing, not writing). The path is validated through
         :func:`~epicurus_knowledge.refs.safe_relative`.

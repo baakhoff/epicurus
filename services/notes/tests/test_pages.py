@@ -170,7 +170,7 @@ async def test_router_invalid_slug_is_400() -> None:
     assert resp.status_code == 400
 
 
-# ── version history (ADR-0045) ────────────────────────────────────────────────
+# ── version history (ADR-0046) ────────────────────────────────────────────────
 
 
 async def test_editor_data_is_versioned() -> None:

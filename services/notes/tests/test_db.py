@@ -65,7 +65,7 @@ async def test_last_updated_at_is_iso(store: NotesStore) -> None:
     datetime.fromisoformat(result)
 
 
-# ── version history (ADR-0045) ────────────────────────────────────────────────
+# ── version history (ADR-0046) ────────────────────────────────────────────────
 
 
 async def test_add_version_records_each_distinct_save_newest_first(store: NotesStore) -> None:

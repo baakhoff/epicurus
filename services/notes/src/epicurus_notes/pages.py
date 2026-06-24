@@ -53,7 +53,7 @@ class EditorData(BaseModel):
 
     ``can_create`` opts this page into the shared editor's authoring affordance
     (ADR-0026): the shell shows a "New note" control that saves to a new slug.
-    ``versioned`` opts it into version history (ADR-0045): every save snapshots the
+    ``versioned`` opts it into version history (ADR-0046): every save snapshots the
     body, and the shell offers a browse/restore-past-versions affordance.
     """
 
@@ -72,7 +72,7 @@ class EditorDocContent(BaseModel):
 
 
 class EditorVersion(BaseModel):
-    """One entry in a note's version list (ADR-0045)."""
+    """One entry in a note's version list (ADR-0046)."""
 
     version_id: str
     created_at: str
@@ -176,7 +176,7 @@ class NotesPages:
         slug = _clean_slug(slug)
         title = derive_title(content)
         await self._store.upsert(tenant=self._tenant, slug=slug, title=title, content=content)
-        # Snapshot the saved body for version history (ADR-0045). The save has
+        # Snapshot the saved body for version history (ADR-0046). The save has
         # already committed, so a failure here must never fail the save — it only
         # loses one history entry.
         try:
@@ -198,7 +198,7 @@ class NotesPages:
         return EditorSaveResult(path=slug, indexed=True, chunk_count=chunk_count)
 
     async def list_versions(self, slug: str) -> EditorVersionList:
-        """A note's past versions, newest first (no bodies) — ADR-0045."""
+        """A note's past versions, newest first (no bodies) — ADR-0046."""
         slug = _clean_slug(slug)
         summaries = await self._store.list_versions(tenant=self._tenant, slug=slug)
         return EditorVersionList(

@@ -9,7 +9,7 @@ Each row records the file's last-seen mtime and sha-256 content hash so the
 indexer can skip unchanged files on subsequent runs.
 
 A third table — ``knowledge_versions`` — keeps a content snapshot per editor save
-(version history, #ADR-0045), so the editor can list and re-open a document's past
+(version history, #ADR-0046), so the editor can list and re-open a document's past
 revisions. It shares this metadata's engine and is created by :class:`VersionStore`.
 """
 
@@ -325,7 +325,7 @@ class DocIndex:
             return result.isoformat() if result is not None else None
 
 
-# ── Document version history (editor save snapshots, #ADR-0045) ───────────────
+# ── Document version history (editor save snapshots, #ADR-0046) ───────────────
 
 
 # Per (tenant, note_path) versions kept; older ones are pruned after each new save so a
@@ -378,7 +378,7 @@ class _StoredVersion(_VersionBase):
 
 
 class VersionStore:
-    """Tenant-scoped content-snapshot history for vault documents (editor saves, #ADR-0045).
+    """Tenant-scoped content-snapshot history for vault documents (editor saves, #ADR-0046).
 
     Backed by the same :class:`~sqlalchemy.ext.asyncio.AsyncEngine` as the index ledgers.
     Each editor save records one snapshot (deduplicated against the previous one); the

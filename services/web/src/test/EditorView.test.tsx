@@ -273,7 +273,7 @@ describe("EditorView", () => {
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
   });
 
-  it("browses, views, and restores a past version (ADR-0045)", async () => {
+  it("browses, views, and restores a past version (ADR-0046)", async () => {
     mockModulePage.mockResolvedValue({
       docs: [{ id: "a.md", title: "a", path: "a.md" }],
       versioned: true,

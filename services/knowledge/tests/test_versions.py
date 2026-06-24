@@ -1,4 +1,4 @@
-"""Tests for editor-save version history (#ADR-0045).
+"""Tests for editor-save version history (#ADR-0046).
 
 Two layers are covered:
 

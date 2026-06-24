@@ -19,9 +19,10 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | Screen | What it does |
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker. |
-| **Models** | **Catalog browser** — search and filter the model catalog by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress. The catalog list is capped to ~5 rows in its **own scroll box** so the long upstream list never pushes the rest of the page away (ADR-0045). It is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
+| **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
+| **Models** | **Catalog browser** — search and filter the model catalog by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
-| **Settings** | Theme (dark/light), connected accounts (OAuth), timezone, platform info, and a **Memory** box at the foot: the durable facts epicurus remembers about you across chats (ADR-0045) — searchable and scrollable, with a provenance badge per fact (*you asked* = the `remember` tool · *learned* = background extraction) and a **forget** button. Memory is reference you curate occasionally, so it lives here rather than in the left nav. |
+| **Settings** | Theme (dark/light/system), default model. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
 | **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`) programmatically (ADR-0018). |
 
@@ -59,14 +60,7 @@ and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bea
 toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
 bar.
 
-The shell is a **fixed-viewport app**: `#root` is pinned to the viewport (`position: fixed`,
-in `src/index.css`) so the document itself never scrolls — only the regions inside it (the
-side rail, the main screen) own their scroll. Without that, a nested `overflow:auto` region
-(a long Models page) inflated the document's scroll height in Chromium, and a wheel over the
-static side rail dragged the whole interface to the top; plain `overflow:hidden` doesn't
-collapse that phantom height, removing the root from flow does (ADR-0045).
-
-When the page is **`versioned`** (notes, knowledge — ADR-0045), a **History** control lists
+When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** control lists
 past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh
 save (so the timeline only ever grows). The shell reads history from the proxied
 `…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
@@ -119,12 +113,14 @@ tool call's `running`→`ok`/`error`), `done` (the final `AgentTurn`), `error`.
 
 Before the first token the shell shows the turn's *process*, not a bare caret: a
 **readiness bar** while the system warms (`readiness` events, #122), a **"Thinking…"** cue
-once it is ready and a token is pending, then an **activity timeline** that shows the
-model's thinking (a collapsible block) and lists each tool step with a human-readable label
-and live status (#121, ADR-0041). The timeline folds to a one-line summary as the answer
-streams in. On `done` the live turn is replaced by the clean server-stored answer — which
-**keeps its folded activity**, persisted on the message (`MessageRecord.activity`), so a
-reopened conversation still shows the timeline (thinking + tool steps).
+once it is ready and a token is pending, then an **activity timeline** that interleaves the
+model's thinking (collapsible blocks) and its tool steps **in the order they happened** —
+think → call → think — each tool step with a human-readable label and live status (#121,
+ADR-0041, ordering #300). The timeline folds to a one-line summary as the answer streams in.
+On `done` the live turn is replaced by the clean server-stored answer — which **keeps its
+folded activity**, persisted on the message (`MessageRecord.activity.timeline`), so a
+reopened conversation still shows the same ordered timeline. Older turns saved before the
+ordered timeline fall back to a thinking-then-steps render.
 
 ## Configuration
 

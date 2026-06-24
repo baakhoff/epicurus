@@ -38,6 +38,7 @@ from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.model_settings import ModelSettingsStore
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
@@ -82,6 +83,7 @@ def create_app() -> FastAPI:
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
 
     prefs = LlmPrefsStore(engine)
+    model_settings = ModelSettingsStore(engine)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
@@ -97,6 +99,7 @@ def create_app() -> FastAPI:
         top_p=settings.llm_top_p,
         num_ctx=settings.llm_num_ctx,
         prefs=prefs,
+        model_settings=model_settings,
     )
 
     catalog = ModelCatalog(
@@ -173,6 +176,9 @@ def create_app() -> FastAPI:
         default_tenant=settings.default_tenant_id,
         attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
         extractor=extractor,
+        # Resolve the loop bound per turn from the stored pref (else the env default), so the
+        # operator's UI choice takes effect without a restart (#297).
+        prefs=prefs,
     )
     oauth = OAuthService(
         secrets,
@@ -193,6 +199,10 @@ def create_app() -> FastAPI:
             await prefs.init()
         except Exception as exc:
             log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
+        try:
+            await model_settings.init()
+        except Exception as exc:
+            log.error("model settings init failed; per-model tuning disabled", error=str(exc))
         try:
             await module_prefs.init()
         except Exception as exc:
@@ -235,7 +245,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         create_llm_router(
-            gateway, prefs=prefs, default_tenant=settings.default_tenant_id, catalog=catalog
+            gateway,
+            prefs=prefs,
+            default_tenant=settings.default_tenant_id,
+            catalog=catalog,
+            model_settings=model_settings,
         )
     )
     app.include_router(

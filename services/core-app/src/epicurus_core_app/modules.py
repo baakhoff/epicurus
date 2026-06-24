@@ -567,7 +567,7 @@ class ModuleRegistry:
         return data
 
     async def get_page_doc_versions(self, name: str, page_id: str, path: str) -> dict[str, Any]:
-        """Proxy an editor document's save history to the shell (ADR-0045).
+        """Proxy an editor document's save history to the shell (ADR-0046).
 
         ``GET /pages/{page_id}/doc/versions?path=<path>`` → ``{versions:[…]}`` newest-first.
         Version history is an ``editor`` capability, so a non-editor page 404s here.
@@ -584,7 +584,7 @@ class ModuleRegistry:
     async def get_page_doc_version(
         self, name: str, page_id: str, path: str, version: str
     ) -> dict[str, Any]:
-        """Proxy one past version of an editor document to the shell (ADR-0045).
+        """Proxy one past version of an editor document to the shell (ADR-0046).
 
         ``GET /pages/{page_id}/doc/version?path=<path>&version=<id>`` → its
         ``{path, version_id, created_at, title, content}`` body; 404 if no such version.
@@ -897,14 +897,14 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
 
     @router.get("/{name}/pages/{page_id}/doc/versions")
     async def get_module_page_doc_versions(name: str, page_id: str, path: str) -> dict[str, Any]:
-        """List an editor document's saved versions, newest first (ADR-0045)."""
+        """List an editor document's saved versions, newest first (ADR-0046)."""
         return await registry.get_page_doc_versions(name, page_id, path)
 
     @router.get("/{name}/pages/{page_id}/doc/version")
     async def get_module_page_doc_version(
         name: str, page_id: str, path: str, version: str
     ) -> dict[str, Any]:
-        """Fetch one past version of an editor document (ADR-0045)."""
+        """Fetch one past version of an editor document (ADR-0046)."""
         return await registry.get_page_doc_version(name, page_id, path, version)
 
     @router.put("/{name}/pages/{page_id}/doc")

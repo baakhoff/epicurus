@@ -342,7 +342,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   // The folder inside which a new file is being created (null = root)
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
 
-  // Version history (ADR-0045): the dropdown's open state and the past version being
+  // Version history (ADR-0046): the dropdown's open state and the past version being
   // previewed (read-only) in place of the live buffer. `null` = editing the current doc.
   const [historyOpen, setHistoryOpen] = useState(false);
   const [viewingVersion, setViewingVersion] = useState<EditorVersionContent | null>(null);
@@ -391,7 +391,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
       api.saveModulePageDoc(module, pageId, path, content),
     onSuccess: (_result, { path, content }) => {
       void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
-      // Every save snapshots a version (ADR-0045) — refresh the open doc's history.
+      // Every save snapshots a version (ADR-0046) — refresh the open doc's history.
       void qc.invalidateQueries({ queryKey: ["module-doc-versions", module, pageId] });
       // Reconcile the buffer only if we're still on the doc we saved — a leave-flush of the
       // *previous* doc must not stamp its content onto the now-open one's baseline. Setting
@@ -403,7 +403,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
   });
 
-  // Version history (ADR-0045): the save snapshots are fetched lazily when the History
+  // Version history (ADR-0046): the save snapshots are fetched lazily when the History
   // dropdown opens; viewing one previews it read-only in place of the live buffer.
   const versioned = Boolean(list.data?.versioned);
   const versions = useQuery({
@@ -564,7 +564,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setSelectedPath(path);
   };
 
-  // Restore a viewed past version (ADR-0045): make its content the live buffer and save it
+  // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
   // as a new version through the normal path. Confirms first if it would drop unsaved edits.
   const restoreVersion = () => {
     if (!viewingVersion || !selectedPath || data.read_only) return;
@@ -819,7 +819,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 {selectedPath}
                 {isNew && <span className="ml-1 text-ink-faint">(new)</span>}
               </span>
-              {/* Editing controls — hidden while previewing a past version (ADR-0045). */}
+              {/* Editing controls — hidden while previewing a past version (ADR-0046). */}
               {!viewingVersion && (
                 <>
                   {/* Save status: ADR-0042 keeps this live; the button is an explicit flush. */}
@@ -853,7 +853,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                 </>
               )}
 
-              {/* History (ADR-0045): browse + restore past saves of this document. */}
+              {/* History (ADR-0046): browse + restore past saves of this document. */}
               {versioned && !isNew && (
                 <div className="relative shrink-0">
                   <button
@@ -937,7 +937,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
               </div>
             )}
 
-            {/* viewing a past version (ADR-0045): a read-only preview with restore / close */}
+            {/* viewing a past version (ADR-0046): a read-only preview with restore / close */}
             {viewingVersion && (
               <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-edge bg-surface-2 px-3 py-1.5 text-xs text-ink-dim">
                 <span>

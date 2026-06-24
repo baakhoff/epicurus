@@ -56,7 +56,7 @@ def create_app() -> FastAPI:
     doc_index = DocIndex(engine)
     module_doc_ledger = ModuleDocLedger(engine)
     suggestion_store = SuggestionStore(engine)
-    # Editor-save version history (#ADR-0045): shares the same Postgres engine as the
+    # Editor-save version history (#ADR-0046): shares the same Postgres engine as the
     # index ledgers; one content snapshot per save, retained per (tenant, note_path).
     version_store = VersionStore(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)

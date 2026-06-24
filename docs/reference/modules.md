@@ -243,7 +243,7 @@ document/folder tree (content is fetched lazily per document), and it owns sever
   ],
   "can_create": false,        // true → shell shows "New note" (Notes module)
   "can_manage_files": true,   // true → shell shows folder CRUD (Knowledge module, #216)
-  "versioned": true           // true → shell shows save-history browse + restore (ADR-0045)
+  "versioned": true           // true → shell shows save-history browse + restore (ADR-0046)
 }
 // GET /pages/{id}/doc?path=<rel>  →  one document's content
 { "path": "projects/a.md", "title": "a", "content": "# A\n…" }
@@ -251,7 +251,7 @@ document/folder tree (content is fetched lazily per document), and it owns sever
 { "path": "projects/a.md", "indexed": true, "chunk_count": 3 }
 ```
 
-When `versioned` is true (notes, knowledge — ADR-0045), every save snapshots the body and
+When `versioned` is true (notes, knowledge — ADR-0046), every save snapshots the body and
 two read-only endpoints expose the history (newest first, deduped, capped per document).
 Restore is **client-side** — the shell re-saves a past version's content through the normal
 `PUT …/doc`, so there is no restore endpoint:
@@ -277,8 +277,8 @@ POST   /pages/{id}/move  { from_path, to_path } →  { "path": "…" }  (404 sou
 Proxied at:
 
 - `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
-- `GET /platform/v1/modules/{name}/pages/{id}/doc/versions?path=<rel>` (ADR-0045)
-- `GET /platform/v1/modules/{name}/pages/{id}/doc/version?path=<rel>&version=<version_id>` (ADR-0045)
+- `GET /platform/v1/modules/{name}/pages/{id}/doc/versions?path=<rel>` (ADR-0046)
+- `GET /platform/v1/modules/{name}/pages/{id}/doc/version?path=<rel>&version=<version_id>` (ADR-0046)
 - `POST /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`

@@ -51,7 +51,7 @@ class NoteRecord:
 
 @dataclass(frozen=True)
 class VersionSummary:
-    """One past version without its body — for the version list (ADR-0045)."""
+    """One past version without its body — for the version list (ADR-0046)."""
 
     slug: str
     version_id: str
@@ -72,7 +72,7 @@ class VersionRecord:
 
 
 # Cap on retained versions per (tenant, slug): the list never exceeds this and a
-# save prunes anything older (ADR-0045).
+# save prunes anything older (ADR-0046).
 MAX_VERSIONS = 50
 
 
@@ -98,7 +98,7 @@ class _StoredNote(_Base):
 
 
 class _NoteVersion(_Base):
-    """An immutable snapshot of a note's body, recorded on each save (ADR-0045).
+    """An immutable snapshot of a note's body, recorded on each save (ADR-0046).
 
     Tenant-scoped and indexed on ``(tenant, slug)`` so the version list and prune
     are cheap. The row ``id`` is the opaque ``version_id`` clients use to fetch a
@@ -204,7 +204,7 @@ class NotesStore:
             )
             return result.isoformat() if result is not None else None
 
-    # ── version history (ADR-0045) ────────────────────────────────────────────
+    # ── version history (ADR-0046) ────────────────────────────────────────────
 
     async def add_version(self, *, tenant: str, slug: str, title: str, content: str) -> None:
         """Snapshot *content* for (tenant, slug), unless it is unchanged.

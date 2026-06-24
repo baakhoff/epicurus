@@ -1,4 +1,4 @@
-"""Tests for the editor version-history proxy methods on ModuleRegistry (ADR-0045, #290).
+"""Tests for the editor version-history proxy methods on ModuleRegistry (ADR-0046, #290).
 
 Like the file-tree proxy tests, these stub ``httpx.AsyncClient`` so no real HTTP
 happens — here we mock ``.get`` (the version reads go through ``_get_json``).

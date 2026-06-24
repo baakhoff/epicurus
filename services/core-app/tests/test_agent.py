@@ -5,9 +5,24 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
+
 from epicurus_core import Attachment, EntityRef, tool_envelope
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
+from epicurus_core_app.llm.prefs import LlmPrefsStore
+
+
+async def _fresh_prefs() -> LlmPrefsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    prefs = LlmPrefsStore(engine)
+    await prefs.init()
+    return prefs
 
 
 class _FakeGateway:
@@ -95,6 +110,37 @@ async def test_agent_stops_at_max_steps() -> None:
     )
     assert turn.stopped == "max_steps"
     assert turn.content == "final"
+
+
+async def test_agent_max_steps_resolved_from_prefs_at_runtime() -> None:
+    # The stored pref (1) overrides the constructor default (4) per turn — no restart needed.
+    store = await _fresh_prefs()
+    await store.set_agent_max_steps("local", 1)
+    results = [
+        ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+        ChatResult(model="m", content="final"),
+    ]
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
+    turn = await Agent(gateway=_FakeGateway(results), mcp=mcp, max_steps=4, prefs=store).run(
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == "max_steps"  # stopped after one round despite the default of 4
+    assert turn.tools_used == ["echo"]
+
+
+async def test_agent_max_steps_falls_back_to_constructor_default() -> None:
+    # With no stored pref, the constructor default (4) applies — the same two results
+    # answer on round 2, well under the bound.
+    store = await _fresh_prefs()
+    results = [
+        ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+        ChatResult(model="m", content="final"),
+    ]
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
+    turn = await Agent(gateway=_FakeGateway(results), mcp=mcp, max_steps=4, prefs=store).run(
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == "completed"
 
 
 async def test_agent_handles_tool_error() -> None:

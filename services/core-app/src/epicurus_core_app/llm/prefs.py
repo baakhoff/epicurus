@@ -38,6 +38,8 @@ class _LlmPrefRow(_PrefBase):
     # Operator-chosen Ollama KV-cache type ("f16" | "q8_0" | "q4_0"); NULL = runtime default.
     # Server-wide, applied via the Ollama container env — not live (see ADR-0046).
     kv_cache_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Operator-chosen agent loop bound (tool rounds per turn); NULL = the env default.
+    agent_max_steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class LlmPrefsStore:
@@ -67,7 +69,13 @@ class LlmPrefsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_LlmPrefRow.__tablename__)}
-        for name in ("global_default", "embed_default", "context_window", "kv_cache_type"):
+        for name in (
+            "global_default",
+            "embed_default",
+            "context_window",
+            "kv_cache_type",
+            "agent_max_steps",
+        ):
             if name not in existing:
                 type_sql = _LlmPrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -151,4 +159,17 @@ class LlmPrefsStore:
         async with self._session() as session:
             row = await self._get_or_create(session, tenant)
             row.kv_cache_type = value
+            await session.commit()
+
+    async def get_agent_max_steps(self, tenant: str) -> int | None:
+        """Return the stored agent loop bound (tool rounds per turn), or ``None`` if unset."""
+        async with self._session() as session:
+            row = await session.get(_LlmPrefRow, tenant)
+            return row.agent_max_steps if row is not None else None
+
+    async def set_agent_max_steps(self, tenant: str, value: int | None) -> None:
+        """Set or clear the agent loop bound for ``tenant`` (the route clamps the range)."""
+        async with self._session() as session:
+            row = await self._get_or_create(session, tenant)
+            row.agent_max_steps = value
             await session.commit()

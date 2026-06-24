@@ -18,7 +18,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 
 | Screen | What it does |
 | --- | --- |
-| **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker. |
+| **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker, and last-turn **Regenerate** / inline **Edit** controls that re-answer in place (#302). |
 | **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
 | **Models** | **Catalog browser** — search and filter the model catalog by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
@@ -46,7 +46,28 @@ each naming one of the module's MCP tools. The shell invokes the tool through th
 (`invokeModuleTool`, validated against the manifest) — a one-tap call, a `confirm` dialog,
 or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the page. The
 tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
-one path, so no module ever ships its own buttons or forms.
+one path, so no module ever ships its own buttons or forms. A board may also declare **view
+controls** (ADR-0049) — labeled selectors (e.g. group-by, filters) the shell renders in the
+toolbar; changing one re-fetches the page with a `?<id>=<value>` query param, so grouping and
+filtering stay module-side while the shell stays a bounded renderer.
+
+The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
+shows immediately, and an Edit/Preview toggle drops to the raw source when you want to
+write (ADR-0042). Because notes/knowledge **re-embed on every save**, the editor does not
+save on each keystroke: a save fires only when you **leave** (switch document, go back, or
+the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
+or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →
+saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only** vault — a
+watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
+and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
+toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
+bar.
+
+When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** control lists
+past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh
+save (so the timeline only ever grows). The shell reads history from the proxied
+`…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
+version's content), so there is no restore endpoint.
 
 ### Right panel / split-screen (ADR-0018)
 
@@ -95,12 +116,14 @@ tool call's `running`→`ok`/`error`), `done` (the final `AgentTurn`), `error`.
 
 Before the first token the shell shows the turn's *process*, not a bare caret: a
 **readiness bar** while the system warms (`readiness` events, #122), a **"Thinking…"** cue
-once it is ready and a token is pending, then an **activity timeline** that shows the
-model's thinking (a collapsible block) and lists each tool step with a human-readable label
-and live status (#121, ADR-0041). The timeline folds to a one-line summary as the answer
-streams in. On `done` the live turn is replaced by the clean server-stored answer — which
-**keeps its folded activity**, persisted on the message (`MessageRecord.activity`), so a
-reopened conversation still shows the timeline (thinking + tool steps).
+once it is ready and a token is pending, then an **activity timeline** that interleaves the
+model's thinking (collapsible blocks) and its tool steps **in the order they happened** —
+think → call → think — each tool step with a human-readable label and live status (#121,
+ADR-0041, ordering #300). The timeline folds to a one-line summary as the answer streams in.
+On `done` the live turn is replaced by the clean server-stored answer — which **keeps its
+folded activity**, persisted on the message (`MessageRecord.activity.timeline`), so a
+reopened conversation still shows the same ordered timeline. Older turns saved before the
+ordered timeline fall back to a thinking-then-steps render.
 
 ## Configuration
 

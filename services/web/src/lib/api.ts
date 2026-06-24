@@ -11,6 +11,8 @@ import {
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
+  EditorVersionContent,
+  EditorVersionList,
   EmailMessage,
   HoverCard,
   LlmPrefs,
@@ -109,6 +111,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
+  // Agent loop bound (tool rounds per turn); null = the env default. The core clamps 1-12.
+  setAgentMaxSteps: (value: number | null) =>
+    request(
+      z.object({ status: z.string(), value: z.number().nullable() }),
+      "/platform/v1/llm/prefs/agent-max-steps",
+      { method: "PUT", body: JSON.stringify({ value }) },
+    ),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",
@@ -157,8 +166,9 @@ export const api = {
       method: "DELETE",
     }),
 
-  // The cross-chat recall corpus — what the model remembers. No `q` = the corpus
-  // newest-first; with `q` = what recall surfaces for that query. `total` is the full size.
+  // The cross-chat memory corpus — the durable facts the model remembers about the user.
+  // No `q` = the corpus newest-first; with `q` = what recall surfaces for that query.
+  // `total` is the full size.
   memory: (q?: string, limit?: number) => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
@@ -166,9 +176,9 @@ export const api = {
     const query = params.size ? `?${params}` : "";
     return request(MemoryListing, `/platform/v1/agent/memory${query}`);
   },
-  // Forget one remembered snippet so it stops being recalled (the conversation is kept).
-  forgetMemory: (id: number) =>
-    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${id}`, {
+  // Forget one remembered fact so it stops being recalled (the conversation is kept).
+  forgetMemory: (id: string) =>
+    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
 
@@ -251,6 +261,18 @@ export const api = {
       EditorSaveResult,
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
       { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+  // An `editor` document's save history, newest first (ADR-0046).
+  modulePageDocVersions: (name: string, pageId: string, path: string) =>
+    request(
+      EditorVersionList,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc/versions?path=${encodeURIComponent(path)}`,
+    ),
+  // One past version of an `editor` document (ADR-0046).
+  modulePageDocVersion: (name: string, pageId: string, path: string, versionId: string) =>
+    request(
+      EditorVersionContent,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc/version?path=${encodeURIComponent(path)}&version=${encodeURIComponent(versionId)}`,
     ),
   // Create a folder inside an editor page's store (#216).
   createModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {

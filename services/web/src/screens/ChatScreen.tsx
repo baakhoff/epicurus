@@ -10,6 +10,8 @@ import {
   ChevronDown,
   CloudMoon,
   History,
+  Pencil,
+  RefreshCw,
   SquarePen,
   Square,
   SendHorizonal,
@@ -38,10 +40,11 @@ import {
   TextArea,
   cn,
 } from "@/components/ui";
+import { activityTimeline } from "@/lib/activity";
 import { api } from "@/lib/api";
-import type { Attachment, EntityRef } from "@/lib/contracts";
+import type { Attachment, EntityRef, MessageRecord } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
-import { useChat, type ToolRun } from "@/stores/chat";
+import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 
@@ -67,14 +70,13 @@ function AssistantRow({ children }: { children: ReactNode }) {
  */
 function AssistantBlock({
   text,
-  runs = [],
-  thinking = "",
+  timeline = [],
   streaming,
   entityRefs = [],
 }: {
   text: string;
-  runs?: ToolRun[];
-  thinking?: string;
+  /** The turn's process (thinking + tool steps) in chronological order (#300). */
+  timeline?: ActivityItem[];
   streaming: boolean;
   entityRefs?: EntityRef[];
 }) {
@@ -89,9 +91,7 @@ function AssistantBlock({
   return (
     <AssistantRow>
       {/* The activity timeline folds to its summary header once the answer starts. */}
-      {(runs.length > 0 || thinking.length > 0) && (
-        <ProcessTimeline runs={runs} thinking={thinking} collapsed={text.length > 0} />
-      )}
+      {timeline.length > 0 && <ProcessTimeline items={timeline} collapsed={text.length > 0} />}
       <EntityRefsContext.Provider value={refsMap}>
         {text && <Markdown>{text}</Markdown>}
       </EntityRefsContext.Provider>
@@ -115,11 +115,10 @@ function LiveTurn() {
   const segments = useChat((s) => s.segments);
   const streaming = useChat((s) => s.streaming);
   const readiness = useChat((s) => s.readiness);
-  const thinking = useChat((s) => s.thinking);
-  if (segments.length === 0 && !thinking && !streaming) return null;
+  if (segments.length === 0 && !streaming) return null;
 
   // Before any thinking, token, or tool: warming progress (#122), then a thinking cue (#121).
-  if (streaming && segments.length === 0 && !thinking) {
+  if (streaming && segments.length === 0) {
     return (
       <div className="ep-settle">
         <AssistantRow>
@@ -134,10 +133,18 @@ function LiveTurn() {
   }
 
   const text = segments.flatMap((s) => (s.kind === "text" ? [s.text] : [])).join("\n");
-  const runs = segments.flatMap((s) => (s.kind === "tool" ? [s.run] : []));
+  // The process timeline = the thinking + tool segments, in the order they streamed (#300);
+  // the text segments are the answer, rendered below by AssistantBlock.
+  const timeline: ActivityItem[] = segments.flatMap((s): ActivityItem[] =>
+    s.kind === "thinking"
+      ? [{ kind: "thinking", text: s.text }]
+      : s.kind === "tool"
+        ? [{ kind: "tool", run: s.run }]
+        : [],
+  );
   return (
     <div className="ep-settle">
-      <AssistantBlock text={text} runs={runs} thinking={thinking} streaming={streaming} />
+      <AssistantBlock text={text} timeline={timeline} streaming={streaming} />
     </div>
   );
 }
@@ -387,6 +394,9 @@ export function ChatScreen() {
   const model = usePrefs((s) => s.model);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  // Inline edit of the last user message (#302): the index being edited + its draft text.
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editText, setEditText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
@@ -437,6 +447,11 @@ export function ChatScreen() {
     const sent = attachments;
     setAttachments([]); // chat.send clears the draft itself
     pinnedRef.current = true;
+    // chat.send clears the draft, but the textarea's height was grown imperatively on
+    // each keystroke — clear the inline height so an emptied composer snaps back to one
+    // line (min-h-[42px]) instead of keeping its multi-line height. Same on mobile + desktop.
+    const composer = composerRef.current;
+    if (composer) composer.style.height = "";
     void chat.send(
       text,
       model,
@@ -454,6 +469,48 @@ export function ChatScreen() {
   const showPending =
     chat.pendingUser !== null &&
     (chat.streaming || messages[messages.length - 1]?.content !== chat.pendingUser);
+
+  // Regenerate attaches to the last assistant message; Edit to the last user message.
+  const lastAssistantIdx = messages.reduce((a, m, i) => (m.role === "assistant" ? i : a), -1);
+  const lastUserIdx = messages.reduce((a, m, i) => (m.role === "user" ? i : a), -1);
+  const turnControlsVisible = !chat.streaming && !showPending && editingIdx === null;
+
+  const onTurnDone = async () => {
+    await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
+    void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  };
+
+  // Regenerate: optimistically drop the stale answer (everything after the last user turn),
+  // then stream a fresh one. The server truncates the same tail before re-answering (#302).
+  const regenerate = () => {
+    if (chat.streaming || lastUserIdx < 0) return;
+    queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) =>
+      (old ?? []).slice(0, lastUserIdx + 1),
+    );
+    pinnedRef.current = true;
+    void chat.regenerate(model, onTurnDone);
+  };
+
+  const cancelEdit = () => {
+    setEditingIdx(null);
+    setEditText("");
+  };
+
+  // Save an edited last user message: optimistically show the corrected text (and drop the
+  // old answer), then stream the new answer. The server edits + truncates server-side.
+  const saveEdit = () => {
+    const content = editText.trim();
+    if (!content || chat.streaming || lastUserIdx < 0) return;
+    setEditingIdx(null);
+    queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) => {
+      const trimmed = (old ?? []).slice(0, lastUserIdx + 1);
+      const last = trimmed[trimmed.length - 1];
+      if (last) trimmed[trimmed.length - 1] = { ...last, content };
+      return trimmed;
+    });
+    pinnedRef.current = true;
+    void chat.editAndRerun(content, model, onTurnDone);
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -489,30 +546,76 @@ export function ChatScreen() {
           )}
           {messages.map((message, i) =>
             message.role === "user" ? (
-              <div key={i} className="flex flex-col items-end gap-1">
-                <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
-                  {message.content}
-                </div>
-                {message.attachments.length > 0 && (
-                  <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
-                    {message.attachments.map((a) => (
-                      <AttachmentPill key={a.att_id} attachment={a} />
-                    ))}
+              editingIdx === i ? (
+                <div key={i} className="flex w-full flex-col items-end gap-2">
+                  <TextArea
+                    value={editText}
+                    autoFocus
+                    aria-label="Edit message"
+                    className="w-full max-w-[85%] min-h-[60px] text-[15px]"
+                    onChange={(e) => setEditText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        saveEdit();
+                      } else if (e.key === "Escape") {
+                        cancelEdit();
+                      }
+                    }}
+                  />
+                  <div className="flex gap-2">
+                    <Button variant="ghost" onClick={cancelEdit}>
+                      Cancel
+                    </Button>
+                    <Button variant="primary" onClick={saveEdit} disabled={!editText.trim()}>
+                      Resend
+                    </Button>
                   </div>
+                </div>
+              ) : (
+                <div key={i} className="flex flex-col items-end gap-1">
+                  <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
+                    {message.content}
+                  </div>
+                  {message.attachments.length > 0 && (
+                    <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+                      {message.attachments.map((a) => (
+                        <AttachmentPill key={a.att_id} attachment={a} />
+                      ))}
+                    </div>
+                  )}
+                  {i === lastUserIdx && turnControlsVisible && (
+                    <button
+                      aria-label="Edit message"
+                      onClick={() => {
+                        setEditingIdx(i);
+                        setEditText(message.content);
+                      }}
+                      className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                    >
+                      <Pencil size={12} /> Edit
+                    </button>
+                  )}
+                </div>
+              )
+            ) : (
+              <div key={i}>
+                <AssistantBlock
+                  text={message.content}
+                  timeline={activityTimeline(message.activity)}
+                  streaming={false}
+                  entityRefs={message.entity_refs}
+                />
+                {i === lastAssistantIdx && turnControlsVisible && (
+                  <button
+                    aria-label="Regenerate response"
+                    onClick={regenerate}
+                    className="mt-1 ml-7 flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                  >
+                    <RefreshCw size={12} /> Regenerate
+                  </button>
                 )}
               </div>
-            ) : (
-              <AssistantBlock
-                key={i}
-                text={message.content}
-                runs={(message.activity?.steps ?? []).map((s) => ({
-                  ...s,
-                  detail: s.detail ?? undefined,
-                }))}
-                thinking={message.activity?.thinking ?? ""}
-                streaming={false}
-                entityRefs={message.entity_refs}
-              />
             ),
           )}
           {showPending && (

@@ -217,3 +217,12 @@ async def test_kv_cache_type_round_trips() -> None:
     assert await store.get_kv_cache_type("t1") == "q8_0"
     await store.set_kv_cache_type("t1", None)
     assert await store.get_kv_cache_type("t1") is None
+
+
+async def test_agent_max_steps_round_trips() -> None:
+    store, _ = await _fresh_store()
+    assert await store.get_agent_max_steps("t1") is None
+    await store.set_agent_max_steps("t1", 6)
+    assert await store.get_agent_max_steps("t1") == 6
+    await store.set_agent_max_steps("t1", None)
+    assert await store.get_agent_max_steps("t1") is None

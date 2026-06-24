@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from epicurus_core import Collection
 from epicurus_tasks.db import TaskStore
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import Task, TaskScope
 
 
 class LocalTasksProvider:
@@ -25,8 +25,10 @@ class LocalTasksProvider:
     def provider_name(self) -> str:
         return "local"
 
-    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
-        return await self._store.list_tasks(tenant_id=tenant_id)
+    async def list_tasks(
+        self, tenant_id: str, *, list_id: str | None = None, scope: TaskScope = "open"
+    ) -> list[Task]:
+        return await self._store.list_tasks(tenant_id=tenant_id, scope=scope)
 
     async def add_task(
         self,

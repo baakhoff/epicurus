@@ -50,6 +50,8 @@ class LlmPrefsResponse(BaseModel):
     global_context_window: int | None
     # Operator-chosen Ollama KV-cache type ("f16"|"q8_0"|"q4_0"); NULL = runtime default.
     kv_cache_type: str | None
+    # Operator-chosen agent loop bound (tool rounds per turn); NULL = the env default.
+    global_agent_max_steps: int | None
     hidden: list[str]
 
 
@@ -67,6 +69,12 @@ class SetEmbedDefaultRequest(BaseModel):
 
 class SetContextWindowRequest(BaseModel):
     """Body for PUT /llm/prefs/context-window."""
+
+    value: int | None
+
+
+class SetAgentMaxStepsRequest(BaseModel):
+    """Body for PUT /llm/prefs/agent-max-steps."""
 
     value: int | None
 
@@ -196,18 +204,21 @@ def create_llm_router(
                 global_embed_default=None,
                 global_context_window=None,
                 kv_cache_type=None,
+                global_agent_max_steps=None,
                 hidden=[],
             )
         stored_default = await prefs.get_default(default_tenant)
         stored_embed_default = await prefs.get_embed_default(default_tenant)
         stored_context_window = await prefs.get_context_window(default_tenant)
         stored_kv_cache_type = await prefs.get_kv_cache_type(default_tenant)
+        stored_agent_max_steps = await prefs.get_agent_max_steps(default_tenant)
         hidden = await prefs.get_hidden(default_tenant)
         return LlmPrefsResponse(
             global_default=stored_default,
             global_embed_default=stored_embed_default,
             global_context_window=stored_context_window,
             kv_cache_type=stored_kv_cache_type,
+            global_agent_max_steps=stored_agent_max_steps,
             hidden=hidden,
         )
 
@@ -246,6 +257,19 @@ def create_llm_router(
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_kv_cache_type(default_tenant, request.value)
         return {"status": "ok", "value": request.value}
+
+    @router.put("/prefs/agent-max-steps")
+    async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | None | str]:
+        """Set or clear the agent loop bound (tool rounds per turn) for this tenant.
+
+        Clamped to 1-12: at least one round to be useful, and a ceiling so a misconfigured
+        value can't let a turn run away. ``null`` clears the override (back to the env default).
+        """
+        if prefs is None:
+            raise HTTPException(status_code=503, detail="preferences store not available")
+        value = None if request.value is None else max(1, min(12, request.value))
+        await prefs.set_agent_max_steps(default_tenant, value)
+        return {"status": "ok", "value": value}
 
     @router.put("/prefs/hidden")
     async def set_hidden(request: SetHiddenRequest) -> dict[str, object]:

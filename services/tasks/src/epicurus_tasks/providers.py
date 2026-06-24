@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from epicurus_core import Collection
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import Task, TaskScope
 
 
 @runtime_checkable
@@ -26,13 +26,18 @@ class TasksProvider(Protocol):
         """Return the short identifier of this provider, e.g. ``"google"``."""
         ...
 
-    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
+    async def list_tasks(
+        self, tenant_id: str, *, list_id: str | None = None, scope: TaskScope = "open"
+    ) -> list[Task]:
         """Return tasks for *tenant_id*.
 
         Args:
             tenant_id: Tenant scope.
             list_id: Provider-specific list identifier. ``None`` means the
                 provider's default list (``@default`` for Google Tasks).
+            scope: Which tasks to include (ADR-0049) — ``"open"`` (default, excludes
+                completed), ``"done"`` (completed only), or ``"all"``. Backs the board's
+                *Show* filter so the operator can review completed work.
         """
         ...
 

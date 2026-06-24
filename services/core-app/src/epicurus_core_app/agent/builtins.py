@@ -1,9 +1,10 @@
 """Core built-in agent tools (ADR-0039).
 
 Tools the core provides directly, alongside the module tools discovered over MCP. Unlike
-module tools they are dispatched in-process (no HTTP). The first is ``now``: the agent has
-no inherent notion of the current date/time, so without it the model guesses the date from
-its training cutoff and stores times in a guessed timezone.
+module tools they are dispatched in-process (no HTTP), and they receive the calling tenant
+so a built-in can read or write tenant-scoped state. ``now`` reports the current date/time
+(without it the model guesses the date from its training cutoff); ``remember`` saves a
+durable fact about the user to long-term memory (ADR-0045).
 """
 
 from __future__ import annotations
@@ -11,10 +12,11 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from epicurus_core import get_logger
+from epicurus_core_app.memory.facts import SOURCE_TOOL, UserFact
 
 log = get_logger("epicurus_core_app.agent.builtins")
 
@@ -67,17 +69,17 @@ def _resolve_zone(name: str) -> tuple[ZoneInfo, str]:
 def make_now_handler(
     tz_provider: TimezoneProvider,
     calendar_tz_provider: CalendarTzProvider,
-) -> Callable[[dict[str, Any]], Awaitable[str]]:
+) -> Callable[[dict[str, Any], str], Awaitable[str]]:
     """Build the ``now`` handler closed over its timezone + calendar-tz sources.
 
     The handler reports the current time in the operator's configured timezone (or an
     explicit ``timezone`` argument). It also reports the connected calendar's timezone and
     a note when it differs from the configured one, so the agent creates events at the
     intended local time. The calendar lookup is best-effort — any failure is omitted, never
-    raised.
+    raised. ``now`` is tenant-agnostic, so the tenant argument is accepted and ignored.
     """
 
-    async def handler(arguments: dict[str, Any]) -> str:
+    async def handler(arguments: dict[str, Any], _tenant: str) -> str:
         configured = await tz_provider()
         requested = arguments.get("timezone")
         wanted = requested if isinstance(requested, str) and requested.strip() else configured
@@ -104,5 +106,70 @@ def make_now_handler(
                 "unless the user says otherwise."
             )
         return json.dumps(payload)
+
+    return handler
+
+
+# ── remember ──────────────────────────────────────────────────────────────────
+
+REMEMBER_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "remember",
+        "description": (
+            "Save a durable fact about the user to long-term memory so you recall it in "
+            "future conversations. Call this when the user asks you to remember something, "
+            "or when you learn a stable detail or preference about them — their name, where "
+            "they live, how they like you to respond, an ongoing project. Keep each fact a "
+            "short standalone statement. Do not save one-off task details, secrets, or "
+            "passwords."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fact": {
+                    "type": "string",
+                    "description": (
+                        "The fact to remember, as a short standalone statement, e.g. "
+                        "'Prefers responses in metric units.'"
+                    ),
+                }
+            },
+            "required": ["fact"],
+        },
+    },
+}
+
+
+class FactWriter(Protocol):
+    """The slice of the memory facade the ``remember`` tool needs (eases faking in tests)."""
+
+    async def remember_fact(
+        self, *, tenant: str, text: str, source: str = ...
+    ) -> UserFact | None: ...
+
+
+def make_remember_handler(
+    memory: FactWriter,
+) -> Callable[[dict[str, Any], str], Awaitable[str]]:
+    """Build the ``remember`` handler closed over the memory facade (ADR-0045).
+
+    Saves the fact to the calling tenant's user-fact memory. A near-duplicate of an existing
+    fact is a no-op (the store dedups); any failure is reported to the model as an ``error:``
+    string rather than raised, so a memory hiccup never breaks the turn.
+    """
+
+    async def handler(arguments: dict[str, Any], tenant: str) -> str:
+        fact = str(arguments.get("fact") or "").strip()
+        if not fact:
+            return "error: a `fact` to remember is required."
+        try:
+            saved = await memory.remember_fact(tenant=tenant, text=fact, source=SOURCE_TOOL)
+        except Exception as exc:  # surface to the model, never crash the turn
+            log.warning("remember tool save failed", error=str(exc))
+            return f"error: could not save that to memory: {exc}"
+        if saved is None:
+            return "Already in memory — nothing new to add."
+        return f"Saved to memory: {saved.text}"
 
     return handler

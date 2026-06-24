@@ -4,7 +4,7 @@
  * entries here without restructuring the shell.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, Blocks, Brain, Cpu, MessageCircle, Settings } from "lucide-react";
+import { Activity, Blocks, Cpu, MessageCircle, Settings } from "lucide-react";
 
 import type { ModuleSnapshot, PageArchetype } from "@/lib/contracts";
 
@@ -14,9 +14,10 @@ export interface Surface {
   icon: LucideIcon;
 }
 
+// Memory is no longer a top-level surface — it lives at the foot of Settings, since it's
+// reference you curate occasionally rather than a place you visit often (ADR-0045).
 export const SURFACES: Surface[] = [
   { path: "/", label: "Chat", icon: MessageCircle },
-  { path: "/memory", label: "Memory", icon: Brain },
   { path: "/models", label: "Models", icon: Cpu },
   { path: "/modules", label: "Modules", icon: Blocks },
   { path: "/settings", label: "Settings", icon: Settings },

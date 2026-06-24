@@ -192,11 +192,13 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
         ))}
       </div>
 
-      {/* Entries */}
+      {/* Entries — capped to roughly five rows tall with its own scroll so the full
+          catalog (dozens of models) never pushes the rest of the page away. The search
+          and tag filters above stay put; only this list scrolls. */}
       {entries.length === 0 ? (
         <p className="py-4 text-center text-sm text-ink-dim">No models match your search.</p>
       ) : (
-        <div className="flex flex-col divide-y divide-edge">
+        <div className="flex max-h-[30rem] flex-col divide-y divide-edge overflow-y-auto overscroll-contain">
           {entries.map((entry) => {
             const dl = active[entry.id];
             const inProgress = dl && !dl.done;

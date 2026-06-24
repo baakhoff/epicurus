@@ -138,15 +138,20 @@ def test_parse_derives_tags() -> None:
     }
     # a 12B vision model is not "small".
     assert "small" not in _entry_by_id(entries, "gemma3:12b").tags
-    # "coder" in the name → "code"; the 1.5B size is also "small".
-    assert set(_entry_by_id(entries, "qwen2.5-coder:1.5b").tags) == {"general", "code", "small"}
+    # "coder" in the name → "code"; the 1.5B size is also "small"; the tools capability → "tools".
+    assert set(_entry_by_id(entries, "qwen2.5-coder:1.5b").tags) == {
+        "general",
+        "code",
+        "small",
+        "tools",
+    }
     assert "small" not in _entry_by_id(entries, "qwen2.5-coder:7b").tags
-    # a plain tools model is just general.
-    assert _entry_by_id(entries, "llama3.1:8b").tags == ["general"]
+    # a plain tools model is general + tools (the capability is now surfaced, #model-caps).
+    assert _entry_by_id(entries, "llama3.1:8b").tags == ["general", "tools"]
 
 
 def test_parse_tags_only_use_the_known_vocabulary() -> None:
-    known = {"general", "code", "multilingual", "vision", "embedding", "small"}
+    known = {"general", "code", "multilingual", "vision", "tools", "embedding", "small"}
     assert all(set(e.tags) <= known for e in parse_library(FIXTURE))
 
 

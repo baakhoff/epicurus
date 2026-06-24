@@ -50,6 +50,10 @@ class ModelInfo(BaseModel):
     loaded: bool = False
     # Hidden from chat pickers; still visible in the model manager so it can be toggled back.
     hidden: bool = False
+    # What the runtime reports the model can do (e.g. "tools", "vision", "embedding"), from
+    # /api/show. Only populated when explicitly requested (it costs one /api/show per model);
+    # empty otherwise — and an empty list also means "the runtime reported none/unknown".
+    capabilities: list[str] = []
 
 
 class ModelDetails(BaseModel):
@@ -58,13 +62,15 @@ class ModelDetails(BaseModel):
     Surfaced in the model-settings sheet. Weight ``quantization`` is fixed when the model is
     pulled (e.g. ``Q4_K_M``) — to change it the operator pulls a different variant; it is
     *not* a runtime knob. ``context_length`` is the model's trained maximum (a ceiling for the
-    operator's per-model context-window choice). Any field is ``None`` when the runtime did
-    not report it (or the model isn't local)."""
+    operator's per-model context-window choice). ``capabilities`` is what the runtime says the
+    model can do (e.g. ``tools``, ``vision``) — drives tool gating + the chat capability hint.
+    Any field is ``None``/empty when the runtime did not report it (or the model isn't local)."""
 
     quantization: str | None = None
     parameter_size: str | None = None
     context_length: int | None = None
     family: str | None = None
+    capabilities: list[str] = []
 
 
 class ProviderInfo(BaseModel):

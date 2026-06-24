@@ -14,6 +14,9 @@ export const ModelInfo = z.object({
   size: z.number().nullish(),
   loaded: z.boolean().default(false),
   hidden: z.boolean().default(false),
+  // What the runtime reports the model can do (e.g. "tools", "vision"); only populated when
+  // the list is fetched with `?capabilities=true`, empty otherwise.
+  capabilities: z.array(z.string()).default([]),
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
@@ -34,6 +37,8 @@ export const ModelDetails = z.object({
   // The model's trained maximum context (a ceiling for the operator's choice).
   context_length: z.number().nullish(),
   family: z.string().nullish(),
+  // Reported capabilities (e.g. "tools", "vision"); drives the chat "can't use tools" hint.
+  capabilities: z.array(z.string()).default([]),
 });
 export type ModelDetails = z.infer<typeof ModelDetails>;
 

@@ -121,8 +121,11 @@ def create_llm_router(
     router = APIRouter(prefix="/platform/v1/llm", tags=["llm"])
 
     @router.get("/models", response_model=list[ModelInfo])
-    async def list_models() -> list[ModelInfo]:
-        return await gateway.models()
+    async def list_models(capabilities: bool = False) -> list[ModelInfo]:
+        """List local models. ``?capabilities=true`` additionally fills each model's reported
+        capabilities (tools/vision/…) from ``/api/show`` — opt-in, one call per model, so the
+        Models page can badge them while the chat picker stays light."""
+        return await gateway.models(with_capabilities=capabilities)
 
     @router.get("/catalog", response_model=CatalogResponse)
     async def get_catalog() -> CatalogResponse:

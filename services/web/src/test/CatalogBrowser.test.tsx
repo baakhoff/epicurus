@@ -117,6 +117,10 @@ describe("CatalogBrowser", () => {
     expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Code" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Embedding" })).toBeInTheDocument();
+    // Capability filters now include Vision and Tools, so the operator can find models that
+    // can call tools / see images (#model-caps).
+    expect(screen.getByRole("button", { name: "Vision" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Tools" })).toBeInTheDocument();
   });
 
   it("shows the upstream source once the catalog loads", async () => {

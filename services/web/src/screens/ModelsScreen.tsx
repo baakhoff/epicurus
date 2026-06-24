@@ -33,6 +33,7 @@ import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag
 import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
 import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
+import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit } from "@/lib/modelFit";
 import { useDownloads } from "@/stores/downloads";
 
@@ -260,7 +261,9 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
 
 function LocalModels() {
   const queryClient = useQueryClient();
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  // Ask for capabilities here so each model can be badged with what it does (tools/vision/…).
+  // Keyed under ["models", …] so the mutations' `["models"]` invalidation still refreshes it.
+  const models = useQuery({ queryKey: ["models", "capabilities"], queryFn: () => api.models(true) });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -308,12 +311,25 @@ function LocalModels() {
               model.hidden && "opacity-60",
             )}
           >
-            <div className="flex min-w-0 flex-1 items-center gap-2">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
               <span className="truncate text-sm text-ink">{model.name}</span>
               {model.loaded && <Badge tone="ok">loaded</Badge>}
               {globalDefault === model.name && <Badge tone="accent">default</Badge>}
               {model.hidden && <Badge tone="dim">hidden</Badge>}
               <FitBadge system={system.data} sizeMb={model.size ? Math.round(model.size / (1024 * 1024)) : null} />
+              {shownCapabilities(model.capabilities).map((cap) => {
+                const Icon = CAPABILITY_META[cap].icon;
+                return (
+                  <span
+                    key={cap}
+                    title={`Supports ${CAPABILITY_META[cap].label.toLowerCase()}`}
+                    className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-ink-faint"
+                  >
+                    <Icon size={11} className="shrink-0" />
+                    {CAPABILITY_META[cap].label}
+                  </span>
+                );
+              })}
             </div>
             <span className="text-xs text-ink-faint">{formatBytes(model.size)}</span>
             <button
@@ -863,7 +879,7 @@ export function KvCache() {
 
 function EmbedDefault() {
   const queryClient = useQueryClient();
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -1058,7 +1074,7 @@ function Providers() {
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export function ModelsScreen() {
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const installed = new Set((models.data ?? []).map((m) => m.name));
 
   return (

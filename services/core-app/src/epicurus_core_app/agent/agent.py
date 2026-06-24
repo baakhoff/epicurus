@@ -239,10 +239,14 @@ class Agent:
         stopped = "completed"
         try:
             specs, route = await self._mcp.discover()
+            # Offer tools only to a model that can use them; otherwise the runtime errors and
+            # the turn fails. A tool-less model just answers in text (the UI flags it).
+            can_use_tools = bool(specs) and await self._gateway.supports_tools(model, tenant_id)
+            offer = specs if can_use_tools else None
             for _ in range(max_steps):
                 result: ChatResult | None = None
                 async for event in self._gateway.stream_chat(
-                    convo, model=model, tools=specs or None, tenant_id=tenant_id
+                    convo, model=model, tools=offer, tenant_id=tenant_id
                 ):
                     if event.delta:
                         parts.append(event.delta)
@@ -432,6 +436,9 @@ class Agent:
         specs, route = await self._mcp.discover()
         call_tenant = tenant_id or self._default_tenant
         max_steps = await self._effective_max_steps(tenant_id)
+        # Offer tools only to a tool-capable model (else the runtime errors); a tool-less model
+        # just answers in text.
+        offer = specs if specs and await self._gateway.supports_tools(model, tenant_id) else None
         convo = list(messages)
         tools_used: list[str] = []
         timeline: list[ActivityItem] = []
@@ -441,9 +448,7 @@ class Agent:
             return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
 
         for _ in range(max_steps):
-            result = await self._gateway.chat(
-                convo, model=model, tools=specs or None, tenant_id=tenant_id
-            )
+            result = await self._gateway.chat(convo, model=model, tools=offer, tenant_id=tenant_id)
             if result.reasoning:
                 append_thinking(timeline, result.reasoning)
             if not result.tool_calls:

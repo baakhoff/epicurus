@@ -26,9 +26,11 @@ async def _fresh_prefs() -> LlmPrefsStore:
 
 
 class _FakeGateway:
-    def __init__(self, results: list[ChatResult]) -> None:
+    def __init__(self, results: list[ChatResult], *, supports_tools: bool = True) -> None:
         self._results = list(results)
         self.calls: list[list[ChatMessage]] = []
+        self.tools_seen: list[Any] = []
+        self._supports_tools = supports_tools
 
     async def chat(
         self,
@@ -39,7 +41,11 @@ class _FakeGateway:
         tenant_id: str | None = None,
     ) -> ChatResult:
         self.calls.append(list(messages))
+        self.tools_seen.append(tools)
         return self._results.pop(0)
+
+    async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
+        return self._supports_tools
 
 
 class _FakeMcp:
@@ -96,6 +102,24 @@ async def test_agent_calls_tool_then_answers() -> None:
     assert turn.stopped == "completed"
     # the tool result was fed back to the model on the second call
     assert any(m.role == "tool" and m.content == "hi" for m in gw.calls[1])
+
+
+async def test_agent_skips_tools_when_the_model_cannot_use_them() -> None:
+    # A model that can't call tools must be offered none — passing tools makes the runtime
+    # error. The turn falls back to a plain text answer even though MCP has tools available.
+    gw = _FakeGateway([ChatResult(model="m", content="just chatting")], supports_tools=False)
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    assert turn.content == "just chatting"
+    assert turn.tools_used == []
+    assert gw.tools_seen == [None]  # tools never offered, despite specs existing
+
+
+async def test_agent_offers_tools_when_the_model_supports_them() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    assert gw.tools_seen[0] == [_echo_spec()]  # the tool specs were offered
 
 
 async def test_agent_stops_at_max_steps() -> None:

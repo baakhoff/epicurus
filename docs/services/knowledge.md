@@ -154,6 +154,16 @@ edits (the editor save, the file-tree CRUD) stay immediate, since the operator i
 approver. Approve/reject are operator-only endpoints the core proxies — deliberately **not**
 MCP tools, so the agent cannot approve its own proposals.
 
+**Review on/off toggle (#KB-refactor).** The Suggestions page header carries a per-module
+switch — *Review agent changes before applying* — backed by the core's
+`GET/PUT /platform/v1/modules/knowledge/suggestions-enabled` (see [core-app](core-app.md)).
+When **on** (the default) proposals stage here for approval. When **off**, the propose tools
+**apply the change directly**: the module reads the setting via its `PlatformClient` and, if
+review is off, immediately approves its own staged suggestion through the same apply path
+(so a content op still re-indexes, a structural op still relocates). If the setting can't be
+read the module defaults to the safe path (review on). A watched read-only vault still 409s
+on apply regardless of the toggle.
+
 With a **watched external vault** (`VAULT_WATCH=true`, #232) the vault is read-only to
 epicurus, so **approve returns 409** — applying would write a vault Obsidian owns. The agent
 can still propose and the operator can still *reject* to clear the queue; the operator makes

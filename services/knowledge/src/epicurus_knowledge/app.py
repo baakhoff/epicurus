@@ -94,15 +94,6 @@ def create_app() -> FastAPI:
     )
 
     bus = EventBus.from_settings(settings)
-    module = build_module(
-        vault_indexer,
-        docs_indexer,
-        module_docs_indexer,
-        suggestion_store,
-        tenant=settings.default_tenant_id,
-        vault_path=settings.vault_path,
-    )
-    mcp_app = module.http_app()
     # Watch mode (#232, ADR-0035) marks the vault externally owned: the editor goes
     # read-only and agent suggestions can't be applied, so Obsidian stays the sole author.
     vault_read_only = settings.vault_read_only
@@ -121,6 +112,19 @@ def create_app() -> FastAPI:
         tenant=settings.default_tenant_id,
         read_only=vault_read_only,
     )
+    # build_module takes the review + platform so its propose tools can auto-apply when the
+    # operator has turned review off (#KB-refactor).
+    module = build_module(
+        vault_indexer,
+        docs_indexer,
+        module_docs_indexer,
+        suggestion_store,
+        suggestion_review,
+        platform,
+        tenant=settings.default_tenant_id,
+        vault_path=settings.vault_path,
+    )
+    mcp_app = module.http_app()
 
     # The initial index runs in the background (#230): the vault + bundled docs can
     # take minutes, so blocking startup would make /health flap and could trip restart

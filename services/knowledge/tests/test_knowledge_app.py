@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.15.0"
+    assert manifest.version == "0.16.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -59,18 +59,29 @@ def _indexer_stub() -> object:
 def _module():  # type: ignore[no-untyped-def]
     """Build the module for manifest assertions (suggestion store never exercised here)."""
     from pathlib import Path
+    from unittest.mock import AsyncMock
 
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from epicurus_core import PlatformClient
+    from epicurus_knowledge.pages import VaultPages
     from epicurus_knowledge.service import build_module
-    from epicurus_knowledge.suggestions import SuggestionStore
+    from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore
 
     store = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    vault = _indexer_stub()
+    review = SuggestionReview(
+        store, VaultPages(Path("/vault"), vault), vault, vault_path=Path("/vault"), tenant="test"
+    )
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=True)
     return build_module(
-        _indexer_stub(),
+        vault,
         _indexer_stub(),
         _indexer_stub(),
         store,
+        review,
+        platform,
         tenant="test",
         vault_path=Path("/vault"),
     )

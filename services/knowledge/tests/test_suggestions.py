@@ -345,13 +345,22 @@ async def test_reject_endpoint_discards(tmp_path: Path) -> None:
 # ── the knowledge_propose_edit tool ───────────────────────────────────────────
 
 
-def _module_with_store(store: SuggestionStore, vault_path: Path):  # type: ignore[no-untyped-def]
+def _module_with_store(store: SuggestionStore, vault_path: Path, *, review_on: bool = True):  # type: ignore[no-untyped-def]
+    from epicurus_core import PlatformClient
     from epicurus_knowledge.module_docs import ModuleDocsIndexer
 
     vault = AsyncMock(spec=KnowledgeIndexer)
+    vault.index_path = AsyncMock(return_value=1)
+    vault.remove_path = AsyncMock(return_value=None)
     docs = AsyncMock(spec=KnowledgeIndexer)
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
-    return build_module(vault, docs, module_docs, store, tenant=TENANT, vault_path=vault_path)
+    pages = VaultPages(vault_path, vault)  # type: ignore[arg-type]
+    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant=TENANT)  # type: ignore[arg-type]
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=review_on)
+    return build_module(
+        vault, docs, module_docs, store, review, platform, tenant=TENANT, vault_path=vault_path
+    )
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
@@ -598,4 +607,18 @@ async def test_propose_rename_rejects_a_slash(tmp_path: Path) -> None:
     )
     env = _envelope(content)
     assert "bare name" in env.text.lower()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None:
+    # With review turned off, the agent's change is applied directly — nothing left pending.
+    store = await _store()
+    module = _module_with_store(store, tmp_path, review_on=False)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_propose_edit",
+        {"path": "kb/new.md", "content": "# Auto\n", "operation": "create"},
+    )
+    env = _envelope(content)
+    assert "applied directly" in env.text.lower()
+    assert (tmp_path / "kb" / "new.md").read_text(encoding="utf-8") == "# Auto\n"
     assert await store.list(tenant=TENANT) == []

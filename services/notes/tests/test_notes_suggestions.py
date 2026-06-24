@@ -6,9 +6,12 @@ can list titles, but never reads a body.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from epicurus_core import PlatformClient
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_notes.db import NotesStore
 from epicurus_notes.pages import NotesPages
@@ -20,6 +23,16 @@ from epicurus_notes.suggestions import (
 )
 
 TENANT = "test"
+
+
+def _module_for(store: NotesStore, sugg: NoteSuggestionStore, *, review_on: bool = True):  # type: ignore[no-untyped-def]
+    """Build the notes module + its fake indexer, with review on or off (#KB-refactor)."""
+    indexer = _FakeIndexer()
+    pages = NotesPages(store, indexer, tenant=TENANT)  # type: ignore[arg-type]
+    review = NoteSuggestionReview(sugg, pages, store, tenant=TENANT)
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=review_on)
+    return build_module(store, sugg, review, platform, tenant=TENANT), indexer
 
 
 class _FakeIndexer:
@@ -171,7 +184,7 @@ async def test_reject_keeps_the_note() -> None:
 
 async def test_tool_append_stages_a_suggestion() -> None:
     store, sugg = await _stores()
-    module = build_module(store, sugg, tenant=TENANT)
+    module, _ = _module_for(store, sugg)
     content, _ = await module.mcp.call_tool("notes_append", {"slug": "n", "text": "more"})
     env = _envelope(content)
     assert "pending your review" in env.text.lower()
@@ -184,7 +197,7 @@ async def test_tool_append_stages_a_suggestion() -> None:
 
 async def test_tool_delete_stages_a_suggestion() -> None:
     store, sugg = await _stores()
-    module = build_module(store, sugg, tenant=TENANT)
+    module, _ = _module_for(store, sugg)
     await module.mcp.call_tool("notes_delete", {"slug": "n"})
     rows = await sugg.list(tenant=TENANT)
     assert len(rows) == 1 and rows[0].operation == "delete"
@@ -193,7 +206,7 @@ async def test_tool_delete_stages_a_suggestion() -> None:
 async def test_tool_list_shows_titles_not_bodies() -> None:
     store, sugg = await _stores()
     await store.upsert(tenant=TENANT, slug="n", title="My Note", content="secret body")
-    module = build_module(store, sugg, tenant=TENANT)
+    module, _ = _module_for(store, sugg)
     content, _ = await module.mcp.call_tool("notes_list", {})
     text = content[0].text
     assert "My Note" in text
@@ -202,6 +215,20 @@ async def test_tool_list_shows_titles_not_bodies() -> None:
 
 async def test_no_read_tool_exists() -> None:
     store, sugg = await _stores()
-    manifest = await build_module(store, sugg, tenant=TENANT).manifest()
+    module, _ = _module_for(store, sugg)
+    manifest = await module.manifest()
     names = {t.name for t in manifest.tools}
     assert not any("get" in n or "read" in n for n in names)
+
+
+async def test_tool_append_auto_applies_when_review_off() -> None:
+    # With review off, the agent's change is applied directly — nothing left pending.
+    store, sugg = await _stores()
+    await store.upsert(tenant=TENANT, slug="n", title="N", content="a")
+    module, _ = _module_for(store, sugg, review_on=False)
+    content, _ = await module.mcp.call_tool("notes_append", {"slug": "n", "text": "b"})
+    env = _envelope(content)
+    assert "applied directly" in env.text.lower()
+    note = await store.get(tenant=TENANT, slug="n")
+    assert note is not None and note.content == "a\nb"
+    assert await sugg.list(tenant=TENANT) == []

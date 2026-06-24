@@ -19,6 +19,19 @@ def _hit(note_path: str, text: str, score: float, heading: str | None = None) ->
     return SearchHit(note_path=note_path, heading=heading, text=text, score=score)
 
 
+def _review_platform(store: SuggestionStore, vault: object, vault_path: Path):  # type: ignore[no-untyped-def]
+    """A review + a platform mock (review on) for build_module in these tests."""
+    from epicurus_core import PlatformClient
+    from epicurus_knowledge.pages import VaultPages
+    from epicurus_knowledge.suggestions import SuggestionReview
+
+    pages = VaultPages(vault_path, vault)  # type: ignore[arg-type]
+    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant="test")  # type: ignore[arg-type]
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    return review, platform
+
+
 def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> EpicurusModule:
     from epicurus_knowledge.module_docs import ModuleDocsIndexer
 
@@ -30,8 +43,16 @@ def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> Epicurus
     module_docs.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
     # The search tests never reach the suggestion store; an uninitialised one is fine.
     suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    review, platform = _review_platform(suggestions, vault, Path("/vault"))
     return build_module(
-        vault, docs, module_docs, suggestions, tenant="test", vault_path=Path("/vault")
+        vault,
+        docs,
+        module_docs,
+        suggestions,
+        review,
+        platform,
+        tenant="test",
+        vault_path=Path("/vault"),
     )
 
 
@@ -98,7 +119,17 @@ def _nav_module(vault_path: Path) -> EpicurusModule:
     docs = AsyncMock(spec=KnowledgeIndexer)
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
     suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
-    return build_module(vault, docs, module_docs, suggestions, tenant="test", vault_path=vault_path)
+    review, platform = _review_platform(suggestions, vault, vault_path)
+    return build_module(
+        vault,
+        docs,
+        module_docs,
+        suggestions,
+        review,
+        platform,
+        tenant="test",
+        vault_path=vault_path,
+    )
 
 
 def _text(content: list) -> str:  # type: ignore[type-arg]

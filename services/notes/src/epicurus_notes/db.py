@@ -69,6 +69,77 @@ class _StoredNote(_Base):
     )
 
 
+class _StoredNoteFolder(_Base):
+    """ORM mapping for a note folder — a persisted tree directory (tenant-scoped).
+
+    Notes are slug-keyed, so a folder is normally *implied* by a note slug that contains
+    ``/``. This row makes a folder exist on its own — an **empty** folder the operator
+    created in the editor — so it survives a reload before any note is filed under it.
+    """
+
+    __tablename__ = "note_folders"
+    __table_args__ = (UniqueConstraint("tenant", "path", name="uq_note_folders_tenant_path"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    path: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NoteFolderStore:
+    """CRUD for tenant-scoped note folders (the editor's empty/explicit tree directories)."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def init(self) -> None:
+        """Create the schema if it does not exist (shares ``NotesStore``'s metadata)."""
+        async with self._engine.begin() as conn:
+            await conn.run_sync(_Base.metadata.create_all)
+
+    async def list(self, *, tenant: str) -> list[str]:
+        """Every explicitly-created folder path for *tenant*, lexicographically sorted.
+
+        Sorted so a parent path always precedes its children (a prefix sorts before the
+        longer string) — the editor's tree builder relies on dirs arriving parent-first.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredNoteFolder.path)
+                .where(_StoredNoteFolder.tenant == tenant)
+                .order_by(_StoredNoteFolder.path)
+            )
+            return list(rows)
+
+    async def add(self, *, tenant: str, path: str) -> bool:
+        """Create the folder *path* if absent; return whether a new row was inserted."""
+        async with self._session() as session:
+            existing = await session.scalar(
+                select(_StoredNoteFolder).where(
+                    _StoredNoteFolder.tenant == tenant,
+                    _StoredNoteFolder.path == path,
+                )
+            )
+            if existing is not None:
+                return False
+            session.add(_StoredNoteFolder(tenant=tenant, path=path))
+            await session.commit()
+            return True
+
+    async def delete(self, *, tenant: str, path: str) -> bool:
+        """Remove the folder row for *path*; returns whether a row was deleted."""
+        async with self._session() as session:
+            result = await session.execute(
+                delete(_StoredNoteFolder).where(
+                    _StoredNoteFolder.tenant == tenant,
+                    _StoredNoteFolder.path == path,
+                )
+            )
+            await session.commit()
+            return bool(cast("Any", result).rowcount)
+
+
 class NotesStore:
     """CRUD for the tenant-scoped notes table in Postgres."""
 

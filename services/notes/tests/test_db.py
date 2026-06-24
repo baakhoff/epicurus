@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_notes.db import NotesStore
+from epicurus_notes.db import NoteFolderStore, NotesStore
 
 TENANT = "test"
 
@@ -16,6 +16,14 @@ async def store() -> NotesStore:
     s = NotesStore(engine)
     await s.init()
     return s
+
+
+@pytest.fixture
+async def folders() -> NoteFolderStore:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    f = NoteFolderStore(engine)
+    await f.init()
+    return f
 
 
 async def test_count_empty(store: NotesStore) -> None:
@@ -63,3 +71,27 @@ async def test_last_updated_at_is_iso(store: NotesStore) -> None:
     from datetime import datetime
 
     datetime.fromisoformat(result)
+
+
+# ── NoteFolderStore (#KB-refactor) ─────────────────────────────────────────────
+
+
+async def test_folder_add_is_idempotent_and_lists_sorted(folders: NoteFolderStore) -> None:
+    assert await folders.add(tenant=TENANT, path="b") is True
+    assert await folders.add(tenant=TENANT, path="a/c") is True
+    assert await folders.add(tenant=TENANT, path="a") is True
+    # A second add of the same path is a no-op (False) — the unique row already exists.
+    assert await folders.add(tenant=TENANT, path="b") is False
+    # Sorted so a parent ("a") precedes its child ("a/c").
+    assert await folders.list(tenant=TENANT) == ["a", "a/c", "b"]
+
+
+async def test_folder_delete_and_tenant_isolation(folders: NoteFolderStore) -> None:
+    await folders.add(tenant="t1", path="shared")
+    await folders.add(tenant="t2", path="shared")
+    assert await folders.delete(tenant="t1", path="shared") is True
+    assert await folders.list(tenant="t1") == []
+    # t2's identically-named folder is untouched.
+    assert await folders.list(tenant="t2") == ["shared"]
+    # Deleting a missing folder is a no-op (False).
+    assert await folders.delete(tenant="t1", path="shared") is False

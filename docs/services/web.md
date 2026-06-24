@@ -124,6 +124,14 @@ Approve/reject post to `POST /platform/v1/modules/{name}/pages/{page_id}/suggest
 (the core proxies to the module); these are operator-only — the agent never approves its own
 proposals.
 
+The **Suggestions page header** carries a per-module **review on/off** switch — *Review agent
+changes before applying* (#KB-refactor, `src/components/archetypes/ReviewView.tsx`). It reads
+`GET` and writes `PUT /platform/v1/modules/{name}/suggestions-enabled` (`src/lib/api.ts`:
+`suggestionsEnabled` / `setSuggestionsEnabled`). When **off**, the module applies the agent's
+changes directly, so the queue stays empty by design — the page shows a contextual "applied
+automatically" empty state rather than "nothing awaits review". The switch is always shown
+(even with an empty queue) so the operator can turn review back on.
+
 ### The chat SSE protocol
 
 `POST /platform/v1/agent/chat/stream` returns Server-Sent Events: an optional leading

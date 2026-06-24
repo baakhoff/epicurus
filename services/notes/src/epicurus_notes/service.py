@@ -19,11 +19,12 @@ the ``review`` archetype — both core-rendered (this module supplies data only)
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, PageSpec, UiSection, tool_envelope
+from epicurus_core import EpicurusModule, PageSpec, PlatformClient, UiSection, tool_envelope
 from epicurus_notes.db import NotesStore
 from epicurus_notes.pages import NOTES_PAGE_ID
 from epicurus_notes.suggestions import (
     REVIEW_PAGE_ID,
+    NoteSuggestionReview,
     NoteSuggestionStore,
     validate_note_operation,
 )
@@ -47,14 +48,19 @@ def _valid_slug(slug: str) -> str | None:
 def build_module(
     store: NotesStore,
     suggestions: NoteSuggestionStore,
+    review: NoteSuggestionReview,
+    platform: PlatformClient,
     *,
     tenant: str,
 ) -> EpicurusModule:
     """Build the Notes module: the editor + review pages, the attach surface, and the
-    agent's write-only tool surface (no read — notes are private)."""
+    agent's write-only tool surface (no read — notes are private).
+
+    *review* + *platform* let the propose tools auto-apply a change when the operator has
+    turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.5.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -141,10 +147,24 @@ def build_module(
             note=note,
         )
         verb = {"create": "create", "update": "edit", "append": "append to", "delete": "delete"}[op]
-        return tool_envelope(
+        pending = (
             f"Proposed to {verb} note '{clean}' (suggestion {s.sid[:8]}). It is pending your"
-            " review in Notes → Note suggestions; nothing changes until you approve it.",
-            [],
+            " review in Notes → Note suggestions; nothing changes until you approve it."
+        )
+        # When the operator has turned review off, apply the change directly (#KB-refactor).
+        try:
+            review_on = await platform.get_suggestions_enabled()
+        except Exception:
+            review_on = True  # if the setting can't be read, default to the safe (review) path
+        if review_on:
+            return tool_envelope(pending, [])
+        try:
+            await review.approve(s.sid)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"{pending} (review is off but applying failed: {detail})", [])
+        return tool_envelope(
+            f"{verb.capitalize()} note '{clean}' applied directly — review is off.", []
         )
 
     @module.tool()

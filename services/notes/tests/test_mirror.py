@@ -37,6 +37,15 @@ async def test_write_rejects_traversal_slug(tmp_path: Path) -> None:
     assert not (tmp_path.parent / "escape.md").exists()
 
 
+async def test_write_does_not_double_suffix_md(tmp_path: Path) -> None:
+    # A slug authored via the editor's file controls already ends in ".md" (#KB-refactor);
+    # the mirror must write "<name>.md", never "<name>.md.md".
+    mirror = NotesMirror(tmp_path, await _store(), tenant=TENANT)
+    await mirror.write("work/idea.md", "body")
+    assert (tmp_path / "work" / "idea.md").read_text(encoding="utf-8") == "body"
+    assert not (tmp_path / "work" / "idea.md.md").exists()
+
+
 async def test_backfill_writes_only_missing(tmp_path: Path) -> None:
     store = await _store()
     await store.upsert(tenant=TENANT, slug="a", title="A", content="aaa")

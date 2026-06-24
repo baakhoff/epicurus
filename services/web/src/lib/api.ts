@@ -299,6 +299,18 @@ export const api = {
   // The cross-module pending-suggestions feed (#KB-refactor): drives the chat composer
   // bubble and the Suggestions page; each item carries its owning module + page id.
   suggestions: () => request(z.array(PendingSuggestion), `/platform/v1/suggestions`),
+  // Whether a module's agent changes go through review (#KB-refactor). Off ⇒ auto-accept.
+  suggestionsEnabled: (module: string) =>
+    request(
+      z.object({ enabled: z.boolean() }),
+      `/platform/v1/modules/${encodeURIComponent(module)}/suggestions-enabled`,
+    ),
+  setSuggestionsEnabled: (module: string, enabled: boolean) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(module)}/suggestions-enabled`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
     request(

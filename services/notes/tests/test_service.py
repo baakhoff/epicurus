@@ -7,24 +7,33 @@ the attach surface.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import EpicurusModule
+from epicurus_core import EpicurusModule, PlatformClient
 from epicurus_notes.db import NotesStore
+from epicurus_notes.indexer import NotesIndexer
+from epicurus_notes.pages import NotesPages
 from epicurus_notes.service import SAVED_SUBJECT, build_module
-from epicurus_notes.suggestions import NoteSuggestionStore
+from epicurus_notes.suggestions import NoteSuggestionReview, NoteSuggestionStore
 
 
 def _module() -> EpicurusModule:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     # manifest()/tool listing don't touch the DB, so uninitialised stores are fine here.
-    return build_module(NotesStore(engine), NoteSuggestionStore(engine), tenant="test")
+    store, sugg = NotesStore(engine), NoteSuggestionStore(engine)
+    pages = NotesPages(store, AsyncMock(spec=NotesIndexer), tenant="test")
+    review = NoteSuggestionReview(sugg, pages, store, tenant="test")
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    return build_module(store, sugg, review, platform, tenant="test")
 
 
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.4.0"
+    assert manifest.version == "0.5.0"
 
 
 async def test_exposes_write_and_list_tools_but_no_read() -> None:

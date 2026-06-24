@@ -32,6 +32,7 @@ from epicurus_core import (
     EpicurusModule,
     ModelSlot,
     PageSpec,
+    PlatformClient,
     UiAction,
     UiSection,
     tool_envelope,
@@ -53,6 +54,7 @@ from epicurus_knowledge.refs import (
 )
 from epicurus_knowledge.suggestions import (
     REVIEW_PAGE_ID,
+    SuggestionReview,
     SuggestionStore,
     validate_operation,
 )
@@ -204,6 +206,8 @@ def build_module(
     docs_indexer: KnowledgeIndexer,
     module_docs_indexer: ModuleDocsIndexer,
     suggestions: SuggestionStore,
+    review: SuggestionReview,
+    platform: PlatformClient,
     *,
     tenant: str,
     vault_path: Path,
@@ -218,12 +222,14 @@ def build_module(
         module_docs_indexer: Indexer for per-module documentation (#215),
             also written to ``<tenant>__docs`` under ``module/<name>/`` prefixes.
         suggestions: Store for agent-proposed vault changes awaiting review (#220).
+        review: Applies a staged change when the operator has review turned off.
+        platform: Reads the suggestions-review on/off setting (#KB-refactor).
         tenant: The tenant whose suggestion queue the propose tool writes to.
         vault_path: Vault root, used to path-confine a proposed edit's target.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.15.0",
+        version="0.16.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -292,6 +298,27 @@ def build_module(
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")
+
+    async def _finalize(sid: str, applied_msg: str, pending_msg: str) -> str:
+        """Leave a staged change pending under review, or auto-apply it when review is off.
+
+        The operator can turn review off per module (#KB-refactor) — then the agent's change
+        is applied immediately (the suggestion is approved right after it is staged), reusing
+        the same apply path the operator would. A failed auto-apply (e.g. a read-only watched
+        vault) leaves the change staged rather than losing it.
+        """
+        try:
+            review_on = await platform.get_suggestions_enabled()
+        except Exception:
+            review_on = True  # if the setting can't be read, default to the safe (review) path
+        if review_on:
+            return tool_envelope(pending_msg, [])
+        try:
+            await review.approve(sid)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"{pending_msg} (review is off but applying failed: {detail})", [])
+        return tool_envelope(applied_msg, [])
 
     @module.tool()
     async def knowledge_search(query: str, k: int = 5) -> str:
@@ -421,10 +448,11 @@ def build_module(
             origin="agent",
             note=note,
         )
-        return tool_envelope(
+        return await _finalize(
+            suggestion.sid,
+            f"{op.capitalize()} of '{path}' applied directly — review is off.",
             f"Proposed {op} of '{path}' (suggestion {suggestion.sid[:8]}). It is pending"
             " your review in Knowledge → Suggestions; nothing changes until you approve it.",
-            [],
         )
 
     # ── Navigation (read-only): how the agent learns where things live ───────────
@@ -517,10 +545,11 @@ def build_module(
             note=note,
             to_path=dst,
         )
-        return tool_envelope(
+        return await _finalize(
+            suggestion.sid,
+            f"Moved '{src}' to '{dst}' directly — review is off.",
             f"Proposed move of '{src}' to '{dst}' (suggestion {suggestion.sid[:8]}). Pending"
             " your review in Knowledge → Suggestions; nothing moves until you approve it.",
-            [],
         )
 
     @module.tool()
@@ -564,10 +593,11 @@ def build_module(
             note=note,
             to_path=dst,
         )
-        return tool_envelope(
+        return await _finalize(
+            suggestion.sid,
+            f"Renamed '{src}' to '{dst}' directly — review is off.",
             f"Proposed rename of '{src}' to '{dst}' (suggestion {suggestion.sid[:8]}). Pending"
             " your review in Knowledge → Suggestions.",
-            [],
         )
 
     @module.tool()
@@ -591,10 +621,11 @@ def build_module(
             origin="agent",
             note=note,
         )
-        return tool_envelope(
+        return await _finalize(
+            suggestion.sid,
+            f"Created folder '{rel}' directly — review is off.",
             f"Proposed new folder '{rel}' (suggestion {suggestion.sid[:8]}). Pending your"
             " review in Knowledge → Suggestions.",
-            [],
         )
 
     @module.tool()
@@ -617,10 +648,11 @@ def build_module(
             origin="agent",
             note=note,
         )
-        return tool_envelope(
+        return await _finalize(
+            suggestion.sid,
+            f"Created knowledge base '{name.strip()}' directly — review is off.",
             f"Proposed new knowledge base '{name.strip()}' (suggestion {suggestion.sid[:8]})."
             " Pending your review in Knowledge → Suggestions.",
-            [],
         )
 
     return module

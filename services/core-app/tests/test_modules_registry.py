@@ -56,6 +56,7 @@ class _FakeModulePrefs:
         self.models: dict[tuple[str, str], dict[str, str]] = {}
         self.disabled: dict[tuple[str, str], set[str]] = {}
         self.collections: dict[tuple[str, str], CollectionPrefs] = {}
+        self.suggestions: dict[tuple[str, str], bool] = {}
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         return {m: e for (t, m), e in self.flags.items() if t == tenant}
@@ -86,6 +87,12 @@ class _FakeModulePrefs:
 
     async def set_collections(self, tenant: str, module: str, prefs: CollectionPrefs) -> None:
         self.collections[(tenant, module)] = prefs
+
+    async def get_suggestions_enabled(self, tenant: str, module: str) -> bool:
+        return self.suggestions.get((tenant, module), True)
+
+    async def set_suggestions_enabled(self, tenant: str, module: str, enabled: bool) -> None:
+        self.suggestions[(tenant, module)] = enabled
 
     async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:
         return set(self.disabled.get((tenant, module), set()))
@@ -1050,3 +1057,20 @@ async def test_all_suggestions_empty_without_a_review_page() -> None:
     # A module with only a browser page contributes nothing to the feed.
     registry, _, _ = _registry(manifest=_pages_manifest())
     assert await registry.all_suggestions() == []
+
+
+# ── Suggestions review on/off toggle (#KB-refactor) ────────────────────────────
+
+
+async def test_suggestions_enabled_defaults_true_and_round_trips() -> None:
+    registry, _, _ = _registry(manifest=_review_manifest())
+    assert await registry.get_suggestions_enabled("knowledge") is True  # default on
+    await registry.set_suggestions_enabled("knowledge", False)
+    assert await registry.get_suggestions_enabled("knowledge") is False
+
+
+async def test_set_suggestions_enabled_unknown_module_is_404() -> None:
+    registry, _, _ = _registry(manifest=_review_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.set_suggestions_enabled("ghost", False)
+    assert err.value.status_code == 404

@@ -23,7 +23,7 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_notes.attachments import NotesAttachments, create_attachments_router
-from epicurus_notes.db import NotesStore
+from epicurus_notes.db import NoteFolderStore, NotesStore
 from epicurus_notes.indexer import NotesIndexer
 from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
@@ -53,7 +53,8 @@ def create_app() -> FastAPI:
     engine = create_async_engine(settings.database_url)
     store = NotesStore(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
-    platform = PlatformClient(base_url=settings.platform_url, tenant_id=tenant)
+    # module=MODULE_NAME so the platform client can read this module's suggestions setting.
+    platform = PlatformClient(base_url=settings.platform_url, tenant_id=tenant, module=MODULE_NAME)
     indexer = NotesIndexer(
         qdrant,
         platform,
@@ -63,25 +64,30 @@ def create_app() -> FastAPI:
 
     bus = EventBus.from_settings(settings)
     suggestion_store = NoteSuggestionStore(engine)
-    # The agent's write tools stage suggestions; build_module registers them + the pages.
-    module = build_module(store, suggestion_store, tenant=tenant)
-    mcp_app = module.http_app()
+    folders = NoteFolderStore(engine)
 
     async def _on_saved(slug: str) -> None:
         """Announce a saved note on NATS (tenant-scoped) for downstream consumers."""
         await bus.publish(SAVED_SUBJECT, {"slug": slug}, tenant_id=tenant)
 
     mirror = NotesMirror(settings.notes_root, store, tenant=tenant)
-    pages = NotesPages(store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror)
+    pages = NotesPages(
+        store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror, folders=folders
+    )
     attachments = NotesAttachments(store, tenant=tenant)
     # Applies/discards agent-proposed note changes on the operator's word (ADR-0033).
     review = NoteSuggestionReview(suggestion_store, pages, store, tenant=tenant)
+    # build_module takes the review + platform so its propose tools can auto-apply when the
+    # operator has turned review off (#KB-refactor).
+    module = build_module(store, suggestion_store, review, platform, tenant=tenant)
+    mcp_app = module.http_app()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await store.init()
             await suggestion_store.init()
+            await folders.init()
             # One-time copy of pre-existing notes into the shared file space (#KB-refactor).
             await mirror.backfill()
             await bus.connect()

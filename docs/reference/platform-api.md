@@ -172,6 +172,16 @@ leave those empty, with `to_path` carrying a `move`'s destination. `append` is *
 (the agent supplies just the text to add; the server concatenates it on approval) and is
 content-like — its diff shows the added text.
 
+### `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled`
+
+The per-module **review on/off** toggle (#KB-refactor) — `{ "enabled": true }`. When **on**
+(the default; a missing or NULL pref reads as `true`) the module stages agent changes on its
+`review` page for approval. When **off**, the module applies them directly (it reads this via
+`PlatformClient.get_suggestions_enabled` and, when off, approves its own staged suggestion
+through the normal apply path). The review-page header reads `GET` and writes `PUT`; `PUT`
+**404**s an unknown module. Persisted in `module_prefs`. Generic across any module with a
+`review` page — today knowledge and notes.
+
 ### `GET /platform/v1/modules/storage/read?path=…`
 
 Proxy the storage module's text-file read for the Files split-screen reader →

@@ -89,6 +89,12 @@ class ModelsUpdate(BaseModel):
     models: dict[str, str]
 
 
+class SuggestionsEnabledUpdate(BaseModel):
+    """The body of the suggestions-review on/off toggle (#KB-refactor)."""
+
+    enabled: bool
+
+
 class ToolInvocation(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -276,6 +282,20 @@ class ModuleRegistry:
         """
         models = await self._prefs.get_models(self._tenant, name)
         return models.get(slot)
+
+    async def get_suggestions_enabled(self, name: str) -> bool:
+        """Whether agent changes to *name* go through review (default True) (#KB-refactor).
+
+        Read directly from Postgres (no manifest round-trip, like ``model_for_slot``) so a
+        module can resolve its own setting cheaply via ``PlatformClient`` to decide whether to
+        stage a suggestion or apply the change directly.
+        """
+        return await self._prefs.get_suggestions_enabled(self._tenant, name)
+
+    async def set_suggestions_enabled(self, name: str, enabled: bool) -> None:
+        """Persist whether *name*'s agent changes go through review. 404 if unknown (operator)."""
+        await self._resolve(name)  # only known modules
+        await self._prefs.set_suggestions_enabled(self._tenant, name, enabled)
 
     async def accounts_view(self, name: str) -> AccountsView:
         """The module's connected accounts + collections, merged with the operator's prefs.
@@ -903,6 +923,19 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
         """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
         return {"model": await registry.model_for_slot(name, slot)}
+
+    @router.get("/{name}/suggestions-enabled")
+    async def get_module_suggestions_enabled(name: str) -> dict[str, bool]:
+        """Whether agent changes to the module go through review (default on, #KB-refactor)."""
+        return {"enabled": await registry.get_suggestions_enabled(name)}
+
+    @router.put("/{name}/suggestions-enabled")
+    async def set_module_suggestions_enabled(
+        name: str, body: SuggestionsEnabledUpdate
+    ) -> dict[str, str]:
+        """Turn review on/off for the module (off ⇒ the agent's changes auto-apply)."""
+        await registry.set_suggestions_enabled(name, body.enabled)
+        return {"status": "ok"}
 
     @router.get("/{name}/collections", response_model=AccountsView)
     async def get_module_collections(name: str) -> AccountsView:

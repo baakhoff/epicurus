@@ -29,12 +29,15 @@ class NotesMirror:
     def _target(self, slug: str) -> Path | None:
         """The ``.md`` path for *slug*, confined to the notes root; None if it would escape.
 
-        A slug is a Postgres key, not a filesystem path, and may legitimately be flat; this
-        is defence-in-depth so a slug containing ``..`` (or absolute parts) can never write
-        outside the notes folder.
+        A slug is a Postgres key, not a filesystem path, and may legitimately be flat or
+        contain ``/`` (folders). A slug authored through the editor's file controls already
+        carries a ``.md`` suffix, so we add one only when missing — never ``note.md.md``.
+        This is also defence-in-depth: a slug containing ``..`` (or absolute parts) can
+        never write outside the notes folder.
         """
         root = self._root.resolve()
-        target = (root / f"{slug}.md").resolve()
+        rel = slug if slug.endswith(".md") else f"{slug}.md"
+        target = (root / rel).resolve()
         return target if target.is_relative_to(root) else None
 
     async def write(self, slug: str, content: str) -> None:

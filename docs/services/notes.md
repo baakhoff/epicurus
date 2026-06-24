@@ -34,7 +34,8 @@ Notes are private. The boundary is enforced in two places (#KB-refactor):
   note to a turn, and the core injects its body into that turn's context.
 
 Every agent write is **staged for operator review** (ADR-0033, the same flow as the knowledge
-base) — nothing is written until you approve it.
+base) — nothing is written until you approve it, unless you turn review **off** for notes, in
+which case the agent's changes apply directly (see *Note suggestions page* below).
 
 ## The contract it exposes
 
@@ -81,16 +82,26 @@ The module is an **attachment source** (`attachable: true`) — the only path fr
 ### Notes page (`editor` archetype, ADR-0018 / ADR-0022 / ADR-0026)
 
 The module contributes a **Notes** left-nav page — declared as a `pages` entry
-`{id: "notes", archetype: "editor"}`. The **core renders** the editor (a document list, a
-markdown source/preview editor, Save, and — because the page sets `can_create` — a **New
-note** control); the module ships **no markup** and only supplies data over three endpoints
-the core proxies. Saving to a new slug **creates** the note; saving an existing one updates
-it. Each save re-indexes the note into `<tenant>__notes`.
+`{id: "notes", archetype: "editor"}`. The **core renders** the editor (a document/folder
+tree, a markdown source/preview editor, Save, and — because the page sets `can_manage_files`
+— the file-management controls: **New document**, **New folder**, new-file-in-folder,
+rename, delete); the module ships **no markup** and only supplies data over the endpoints the
+core proxies. Saving to a new slug **creates** the note; saving an existing one updates it.
+Each save re-indexes the note into `<tenant>__notes`.
 
 The shared `EditorView` is **core-owned**; notes reuses it (knowledge is the other user).
 The note **title** is derived from the body (its first heading / line), so the
 `{content}`-only save contract needs no title field; the **slug** (the editor `path`) is a
 Postgres key, not a filesystem path — there is no traversal surface, only slug validation.
+
+**Folders, no projects (#KB-refactor).** A `/` in a slug groups notes into folders, exactly
+like the knowledge base — but notes are a single **flat space** with **no project switcher**
+(`scope_noun` is empty). The editor's folder controls let the operator organise notes into
+nested folders; an **empty** folder is persisted in the `note_folders` table (see *Data
+model*) so it survives a reload before any note is filed under it. Renaming a note (the
+editor renames files, not folders) **re-keys its slug** via `POST /pages/{id}/move`: the row,
+its vectors, and its `.md` mirror all follow the new slug. Folder management is the
+**operator's** surface — the agent has no folder/move tool and notes stay private.
 
 ### Note suggestions page (`review` archetype, ADR-0033)
 
@@ -104,16 +115,26 @@ the shared review overlay render note suggestions with no special-casing.
 A note suggestion carries one of four **operations**: `create` / `update` / `append` /
 `delete`. The first three are content ops shown with a **server-computed unified diff** (and
 support **per-hunk** approval); `delete` is reviewed as a confirmation showing the current
-body. Because notes are slug-keyed in Postgres (no filesystem), there is **no** `move` /
-folder operation; `append` is notes-specific — the agent supplies only the text to add and the
-server concatenates it onto the current body. The review payload carries the full `current`
-(live body, empty for a create) and `content` (the body approving would produce) so the shell
-can render the per-hunk diff.
+body. There is **no** `move` / folder **suggestion** operation — folders are the operator's,
+managed in the editor (the agent has no folder/move tool); `append` is notes-specific — the
+agent supplies only the text to add and the server concatenates it onto the current body. The
+review payload carries the full `current` (live body, empty for a create) and `content` (the
+body approving would produce) so the shell can render the per-hunk diff.
 
 The **trust boundary is the author**: agent changes route through review; the operator's own
 editor saves stay immediate, since the operator is already the approver. Approve/reject are
 operator-only endpoints the core proxies — deliberately **not** MCP tools, so the agent cannot
 approve its own proposals.
+
+**Review on/off toggle (#KB-refactor).** The review page header carries a per-module switch —
+*Review agent changes before applying* — backed by the core's
+`GET/PUT /platform/v1/modules/notes/suggestions-enabled` (see [core-app](core-app.md)). When
+**on** (the default), agent proposals stage here for approval as described above. When **off**,
+the propose tools **apply the change directly** (the module reads the setting via its
+`PlatformClient` and, if review is off, immediately approves its own staged suggestion through
+the same apply path) and the tool reply says so. The operator's editor saves are immediate
+regardless — the toggle only governs the **agent's** writes. If the setting can't be read the
+module defaults to the safe path (review on).
 
 - `GET /pages/review` — the pending queue: each suggestion as `{id, title, path, operation,
   origin, note, created_at, diff, to_path, current, content}`. `path` is the note slug;
@@ -151,9 +172,14 @@ data flows through the core.
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, the `notes.saved` event, `attachable: true`, `pages`, UI). |
 | `GET /status` | Live stats `{note_count, last_updated_at}`. Proxied at `GET /platform/v1/modules/notes/status`. |
-| `GET /pages/{page_id}` | Editor document list `{title, docs:[{id, title, path}], can_create: true}` (page id `notes`). |
+| `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files: true}` (page id `notes`). Dir nodes (`type: "dir"`) come from `note_folders` ∪ slug prefixes, emitted parent-first before file nodes. |
 | `GET /pages/{page_id}/doc?path=<slug>` | One note's content `{path, title, content}`. |
 | `PUT /pages/{page_id}/doc?path=<slug>` | Save (create-on-absent) `{content}` → `{path, indexed, chunk_count}`. The note is the source of truth — a failed re-index returns `indexed: false`, never losing the write. |
+| `POST /pages/{page_id}/folder?path=<dir>` | Create an empty folder → `{path}`. 409 if it exists, 400 if the path is invalid. |
+| `DELETE /pages/{page_id}/doc?path=<slug>` | Delete a note (row + vectors + `.md` mirror). 404 if absent. Used by an approved `delete` and the editor's delete control. |
+| `DELETE /pages/{page_id}/folder?path=<dir>` | Delete an **empty** folder. 409 if a note or child folder lives under it, 404 if it doesn't exist. |
+| `POST /pages/{page_id}/move` | Rename/move a note `{from_path, to_path}` → `{path}` — re-keys the slug (row + vectors + mirror follow). 404 if the source is missing, 409 if the destination is taken. |
+| `GET`/`PUT` `/platform/v1/modules/notes/suggestions-enabled` | (Core endpoint) the review on/off toggle for notes — see [core-app](core-app.md). |
 | `GET /pages/review` | Pending note-suggestion queue: `{title, suggestions:[{id, title, path, operation, origin, note, created_at, diff, to_path, current, content}]}`. `operation` ∈ create/update/append/delete. Proxied at `GET /platform/v1/modules/notes/pages/review`. Registered before the editor pages router so it isn't shadowed by `/pages/{page_id}`. |
 | `POST /pages/review/suggestions/{sid}/approve` | Apply a staged change + index it, drop the row → `{id, status, path, operation, indexed}`. Optional `{content}` body — the operator's per-hunk-merged result for a content op; absent ⇒ compose from the current body. 404 if unknown. Operator-only (not an MCP tool). |
 | `POST /pages/review/suggestions/{sid}/reject` | Discard a staged change, note untouched → `{id, status, path, operation}`. 404 if unknown. Operator-only. |
@@ -208,6 +234,10 @@ see [storage](storage.md)).
 
 - **Postgres `notes`** — the note bodies: `id`, `tenant`, `slug`, `title`, `content`,
   `created_at`, `updated_at`; unique on `(tenant, slug)`. **The source of truth.**
+- **Postgres `note_folders`** — explicitly-created folders (#KB-refactor): `id`, `tenant`,
+  `path`, `created_at`; unique on `(tenant, path)`. A folder is normally *implied* by a note
+  slug containing `/`; this table makes an **empty** folder exist on its own so it survives a
+  reload. Folders are derived from the union of these rows and every slug's prefixes.
 - **Postgres `notes_suggestions`** — pending agent-proposed note changes (ADR-0033):
   `id`, `tenant`, `sid` (opaque uuid), `slug`, `operation`
   (`create`/`update`/`append`/`delete`), `proposed_content` (the full body for
@@ -242,12 +272,12 @@ Package `epicurus_notes`:
 | Module | Responsibility |
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
-| `db.py` | The `notes` table + CRUD (`NotesStore`) — the source of truth. |
+| `db.py` | The `notes` table + CRUD (`NotesStore`) — the source of truth — and the `note_folders` table + CRUD (`NoteFolderStore`) for explicit/empty folders (#KB-refactor). |
 | `indexer.py` | Chunk + embed + upsert into `<tenant>__notes` (`NotesIndexer`); no search method (private + attach-only). |
 | `mirror.py` | The read-only `.md` mirror to the shared file space (#KB-refactor): `NotesMirror` (slug-confined `write` per save, `delete` on note removal, and a one-time `backfill`), best-effort throughout. |
-| `pages.py` | The `editor` page surface: list, read, create/update (title derivation + slug safety + mirror write + re-index) + `delete_doc` (used by an approved `delete`). |
+| `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + re-index), `delete_doc`, and the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following). |
 | `suggestions.py` | The `review` page surface (ADR-0033): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional per-hunk `content`), and `create_note_review_router`. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |
 | `service.py` | The manifest — `pages` (editor + review), `attachable`, the `notes.saved` event, and the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no read tool**). |
-| `app.py` | Lifespan (incl. the suggestion-store init + mirror backfill), `GET /status`, the review router (registered first) + the `/pages/*` and `/attachments/*` routers, event publish. |
+| `app.py` | Lifespan (incl. the suggestion-store + folder-store init + mirror backfill), `GET /status`, the review router (registered first) + the `/pages/*` and `/attachments/*` routers, event publish. |
 | `settings.py` | `NotesSettings` (adds Qdrant, DB, platform URL, chunk size, `notes_root`). |

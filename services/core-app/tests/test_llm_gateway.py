@@ -782,6 +782,19 @@ async def test_stored_context_window_overrides_env() -> None:
     assert await _gateway(prefs=prefs, num_ctx=4096).effective_context_window() == 16384
 
 
+async def test_effective_kv_cache_type_reads_the_pref() -> None:
+    prefs = await _fresh_prefs()
+    # No stored pref → None (the runtime's f16 default applies; the suggestion assumes f16).
+    assert await _gateway(prefs=prefs).effective_kv_cache_type() is None
+    await prefs.set_kv_cache_type("local", "q8_0")
+    assert await _gateway(prefs=prefs).effective_kv_cache_type() == "q8_0"
+
+
+async def test_effective_kv_cache_type_none_without_prefs() -> None:
+    # No prefs store → no stored choice → None.
+    assert await _gateway().effective_kv_cache_type() is None
+
+
 async def test_chat_applies_context_window_pref(monkeypatch: pytest.MonkeyPatch) -> None:
     """A streamed/blocking chat turn resolves num_ctx from the pref, per turn."""
     captured: dict[str, Any] = {}

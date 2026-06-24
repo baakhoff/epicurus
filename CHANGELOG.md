@@ -276,6 +276,20 @@ images to GHCR.
 
 ### Changed
 
+- **The context-window suggestion now reflects your KV-cache type and the model's real
+  limits — and is no longer clipped to 32k** — the Models-page estimate of "how big a context
+  can this box hold?" assumed a fixed f16 KV cache and capped at a flat 32,768, ignoring two
+  things the operator can already set/observe: the **KV-cache type** (a quantized cache
+  `q8_0`/`q4_0` stores fewer bytes per token, so the same VRAM buys roughly 2×/4× the context)
+  and the model's **trained context length**. The suggestion now scales the per-token KV cost
+  by the active `kv_cache_type` and uses the model's trained `context_length` (read from
+  `/api/show`) as the ceiling — so a long-context model on a roomy GPU can be suggested well
+  past 32k, while a short-context model is never suggested beyond what it was trained for. The
+  flat 32,768 survives only as the fallback when the trained length is unknown (and the lower
+  CPU cap is unchanged). `GET /platform/v1/system/info` gains `kv_cache_type` and
+  `model.{context_length, quantization}`; the Models page shows the model's quantization +
+  trained limit and lets the token field/slider exceed 32k when supported (`core-app` →
+  0.34.0, `web` → 0.44.0).
 - **Long conversations are trimmed to fit the model's context window instead of overflowing
   it** — a local runtime (Ollama) silently drops whatever spills past `num_ctx`, and what
   spills first is the *oldest* context: the agent's instructions and recalled memory. With the

@@ -11,6 +11,8 @@ import {
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
+  EditorVersionContent,
+  EditorVersionList,
   EmailMessage,
   HoverCard,
   LlmPrefs,
@@ -248,6 +250,18 @@ export const api = {
       EditorSaveResult,
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
       { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+  // An `editor` document's save history, newest first (ADR-0046).
+  modulePageDocVersions: (name: string, pageId: string, path: string) =>
+    request(
+      EditorVersionList,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc/versions?path=${encodeURIComponent(path)}`,
+    ),
+  // One past version of an `editor` document (ADR-0046).
+  modulePageDocVersion: (name: string, pageId: string, path: string, versionId: string) =>
+    request(
+      EditorVersionContent,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc/version?path=${encodeURIComponent(path)}&version=${encodeURIComponent(versionId)}`,
     ),
   // Create a folder inside an editor page's store (#216).
   createModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {

@@ -614,6 +614,12 @@ export const EditorData = z.object({
    * this mode, so Obsidian stays the sole author.
    */
   read_only: z.boolean().default(false),
+  /**
+   * Save history (ADR-0046): when true every save snapshots the document, and the shell
+   * shows a History affordance to browse and restore past versions. Notes and knowledge
+   * set this. Restore is client-side (re-save a past version's content).
+   */
+  versioned: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 
@@ -632,6 +638,31 @@ export const EditorSaveResult = z.object({
   chunk_count: z.number().default(0),
 });
 export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
+
+/** One entry in an `editor` document's save history (ADR-0046) — metadata only, no body. */
+export const EditorVersion = z.object({
+  version_id: z.string(),
+  created_at: z.string(),
+  title: z.string().default(""),
+  size: z.number().default(0),
+});
+export type EditorVersion = z.infer<typeof EditorVersion>;
+
+/** A document's save history, newest first. */
+export const EditorVersionList = z.object({
+  versions: z.array(EditorVersion).default([]),
+});
+export type EditorVersionList = z.infer<typeof EditorVersionList>;
+
+/** One past version's full content, fetched when the operator views it (ADR-0046). */
+export const EditorVersionContent = z.object({
+  path: z.string(),
+  version_id: z.string(),
+  created_at: z.string(),
+  title: z.string().default(""),
+  content: z.string(),
+});
+export type EditorVersionContent = z.infer<typeof EditorVersionContent>;
 
 /* ── review queue (ADR-0033, #220) ───────────────────────────────────────── */
 

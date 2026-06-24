@@ -46,6 +46,12 @@ The note **title** is derived from the body (its first heading / line), so the
 `{content}`-only save contract needs no title field; the **slug** (the editor `path`) is a
 Postgres key, not a filesystem path — there is no traversal surface, only slug validation.
 
+The page is **versioned** (`versioned: true`, ADR-0046): every save snapshots the note's
+body, and the shell offers a **browse + restore past versions** affordance. A byte-identical
+re-save is deduped (no new snapshot), and history is bounded to the newest **50** versions
+per note. **Restore is client-side** — the shell fetches a past version and re-saves its
+content through the normal save path; the module exposes **no restore endpoint**.
+
 ### Events (NATS)
 
 Emits **`<tenant>.notes.saved`** (`{slug}`) after a note is saved and indexed.
@@ -69,7 +75,9 @@ and no agent tools; all data flows through the core.
 | `GET /status` | Live stats `{note_count, last_updated_at}`. Proxied at `GET /platform/v1/modules/notes/status`. |
 | `GET /pages/{page_id}` | Editor document list `{title, docs:[{id, title, path}], can_create: true}` (page id `notes`). |
 | `GET /pages/{page_id}/doc?path=<slug>` | One note's content `{path, title, content}`. |
-| `PUT /pages/{page_id}/doc?path=<slug>` | Save (create-on-absent) `{content}` → `{path, indexed, chunk_count}`. The note is the source of truth — a failed re-index returns `indexed: false`, never losing the write. |
+| `PUT /pages/{page_id}/doc?path=<slug>` | Save (create-on-absent) `{content}` → `{path, indexed, chunk_count}`. The note is the source of truth — a failed re-index returns `indexed: false`, never losing the write. Each save also snapshots the body for version history (ADR-0046). |
+| `GET /pages/{page_id}/doc/versions?path=<slug>` | A note's past versions, newest first → `{versions:[{version_id, created_at, title, size}]}` (ADR-0046, capped at 50). |
+| `GET /pages/{page_id}/doc/version?path=<slug>&version=<version_id>` | One past version's full content → `{path, version_id, created_at, title, content}`; 404 if it is not that note's version. |
 | `GET /attachments` | Attachment picker (see above). |
 | `GET /attachments/{ref_id}` | Attachment resolve (see above). |
 | `GET /mcp` (streamable-HTTP) | MCP surface (no tools registered). |
@@ -108,6 +116,9 @@ Notes needs **no disk mount** — it is stateless w.r.t. local storage.
 
 - **Postgres `notes`** — the note bodies: `id`, `tenant`, `slug`, `title`, `content`,
   `created_at`, `updated_at`; unique on `(tenant, slug)`.
+- **Postgres `note_versions`** — immutable per-save snapshots (ADR-0046): `id` (the opaque
+  `version_id`), `tenant`, `slug`, `title`, `content`, `created_at`; indexed on
+  `(tenant, slug)`. Deduped on the newest body and pruned to the latest 50 per note.
 - **Qdrant `<tenant>__notes`** — note chunk embeddings (cosine), one collection per tenant.
   Each point payload: `{slug, chunk_index, heading, text}`.
 
@@ -130,7 +141,7 @@ Package `epicurus_notes`:
 | Module | Responsibility |
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
-| `db.py` | The `notes` table + CRUD (`NotesStore`) — the source of truth. |
+| `db.py` | The `notes` + `note_versions` tables + CRUD (`NotesStore`) — the source of truth, incl. version snapshots. |
 | `indexer.py` | Chunk + embed + upsert into `<tenant>__notes` (`NotesIndexer`); no search method (attach-only). |
 | `pages.py` | The `editor` page surface: list, read, create/update (title derivation + slug safety + re-index). |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`). |

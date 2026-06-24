@@ -33,7 +33,15 @@ log = get_logger("epicurus_core_app.llm.catalog")
 
 # The capability/tag vocabulary the web browser knows (data/catalog.ts). The parser
 # only ever emits tags from this set, in this order, so the response stays stable.
-KNOWN_TAGS: tuple[str, ...] = ("general", "code", "multilingual", "vision", "embedding", "small")
+KNOWN_TAGS: tuple[str, ...] = (
+    "general",
+    "code",
+    "multilingual",
+    "vision",
+    "tools",
+    "embedding",
+    "small",
+)
 
 # A model is "small" when its largest-listed parameter count is under this many billions.
 _SMALL_PARAMS_B = 2.0
@@ -197,6 +205,8 @@ def _derive_tags(name: str, description: str, caps: set[str], params: str) -> li
         tags.add("embedding")
     if "vision" in caps:
         tags.add("vision")
+    if "tools" in caps:
+        tags.add("tools")
     haystack = f"{name} {description}".lower()
     if re.search(r"cod(?:e|er|ing)", haystack):
         tags.add("code")

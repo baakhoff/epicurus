@@ -30,6 +30,9 @@ class _FakeStreamGateway:
             yield StreamEvent(delta=delta)
         yield StreamEvent(result=result)
 
+    async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
+        return True
+
 
 class _FakeMcp:
     def __init__(self, outputs: dict[str, str] | None = None, fail: bool = False) -> None:
@@ -101,6 +104,9 @@ async def test_stream_tool_failure_is_reported_not_fatal() -> None:
 
 async def test_stream_gateway_error_yields_error_event() -> None:
     class _Exploding:
+        async def supports_tools(self, *args: Any, **kwargs: Any) -> bool:
+            return True
+
         async def stream_chat(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamEvent]:
             raise RuntimeError("paused")
             yield StreamEvent()  # pragma: no cover - makes this an async generator
@@ -114,6 +120,9 @@ async def test_stream_emits_thinking_events_and_persists_them() -> None:
     # A reasoning model streams a `reasoning` event before its answer; the agent surfaces it
     # as a `thinking` event and folds it into the turn's persisted activity (ADR-0041).
     class _ReasoningGateway:
+        async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
+            return True
+
         async def stream_chat(
             self,
             messages: list[ChatMessage],
@@ -188,6 +197,9 @@ async def test_stream_timeline_preserves_think_tool_think_order() -> None:
     class _ScriptGateway:
         def __init__(self, rounds: list[tuple[list[str], list[str], ChatResult]]) -> None:
             self._rounds = list(rounds)
+
+        async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
+            return True
 
         async def stream_chat(
             self,

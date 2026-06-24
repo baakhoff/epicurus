@@ -938,6 +938,7 @@ async def test_show_parses_quantization_and_context_length(monkeypatch: pytest.M
                     "quantization_level": "Q4_K_M",
                 },
                 "model_info": {"general.architecture": "llama", "llama.context_length": 131072},
+                "capabilities": ["completion", "tools", "insert"],
             }
 
     class _Client:
@@ -960,6 +961,92 @@ async def test_show_parses_quantization_and_context_length(monkeypatch: pytest.M
     assert details.parameter_size == "8.0B"
     assert details.context_length == 131072
     assert details.family == "llama"
+    assert details.capabilities == ["completion", "tools", "insert"]
+
+
+# ── tool-capability gating (a tool-less model just answers in text) ───────────────
+
+
+def _show_client(capabilities: list[str]) -> type:
+    """A fake httpx client whose ``/api/show`` reports the given capabilities."""
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"capabilities": capabilities}
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, Any]) -> _Resp:
+            return _Resp()
+
+    return _Client
+
+
+async def test_supports_tools_reads_local_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
+    g = "epicurus_core_app.llm.gateway.httpx.AsyncClient"
+    monkeypatch.setattr(g, _show_client(["completion", "tools"]))
+    assert await _gateway().supports_tools("llama3.2") is True
+    monkeypatch.setattr(g, _show_client(["completion", "vision"]))
+    assert await _gateway().supports_tools("llama3.2") is False
+    # An empty capability list (older runtime that doesn't report them) must not restrict.
+    monkeypatch.setattr(g, _show_client([]))
+    assert await _gateway().supports_tools("llama3.2") is True
+
+
+async def test_supports_tools_assumes_hosted_models_can() -> None:
+    # Hosted providers can't be probed via Ollama and the mainstream ones support tools, so
+    # they're assumed capable — note no runtime client is mocked: /api/show is never called.
+    assert await _gateway().supports_tools("claude/claude-3-5-sonnet-latest") is True
+
+
+async def test_models_with_capabilities_enriches_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Resp:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self._data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return self._data
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def get(self, path: str) -> _Resp:
+            if path == "/api/tags":
+                return _Resp({"models": [{"name": "a:1", "size": 1}, {"name": "b:1", "size": 2}]})
+            return _Resp({"models": []})  # /api/ps
+
+        async def post(self, path: str, json: dict[str, Any]) -> _Resp:
+            caps = {"a:1": ["tools"], "b:1": ["vision"]}.get(json["model"], [])
+            return _Resp({"capabilities": caps})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", _Client)
+    enriched = {m.name: m for m in await _gateway().models(with_capabilities=True)}
+    assert enriched["a:1"].capabilities == ["tools"]
+    assert enriched["b:1"].capabilities == ["vision"]
+    # Without the flag there are no per-model /api/show calls; capabilities stay empty.
+    plain = await _gateway().models()
+    assert all(m.capabilities == [] for m in plain)
 
 
 # ── per-model device → Ollama num_gpu (GPU/CPU choice, #293) ──────────────────────

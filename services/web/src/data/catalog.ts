@@ -10,7 +10,15 @@ import type { CatalogEntry } from "@/lib/contracts";
 
 export type { CatalogEntry };
 
-export const ALL_TAGS = ["general", "code", "multilingual", "vision", "embedding", "small"] as const;
+export const ALL_TAGS = [
+  "general",
+  "code",
+  "multilingual",
+  "vision",
+  "tools",
+  "embedding",
+  "small",
+] as const;
 export type CatalogTag = (typeof ALL_TAGS)[number];
 
 export const TAG_LABELS: Record<CatalogTag, string> = {
@@ -18,6 +26,7 @@ export const TAG_LABELS: Record<CatalogTag, string> = {
   code: "Code",
   multilingual: "Multilingual",
   vision: "Vision",
+  tools: "Tools",
   embedding: "Embedding",
   small: "Small (<2 GB)",
 };

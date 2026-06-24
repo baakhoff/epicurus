@@ -80,7 +80,11 @@ export const api = {
       body: JSON.stringify({ state }),
     }),
 
-  models: () => request(z.array(ModelInfo), "/platform/v1/llm/models"),
+  models: (withCapabilities = false) =>
+    request(
+      z.array(ModelInfo),
+      `/platform/v1/llm/models${withCapabilities ? "?capabilities=true" : ""}`,
+    ),
   // The browsable model catalog the core parses from upstream on a schedule (#269).
   catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>

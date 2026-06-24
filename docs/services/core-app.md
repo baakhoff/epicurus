@@ -48,6 +48,12 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 
+Tools are offered to the model **only when it can use them**: the loop checks the resolved
+model's capabilities (`gateway.supports_tools` → `/api/show`; hosted providers are assumed
+capable) and, for a tool-less local model, calls without tools so the turn falls back to a
+plain text answer instead of the runtime erroring. The web shell surfaces the same fact as a
+"can't use tools" hint in the composer.
+
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
 ### Built-in agent tools (ADR-0039)
@@ -85,8 +91,8 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/llm/models` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). |
-| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family}` (any field `null` when not reported). Backs the model-settings sheet's quantization display. `model` is a query param (names carry `:`/`/`). |
+| `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) from `/api/show` — opt-in (one call per model), so the Models page can badge them while the chat picker stays light. |
+| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported). Backs the model-settings sheet and the chat "can't use tools" hint. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |

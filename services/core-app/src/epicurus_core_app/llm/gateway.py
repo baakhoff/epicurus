@@ -14,6 +14,7 @@ content, no keys). Retries on 429/5xx use LiteLLM's exponential backoff.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
@@ -542,8 +543,16 @@ class LlmGateway:
             return False
         return True
 
-    async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
-        """List the local runtime's models, marking the ones loaded in memory or hidden."""
+    async def models(
+        self, tenant_id: str | None = None, *, with_capabilities: bool = False
+    ) -> list[ModelInfo]:
+        """List the local runtime's models, marking the ones loaded in memory or hidden.
+
+        ``with_capabilities`` additionally fills each model's ``capabilities`` (e.g. ``tools``,
+        ``vision``) by querying ``/api/show`` per model, concurrently. It costs one extra call
+        per model, so it is **opt-in** — the chat picker lists without it; the Models page asks
+        for it to badge what each model can do.
+        """
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
             response = await client.get("/api/tags")
             response.raise_for_status()
@@ -558,7 +567,7 @@ class LlmGateway:
         hidden: set[str] = set()
         if self._prefs is not None:
             hidden = set(await self._prefs.get_hidden(tenant_id or self._default_tenant))
-        return [
+        infos = [
             ModelInfo(
                 name=m["name"],
                 size=m.get("size"),
@@ -567,6 +576,31 @@ class LlmGateway:
             )
             for m in payload.get("models", [])
         ]
+        if with_capabilities and infos:
+            caps = await asyncio.gather(*(self._capabilities(info.name) for info in infos))
+            for info, info_caps in zip(infos, caps, strict=True):
+                info.capabilities = info_caps
+        return infos
+
+    async def _capabilities(self, model: str) -> list[str]:
+        """The model's reported capabilities (best-effort; empty when unknown/unreported)."""
+        return (await self.show(model)).capabilities
+
+    async def supports_tools(self, model: str | None = None, tenant_id: str | None = None) -> bool:
+        """Whether ``model`` can use tools — so the agent offers them only when they'll work.
+
+        Passing tools to a local model that doesn't support them makes the runtime error, so
+        the agent gates on this and falls back to a plain text answer. Hosted providers are
+        assumed tool-capable (we can't probe them, and the mainstream ones are). A local model
+        is judged by its ``/api/show`` capabilities; if the runtime reports none (older Ollama),
+        we don't restrict — only an explicit capability list *without* ``tools`` disables them.
+        """
+        resolved = model or await self.effective_default(tenant_id)
+        _, provider = registry.resolve(resolved)
+        if not provider.is_local:
+            return True
+        caps = await self._capabilities(resolved)
+        return "tools" in caps if caps else True
 
     async def show(self, model: str) -> ModelDetails:
         """Read-only facts about a local model from the runtime's ``/api/show``.
@@ -601,11 +635,16 @@ class LlmGateway:
                 None,
             )
         family = details.get("family")
+        raw_caps = payload.get("capabilities")
+        capabilities = (
+            [c for c in raw_caps if isinstance(c, str)] if isinstance(raw_caps, list) else []
+        )
         return ModelDetails(
             quantization=details.get("quantization_level") or None,
             parameter_size=details.get("parameter_size") or None,
             context_length=context_length,
             family=family if isinstance(family, str) else None,
+            capabilities=capabilities,
         )
 
     async def pull(self, model: str) -> None:

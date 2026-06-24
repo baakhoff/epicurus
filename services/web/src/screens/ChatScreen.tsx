@@ -16,6 +16,7 @@ import {
   Square,
   SendHorizonal,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -43,7 +44,7 @@ import {
 import { activityTimeline } from "@/lib/activity";
 import { api } from "@/lib/api";
 import type { Attachment, EntityRef, MessageRecord } from "@/lib/contracts";
-import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
+import { relativeTime, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
@@ -212,7 +213,7 @@ function ModelPicker() {
   const setModel = usePrefs((s) => s.setModel);
   const recents = usePrefs((s) => s.recentModels);
   const [custom, setCustom] = useState("");
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models, enabled: open });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
 
@@ -241,6 +242,7 @@ function ModelPicker() {
                   key={m.name}
                   label={m.name}
                   loaded={m.loaded}
+                  size={m.size}
                   active={model === m.name}
                   onPick={() => {
                     setModel(m.name);
@@ -316,11 +318,13 @@ function PickRow({
   label,
   active,
   loaded = false,
+  size = null,
   onPick,
 }: {
   label: string;
   active: boolean;
   loaded?: boolean;
+  size?: number | null;
   onPick: () => void;
 }) {
   return (
@@ -332,7 +336,8 @@ function PickRow({
       )}
     >
       <span className="truncate">{label}</span>
-      <span className="flex items-center gap-2">
+      <span className="flex shrink-0 items-center gap-2">
+        {size != null && <span className="text-xs text-ink-faint">{formatBytes(size)}</span>}
         {loaded && <Badge tone="ok">loaded</Badge>}
         {active && <Check size={14} />}
       </span>
@@ -416,8 +421,23 @@ export function ChatScreen() {
     queryKey: ["session", chat.sessionId],
     queryFn: () => api.sessionMessages(chat.sessionId),
   });
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+
+  // The model this chat will actually use (the per-chat choice, else the core default). If it's
+  // a local one, check whether it can call tools so we can warn that it's chat-only.
+  const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
+  const effectiveIsLocal = Boolean(effectiveModel) && !effectiveModel!.includes("/");
+  const modelDetails = useQuery({
+    queryKey: ["modelDetails", effectiveModel],
+    queryFn: () => api.modelDetails(effectiveModel!),
+    enabled: effectiveIsLocal,
+  });
+  const caps = modelDetails.data?.capabilities ?? [];
+  // Only warn when the runtime actually reported capabilities and tools isn't among them —
+  // an empty list means "unknown", not "no tools".
+  const toolless = effectiveIsLocal && caps.length > 0 && !caps.includes("tools");
 
   const hasAnyBrain =
     (models.data?.length ?? 0) > 0 ||
@@ -650,6 +670,15 @@ export function ChatScreen() {
 
       {/* composer */}
       <div className="border-t border-edge px-4 py-3 pb-safe">
+        {toolless && (
+          <div className="mx-auto mb-2 flex max-w-2xl items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
+            <Wrench size={12} className="shrink-0 text-ink-faint" />
+            <span>
+              <span className="font-medium text-ink">{effectiveModel}</span> can't use tools — it
+              can only chat (no calendar, files, or other actions).
+            </span>
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
             {attachments.map((a) => (

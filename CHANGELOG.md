@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Model capabilities are surfaced — tool support, vision, and more — and a tool-less model
+  just answers in text** — the runtime reports what each model can do (`/api/show`
+  `capabilities`), but nothing used it. Now: (1) the **agent offers tools only to a
+  tool-capable model** — passing tools to one that can't makes the runtime error, so a
+  tool-less local model falls back to a plain **text answer** and the chat composer shows a
+  **"can't use tools — chat only"** hint (driven by `GET /models/details`, which gains
+  `capabilities`); (2) the **Models page badges** each downloaded model with what it does
+  (tools / vision / …) — `GET /platform/v1/llm/models?capabilities=true` opt-in fills them
+  from `/api/show`; (3) the catalog browser gains **Tools** and surfaces **Vision** as search
+  filters (the upstream `tools` capability is now mapped into the tag vocabulary); (4) the
+  **chat model picker shows each model's size**. `ModelInfo`/`ModelDetails` gain `capabilities`
+  (`core-app` → 0.32.0, `web` → 0.42.0).
+
 - **Chat: the activity timeline persists and now shows the model's thinking** — the agent's
   process (its tool steps) used to disappear the instant a turn finished. Now the turn's
   **thinking + tool steps** are persisted with the message: the timeline **folds** to its

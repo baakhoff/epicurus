@@ -155,7 +155,7 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
     queryKey: ["module-models", name],
     queryFn: () => api.getModuleModels(name),
   });
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const save = useMutation({
     mutationFn: (next: Record<string, string>) => api.setModuleModels(name, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-models", name] }),

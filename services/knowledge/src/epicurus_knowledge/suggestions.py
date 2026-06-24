@@ -32,7 +32,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, String, Text, func, select
+from sqlalchemy import DateTime, String, Text, func, inspect, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -46,15 +47,35 @@ log = get_logger("knowledge.suggestions")
 # The review page id this module declares (see service.py manifest `pages`).
 REVIEW_PAGE_ID = "review"
 
-# The operations a suggestion may carry. ``create``/``update`` carry proposed content;
-# ``delete`` carries none (the row's proposed_content is empty).
-_OPERATIONS = frozenset({"create", "update", "delete"})
+# The operations a suggestion may carry (#KB-refactor — the agent's structural tools all
+# stage suggestions, never writing directly):
+#   create / update — carry proposed document content;
+#   delete          — removes a document (no content);
+#   move            — move/rename a file or folder (``path`` → ``to_path``);
+#   mkdir           — create a folder (at ``path``);
+#   mkproject       — create a knowledge base (``path`` is its name).
+_OPERATIONS = frozenset({"create", "update", "delete", "move", "mkdir", "mkproject"})
+# Operations whose review shows a content diff; the rest are simple confirmations.
+_DIFF_OPERATIONS = frozenset({"create", "update", "delete"})
+
+# Columns added to knowledge_suggestions after its first release; added in place at init
+# (the store uses ``create_all``, no migration tool) — mirrors storage_files' pattern.
+_ADDED_COLUMNS = ("to_path",)
 
 
 class Suggestion:
     """A single staged change — an immutable value object returned by the store."""
 
-    __slots__ = ("created_at", "note", "operation", "origin", "path", "proposed_content", "sid")
+    __slots__ = (
+        "created_at",
+        "note",
+        "operation",
+        "origin",
+        "path",
+        "proposed_content",
+        "sid",
+        "to_path",
+    )
 
     def __init__(
         self,
@@ -65,6 +86,7 @@ class Suggestion:
         origin: str,
         note: str,
         created_at: datetime,
+        to_path: str = "",
     ) -> None:
         self.sid = sid
         self.path = path
@@ -73,6 +95,8 @@ class Suggestion:
         self.origin = origin
         self.note = note
         self.created_at = created_at
+        # The destination for a ``move`` (empty for every other operation).
+        self.to_path = to_path
 
 
 # ── persistence ──────────────────────────────────────────────────────────────
@@ -95,6 +119,8 @@ class _StoredSuggestion(_SuggestionBase):
     proposed_content: Mapped[str] = mapped_column(Text, default="")
     origin: Mapped[str] = mapped_column(String(64), default="agent")
     note: Mapped[str] = mapped_column(Text, default="")
+    # Destination path for a ``move`` operation; empty for all others (#KB-refactor).
+    to_path: Mapped[str] = mapped_column(String(4096), server_default="", default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -106,9 +132,28 @@ class SuggestionStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Create the schema, then add any columns introduced after first release."""
         async with self._engine.begin() as conn:
             await conn.run_sync(_SuggestionBase.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
+
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Idempotently add post-#220 columns to an existing ``knowledge_suggestions`` table.
+
+        No migration framework (the store uses ``create_all``), so a deployment that predates
+        a column gets it added in place with its default. Portable across Postgres and SQLite.
+        """
+        inspector = inspect(sync_conn)
+        existing = {c["name"] for c in inspector.get_columns(_StoredSuggestion.__tablename__)}
+        for name in _ADDED_COLUMNS:
+            if name not in existing:
+                column = _StoredSuggestion.__table__.c[name]
+                type_sql = column.type.compile(dialect=sync_conn.dialect)
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {_StoredSuggestion.__tablename__} "
+                    f"ADD COLUMN {name} {type_sql} NOT NULL DEFAULT ''"
+                )
 
     async def add(
         self,
@@ -119,6 +164,7 @@ class SuggestionStore:
         proposed_content: str,
         origin: str,
         note: str,
+        to_path: str = "",
     ) -> Suggestion:
         """Stage a new suggestion and return it (with its freshly minted ``sid``)."""
         sid = uuid.uuid4().hex
@@ -131,6 +177,7 @@ class SuggestionStore:
                 proposed_content=proposed_content,
                 origin=origin,
                 note=note,
+                to_path=to_path,
             )
             session.add(row)
             await session.commit()
@@ -183,6 +230,7 @@ def _to_value(row: _StoredSuggestion) -> Suggestion:
         origin=row.origin,
         note=row.note,
         created_at=row.created_at,
+        to_path=row.to_path or "",
     )
 
 
@@ -195,11 +243,16 @@ class ReviewSuggestion(BaseModel):
     id: str
     title: str
     path: str
-    operation: str  # create | update | delete
+    operation: str  # create | update | delete | move | mkdir | mkproject
     origin: str
     note: str = ""
     created_at: str  # ISO-8601
-    diff: str  # unified diff (current vault content → proposed)
+    diff: str  # unified diff (current content → proposed); empty for non-content ops
+    to_path: str = ""  # destination for a ``move`` (empty otherwise)
+    # Full texts so the shell can render a per-hunk review (#KB-refactor): ``current`` is
+    # the live document (empty for a create), ``content`` is the proposal (empty for delete).
+    current: str = ""
+    content: str = ""
 
 
 class ReviewData(BaseModel):
@@ -217,6 +270,13 @@ class ApplyResult(BaseModel):
     path: str
     operation: str
     indexed: bool = False
+
+
+class ApproveBody(BaseModel):
+    """Optional approve payload: the operator's edited content for a partial (per-hunk)
+    approval of an ``update``/``create``. Absent ⇒ apply the agent's full proposal."""
+
+    content: str | None = None
 
 
 # ── review orchestration ──────────────────────────────────────────────────────
@@ -267,30 +327,64 @@ class SuggestionReview:
         return target.read_text(encoding="utf-8", errors="replace")
 
     async def list_review(self) -> ReviewData:
-        """The pending queue, each suggestion paired with a diff against the live vault."""
+        """The pending queue, each content change paired with a diff against the live vault.
+
+        Content operations (create/update/delete) carry a unified diff; structural ones
+        (move/mkdir/mkproject) carry an empty diff — the shell reviews them as a simple
+        confirmation from ``path`` / ``to_path`` (#KB-refactor).
+        """
         items: list[ReviewSuggestion] = []
         for s in await self._store.list(tenant=self._tenant):
-            before = self._current_content(s.path)
-            after = "" if s.operation == "delete" else s.proposed_content
+            diff = ""
+            current = ""
+            content = ""
+            if s.operation in _DIFF_OPERATIONS:
+                current = self._current_content(s.path)
+                content = "" if s.operation == "delete" else s.proposed_content
+                diff = _unified_diff(s.path, current, content)
             items.append(
                 ReviewSuggestion(
                     id=s.sid,
-                    title=doc_title(s.path),
+                    title=doc_title(s.to_path or s.path),
                     path=s.path,
                     operation=s.operation,
                     origin=s.origin,
                     note=s.note,
                     created_at=s.created_at.isoformat(),
-                    diff=_unified_diff(s.path, before, after),
+                    diff=diff,
+                    to_path=s.to_path,
+                    current=current,
+                    content=content,
                 )
             )
         return ReviewData(suggestions=items)
 
-    async def approve(self, sid: str) -> ApplyResult:
+    async def _reindex_move(self, from_rel: str, to_rel: str) -> bool:
+        """Re-index after a move: a single file swaps its vectors; a folder reconciles fully."""
+        if from_rel.endswith(".md"):
+            await self._indexer.remove_path(from_rel)
+            try:
+                await self._indexer.index_path(to_rel)
+                return True
+            except Exception as exc:
+                log.warning("move applied but re-index failed", path=to_rel, error=str(exc))
+                return False
+        # A folder move renames many note paths — let the incremental indexer reconcile.
+        try:
+            await self._indexer.run()
+            return True
+        except Exception as exc:
+            log.warning("folder move applied but re-index failed", path=to_rel, error=str(exc))
+            return False
+
+    async def approve(self, sid: str, content: str | None = None) -> ApplyResult:
         """Apply a suggestion to the vault (and index it), then drop it from the queue.
 
-        404 if the suggestion is unknown. ``create``/``update`` write the proposed
-        content and re-index just that file; ``delete`` removes the file and its vectors.
+        404 if the suggestion is unknown. ``create``/``update`` write the proposed content
+        — or *content*, when the operator approved only part of an edit (per-hunk review,
+        #KB-refactor) — and re-index the file; ``delete`` removes the file and its vectors;
+        ``move`` relocates a file/folder and re-indexes; ``mkdir`` / ``mkproject`` create a
+        folder / knowledge base.
 
         409 when the vault is externally owned (watch mode, #232): applying would write a
         vault Obsidian owns, so the apply is refused. Reject still works to clear the queue.
@@ -308,19 +402,31 @@ class SuggestionReview:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
         indexed = False
         if s.operation in ("create", "update"):
-            result = await self._pages.write_doc(s.path, s.proposed_content)
+            body = s.proposed_content if content is None else content
+            result = await self._pages.write_doc(s.path, body)
             indexed = result.indexed
         elif s.operation == "delete":
             target = safe_relative(self._vault, s.path)
             if target.is_file():
                 target.unlink()
             await self._indexer.remove_path(s.path)
+        elif s.operation == "move":
+            self._pages.move_item(s.path, s.to_path)
+            indexed = await self._reindex_move(s.path, s.to_path)
+        elif s.operation == "mkdir":
+            self._pages.create_folder(s.path)
+        elif s.operation == "mkproject":
+            self._pages.create_project(s.path)
         else:  # defensive — propose validates, but never trust stored data blindly
             raise HTTPException(status_code=400, detail=f"unknown operation: {s.operation}")
         await self._store.delete(tenant=self._tenant, sid=sid)
         log.info("suggestion approved", sid=sid, operation=s.operation, path=s.path)
         return ApplyResult(
-            id=sid, status="approved", path=s.path, operation=s.operation, indexed=indexed
+            id=sid,
+            status="approved",
+            path=s.to_path or s.path,
+            operation=s.operation,
+            indexed=indexed,
         )
 
     async def reject(self, sid: str) -> ApplyResult:
@@ -354,8 +460,10 @@ def create_review_router(review: SuggestionReview) -> APIRouter:
         return await review.list_review()
 
     @router.post("/pages/review/suggestions/{suggestion_id}/approve", response_model=ApplyResult)
-    async def approve(suggestion_id: str) -> ApplyResult:
-        return await review.approve(suggestion_id)
+    async def approve(suggestion_id: str, body: ApproveBody | None = None) -> ApplyResult:
+        # ``body.content`` lets the operator approve only part of an edit (per-hunk review,
+        # #KB-refactor); absent ⇒ apply the agent's full proposal.
+        return await review.approve(suggestion_id, body.content if body else None)
 
     @router.post("/pages/review/suggestions/{suggestion_id}/reject", response_model=ApplyResult)
     async def reject(suggestion_id: str) -> ApplyResult:
@@ -367,6 +475,7 @@ def create_review_router(review: SuggestionReview) -> APIRouter:
 __all__ = [
     "REVIEW_PAGE_ID",
     "ApplyResult",
+    "ApproveBody",
     "ReviewData",
     "ReviewSuggestion",
     "Suggestion",

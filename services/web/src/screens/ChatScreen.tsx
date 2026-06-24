@@ -10,10 +10,14 @@ import {
   ChevronDown,
   CloudMoon,
   History,
+  Pencil,
+  RefreshCw,
+  Sparkles,
   SquarePen,
   Square,
   SendHorizonal,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -26,6 +30,7 @@ import {
   refsById,
 } from "@/components/EntityRef";
 import { Markdown } from "@/components/Markdown";
+import { SuggestionReviewModal } from "@/components/SuggestionReviewModal";
 import { ProcessTimeline, ReadinessBar, ThinkingIndicator } from "@/components/TurnActivity";
 import {
   Badge,
@@ -38,10 +43,11 @@ import {
   TextArea,
   cn,
 } from "@/components/ui";
-import { api } from "@/lib/api";
-import type { Attachment, EntityRef } from "@/lib/contracts";
-import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
-import { useChat, type ChatSegment } from "@/stores/chat";
+import { activityTimeline } from "@/lib/activity";
+import { ApiError, api } from "@/lib/api";
+import type { Attachment, EntityRef, MessageRecord, PendingSuggestion } from "@/lib/contracts";
+import { relativeTime, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
+import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 
@@ -59,25 +65,25 @@ function AssistantRow({ children }: { children: ReactNode }) {
   );
 }
 
-/** A finished or streaming assistant message: a process timeline (#121) over the prose. */
+/**
+ * A finished or streaming assistant message: the activity timeline (#121, ADR-0041) over the
+ * prose. `runs`/`thinking` are the turn's *process* — fed live from the stream, or from the
+ * message's persisted activity when a past conversation is reopened — so the timeline folds
+ * to its summary header (rather than vanishing) once the answer is in.
+ */
 function AssistantBlock({
-  segments,
+  text,
+  timeline = [],
   streaming,
   entityRefs = [],
 }: {
-  segments: ChatSegment[];
+  text: string;
+  /** The turn's process (thinking + tool steps) in chronological order (#300). */
+  timeline?: ActivityItem[];
   streaming: boolean;
   entityRefs?: EntityRef[];
 }) {
   const refsMap = useMemo(() => refsById(entityRefs), [entityRefs]);
-  const toolRuns = useMemo(
-    () => segments.flatMap((s) => (s.kind === "tool" ? [s.run] : [])),
-    [segments],
-  );
-  const text = useMemo(
-    () => segments.map((s) => (s.kind === "text" ? s.text : "")).join("\n"),
-    [segments],
-  );
   // Refs not already linked inline get a chip row beneath the message, so every
   // referenced entity surfaces exactly once (ADR-0019).
   const rowRefs = useMemo(() => {
@@ -88,7 +94,7 @@ function AssistantBlock({
   return (
     <AssistantRow>
       {/* The activity timeline folds to its summary header once the answer starts. */}
-      {toolRuns.length > 0 && <ProcessTimeline runs={toolRuns} collapsed={text.length > 0} />}
+      {timeline.length > 0 && <ProcessTimeline items={timeline} collapsed={text.length > 0} />}
       <EntityRefsContext.Provider value={refsMap}>
         {text && <Markdown>{text}</Markdown>}
       </EntityRefsContext.Provider>
@@ -114,7 +120,7 @@ function LiveTurn() {
   const readiness = useChat((s) => s.readiness);
   if (segments.length === 0 && !streaming) return null;
 
-  // Before the first token or tool: warming progress (#122), then a thinking cue (#121).
+  // Before any thinking, token, or tool: warming progress (#122), then a thinking cue (#121).
   if (streaming && segments.length === 0) {
     return (
       <div className="ep-settle">
@@ -129,9 +135,19 @@ function LiveTurn() {
     );
   }
 
+  const text = segments.flatMap((s) => (s.kind === "text" ? [s.text] : [])).join("\n");
+  // The process timeline = the thinking + tool segments, in the order they streamed (#300);
+  // the text segments are the answer, rendered below by AssistantBlock.
+  const timeline: ActivityItem[] = segments.flatMap((s): ActivityItem[] =>
+    s.kind === "thinking"
+      ? [{ kind: "thinking", text: s.text }]
+      : s.kind === "tool"
+        ? [{ kind: "tool", run: s.run }]
+        : [],
+  );
   return (
     <div className="ep-settle">
-      <AssistantBlock segments={segments} streaming={streaming} />
+      <AssistantBlock text={text} timeline={timeline} streaming={streaming} />
     </div>
   );
 }
@@ -199,7 +215,7 @@ function ModelPicker() {
   const setModel = usePrefs((s) => s.setModel);
   const recents = usePrefs((s) => s.recentModels);
   const [custom, setCustom] = useState("");
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models, enabled: open });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
 
@@ -228,6 +244,7 @@ function ModelPicker() {
                   key={m.name}
                   label={m.name}
                   loaded={m.loaded}
+                  size={m.size}
                   active={model === m.name}
                   onPick={() => {
                     setModel(m.name);
@@ -303,11 +320,13 @@ function PickRow({
   label,
   active,
   loaded = false,
+  size = null,
   onPick,
 }: {
   label: string;
   active: boolean;
   loaded?: boolean;
+  size?: number | null;
   onPick: () => void;
 }) {
   return (
@@ -319,7 +338,8 @@ function PickRow({
       )}
     >
       <span className="truncate">{label}</span>
-      <span className="flex items-center gap-2">
+      <span className="flex shrink-0 items-center gap-2">
+        {size != null && <span className="text-xs text-ink-faint">{formatBytes(size)}</span>}
         {loaded && <Badge tone="ok">loaded</Badge>}
         {active && <Check size={14} />}
       </span>
@@ -373,24 +393,146 @@ function Welcome() {
   );
 }
 
+/* ── suggestion bubble (#KB-refactor) ───────────────────────────────────────── */
+
+const SUGGESTION_VERB: Record<PendingSuggestion["operation"], string> = {
+  create: "add",
+  update: "edit",
+  append: "append to",
+  delete: "delete",
+  move: "move",
+  mkdir: "add a folder",
+  mkproject: "add a knowledge base",
+};
+
+/**
+ * A bubble above the composer when the assistant has filed suggestions (ADR-0033). A
+ * one-tap structural op (move / new folder / new knowledge base) can be approved inline;
+ * a richer change opens the review overlay. Ignore leaves it on the Suggestions page.
+ */
+function SuggestionBubble() {
+  const qc = useQueryClient();
+  const pending = useQuery({
+    queryKey: ["suggestions"],
+    queryFn: api.suggestions,
+    staleTime: 30_000,
+  });
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [reviewing, setReviewing] = useState<PendingSuggestion | null>(null);
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["suggestions"] });
+
+  const approveSimple = useMutation({
+    mutationFn: (s: PendingSuggestion) => api.approveSuggestion(s.module, s.page_id, s.id),
+    onSuccess: invalidate,
+    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not approve."),
+  });
+
+  const active = (pending.data ?? []).filter((s) => !dismissed.has(s.id));
+  const latest = active.at(-1);
+  if (!latest) return null;
+
+  const simple =
+    latest.operation === "move" ||
+    latest.operation === "mkdir" ||
+    latest.operation === "mkproject";
+  const target = latest.operation === "move" ? `${latest.path} → ${latest.to_path}` : latest.path;
+
+  return (
+    <>
+      <div className="mx-auto mb-2 flex max-w-2xl items-center gap-2 rounded-(--radius-card) border border-accent/40 bg-accent-dim px-3 py-2 text-sm">
+        <Sparkles size={15} className="shrink-0 text-accent" />
+        <span className="min-w-0 flex-1 truncate text-ink">
+          {active.length > 1 && (
+            <span className="text-ink-faint">{active.length} suggestions · </span>
+          )}
+          The assistant wants to {SUGGESTION_VERB[latest.operation]}{" "}
+          <span className="font-mono text-xs">{target}</span>
+        </span>
+        {simple ? (
+          <Button
+            variant="primary"
+            className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            busy={approveSimple.isPending}
+            onClick={() => approveSimple.mutate(latest)}
+          >
+            Approve
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            onClick={() => setReviewing(latest)}
+          >
+            Open
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          className="h-7 shrink-0 px-2.5 py-0 text-xs"
+          onClick={() => setDismissed((p) => new Set(p).add(latest.id))}
+        >
+          Ignore
+        </Button>
+      </div>
+      {reviewing && (
+        <SuggestionReviewModal
+          key={reviewing.id}
+          suggestion={reviewing}
+          onClose={() => setReviewing(null)}
+          onResolved={invalidate}
+        />
+      )}
+    </>
+  );
+}
+
 /* ── the screen ─────────────────────────────────────────────────────────── */
 
 export function ChatScreen() {
   const queryClient = useQueryClient();
   const chat = useChat();
   const model = usePrefs((s) => s.model);
-  const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  // Inline edit of the last user message (#302): the index being edited + its draft text.
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editText, setEditText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
+
+  // The composer text lives in the chat store so it survives leaving and returning
+  // to the page. The textarea's auto-grown height is set imperatively on keystroke,
+  // so restore it on mount when we come back to a saved (possibly multi-line) draft.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (el) {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
+    }
+  }, []);
 
   const history = useQuery({
     queryKey: ["session", chat.sessionId],
     queryFn: () => api.sessionMessages(chat.sessionId),
   });
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+
+  // The model this chat will actually use (the per-chat choice, else the core default). If it's
+  // a local one, check whether it can call tools so we can warn that it's chat-only.
+  const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
+  const effectiveIsLocal = Boolean(effectiveModel) && !effectiveModel!.includes("/");
+  const modelDetails = useQuery({
+    queryKey: ["modelDetails", effectiveModel],
+    queryFn: () => api.modelDetails(effectiveModel!),
+    enabled: effectiveIsLocal,
+  });
+  const caps = modelDetails.data?.capabilities ?? [];
+  // Only warn when the runtime actually reported capabilities and tools isn't among them —
+  // an empty list means "unknown", not "no tools".
+  const toolless = effectiveIsLocal && caps.length > 0 && !caps.includes("tools");
 
   const hasAnyBrain =
     (models.data?.length ?? 0) > 0 ||
@@ -415,18 +557,24 @@ export function ChatScreen() {
   }, [chat.segments, chat.pendingUser, history.data]);
 
   const send = () => {
-    const text = draft.trim();
+    const text = chat.draft.trim();
     if (!text || chat.streaming) return;
     const sent = attachments;
-    setDraft("");
-    setAttachments([]);
+    setAttachments([]); // chat.send clears the draft itself
     pinnedRef.current = true;
+    // chat.send clears the draft, but the textarea's height was grown imperatively on
+    // each keystroke — clear the inline height so an emptied composer snaps back to one
+    // line (min-h-[42px]) instead of keeping its multi-line height. Same on mobile + desktop.
+    const composer = composerRef.current;
+    if (composer) composer.style.height = "";
     void chat.send(
       text,
       model,
       async () => {
         await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        // A turn may have filed knowledge-base suggestions — refresh the composer bubble.
+        void queryClient.invalidateQueries({ queryKey: ["suggestions"] });
       },
       sent,
     );
@@ -438,6 +586,48 @@ export function ChatScreen() {
   const showPending =
     chat.pendingUser !== null &&
     (chat.streaming || messages[messages.length - 1]?.content !== chat.pendingUser);
+
+  // Regenerate attaches to the last assistant message; Edit to the last user message.
+  const lastAssistantIdx = messages.reduce((a, m, i) => (m.role === "assistant" ? i : a), -1);
+  const lastUserIdx = messages.reduce((a, m, i) => (m.role === "user" ? i : a), -1);
+  const turnControlsVisible = !chat.streaming && !showPending && editingIdx === null;
+
+  const onTurnDone = async () => {
+    await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
+    void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  };
+
+  // Regenerate: optimistically drop the stale answer (everything after the last user turn),
+  // then stream a fresh one. The server truncates the same tail before re-answering (#302).
+  const regenerate = () => {
+    if (chat.streaming || lastUserIdx < 0) return;
+    queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) =>
+      (old ?? []).slice(0, lastUserIdx + 1),
+    );
+    pinnedRef.current = true;
+    void chat.regenerate(model, onTurnDone);
+  };
+
+  const cancelEdit = () => {
+    setEditingIdx(null);
+    setEditText("");
+  };
+
+  // Save an edited last user message: optimistically show the corrected text (and drop the
+  // old answer), then stream the new answer. The server edits + truncates server-side.
+  const saveEdit = () => {
+    const content = editText.trim();
+    if (!content || chat.streaming || lastUserIdx < 0) return;
+    setEditingIdx(null);
+    queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) => {
+      const trimmed = (old ?? []).slice(0, lastUserIdx + 1);
+      const last = trimmed[trimmed.length - 1];
+      if (last) trimmed[trimmed.length - 1] = { ...last, content };
+      return trimmed;
+    });
+    pinnedRef.current = true;
+    void chat.editAndRerun(content, model, onTurnDone);
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -473,32 +663,90 @@ export function ChatScreen() {
           )}
           {messages.map((message, i) =>
             message.role === "user" ? (
-              <div key={i} className="flex flex-col items-end gap-1">
-                <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
-                  {message.content}
-                </div>
-                {message.attachments.length > 0 && (
-                  <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
-                    {message.attachments.map((a) => (
-                      <AttachmentPill key={a.att_id} attachment={a} />
-                    ))}
+              editingIdx === i ? (
+                <div key={i} className="flex w-full flex-col items-end gap-2">
+                  <TextArea
+                    value={editText}
+                    autoFocus
+                    aria-label="Edit message"
+                    className="w-full max-w-[85%] min-h-[60px] text-[15px]"
+                    onChange={(e) => setEditText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        saveEdit();
+                      } else if (e.key === "Escape") {
+                        cancelEdit();
+                      }
+                    }}
+                  />
+                  <div className="flex gap-2">
+                    <Button variant="ghost" onClick={cancelEdit}>
+                      Cancel
+                    </Button>
+                    <Button variant="primary" onClick={saveEdit} disabled={!editText.trim()}>
+                      Resend
+                    </Button>
                   </div>
+                </div>
+              ) : (
+                <div key={i} className="flex flex-col items-end gap-1">
+                  <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
+                    {message.content}
+                  </div>
+                  {message.attachments.length > 0 && (
+                    <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+                      {message.attachments.map((a) => (
+                        <AttachmentPill key={a.att_id} attachment={a} />
+                      ))}
+                    </div>
+                  )}
+                  {i === lastUserIdx && turnControlsVisible && (
+                    <button
+                      aria-label="Edit message"
+                      onClick={() => {
+                        setEditingIdx(i);
+                        setEditText(message.content);
+                      }}
+                      className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                    >
+                      <Pencil size={12} /> Edit
+                    </button>
+                  )}
+                </div>
+              )
+            ) : (
+              <div key={i}>
+                <AssistantBlock
+                  text={message.content}
+                  timeline={activityTimeline(message.activity)}
+                  streaming={false}
+                  entityRefs={message.entity_refs}
+                />
+                {i === lastAssistantIdx && turnControlsVisible && (
+                  <button
+                    aria-label="Regenerate response"
+                    onClick={regenerate}
+                    className="mt-1 ml-7 flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                  >
+                    <RefreshCw size={12} /> Regenerate
+                  </button>
                 )}
               </div>
-            ) : (
-              <AssistantBlock
-                key={i}
-                segments={[{ kind: "text", text: message.content }]}
-                streaming={false}
-                entityRefs={message.entity_refs}
-              />
             ),
           )}
           {showPending && (
-            <div className="flex justify-end">
+            <div className="flex flex-col items-end gap-1">
               <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
                 {chat.pendingUser}
               </div>
+              {chat.pendingAttachments.length > 0 && (
+                <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+                  {chat.pendingAttachments.map((a) => (
+                    <AttachmentPill key={a.att_id} attachment={a} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
           <LiveTurn />
@@ -526,6 +774,16 @@ export function ChatScreen() {
 
       {/* composer */}
       <div className="border-t border-edge px-4 py-3 pb-safe">
+        {toolless && (
+          <div className="mx-auto mb-2 flex max-w-2xl items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
+            <Wrench size={12} className="shrink-0 text-ink-faint" />
+            <span>
+              <span className="font-medium text-ink">{effectiveModel}</span> can't use tools — it
+              can only chat (no calendar, files, or other actions).
+            </span>
+          </div>
+        )}
+        <SuggestionBubble />
         {attachments.length > 0 && (
           <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
             {attachments.map((a) => (
@@ -542,10 +800,11 @@ export function ChatScreen() {
         <div className="mx-auto flex max-w-2xl items-end gap-2">
           <AttachButton onAttach={(a) => setAttachments((prev) => [...prev, a])} />
           <TextArea
+            ref={composerRef}
             rows={1}
-            value={draft}
+            value={chat.draft}
             onChange={(e) => {
-              setDraft(e.target.value);
+              chat.setDraft(e.target.value);
               e.target.style.height = "auto";
               e.target.style.height = `${Math.min(e.target.scrollHeight, 144)}px`;
             }}
@@ -568,7 +827,7 @@ export function ChatScreen() {
               variant="primary"
               aria-label="Send"
               onClick={send}
-              disabled={!draft.trim()}
+              disabled={!chat.draft.trim()}
               className="h-[42px]"
             >
               <SendHorizonal size={16} />

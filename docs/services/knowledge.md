@@ -1,36 +1,69 @@
-# knowledge — Obsidian-vault RAG + platform self-documentation
+# knowledge — multi-project knowledge bases + platform self-documentation
 
 **`epicurus-knowledge`** is a sidecar module that indexes three markdown sources
 for retrieval-augmented generation, fully incrementally:
 
-1. **Operator vault** — an Obsidian markdown vault the operator mounts at `/vault`.
+1. **Operator knowledge bases** — markdown notes the operator keeps under the shared
+   file space at `/data/<tenant>/knowledge` (tenant-scoped, constraint #1). Each top-level
+   folder there is a **project** ("knowledge base"); documents are addressed
+   `<project>/<path>.md` (#KB-refactor).
 2. **Platform docs** (self-documentation) — the `docs/` tree bundled into the image
-   at `/docs`; available with **no operator setup** in any deploy.
+   at `/docs`; available with **no operator setup** in any deploy. Also surfaced
+   read-only inside the editor under a reserved `__docs__` scope so a service's
+   documentation is browsable in the knowledge base (#KB-refactor).
 3. **Module docs** — usage documentation contributed by each enabled module via a
    `docs_url` endpoint, auto-indexed on startup; disabled modules have their docs
    purged automatically (#215).
 
 Chunks are embedded **through the core** (no model key lives here) and stored in
-tenant-scoped Qdrant collections. Host port **8085**.
+tenant-scoped Qdrant collections. Knowledge documents live under `/data/<tenant>/knowledge`
+in the **shared file space** (tenant-scoped, constraint #1) — the same tree the storage
+module indexes read-only — so they also appear in the unified Files view (#KB-refactor). Host
+port **8085**.
 
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
 
+The agent **navigates** the knowledge base read-only and **proposes** every change — there
+is no direct agent write path. The knowledge base is organised into **projects**
+(top-level folders, each a "knowledge base"); documents are addressed `<project>/<path>.md`.
+
+**Read-only navigation** (so the agent learns where things live):
+
 | Tool | Inputs | Returns |
 | --- | --- | --- |
 | `knowledge_search(query, k=5)` | `query`: search phrase; `k`: max results | A `ToolEnvelope`: the top-`k` matching chunks as readable text **plus** one entity-reference chip per cited document (ADR-0019). |
-| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over all three sources (vault + platform docs + module docs). |
-| `knowledge_propose_edit(path, content="", operation="update", note="")` | `path`: vault-relative `.md` path; `content`: proposed full content; `operation`: `create`/`update`/`delete`; `note`: optional rationale | A confirmation that the change was **staged for operator review** (ADR-0033, #220). Never writes the vault directly — the operator approves or rejects it in the Suggestions page. This is the agent's only write path. |
+| `knowledge_list_projects()` | — | The knowledge bases (projects) — their names, one per line (#KB-refactor). |
+| `knowledge_tree(project="")` | `project`: optional knowledge-base name (omit for all) | An indented folder/document tree ("schema") of one or all knowledge bases. Paths are `<project>/<folder>/<doc>.md`. |
+| `knowledge_read_document(path)` | `path`: `<project>/<folder>/<doc>.md` | One document's full content, or an error if the path is invalid or missing. |
 
-`knowledge_search` merges results from the vault (`<tenant>__knowledge`) and the
-platform-docs (`<tenant>__docs`) collections, re-ranked by cosine similarity score, so the
-agent sees the most relevant content regardless of source. It returns a **`ToolEnvelope`**
+**Reindex:**
+
+| Tool | Inputs | Returns |
+| --- | --- | --- |
+| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over all three sources (knowledge bases + platform docs + module docs). |
+
+**Proposals** — every structural or content change is **staged for operator review**
+(ADR-0033, #220), never applied directly; the operator approves or rejects it in the
+Suggestions page:
+
+| Tool | Inputs | Returns |
+| --- | --- | --- |
+| `knowledge_propose_edit(path, content="", operation="update", note="")` | `path`: knowledge-base-relative `.md` path; `content`: proposed full content; `operation`: `create`/`update`/`delete` (default `update`); `note`: optional rationale | A confirmation that the change was staged. Restricted to create/update/delete only — structural changes use the tools below (#KB-refactor). |
+| `knowledge_propose_move(from_path, to_path, note="")` | the current and destination paths (file or folder); optional `note` | A confirmation that a move/rename was staged. |
+| `knowledge_propose_rename(path, new_name, note="")` | `path`: the item's current `<project>/<…>/<name>`; `new_name`: the new **bare** leaf name (no `/`; the `.md` suffix is kept for documents); optional `note` | A confirmation that a rename-in-place was staged. A convenience over `knowledge_propose_move` — keeps the same folder. Staged as a `move` suggestion (#KB-refactor). |
+| `knowledge_propose_folder(path, note="")` | `path`: `<project>/<folder>`; optional `note` | A confirmation that a folder create was staged. |
+| `knowledge_propose_project(name, note="")` | `name`: a single folder name (no slashes); optional `note` | A confirmation that a new knowledge base create was staged. |
+
+`knowledge_search` merges results from the operator's knowledge bases (`<tenant>__knowledge`)
+and the platform-docs (`<tenant>__docs`) collections, re-ranked by cosine similarity score, so
+the agent sees the most relevant content regardless of source. It returns a **`ToolEnvelope`**
 (ADR-0019): the chunk text (so the agent can quote and reason over it) plus one
 **entity-reference chip per distinct cited document** — hovering a chip shows a hover-card
-and clicking a vault note opens it in the Knowledge page (see *Hover-cards* below).
+and clicking a knowledge-base note opens it in the Knowledge page (see *Hover-cards* below).
 Platform-docs citations are shown with a `docs/` path prefix so the agent can tell them
-apart from vault notes.
+apart from knowledge-base notes.
 
 ### Events (NATS)
 
@@ -41,36 +74,62 @@ Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
 | Panel | What it shows / does |
 | --- | --- |
 | **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at` · `index_phase` / `index_attempts` (background-index progress, #230). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
-| **Settings** | Vault path (`VAULT_PATH`) — editable in the shell. |
-| **Actions** | **Re-index** — triggers `knowledge_reindex` (both sources) through the core. |
+| **Settings** | Vault path (`VAULT_PATH`, default `/data/knowledge`; the on-disk tree is tenant-scoped to `/data/<tenant>/knowledge`) — editable in the shell. |
+| **Actions** | **Re-index** — triggers `knowledge_reindex` (all sources) through the core. |
 
 No module code runs in the shell; all data flows through the core.
 
 ### Knowledge page (`editor` archetype, ADR-0018)
 
 The module contributes a **Knowledge** left-nav page — an Obsidian-style browse-and-edit
-view over the vault with nested folder management, declared as a `pages` entry
+view with nested folder management, declared as a `pages` entry
 `{id: "vault", archetype: "editor"}`. The **core renders** the editor from its bounded
-vocabulary (a document/folder tree, a markdown source/preview editor, a save button,
-CRUD controls); the module ships **no markup** and only supplies data over the endpoints
-the core proxies.
+vocabulary (a knowledge-base switcher, a document/folder tree, a markdown editor that
+**opens rendered** and **saves on leave / idle / explicit Save** — not per keystroke, since
+each save re-embeds (ADR-0042) — a save button, CRUD controls); the module ships **no
+markup** and only supplies data over the endpoints the core proxies.
 
-Saving a document writes it back to the vault and **re-indexes just that file** into
+**Projects / scopes (#KB-refactor).** The page is scoped to one **knowledge base** (project)
+at a time. `EditorData` carries the list of selectable scopes and which is active:
+
+- `scopes` — each `{id, title, kind}` where `kind` is `project` (a writable knowledge base)
+  or `reference` (the read-only platform docs).
+- `scope` — the active scope id; defaults to the first project.
+- `scope_noun` — `"knowledge base"` (the noun the shell shows on the switcher and its
+  "New …" control). An empty `scope_noun` means *no switcher* — Notes leaves it empty,
+  keeping the shared archetype generic.
+- `can_create_scope` — whether the operator may create another knowledge base.
+
+The switcher lets the operator move between knowledge bases, **New knowledge base** creates a
+top-level folder (`POST /pages/{page_id}/project?name=`), and the shell offers a **New
+document** control (a root-level create — previously a document could only be added inside an
+existing folder). Tree `docs` paths are **scope-relative** — the shell prepends the active
+`scope` when it reads, saves, or manages files — so a project's contents show without the
+project folder itself appearing as a node.
+
+**Platform docs in the switcher (`__docs__` scope, #KB-refactor).** A reserved, read-only
+scope surfaces the bundled platform docs inside the knowledge base, so a service's
+documentation is browsable alongside the operator's notes. It is listed in `scopes` with
+`kind: "reference"`, returns `read_only: true` / `can_manage_files: false`, and every write
+that targets it is refused (**409**). The `__docs__` id is `_`-prefixed, which a real
+project name can never be (`safe_project`), so the path scheme stays unambiguous.
+
+Saving a document — on leaving the page, after it idles, or on an explicit Save (ADR-0042) —
+writes it back to the knowledge base and **re-indexes just that file** into
 `<tenant>__knowledge`, so an edit made in the shell is immediately retrievable by the
-agent (the vault is agent-retrievable by default — contrast the Notes module). The
-editor component is **core-owned and shared**; Notes reuses it. The bundled platform docs
-are *not* exposed as an editor page (they are read-only, image-bundled self-documentation).
+agent (knowledge is agent-retrievable by default — contrast the Notes module). The
+editor component is **core-owned and shared**; Notes reuses it.
 
-The vault must be mounted **read-write** for saving and folder management to work (see
-Configuration); the default empty named volume is writable, and an operator binding their
-Obsidian vault should mount it writable by the container user (uid 10001).
+The shared file space must be mounted **read-write** for saving and folder management to work
+(see Configuration); the default empty named volume is writable, and an operator binding their
+own Obsidian vault should mount it writable by the container user (uid 10001).
 
 **Read-only when the vault is externally owned (#232, ADR-0035).** With a watched external
 vault (`VAULT_WATCH=true`, see *Live vault sync* below) the page returns `read_only: true`
-and `can_manage_files: false`: the shell hides Save and the file-tree controls and shows a
-read-only banner, and every write endpoint (save, folder create, doc/folder delete, move)
-returns **409**. Obsidian is the sole author; edits made there sync to disk and re-index
-automatically.
+and `can_manage_files: false`: the shell hides Save and the file-tree controls, **never
+auto-saves**, and shows a read-only banner, and every write endpoint (save, folder create,
+doc/folder delete, move, new knowledge base) returns **409**. Obsidian is the sole author;
+edits made there sync to disk and re-index automatically.
 
 **File-tree management (#216).** The Knowledge page sets `can_manage_files: true` in its
 `EditorData` response; the shell then shows CRUD controls over the tree — creating nested
@@ -79,18 +138,50 @@ renaming documents. Operations are gated by path-safety validation in `refs.py` 
 `..`-traversal and symlink-escape checks as the document editor). Notes sets this flag
 `false` — it uses the separate `can_create` authoring flow instead.
 
+**Version history (#ADR-0046).** The Knowledge page is `versioned: true` in its `EditorData`
+response: **every editor save snapshots the document's content** into the
+`knowledge_versions` table (see *Data model*), so the shell can browse and **restore** a
+prior revision. Restore is **client-side** — the shell fetches a past version's content via
+the version endpoint and re-saves it through the normal `PUT .../doc` path (which snapshots
+again); the module exposes **no** restore endpoint. Consecutive byte-identical saves are
+**deduplicated** (an idle/blur auto-save that changed nothing adds no row), and the newest
+**50** versions per `(tenant, path)` are retained — older snapshots are pruned. Recording a
+snapshot is best-effort and never fails a save: the file write is the source of truth, so a
+version is recorded even if the re-index failed. Viewing history (`GET .../doc/versions`,
+`GET .../doc/version`) is allowed even on a **read-only (watched) vault** — but because every
+write 409s there (#232), **external/watched-vault edits are not versioned in v1**: only
+in-app editor saves accrue history. Browse the list newest-first; each entry carries an
+opaque `version_id`, the snapshot `title`, its `created_at`, and its `size`.
+
 ### Suggestions page (`review` archetype, ADR-0033, #220)
 
-Agent-initiated vault changes are **staged for review, never applied directly**. The agent's
-only write path is the `knowledge_propose_edit` tool, which stages a suggestion; the module
-contributes a second left-nav page — **Suggestions** — declared as
-`{id: "review", archetype: "review"}`, where the operator reviews a diff and approves or
-rejects each pending change. Only an approved change is written to the vault and indexed.
+Agent-initiated knowledge-base changes are **staged for review, never applied directly**.
+Every agent write — content (`knowledge_propose_edit`) *and* structural
+(`knowledge_propose_move` / `knowledge_propose_folder` / `knowledge_propose_project`) —
+stages a suggestion; the module contributes a second left-nav page — **Suggestions** —
+declared as `{id: "review", archetype: "review"}`, where the operator reviews and approves
+or rejects each pending change. Only an approved change is written and indexed.
+
+A suggestion carries one of six **operations**: `create` / `update` / `delete` (content
+ops, with a server-computed unified diff) and `move` / `mkdir` / `mkproject` (structural
+ops, reviewed as a simple confirmation from `path` / `to_path`). The review payload includes
+the full `current` (live document, empty for a create) and `content` (the proposal, empty for
+a delete) so the shell can render a **per-hunk** review of an edit (#KB-refactor).
 
 The **trust boundary is the author**: agent edits route through review; direct *operator*
 edits (the editor save, the file-tree CRUD) stay immediate, since the operator is already the
 approver. Approve/reject are operator-only endpoints the core proxies — deliberately **not**
 MCP tools, so the agent cannot approve its own proposals.
+
+**Review on/off toggle (#KB-refactor).** The Suggestions page header carries a per-module
+switch — *Review agent changes before applying* — backed by the core's
+`GET/PUT /platform/v1/modules/knowledge/suggestions-enabled` (see [core-app](core-app.md)).
+When **on** (the default) proposals stage here for approval. When **off**, the propose tools
+**apply the change directly**: the module reads the setting via its `PlatformClient` and, if
+review is off, immediately approves its own staged suggestion through the same apply path
+(so a content op still re-indexes, a structural op still relocates). If the setting can't be
+read the module defaults to the safe path (review on). A watched read-only vault still 409s
+on apply regardless of the toggle.
 
 With a **watched external vault** (`VAULT_WATCH=true`, #232) the vault is read-only to
 epicurus, so **approve returns 409** — applying would write a vault Obsidian owns. The agent
@@ -98,11 +189,15 @@ can still propose and the operator can still *reject* to clear the queue; the op
 the change in Obsidian instead (ADR-0035).
 
 - `GET /pages/review` — the pending queue: each suggestion as `{id, title, path, operation,
-  origin, note, created_at, diff}`, where `diff` is a server-computed unified diff of the
-  current vault content against the proposal.
-- `POST /pages/review/suggestions/{id}/approve` — apply the change (create/update writes +
-  re-indexes; delete unlinks + de-indexes) and drop it from the queue.
-- `POST /pages/review/suggestions/{id}/reject` — discard the suggestion; the vault is untouched.
+  origin, note, created_at, diff, to_path, current, content}`, where `diff` is a
+  server-computed unified diff of the current content against the proposal (empty for a
+  structural op).
+- `POST /pages/review/suggestions/{id}/approve` — apply the change and drop it from the
+  queue: create/update write + re-index; delete unlinks + de-indexes; move relocates +
+  re-indexes; mkdir/mkproject create a folder / knowledge base. The body is **optional**
+  `{content}` — the operator's per-hunk-merged result for an edit, so only the accepted
+  changes are written; absent ⇒ apply the agent's full proposal (#KB-refactor).
+- `POST /pages/review/suggestions/{id}/reject` — discard the suggestion; nothing is touched.
 
 Pending suggestions are stored in `knowledge_suggestions` (tenant-scoped — see *Data model*).
 
@@ -145,15 +240,18 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
-| `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only}` (page id `vault`). `type` is `"file"` or `"dir"`. `can_manage_files: true` enables folder CRUD in the shell; `read_only: true` (watch mode, #232) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
-| `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is vault-relative and strictly confined (no traversal, `.md` only). |
-| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it. The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. **409** when the vault is externally owned (watch mode, #232); the folder/delete/move write routes behave likewise. |
+| `GET /pages/{page_id}?scope=<id>` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only, versioned, scopes:[{id, title, kind}], scope, scope_noun, can_create_scope}` (page id `vault`). `scope` selects the knowledge base (empty = the first project, or the reserved `__docs__` for the read-only platform docs). `type` is `"file"` or `"dir"`; `docs` paths are scope-relative. `can_manage_files: true` enables folder CRUD; `versioned: true` enables save-history browse/restore (#ADR-0046); `read_only: true` (watch mode #232, or the `__docs__` scope) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
+| `POST /pages/{page_id}/project?name=<name>` | Create a new knowledge base — a top-level folder under the knowledge root → `{id, title, kind}` (#KB-refactor). 409 if it already exists, 400 for an invalid name (single segment, no separators / `..` / `.`/`_` prefix). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/project`. |
+| `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is scope-relative and strictly confined (no traversal, `.md` only); a `__docs__/…` path reads the read-only platform docs. |
+| `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it, and records a version-history snapshot (#ADR-0046, see *Version history* below). The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. **409** when the vault is externally owned (watch mode, #232) or the path targets the read-only `__docs__` scope; the folder/delete/move write routes behave likewise. |
+| `GET /pages/{page_id}/doc/versions?path=<rel>` | A document's save-snapshot history (#ADR-0046), newest first → `{versions:[{version_id, created_at, title, size}]}`. `version_id` is opaque; `size` is the snapshot's character count. Allowed even when the vault is read-only (viewing history is not a write). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}/doc/versions`. |
+| `GET /pages/{page_id}/doc/version?path=<rel>&version=<version_id>` | One past version's full content → `{path, version_id, created_at, title, content}`. 404 if the version is unknown (a non-integer `version_id` is treated as not-found, never a 500). Allowed when read-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}/doc/version`. |
 | `POST /pages/{page_id}/folder?path=<rel>` | Create a directory at `path` → `{path}`. 409 if the directory already exists. Path goes through `safe_dir_relative` (no `..`, no absolute). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
 | `DELETE /pages/{page_id}/doc?path=<rel>` | Delete a `.md` file. 404 if absent. 400 for path-safety violations. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/doc`. |
 | `DELETE /pages/{page_id}/folder?path=<rel>` | Delete an **empty** directory. 409 if not empty, 404 if absent. Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/folder`. |
 | `POST /pages/{page_id}/move` | Move or rename a file or folder. Body: `{from_path, to_path}` → `{path}`. 404 if source absent, 409 if destination exists. Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/move`. |
-| `GET /pages/review` | Pending suggestion queue (#220): `{title, suggestions:[{id, title, path, operation, origin, note, created_at, diff}]}`. Proxied at `GET /platform/v1/modules/knowledge/pages/review`. Registered before the editor pages router so it isn't shadowed by `/pages/{page_id}`. |
-| `POST /pages/review/suggestions/{sid}/approve` | Apply a staged change + index it, drop the row → `{id, status, path, operation, indexed}`. 404 if unknown; **409** when the vault is externally owned (watch mode, #232). Proxied at `POST /platform/v1/modules/knowledge/pages/review/suggestions/{sid}/approve`. Operator-only (not an MCP tool). |
+| `GET /pages/review` | Pending suggestion queue (#220): `{title, suggestions:[{id, title, path, operation, origin, note, created_at, diff, to_path, current, content}]}`. `operation` ∈ create/update/delete/move/mkdir/mkproject; `diff`/`current`/`content` are empty for structural ops (#KB-refactor). Proxied at `GET /platform/v1/modules/knowledge/pages/review`. Registered before the editor pages router so it isn't shadowed by `/pages/{page_id}`. |
+| `POST /pages/review/suggestions/{sid}/approve` | Apply a staged change + index it, drop the row → `{id, status, path, operation, indexed}`. Optional `{content}` body — the operator's per-hunk-merged result for an edit; absent ⇒ apply the full proposal (#KB-refactor). 404 if unknown; **409** when the vault is externally owned (watch mode, #232). Proxied at `POST /platform/v1/modules/knowledge/pages/review/suggestions/{sid}/approve`. Operator-only (not an MCP tool). |
 | `POST /pages/review/suggestions/{sid}/reject` | Discard a staged change, vault untouched → `{id, status, path, operation}`. 404 if unknown. Proxied likewise. Operator-only. |
 | `GET /attachments` | Attachment picker: every vault doc as `{ref_id, kind, title}` (#137). Proxied at `GET /platform/v1/modules/knowledge/attachments`. |
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
@@ -214,8 +312,8 @@ docs all rebuild after a reset.
 
 By default the index refreshes at startup and on an explicit `knowledge_reindex`. Set
 **`VAULT_WATCH=true`** to also **watch the vault and re-index on change** — the path for
-keeping the knowledge base in step with an Obsidian-Sync (or Git) folder bind-mounted at
-`/vault`. `watcher.VaultWatcher` runs a `watchfiles.awatch` loop; each debounced batch of
+keeping the knowledge base in step with an Obsidian-Sync (or Git) folder bind-mounted under
+`/data/<tenant>/knowledge` (the tenant-scoped `VAULT_PATH`). `watcher.VaultWatcher` runs a `watchfiles.awatch` loop; each debounced batch of
 changes (window `VAULT_WATCH_DEBOUNCE_MS`, default 1500 ms) triggers one incremental
 `KnowledgeIndexer.run()`. Because the indexer is hash/mtime-incremental, a watch event over
 a synced folder only re-embeds the files that actually changed.
@@ -287,7 +385,7 @@ platform services read these docs if needed.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `VAULT_PATH` | `/vault` | In-container path of the Obsidian vault. |
+| `VAULT_PATH` | `/data/knowledge` | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge` (`<tenant>` = `DEFAULT_TENANT_ID`). Each top-level folder under it is a project (knowledge base). Lives under the same `/data` tree the storage module indexes read-only (#KB-refactor). |
 | `DOCS_PATH` | `/docs` | In-container path of the platform docs (bundled in image). |
 | `PLATFORM_URL` | `http://core-app:8080` | The core's base URL (for embeddings via the platform API). |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
@@ -300,15 +398,24 @@ platform services read these docs if needed.
 | `VAULT_WATCH` | `false` | Watch the vault and re-index on change (#232). Enabling it makes the vault **externally owned** — the editor page goes read-only and Obsidian becomes the sole author (ADR-0035). See [Obsidian sync](../developer/obsidian-sync.md). |
 | `VAULT_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of vault changes before a re-index is triggered. |
 
-The vault is bound to `/vault` **read-write** via `KNOWLEDGE_HOST_VAULT`, which
-defaults to an **empty named volume** (point it at your vault to index real notes).
-Read-write so the Knowledge editor page can save edits back to the vault (#130); mount a
-host directory the container user (uid 10001) can write. The platform docs at `/docs` are
-always present — bundled at image build time, and are not editable from the shell.
+Knowledge documents live at `/data/<tenant>/knowledge` in the **shared file space** — bound
+**read-write** via `EPICURUS_FILES_ROOT` (the single env var that mounts the whole `/data`
+tree for storage, knowledge, and notes), which defaults to an **empty named volume**. The
+on-disk tree is **tenant-scoped** (constraint #1): knowledge inserts a `<tenant>/` segment
+(`<tenant>` = `DEFAULT_TENANT_ID`, default `local`) — the volume mount stays `/data`, only the
+in-container path carries the segment. Point `EPICURUS_FILES_ROOT` at a host directory to
+expose real files; the one-shot `files-init` container creates `/data/<tenant>/knowledge` and
+chowns it to the container user (uid 10001) so the editor's create/save never hits a
+`PermissionError` on a fresh volume (#KB-refactor — see
+[Infrastructure](../infrastructure/index.md#shared-file-space)). `EPICURUS_FILES_ROOT`
+**replaces** the old per-module `KNOWLEDGE_HOST_VAULT`; existing deployments move their old
+vault contents into `<files-root>/<tenant>/knowledge/<project>/`. The platform docs at `/docs`
+are always present — bundled at image build time, **not** tenant-scoped (shared & read-only),
+and not editable from the shell.
 
-In **watch mode** (`VAULT_WATCH=true`) epicurus only ever **reads** the vault, so a
-read-only mount of an Obsidian-synced folder is enough (the container user needs read
-access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md).
+In **watch mode** (`VAULT_WATCH=true`) epicurus only ever **reads** the vault. To watch your
+own Obsidian-synced folder, bind it under `/data/<tenant>/knowledge` (the container user needs
+read access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md).
 
 ## Data model
 
@@ -322,9 +429,17 @@ access). See [Keeping the vault in sync with Obsidian](../developer/obsidian-syn
   unique on `(tenant, module_name, doc_path)`. Records are purged when a module is
   disabled or removed.
 - **Postgres `knowledge_suggestions`** — pending agent-proposed changes (#220, ADR-0033):
-  `id`, `tenant`, `sid` (opaque uuid), `path`, `operation` (`create`/`update`/`delete`),
-  `proposed_content`, `origin`, `note`, `created_at`. A row is removed on approve (after the
-  change is applied) or reject; the table only ever holds pending suggestions.
+  `id`, `tenant`, `sid` (opaque uuid), `path`, `operation`
+  (`create`/`update`/`delete`/`move`/`mkdir`/`mkproject`), `proposed_content`, `to_path`
+  (the destination of a `move`, empty otherwise), `origin`, `note`, `created_at`. A row is
+  removed on approve (after the change is applied) or reject; the table only ever holds
+  pending suggestions. The `to_path` column is added in place at init on a pre-#KB-refactor
+  deployment (the store uses `create_all`, no migration tool — mirrors `storage_files`).
+- **Postgres `knowledge_versions`** — editor-save content snapshots (#ADR-0046): `id` (PK,
+  also the opaque `version_id`), `tenant`, `note_path`, `title`, `content` (Text — full
+  snapshot), `created_at`; indexed on `(tenant, note_path)`. One row per distinct save
+  (consecutive identical saves deduplicated); pruned to the newest 50 per `(tenant,
+  note_path)`. Shares the index ledgers' engine; created by `VersionStore.init()`.
 - **Qdrant `<tenant>__knowledge`** — vault chunk embeddings (cosine), one collection per tenant.
 - **Qdrant `<tenant>__docs`** — platform-docs + module-docs chunk embeddings (cosine), one
   collection per tenant. Module-doc points use a distinct UUID namespace from platform-doc
@@ -340,10 +455,11 @@ core-app (embeddings + status proxy via the platform API) · Qdrant (vectors) ·
 ## Run & extend
 
 ```bash
-# With your Obsidian vault (docs auto-indexed from the image):
-KNOWLEDGE_HOST_VAULT=/path/to/your/vault docker compose up -d knowledge
+# With a host directory for the shared file space (knowledge bases live under
+# <root>/<tenant>/knowledge/<project>/, tenant = DEFAULT_TENANT_ID; docs auto-indexed from the image):
+EPICURUS_FILES_ROOT=/path/to/your/files docker compose up -d knowledge
 
-# Without a vault (only platform docs are indexed):
+# Without one (empty named volume; only platform docs are indexed until you add notes):
 docker compose up -d knowledge
 ```
 
@@ -352,14 +468,14 @@ Package `epicurus_knowledge`:
 | Module | Responsibility |
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
-| `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. |
+| `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. Also `knowledge_versions` (`VersionStore`): editor-save content snapshots with dedup + 50-version retention (#ADR-0046). |
 | `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; a run-lock serialises full passes so the watcher (#232) and startup index never overlap. |
 | `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
 | `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). Started by `app.py` when `VAULT_WATCH=true`. |
-| `service.py` | MCP tools (`knowledge_search` → entity-ref chips, `knowledge_reindex`, `knowledge_propose_edit` → staged review #220) + manifest UI + the `editor` and `review` page specs. |
-| `pages.py` | The `editor` page surface (#130): document/folder tree, read, save, and folder CRUD (create, delete, move — #216). `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. |
-| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store, `SuggestionReview` (diff + apply on approve / discard on reject), and `create_review_router`. Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
-| `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories) + vault walks (`iter_md_files`, `iter_tree_nodes`). |
+| `service.py` | MCP tools — read-only navigation (`knowledge_search` → entity-ref chips, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`), `knowledge_reindex`, and the propose tools that stage suggestions (`knowledge_propose_edit` create/update/delete, `knowledge_propose_move`, `knowledge_propose_rename` (rename-in-place → a `move` suggestion), `knowledge_propose_folder`, `knowledge_propose_project` — #KB-refactor / #220) + manifest UI + the `editor` and `review` page specs. |
+| `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` owns all filesystem operations; `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |
+| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store (with the added `to_path` column), `SuggestionReview` (diff + apply on approve / discard on reject, across create/update/delete/move/mkdir/mkproject; approve takes optional per-hunk `content` — #KB-refactor), and `create_review_router`. Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
+| `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories, `safe_project` for a knowledge-base name) + walks (`iter_md_files`, `iter_tree_nodes`, `iter_projects`). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
 | `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |

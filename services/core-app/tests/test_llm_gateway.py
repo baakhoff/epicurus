@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 
 from epicurus_core import SecretError
 from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -50,6 +51,17 @@ async def _fresh_prefs() -> LlmPrefsStore:
     return prefs
 
 
+async def _fresh_model_settings() -> ModelSettingsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = ModelSettingsStore(engine)
+    await store.init()
+    return store
+
+
 def _gateway(
     power: PowerController | None = None,
     secrets: Any = None,
@@ -59,6 +71,7 @@ def _gateway(
     top_p: float | None = None,
     num_ctx: int | None = None,
     prefs: LlmPrefsStore | None = None,
+    model_settings: ModelSettingsStore | None = None,
 ) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
@@ -74,6 +87,7 @@ def _gateway(
         top_p=top_p,
         num_ctx=num_ctx,
         prefs=prefs,
+        model_settings=model_settings,
     )
 
 
@@ -455,6 +469,100 @@ async def test_stream_chat_assembles_tool_call_fragments(monkeypatch: pytest.Mon
     assert call["function"]["arguments"] == '{"message": "hi"}'
 
 
+# ── reasoning / thinking capture (ADR-0041) ──────────────────────────────────────
+
+
+async def test_chat_extracts_inline_think_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            {
+                "model": "ollama_chat/llama3.2",
+                "choices": [{"message": {"content": "<think>ponder</think>The reply."}}],
+            }
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    result = await _gateway().chat([ChatMessage(role="user", content="hi")])
+    # The <think> span is lifted out of the answer into the reasoning field.
+    assert result.content == "The reply."
+    assert result.reasoning == "ponder"
+
+
+async def test_chat_prefers_native_reasoning_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            {
+                "model": "anthropic/c",
+                "choices": [{"message": {"content": "Done.", "reasoning_content": "native trace"}}],
+            }
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    result = await _gateway(secrets=secrets).chat(
+        [ChatMessage(role="user", content="hi")], model="claude/c"
+    )
+    assert result.content == "Done."
+    assert result.reasoning == "native trace"
+
+
+def _reasoning_chunk(content: str | None = None, reasoning: str | None = None) -> Any:
+    """A streaming chunk whose delta carries content and/or a reasoning_content field."""
+
+    class _Delta:
+        def __init__(self) -> None:
+            self.content = content
+            self.reasoning_content = reasoning
+            self.tool_calls = None
+
+    class _Choice:
+        def __init__(self) -> None:
+            self.delta = _Delta()
+
+    class _Chunk:
+        def __init__(self) -> None:
+            self.choices = [_Choice()]
+
+    return _Chunk()
+
+
+async def test_stream_chat_surfaces_native_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_chunks() -> AsyncIterator[Any]:
+        yield _reasoning_chunk(reasoning="weigh it")
+        yield _reasoning_chunk(content="Answer.")
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    events = [e async for e in _gateway().stream_chat([ChatMessage(role="user", content="hi")])]
+    assert [e.reasoning for e in events if e.reasoning] == ["weigh it"]
+    assert [e.delta for e in events if e.delta] == ["Answer."]
+    result = next(e.result for e in events if e.result is not None)
+    assert result.content == "Answer."
+    assert result.reasoning == "weigh it"
+
+
+async def test_stream_chat_splits_inline_think_from_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_chunks() -> AsyncIterator[Any]:
+        # The <think> span is split across chunk boundaries; the answer follows.
+        for piece in ["<thi", "nk>hidden</think>vis", "ible"]:
+            yield _reasoning_chunk(content=piece)
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    events = [e async for e in _gateway().stream_chat([ChatMessage(role="user", content="hi")])]
+    assert "".join(e.reasoning for e in events if e.reasoning) == "hidden"
+    assert "".join(e.delta for e in events if e.delta) == "visible"
+    result = next(e.result for e in events if e.result is not None)
+    assert result.content == "visible"
+    assert result.reasoning == "hidden"
+
+
 # ── LLM tuning (#114) ────────────────────────────────────────────────────────────
 
 
@@ -674,6 +782,19 @@ async def test_stored_context_window_overrides_env() -> None:
     assert await _gateway(prefs=prefs, num_ctx=4096).effective_context_window() == 16384
 
 
+async def test_effective_kv_cache_type_reads_the_pref() -> None:
+    prefs = await _fresh_prefs()
+    # No stored pref → None (the runtime's f16 default applies; the suggestion assumes f16).
+    assert await _gateway(prefs=prefs).effective_kv_cache_type() is None
+    await prefs.set_kv_cache_type("local", "q8_0")
+    assert await _gateway(prefs=prefs).effective_kv_cache_type() == "q8_0"
+
+
+async def test_effective_kv_cache_type_none_without_prefs() -> None:
+    # No prefs store → no stored choice → None.
+    assert await _gateway().effective_kv_cache_type() is None
+
+
 async def test_chat_applies_context_window_pref(monkeypatch: pytest.MonkeyPatch) -> None:
     """A streamed/blocking chat turn resolves num_ctx from the pref, per turn."""
     captured: dict[str, Any] = {}
@@ -713,3 +834,348 @@ async def test_context_window_pref_not_sent_to_hosted(monkeypatch: pytest.Monkey
         [ChatMessage(role="user", content="hi")], model="claude/claude-3-5-sonnet-latest"
     )
     assert "num_ctx" not in captured  # Ollama-only runtime option, never sent to hosted
+
+
+# ── per-model settings: context window + keep-alive (chat & embed) ────────────────
+
+
+async def test_per_model_context_and_keep_alive_win(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(context_window=4096, keep_alive="1h"))
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 4096
+    assert captured["keep_alive"] == "1h"  # overrides the "5m" env default
+
+
+# ── context compaction: fit the prompt to the window before the runtime truncates ──
+
+
+def _long_convo(n: int) -> list[ChatMessage]:
+    """A system prompt plus ``n`` chunky user turns — enough to overflow a small window."""
+    body = "x" * 340
+    return [ChatMessage(role="system", content="INSTRUCTIONS")] + [
+        ChatMessage(role="user", content=f"turn-{i} {body}") for i in range(n)
+    ]
+
+
+async def test_chat_trims_history_to_fit_a_local_context_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 2048)  # a tight local window
+    convo = _long_convo(20)
+    await _gateway(prefs=prefs).chat(convo)
+
+    sent = captured["messages"]
+    assert len(sent) < len(convo)  # history was trimmed to fit
+    assert sent[0]["content"] == "INSTRUCTIONS"  # the system prompt survived
+    assert sent[-1]["content"].startswith("turn-19")  # the newest turn survived
+    assert any("trimmed to fit the context window" in m["content"] for m in sent)  # noted
+
+
+async def test_chat_does_not_trim_a_hosted_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 2048)
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    convo = _long_convo(20)
+    await _gateway(prefs=prefs, secrets=secrets).chat(
+        convo, model="claude/claude-3-5-sonnet-latest"
+    )
+    # Hosted providers have large contexts and handle overflow themselves — left untouched.
+    assert len(captured["messages"]) == len(convo)
+
+
+async def test_per_model_context_overrides_global_pref(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 16384)  # global pref
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(context_window=4096))  # this model wins
+    await _gateway(prefs=prefs, model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 4096
+
+
+async def test_per_model_settings_match_by_family_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Stored under the runtime's tagged name; a request for the bare default must still match.
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2:latest", ModelSettings(context_window=2048))
+    # Request uses the bare default model "llama3.2"; settings keyed by the tag must match.
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 2048
+
+
+async def test_per_model_falls_back_to_env_keep_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()  # store present but no row for this model
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["keep_alive"] == "5m"  # env default
+    assert "num_ctx" not in captured  # no per-model, no global pref, no env num_ctx
+
+
+async def test_embed_applies_per_model_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.1, 0.2]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "nomic-embed-text", ModelSettings(context_window=512, keep_alive="10m"))
+    vectors = await _gateway(model_settings=ms).embed(["hello"], model="nomic-embed-text")
+    assert vectors == [[0.1, 0.2]]
+    assert captured["num_ctx"] == 512
+    assert captured["keep_alive"] == "10m"
+
+
+async def test_embed_unset_passes_no_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    ms = await _fresh_model_settings()
+    await _gateway(model_settings=ms).embed(["hello"], model="nomic-embed-text")
+    assert "num_ctx" not in captured  # embeddings stay opt-in — unchanged when nothing set
+    assert "keep_alive" not in captured
+
+
+async def test_show_parses_quantization_and_context_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _HttpResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "details": {
+                    "family": "llama",
+                    "parameter_size": "8.0B",
+                    "quantization_level": "Q4_K_M",
+                },
+                "model_info": {"general.architecture": "llama", "llama.context_length": 131072},
+                "capabilities": ["completion", "tools", "insert"],
+            }
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, Any]) -> _HttpResponse:
+            assert path == "/api/show"
+            return _HttpResponse()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", _Client)
+    details = await _gateway().show("llama3.2:latest")
+    assert details.quantization == "Q4_K_M"
+    assert details.parameter_size == "8.0B"
+    assert details.context_length == 131072
+    assert details.family == "llama"
+    assert details.capabilities == ["completion", "tools", "insert"]
+
+
+# ── tool-capability gating (a tool-less model just answers in text) ───────────────
+
+
+def _show_client(capabilities: list[str]) -> type:
+    """A fake httpx client whose ``/api/show`` reports the given capabilities."""
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"capabilities": capabilities}
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, Any]) -> _Resp:
+            return _Resp()
+
+    return _Client
+
+
+async def test_supports_tools_reads_local_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
+    g = "epicurus_core_app.llm.gateway.httpx.AsyncClient"
+    monkeypatch.setattr(g, _show_client(["completion", "tools"]))
+    assert await _gateway().supports_tools("llama3.2") is True
+    monkeypatch.setattr(g, _show_client(["completion", "vision"]))
+    assert await _gateway().supports_tools("llama3.2") is False
+    # An empty capability list (older runtime that doesn't report them) must not restrict.
+    monkeypatch.setattr(g, _show_client([]))
+    assert await _gateway().supports_tools("llama3.2") is True
+
+
+async def test_supports_tools_assumes_hosted_models_can() -> None:
+    # Hosted providers can't be probed via Ollama and the mainstream ones support tools, so
+    # they're assumed capable — note no runtime client is mocked: /api/show is never called.
+    assert await _gateway().supports_tools("claude/claude-3-5-sonnet-latest") is True
+
+
+async def test_models_with_capabilities_enriches_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Resp:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self._data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return self._data
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def get(self, path: str) -> _Resp:
+            if path == "/api/tags":
+                return _Resp({"models": [{"name": "a:1", "size": 1}, {"name": "b:1", "size": 2}]})
+            return _Resp({"models": []})  # /api/ps
+
+        async def post(self, path: str, json: dict[str, Any]) -> _Resp:
+            caps = {"a:1": ["tools"], "b:1": ["vision"]}.get(json["model"], [])
+            return _Resp({"capabilities": caps})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", _Client)
+    enriched = {m.name: m for m in await _gateway().models(with_capabilities=True)}
+    assert enriched["a:1"].capabilities == ["tools"]
+    assert enriched["b:1"].capabilities == ["vision"]
+    # Without the flag there are no per-model /api/show calls; capabilities stay empty.
+    plain = await _gateway().models()
+    assert all(m.capabilities == [] for m in plain)
+
+
+# ── per-model device → Ollama num_gpu (GPU/CPU choice, #293) ──────────────────────
+
+
+async def test_device_cpu_sets_num_gpu_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(device="cpu"))
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_gpu"] == 0
+
+
+async def test_device_gpu_offloads_all_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(device="gpu"))
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_gpu"] == 999
+
+
+async def test_device_auto_omits_num_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(context_window=4096))  # device unset = auto
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert "num_gpu" not in captured
+
+
+async def test_embed_device_cpu_sets_num_gpu_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "nomic-embed-text", ModelSettings(device="cpu"))
+    await _gateway(model_settings=ms).embed(["hi"], model="nomic-embed-text")
+    assert captured["num_gpu"] == 0

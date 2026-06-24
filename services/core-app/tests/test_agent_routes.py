@@ -18,6 +18,7 @@ from epicurus_core_app.agent import routes as agent_routes
 from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.llm.models import PowerState
+from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
 
 
@@ -31,6 +32,7 @@ class _FakeAgent:
         model: str | None = None,
         tenant_id: str | None = None,
         session_id: str | None = None,
+        persist_input: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         yield AgentEvent(type="delta", text="hi")
         yield AgentEvent(type="done", turn=AgentTurn(content="hi", stopped="completed"))
@@ -151,3 +153,151 @@ async def test_readiness_endpoint_returns_a_snapshot() -> None:
     assert body["ready"] is True
     assert body["power"] == "idle"
     assert body["components"][0]["name"] == "model"
+
+
+# ── memory view routes ──────────────────────────────────────────────────────
+
+
+class _FakeMemory:
+    """Stands in for the memory facade — records what the memory routes asked of it."""
+
+    def __init__(self, *, last_user: int | None = 1) -> None:
+        self.searched: list[str] = []
+        self.forgotten: list[str] = []
+        self._last_user = last_user
+        self.truncated_after: list[int] = []
+        self.revised: list[tuple[int, str]] = []
+
+    async def last_user_message_id(self, *, tenant: str, session_id: str) -> int | None:
+        return self._last_user
+
+    async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> int:
+        self.truncated_after.append(after_id)
+        return 1
+
+    async def revise_message(
+        self, *, tenant: str, session_id: str, message_id: int, content: str
+    ) -> None:
+        self.revised.append((message_id, content))
+
+    async def memories(self, *, tenant: str, limit: int = 200) -> tuple[list[MemoryItem], int]:
+        return [
+            MemoryItem(id="f2", text="Lives in Belgrade", source="auto"),
+            MemoryItem(id="f1", text="Prefers metric units", source="tool"),
+        ], 2
+
+    async def search_memory(
+        self, *, tenant: str, query: str, limit: int = 20
+    ) -> tuple[list[MemoryItem], int]:
+        self.searched.append(query)
+        return [MemoryItem(id="f1", text="Prefers metric units", source="tool", score=0.9)], 2
+
+    async def forget_memory(self, *, tenant: str, memory_id: str) -> int:
+        self.forgotten.append(memory_id)
+        return 1
+
+
+def _memory_app(memory: object) -> FastAPI:
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            _FakeAgent(),  # type: ignore[arg-type]
+            memory,  # type: ignore[arg-type]
+            "local",
+            object(),  # attachment store — unused by the memory routes  # type: ignore[arg-type]
+        )
+    )
+    return app
+
+
+async def test_memory_list_returns_corpus_and_total() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert [item["id"] for item in body["items"]] == ["f2", "f1"]  # newest first
+    assert body["items"][0]["source"] == "auto"
+    assert body["items"][0]["score"] is None  # corpus rows carry no score
+
+
+async def test_memory_search_trims_and_forwards_the_query() -> None:
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory", params={"q": "  apples "})
+    assert resp.status_code == 200
+    assert memory.searched == ["apples"]  # whitespace trimmed before search
+    assert resp.json()["items"][0]["score"] == 0.9
+
+
+async def test_memory_list_rejects_out_of_range_limit() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory", params={"limit": 0})
+    assert resp.status_code == 422  # limit has ge=1
+
+
+async def test_forget_memory_deletes_one_fact() -> None:
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.delete("/platform/v1/agent/memory/f7")
+    assert resp.status_code == 200
+    assert resp.json() == {"forgotten": 1}
+    assert memory.forgotten == ["f7"]
+
+
+# ── regenerate / edit the conversation tail (#302) ───────────────────────────
+
+
+async def test_regenerate_truncates_then_streams_a_fresh_turn() -> None:
+    memory = _FakeMemory(last_user=5)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/regenerate", json={})
+    assert resp.status_code == 200
+    # The stale tail after the last user message (id 5) is dropped, then the turn streams.
+    assert memory.truncated_after == [5]
+    assert [event for event, _ in _parse_sse(resp.text)] == ["delta", "done"]
+
+
+async def test_regenerate_with_no_user_turn_errors() -> None:
+    memory = _FakeMemory(last_user=None)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/regenerate", json={})
+    frames = _parse_sse(resp.text)
+    assert [event for event, _ in frames] == ["error"]
+    assert memory.truncated_after == []  # nothing dropped when there's nothing to answer
+
+
+async def test_edit_revises_the_last_user_message_then_truncates_and_streams() -> None:
+    memory = _FakeMemory(last_user=5)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/sessions/s1/edit", json={"content": "  corrected ask  "}
+        )
+    assert resp.status_code == 200
+    assert memory.revised == [(5, "corrected ask")]  # trimmed, applied to the last user msg
+    assert memory.truncated_after == [5]
+    assert [event for event, _ in _parse_sse(resp.text)] == ["delta", "done"]
+
+
+async def test_edit_with_blank_content_errors_and_changes_nothing() -> None:
+    memory = _FakeMemory(last_user=5)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/edit", json={"content": "   "})
+    assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
+    assert memory.revised == [] and memory.truncated_after == []

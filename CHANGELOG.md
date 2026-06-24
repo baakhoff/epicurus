@@ -14,6 +14,76 @@ images to GHCR.
 
 ### Added
 
+- **Model capabilities are surfaced — tool support, vision, and more — and a tool-less model
+  just answers in text** — the runtime reports what each model can do (`/api/show`
+  `capabilities`), but nothing used it. Now: (1) the **agent offers tools only to a
+  tool-capable model** — passing tools to one that can't makes the runtime error, so a
+  tool-less local model falls back to a plain **text answer** and the chat composer shows a
+  **"can't use tools — chat only"** hint (driven by `GET /models/details`, which gains
+  `capabilities`); (2) the **Models page badges** each downloaded model with what it does
+  (tools / vision / …) — `GET /platform/v1/llm/models?capabilities=true` opt-in fills them
+  from `/api/show`; (3) the catalog browser gains **Tools** and surfaces **Vision** as search
+  filters (the upstream `tools` capability is now mapped into the tag vocabulary); (4) the
+  **chat model picker shows each model's size**. `ModelInfo`/`ModelDetails` gain `capabilities`
+  (`core-app` → 0.35.0, `web` → 0.45.0).
+
+- **Chat: the activity timeline persists and now shows the model's thinking** — the agent's
+  process (its tool steps) used to disappear the instant a turn finished. Now the turn's
+  **thinking + tool steps** are persisted with the message: the timeline **folds** to its
+  summary rather than vanishing, and reappears folded when you reopen the conversation. The
+  model's chain-of-thought is surfaced in a collapsible **Thinking** block — captured both
+  from a provider's native reasoning field and from inline `<think>…</think>` spans (local
+  reasoning models), and kept out of the answer. Adds a `thinking` SSE event and an additive
+  `activity` JSON column on `agent_messages` (ADR-0041) (`epicurus-core` → 0.13.0,
+  `core-app` → 0.23.0, `web` → 0.31.0).
+- **Memory view — see and curate what epicurus remembers about you** — the cross-chat
+  semantic-recall corpus (every user/assistant turn is embedded into Qdrant and the most
+  similar past snippets are pulled into future chats as context) is now visible in a new
+  top-level **Memory** screen. Browse it newest-first, **search** to see exactly what recall
+  surfaces for a topic (the same ranking a chat turn gets), and **forget** any snippet so it
+  stops being recalled — forgetting drops the recall **vector only**, leaving the source
+  conversation intact. Backed by `GET /platform/v1/agent/memory?q=&limit=` and
+  `DELETE /platform/v1/agent/memory/{id}`; each snippet's role + timestamp are joined from
+  `agent_messages` by point id, so there's no change to the indexing path and it covers
+  existing memories (closes #276, ADR-0040) (`core-app` → 0.22.0, `web` → 0.30.0).
+- **The assistant knows the current time and your timezone** — the agent gained a built-in
+  `now` tool (its first non-module tool) so it stops guessing the date from its training
+  cutoff; combined with a new **Timezone** setting (Settings → Timezone, default `UTC`,
+  editable; env `DEFAULT_TIMEZONE`) it creates calendar events at the right local date and
+  time. `now` also surfaces the connected Google Calendar's timezone and flags a mismatch
+  with your setting. Previously, "add it at 19:00" could land on the wrong day at the wrong
+  hour. ADR-0039 (`core-app` → 0.21.0, `calendar` → 0.9.0 for the `/status` timezone,
+  `web` → 0.29.0 for the Settings card).
+- **Live model catalog — the core parses the model list from upstream on a schedule** — the
+  Models screen's "Browse models" list used to be a hand-maintained static file
+  (`services/web/src/data/catalog.ts`) that went stale and forced a web release for every new
+  model. The core now owns it (constraint #8): a new `ModelCatalog` fetches a configurable
+  source (`https://ollama.com/library` by default), parses each model's sizes, description,
+  capabilities (→ tags) and popularity, caches the result, and refreshes it **regularly** on a
+  background loop. New endpoint `GET /platform/v1/llm/catalog` → `{ entries, source, updated_at,
+  stale }`; the web shell fetches it (keeping `filterCatalog` unchanged) and shows provenance
+  ("From ollama.com/library · updated 3m ago"). Resilient: a failed/disabled refresh serves the
+  last-good snapshot, and a small built-in **seed** when nothing has been fetched yet (cold or
+  air-gapped), so the browser is never empty — the bundled list is the offline fallback. New
+  knobs: `LLM_CATALOG_URL`, `LLM_CATALOG_REFRESH_SECONDS` (default 6h), `LLM_CATALOG_MAX_MODELS`
+  (0 = unlimited), `LLM_CATALOG_ENABLED` (closes #269) (`core-app` → 0.20.0, `web` → 0.28.0).
+- **Mail: mark messages read / unread** — mail is no longer read-only. Two new MCP tools
+  (`mail_mark_read` / `mail_mark_unread`) let the agent flip a message's read state on request
+  ("mark my newsletter as read"), and the right-panel email reader gains a **Mark as read /
+  Mark as unread** toggle (a tool-backed action, ADR-0024) that invokes the tool through the core
+  proxy and re-fetches so the toggle flips. The provider seam gains `set_unread(message_id,
+  unread)`; the Gmail provider implements it via `messages.modify` on the `UNREAD` label, which
+  needs the **`gmail.modify`** scope — it **replaces** `gmail.readonly` (which it supersets), so
+  **an operator who connected Google before this change must reconnect once** (Settings → Connect)
+  to grant it; until then the mark tools return a reconnect hint rather than a 500. No core-app
+  change — the core's `/messages` and `/tools` proxies are generic pass-throughs (closes #277)
+  (`mail` → 0.7.0, `web` → 0.27.0).
+- **The chat composer keeps your unsent draft when you leave the page** — the message you're
+  typing now lives in the chat store rather than the screen's local state, so switching to
+  Models / Modules / a module page and back (which unmounts the chat screen) no longer discards
+  it. The draft is restored with its auto-grown height intact and is cleared only when the
+  message is actually sent. It persists for the app session (not across a full reload) (#278)
+  (`web` → 0.26.0).
 - **Context-window management (hardware-aware, UI-settable)** — the local runtime's context
   window (Ollama `num_ctx`) is now a persisted, per-tenant preference set from a new **Context
   window** card on the Models screen, instead of an env-var-only knob. This fixes empty replies:
@@ -217,8 +287,70 @@ images to GHCR.
   attach proxy and web attach menu render it unchanged — the module only supplies data
   (ADR-0019) (closes #139) (`tasks` → 0.3.0).
 
+### Changed
+
+- **The context-window suggestion now reflects your KV-cache type and the model's real
+  limits — and is no longer clipped to 32k** — the Models-page estimate of "how big a context
+  can this box hold?" assumed a fixed f16 KV cache and capped at a flat 32,768, ignoring two
+  things the operator can already set/observe: the **KV-cache type** (a quantized cache
+  `q8_0`/`q4_0` stores fewer bytes per token, so the same VRAM buys roughly 2×/4× the context)
+  and the model's **trained context length**. The suggestion now scales the per-token KV cost
+  by the active `kv_cache_type` and uses the model's trained `context_length` (read from
+  `/api/show`) as the ceiling — so a long-context model on a roomy GPU can be suggested well
+  past 32k, while a short-context model is never suggested beyond what it was trained for. The
+  flat 32,768 survives only as the fallback when the trained length is unknown (and the lower
+  CPU cap is unchanged). `GET /platform/v1/system/info` gains `kv_cache_type` and
+  `model.{context_length, quantization}`; the Models page shows the model's quantization +
+  trained limit and lets the token field/slider exceed 32k when supported (`core-app` →
+  0.34.0, `web` → 0.44.0).
+- **Long conversations are trimmed to fit the model's context window instead of overflowing
+  it** — a local runtime (Ollama) silently drops whatever spills past `num_ctx`, and what
+  spills first is the *oldest* context: the agent's instructions and recalled memory. With the
+  default 4096 window that happens within a few turns, quietly degrading replies. The gateway
+  now **compacts** every local prompt to fit before sending it (`llm/compaction.py`, applied in
+  `_fit_to_context` across the blocking + streaming paths): the leading **system** messages are
+  kept whole, the **most-recent** turns that fit within `num_ctx` (minus a reply reserve and the
+  tool-schema footprint) are kept, older history is dropped first, a `tool` result is never
+  orphaned from its `assistant` call, and the final message is always kept; a short `system`
+  note marks the cut so the model knows earlier turns existed. Token counts are a conservative
+  character-based estimate (no tokenizer dependency). Hosted providers (large contexts, handled
+  server-side) and short chats are untouched — the latter a no-op (`core-app` → 0.33.0).
+- **The observability stack (Grafana / Prometheus / Loki / Tempo / Alloy / Alertmanager) is now
+  opt-in** — a self-hosted box that isn't running dashboards shouldn't pay for eight extra
+  containers it never opens. Every observability service is gated behind the `observability`
+  compose profile, so `docker compose up` (and `task up`) now runs a lean stack without them;
+  bring them up with `docker compose --profile observability up -d` (or `task obs-up`). Nothing
+  in epicurus depends on the stack at runtime — services still expose `/metrics` and `/health`,
+  so an operator who prefers `docker logs` or their own monitoring can point it at those
+  endpoints and never enable the profile. Infra-only; no component version change.
+
 ### Fixed
 
+- **A just-attached file now shows its pill immediately, not only after a reload** — when you
+  attached a file and sent it, the message echoed back without the attachment pill; the pill
+  only appeared once the page was reloaded (the server *had* persisted it). The optimistic
+  user message carried only the text — the staged attachments were sent to the backend but
+  never kept in client state — so there was nothing to render beside the bubble until the
+  server transcript was refetched. The chat store now holds the staged attachments on a
+  `pendingAttachments` field alongside `pendingUser` (set on send, cleared when the
+  server-stored turn takes over or the session changes), and the optimistic bubble renders
+  their pills exactly like the persisted message — a seamless hand-off, no reload (`web` →
+  0.46.0).
+- **Markdown now renders headings and lists instead of plain indented text** — assistant
+  replies (and the editor preview) typeset through the shared `.ep-prose` styles, but Tailwind's
+  preflight resets `h1–h6` to body size/weight and strips `list-style` from `ul`/`ol`, and the
+  prose rules never restored them. So `#`/`##` headings looked like ordinary paragraphs and `-`
+  / `1.` lists showed as a bare indent with no bullet or number. Restored an explicit heading
+  scale + weight (h1–h6) and per-type list markers (disc / decimal / nested circle), with
+  GFM task-list checkboxes, `hr`, and trimmed first/last margins. Pure styling — the markdown
+  DOM was already correct (`web` → 0.43.0).
+- **Scrolling over the left nav no longer scrolls the whole interface** — the fixed-height
+  (`h-dvh`) app shell never clipped itself, and the side rail had no scroll region of its own.
+  So once the rail's links (core surfaces + module pages + the power orb) outgrew the viewport,
+  its overflow escaped to `<body>` and a wheel event anywhere over the rail dragged the entire
+  UI — most visible on the Models screen. The shell now sets `overflow-hidden` (every region
+  already owns its scroll) and the rail scrolls its own links; the rail also gained an
+  accessible name (`aria-label="Primary"`) (`web` → 0.25.1).
 - **The UI "Embedding model" choice now actually drives memory embedding** — core memory
   recall hard-coded `settings.memory_embed_model` and ignored the operator's `embed_default`
   pref, so picking an embedding model in the UI had no effect and recall 404'd if the env

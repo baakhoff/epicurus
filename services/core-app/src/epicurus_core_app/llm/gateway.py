@@ -14,6 +14,7 @@ content, no keys). Retries on 429/5xx use LiteLLM's exponential backoff.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
@@ -24,9 +25,16 @@ import litellm
 
 from epicurus_core import EventBus, SecretError, SecretStore, get_logger
 from epicurus_core_app.llm import providers as registry
+from epicurus_core_app.llm.compaction import (
+    compact_messages,
+    estimate_tools_tokens,
+    reply_reserve,
+)
+from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import (
     ChatMessage,
     ChatResult,
+    ModelDetails,
     ModelInfo,
     ProviderInfo,
     StreamEvent,
@@ -34,6 +42,7 @@ from epicurus_core_app.llm.models import (
 )
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.reasoning import ThinkSplitter, split_reasoning
 
 litellm.telemetry = False
 litellm.drop_params = True
@@ -41,6 +50,10 @@ litellm.drop_params = True
 log = get_logger("epicurus_core_app.llm")
 
 USAGE_SUBJECT = "llm.usage"
+
+# Inserted in place of dropped history when a turn is trimmed to fit the context window, so the
+# model knows earlier messages were cut rather than never said.
+_TRIM_NOTE = "(Earlier messages in this conversation were trimmed to fit the context window.)"
 
 
 class UnknownProviderError(LookupError):
@@ -67,6 +80,7 @@ class LlmGateway:
         top_p: float | None = None,
         num_ctx: int | None = None,
         prefs: LlmPrefsStore | None = None,
+        model_settings: ModelSettingsStore | None = None,
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
@@ -82,6 +96,7 @@ class LlmGateway:
         self._top_p = top_p
         self._num_ctx = num_ctx
         self._prefs = prefs
+        self._model_settings = model_settings
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         """The active default model: the stored pref if set, else the env default."""
@@ -118,6 +133,42 @@ class LlmGateway:
             if stored is not None:
                 return stored
         return self._num_ctx
+
+    async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None:
+        """The operator's Ollama KV-cache type (``f16``/``q8_0``/``q4_0``), or ``None``.
+
+        Server-wide and applied via the Ollama container's ``OLLAMA_KV_CACHE_TYPE`` env (#310),
+        not a per-call option — but the context-window suggestion reads it here so a quantized
+        cache (which stores fewer bytes per token) is reflected as more usable context.
+        """
+        if self._prefs is None:
+            return None
+        return await self._prefs.get_kv_cache_type(tenant_id or self._default_tenant)
+
+    async def _settings_for(self, model: str, tenant_id: str | None) -> ModelSettings:
+        """The operator's per-model settings for ``model`` (empty when none apply).
+
+        The store is keyed by the name the runtime reports (e.g. ``llama3.2:latest``), but a
+        request may name the model bare (``llama3.2``) or vice-versa. Match loosely: exact
+        name, then bare name, then the family (everything before the ``:tag``) — so a single
+        sheet edit reliably reaches the model however it's addressed. Hosted ids carry a
+        ``provider/`` prefix which we strip before matching (these settings are local-only).
+        """
+        if self._model_settings is None:
+            return ModelSettings()
+        stored = await self._model_settings.list(tenant_id or self._default_tenant)
+        if not stored:
+            return ModelSettings()
+        bare = model.split("/", 1)[-1]
+        if model in stored:
+            return stored[model]
+        if bare in stored:
+            return stored[bare]
+        family = bare.split(":", 1)[0]
+        for key, settings in stored.items():
+            if key.split(":", 1)[0] == family:
+                return settings
+        return ModelSettings()
 
     async def model_readiness(
         self, model: str | None = None, *, tenant_id: str | None = None
@@ -161,25 +212,33 @@ class LlmGateway:
         _, provider = registry.resolve(model)
         return not (self._power.paused and provider.is_local)
 
-    async def _call_config(
-        self, model: str, tenant_id: str | None, *, num_ctx: int | None = None
-    ) -> dict[str, Any]:
+    async def _call_config(self, model: str, tenant_id: str | None) -> dict[str, Any]:
         """The LiteLLM call kwargs (model, endpoint, key, tuning) for ``model``.
 
-        For hosted providers the API key is fetched from OpenBao at call time and is
-        never logged. Tuning knobs (temperature/top_p, plus local-only num_ctx and
-        keep_alive) come from settings, so they need no code edit to change. ``num_ctx``
-        is resolved per turn by the caller (the operator's Context-window pref, else the
-        env default); it is an Ollama runtime option applied to local models only.
+        For hosted providers the API key is fetched from OpenBao at call time and is never
+        logged. For local models the Ollama runtime options are resolved **per this model**:
+        ``num_ctx`` from the operator's per-model setting, else the global context-window
+        pref, else the env default; ``keep_alive`` from the per-model setting, else the env
+        default. So a small model and a large one can carry different context windows and
+        keep-alives. Sampling knobs (temperature/top_p) come from settings.
         """
         litellm_model, provider = registry.resolve(model)
         config: dict[str, Any] = {"model": litellm_model}
         if provider.is_local:
             config["api_base"] = self._ollama_url
-            config["keep_alive"] = self._keep_alive
+            settings = await self._settings_for(model, tenant_id)
+            num_ctx = await self._effective_num_ctx(model, tenant_id, settings=settings)
             # num_ctx is an Ollama runtime option — local models only.
             if num_ctx is not None:
                 config["num_ctx"] = num_ctx
+            config["keep_alive"] = settings.keep_alive or self._keep_alive
+            # device → Ollama num_gpu (layers offloaded to the GPU): "cpu" = 0 (all CPU),
+            # "gpu" = 999 (all layers; the runtime clamps to the model's count), "auto"/unset
+            # = omit so the runtime decides. Lets the operator pin where a model runs (#293).
+            if settings.device == "cpu":
+                config["num_gpu"] = 0
+            elif settings.device == "gpu":
+                config["num_gpu"] = 999
         if provider.secret_path is not None:
             tenant = tenant_id or self._default_tenant
             secret = await self._secrets.get(provider.secret_path, tenant)
@@ -194,15 +253,53 @@ class LlmGateway:
             config["top_p"] = self._top_p
         return config
 
+    async def _effective_num_ctx(
+        self, model: str, tenant_id: str | None, *, settings: ModelSettings | None = None
+    ) -> int | None:
+        """The Ollama context window for ``model``: per-model setting, else global pref, else env.
+
+        One source of truth for both the runtime ``num_ctx`` option and the context-fit budget.
+        ``None`` means no explicit window (the runtime's own default applies).
+        """
+        if settings is None:
+            settings = await self._settings_for(model, tenant_id)
+        if settings.context_window is not None:
+            return settings.context_window
+        return await self.effective_context_window(tenant_id)
+
+    async def _fit_to_context(
+        self,
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None,
+        tenant_id: str | None,
+    ) -> list[ChatMessage]:
+        """Trim ``messages`` to fit ``model``'s context window — local models only.
+
+        The local runtime silently drops tokens past ``num_ctx``, evicting the oldest (the
+        system prompt + recalled context). We pre-trim instead (see :mod:`compaction`): keep the
+        system prefix and the most-recent turns within ``num_ctx`` minus a reply reserve and the
+        tool schemas' footprint. Hosted providers (large contexts, handled server-side) and calls
+        with no known window are left untouched.
+        """
+        _, provider = registry.resolve(model)
+        if not provider.is_local:
+            return messages
+        num_ctx = await self._effective_num_ctx(model, tenant_id)
+        if not num_ctx:
+            return messages
+        budget = num_ctx - reply_reserve(num_ctx) - estimate_tools_tokens(tools)
+        return compact_messages(messages, budget=budget, note=_TRIM_NOTE)
+
     async def _complete(
         self,
         model: str,
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None,
         tenant_id: str | None,
-        num_ctx: int | None,
     ) -> ChatResult:
-        config = await self._call_config(model, tenant_id, num_ctx=num_ctx)
+        config = await self._call_config(model, tenant_id)
+        messages = await self._fit_to_context(model, messages, tools, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -215,10 +312,16 @@ class LlmGateway:
         data: dict[str, Any] = response.model_dump()
         message = data["choices"][0]["message"]
         usage = data.get("usage") or {}
+        # Reasoning is either a separate field (hosted reasoning models) or inlined in the
+        # content as <think>…</think> (local models); take the native field if present, else
+        # split it out so the answer stays clean (ADR-0041).
+        answer, inline_thinking = split_reasoning(message.get("content") or "")
+        reasoning = message.get("reasoning_content") or inline_thinking or None
         result = ChatResult(
             model=data.get("model") or config["model"],
-            content=message.get("content") or "",
+            content=answer,
             tool_calls=message.get("tool_calls"),
+            reasoning=reasoning,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
         )
@@ -241,13 +344,12 @@ class LlmGateway:
     ) -> ChatResult:
         """Return a completion, walking the fallback chain on failure."""
         resolved = model or await self.effective_default(tenant_id)
-        num_ctx = await self.effective_context_window(tenant_id)
         last_error: Exception | None = None
         for candidate in self._candidates(resolved):
             if not self._is_available(candidate):
                 continue
             try:
-                return await self._complete(candidate, messages, tools, tenant_id, num_ctx)
+                return await self._complete(candidate, messages, tools, tenant_id)
             except Exception as exc:  # provider/call error -> try the next candidate
                 last_error = exc
                 log.warning("llm call failed; trying next", model=candidate, error=str(exc))
@@ -267,8 +369,8 @@ class LlmGateway:
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
-        num_ctx = await self.effective_context_window(tenant_id)
-        config = await self._call_config(candidate, tenant_id, num_ctx=num_ctx)
+        config = await self._call_config(candidate, tenant_id)
+        messages = await self._fit_to_context(candidate, messages, None, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -307,8 +409,8 @@ class LlmGateway:
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
-        num_ctx = await self.effective_context_window(tenant_id)
-        config = await self._call_config(candidate, tenant_id, num_ctx=num_ctx)
+        config = await self._call_config(candidate, tenant_id)
+        messages = await self._fit_to_context(candidate, messages, tools, tenant_id)
         start = time.monotonic()
         response = await litellm.acompletion(
             messages=[m.provider_dump() for m in messages],
@@ -319,15 +421,28 @@ class LlmGateway:
         )
         self._power.mark_active()
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        splitter = ThinkSplitter()
         calls: dict[int, dict[str, Any]] = {}
         async for chunk in response:
             choices = chunk.choices
             if not choices:
                 continue
             delta = choices[0].delta
+            # Hosted reasoning models stream a separate reasoning_content field.
+            native_reasoning = getattr(delta, "reasoning_content", None)
+            if native_reasoning:
+                reasoning_parts.append(native_reasoning)
+                yield StreamEvent(reasoning=native_reasoning)
             if delta.content:
-                content_parts.append(delta.content)
-                yield StreamEvent(delta=delta.content)
+                # Local models inline thinking as <think>…</think>; split it from the answer.
+                answer_delta, think_delta = splitter.feed(delta.content)
+                if think_delta:
+                    reasoning_parts.append(think_delta)
+                    yield StreamEvent(reasoning=think_delta)
+                if answer_delta:
+                    content_parts.append(answer_delta)
+                    yield StreamEvent(delta=answer_delta)
             for fragment in delta.tool_calls or []:
                 index = fragment.index or 0
                 entry = calls.setdefault(
@@ -345,10 +460,19 @@ class LlmGateway:
                     entry["function"]["arguments"] += arguments
                 elif arguments is not None:  # some providers send whole args as a dict
                     entry["function"]["arguments"] = arguments
+        # Release any tail the splitter was holding back in case it began a <think> tag.
+        answer_tail, think_tail = splitter.flush()
+        if think_tail:
+            reasoning_parts.append(think_tail)
+            yield StreamEvent(reasoning=think_tail)
+        if answer_tail:
+            content_parts.append(answer_tail)
+            yield StreamEvent(delta=answer_tail)
         result = ChatResult(
             model=config["model"],
             content="".join(content_parts),
             tool_calls=[calls[i] for i in sorted(calls)] or None,
+            reasoning="".join(reasoning_parts) or None,
         )
         yield StreamEvent(result=result)
         await self._emit_usage(
@@ -385,16 +509,33 @@ class LlmGateway:
     async def embed(
         self, texts: list[str], *, model: str | None = None, tenant_id: str | None = None
     ) -> list[list[float]]:
-        """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``)."""
+        """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``).
+
+        The embedding model gets the same per-model settings sheet as a chat model: when the
+        operator has set a context window or keep-alive for it, those are passed as Ollama
+        runtime options (LiteLLM drops them if the runtime doesn't take them). With nothing
+        set, the call is unchanged — embeddings stay opt-in, never silently retuned.
+        """
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
         resolved = model or await self.effective_embed_default(tenant_id)
         embed_model = f"ollama/{resolved}"
+        settings = await self._settings_for(resolved, tenant_id)
+        options: dict[str, Any] = {}
+        if settings.context_window is not None:
+            options["num_ctx"] = settings.context_window
+        if settings.keep_alive:
+            options["keep_alive"] = settings.keep_alive
+        if settings.device == "cpu":
+            options["num_gpu"] = 0
+        elif settings.device == "gpu":
+            options["num_gpu"] = 999
         start = time.monotonic()
         response = await litellm.aembedding(
             model=embed_model,
             input=texts,
             api_base=self._ollama_url,
+            **options,
         )
         self._power.mark_active()
         await self._emit_usage(
@@ -461,8 +602,16 @@ class LlmGateway:
             return False
         return True
 
-    async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
-        """List the local runtime's models, marking the ones loaded in memory or hidden."""
+    async def models(
+        self, tenant_id: str | None = None, *, with_capabilities: bool = False
+    ) -> list[ModelInfo]:
+        """List the local runtime's models, marking the ones loaded in memory or hidden.
+
+        ``with_capabilities`` additionally fills each model's ``capabilities`` (e.g. ``tools``,
+        ``vision``) by querying ``/api/show`` per model, concurrently. It costs one extra call
+        per model, so it is **opt-in** — the chat picker lists without it; the Models page asks
+        for it to badge what each model can do.
+        """
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
             response = await client.get("/api/tags")
             response.raise_for_status()
@@ -477,7 +626,7 @@ class LlmGateway:
         hidden: set[str] = set()
         if self._prefs is not None:
             hidden = set(await self._prefs.get_hidden(tenant_id or self._default_tenant))
-        return [
+        infos = [
             ModelInfo(
                 name=m["name"],
                 size=m.get("size"),
@@ -486,6 +635,76 @@ class LlmGateway:
             )
             for m in payload.get("models", [])
         ]
+        if with_capabilities and infos:
+            caps = await asyncio.gather(*(self._capabilities(info.name) for info in infos))
+            for info, info_caps in zip(infos, caps, strict=True):
+                info.capabilities = info_caps
+        return infos
+
+    async def _capabilities(self, model: str) -> list[str]:
+        """The model's reported capabilities (best-effort; empty when unknown/unreported)."""
+        return (await self.show(model)).capabilities
+
+    async def supports_tools(self, model: str | None = None, tenant_id: str | None = None) -> bool:
+        """Whether ``model`` can use tools — so the agent offers them only when they'll work.
+
+        Passing tools to a local model that doesn't support them makes the runtime error, so
+        the agent gates on this and falls back to a plain text answer. Hosted providers are
+        assumed tool-capable (we can't probe them, and the mainstream ones are). A local model
+        is judged by its ``/api/show`` capabilities; if the runtime reports none (older Ollama),
+        we don't restrict — only an explicit capability list *without* ``tools`` disables them.
+        """
+        resolved = model or await self.effective_default(tenant_id)
+        _, provider = registry.resolve(resolved)
+        if not provider.is_local:
+            return True
+        caps = await self._capabilities(resolved)
+        return "tools" in caps if caps else True
+
+    async def show(self, model: str) -> ModelDetails:
+        """Read-only facts about a local model from the runtime's ``/api/show``.
+
+        Returns empty details (all ``None``) rather than raising when the model isn't local or
+        the runtime is unreachable, so the model-settings sheet degrades to "unknown". The
+        trained context length lives under ``model_info`` keyed by the architecture (e.g.
+        ``llama.context_length``); fall back to any ``*.context_length`` if the arch is absent.
+        """
+        try:
+            async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
+                response = await client.post("/api/show", json={"model": model})
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            log.warning("ollama /api/show failed", model=model)
+            return ModelDetails()
+        details = payload.get("details") or {}
+        info = payload.get("model_info") or {}
+        arch = info.get("general.architecture")
+        context_length: int | None = None
+        arch_key = f"{arch}.context_length" if isinstance(arch, str) else None
+        if arch_key and isinstance(info.get(arch_key), int):
+            context_length = info[arch_key]
+        else:
+            context_length = next(
+                (
+                    value
+                    for key, value in info.items()
+                    if key.endswith(".context_length") and isinstance(value, int)
+                ),
+                None,
+            )
+        family = details.get("family")
+        raw_caps = payload.get("capabilities")
+        capabilities = (
+            [c for c in raw_caps if isinstance(c, str)] if isinstance(raw_caps, list) else []
+        )
+        return ModelDetails(
+            quantization=details.get("quantization_level") or None,
+            parameter_size=details.get("parameter_size") or None,
+            context_length=context_length,
+            family=family if isinstance(family, str) else None,
+            capabilities=capabilities,
+        )
 
     async def pull(self, model: str) -> None:
         """Pull a model into the local runtime (blocks until complete)."""

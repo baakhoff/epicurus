@@ -12,6 +12,11 @@ class CoreAppSettings(CoreSettings):
 
     # Ollama, the local LLM runtime. On the internal Docker network: http://ollama:11434.
     ollama_url: str = "http://localhost:11434"
+    # KV-cache apply (#307): the core writes Ollama's start-up env file here (a named volume
+    # both containers share; the Ollama entrypoint sources it), then restarts this service so it
+    # re-reads it. Defaults match the compose wiring; override only if you remap either.
+    ollama_runtime_env_path: str = "/etc/epicurus/ollama.env"
+    ollama_service_name: str = "ollama"
     # Default Ollama model used when a request does not name one.
     llm_default_model: str = "llama3.2"
     # How long Ollama keeps a model loaded after its last use (idle unload, ADR-0005).
@@ -30,6 +35,19 @@ class CoreAppSettings(CoreSettings):
     llm_top_p: float | None = None
     # Ollama context-window size (num_ctx); applied to local models only.
     llm_num_ctx: int | None = None
+    # ── Model catalog (#269) ────────────────────────────────────────────────────
+    # The core parses the browsable model list from this source on a schedule, so the
+    # Models screen never ships a hand-maintained list. Defaults to the public Ollama
+    # library; point it at a mirror for an air-gapped deployment.
+    llm_catalog_url: str = "https://ollama.com/library"
+    # How often the background loop re-parses the source (seconds). The library changes
+    # rarely, so this is hours, not minutes. Floored to 60s by the catalog.
+    llm_catalog_refresh_seconds: int = 6 * 60 * 60
+    # Cap on model families kept (the most-popular survive); 0 = unlimited.
+    llm_catalog_max_models: int = 0
+    # When false, no outbound fetch happens and the built-in seed is served as-is
+    # (air-gapped builds). The endpoint and seed still work; only the refresh is skipped.
+    llm_catalog_enabled: bool = True
     # Comma-separated module base URLs. Each module serves its MCP tools at
     # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
     # (the registry + web shell read these).
@@ -64,6 +82,10 @@ class CoreAppSettings(CoreSettings):
     qdrant_url: str = "http://localhost:6333"
     # Ollama embedding model used to vectorize conversation text for recall.
     memory_embed_model: str = "nomic-embed-text"
+    # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
+    # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
+    # deployment sets its own in the Settings screen (persisted) or via this env.
+    default_timezone: str = "UTC"
 
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.

@@ -7,26 +7,36 @@ import { z } from "zod";
 import {
   AccountsView,
   AttachmentUploaded,
+  CatalogResponse,
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
+  EditorScope,
+  EditorVersionContent,
+  EditorVersionList,
   EmailMessage,
+  FileText,
   HoverCard,
   LlmPrefs,
   LogEntry,
+  MemoryListing,
   MessageRecord,
+  ModelDetails,
   ModelInfo,
+  ModelSettings,
   ModuleAttachmentItem,
   ModuleSnapshot,
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
+  PendingSuggestion,
   PlatformInfo,
   PowerStatus,
   ProviderInfo,
   Readiness,
   SessionSummary,
   SystemInfo,
+  TimezonePrefs,
   type PowerState,
 } from "@/lib/contracts";
 import { parseFrame } from "@/lib/sse";
@@ -73,7 +83,13 @@ export const api = {
       body: JSON.stringify({ state }),
     }),
 
-  models: () => request(z.array(ModelInfo), "/platform/v1/llm/models"),
+  models: (withCapabilities = false) =>
+    request(
+      z.array(ModelInfo),
+      `/platform/v1/llm/models${withCapabilities ? "?capabilities=true" : ""}`,
+    ),
+  // The browsable model catalog the core parses from upstream on a schedule (#269).
+  catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>
     request(z.object({ status: z.string() }), `/platform/v1/llm/models?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
@@ -95,10 +111,49 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
+  // Global Ollama KV-cache type ("q8_0"|"q4_0"|null=default f16). The core writes Ollama's env
+  // file and restarts it to apply (#307); `applied` is false when Docker isn't wired, so the UI
+  // falls back to the manual-restart instructions.
+  setKvCacheType: (value: string | null) =>
+    request(
+      z.object({ status: z.string(), applied: z.boolean() }),
+      "/platform/v1/llm/prefs/kv-cache-type",
+      { method: "PUT", body: JSON.stringify({ value }) },
+    ),
+  // Agent loop bound (tool rounds per turn); null = the env default. The core clamps 1-12.
+  setAgentMaxSteps: (value: number | null) =>
+    request(
+      z.object({ status: z.string(), value: z.number().nullable() }),
+      "/platform/v1/llm/prefs/agent-max-steps",
+      { method: "PUT", body: JSON.stringify({ value }) },
+    ),
   setModelHidden: (name: string, hidden: boolean) =>
     request(z.object({ status: z.string(), hidden: z.array(z.string()) }), "/platform/v1/llm/prefs/hidden", {
       method: "PUT",
       body: JSON.stringify({ name, hidden }),
+    }),
+
+  // Per-model settings (context window + keep-alive). `model` is a query param —
+  // names carry ":" and "/" which proxies may mangle in a path.
+  modelSettings: (model: string) =>
+    request(ModelSettings, `/platform/v1/llm/model-settings?model=${encodeURIComponent(model)}`),
+  setModelSettings: (
+    model: string,
+    settings: { context_window: number | null; keep_alive: string | null; device: string | null },
+  ) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/model-settings", {
+      method: "PUT",
+      body: JSON.stringify({ model, ...settings }),
+    }),
+  // Read-only facts (quantization, parameter size, trained context length) for the sheet.
+  modelDetails: (model: string) =>
+    request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),
+
+  timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
+  setTimezone: (timezone: string) =>
+    request(z.object({ status: z.string(), timezone: z.string() }), "/platform/v1/timezone", {
+      method: "PUT",
+      body: JSON.stringify({ timezone }),
     }),
 
   providers: () => request(z.array(ProviderInfo), "/platform/v1/llm/providers"),
@@ -117,6 +172,22 @@ export const api = {
     request(z.array(MessageRecord), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`),
   deleteSession: (id: string) =>
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // The cross-chat memory corpus — the durable facts the model remembers about the user.
+  // No `q` = the corpus newest-first; with `q` = what recall surfaces for that query.
+  // `total` is the full size.
+  memory: (q?: string, limit?: number) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (limit != null) params.set("limit", String(limit));
+    const query = params.size ? `?${params}` : "";
+    return request(MemoryListing, `/platform/v1/agent/memory${query}`);
+  },
+  // Forget one remembered fact so it stops being recalled (the conversation is kept).
+  forgetMemory: (id: string) =>
+    request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
 
@@ -200,6 +271,18 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
+  // An `editor` document's save history, newest first (ADR-0046).
+  modulePageDocVersions: (name: string, pageId: string, path: string) =>
+    request(
+      EditorVersionList,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc/versions?path=${encodeURIComponent(path)}`,
+    ),
+  // One past version of an `editor` document (ADR-0046).
+  modulePageDocVersion: (name: string, pageId: string, path: string, versionId: string) =>
+    request(
+      EditorVersionContent,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc/version?path=${encodeURIComponent(path)}&version=${encodeURIComponent(versionId)}`,
+    ),
   // Create a folder inside an editor page's store (#216).
   createModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {
     await request(
@@ -208,6 +291,13 @@ export const api = {
       { method: "POST" },
     );
   },
+  // Create a new knowledge base (project) — a top-level scope (#KB-refactor).
+  createModuleProject: (name: string, pageId: string, projectName: string) =>
+    request(
+      EditorScope,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/project?project=${encodeURIComponent(projectName)}`,
+      { method: "POST" },
+    ),
   // Delete a document from an editor page's store (#216).
   deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
     const response = await fetch(
@@ -240,11 +330,17 @@ export const api = {
       { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
     ),
   // Approve a staged suggestion on a `review` page — applies + indexes it (#220).
-  approveSuggestion: (name: string, pageId: string, suggestionId: string) =>
+  // `content` (optional) is the operator's per-hunk-merged result for an edit (#KB-refactor).
+  approveSuggestion: (
+    name: string,
+    pageId: string,
+    suggestionId: string,
+    content?: string,
+  ) =>
     request(
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/approve`,
-      { method: "POST" },
+      { method: "POST", body: JSON.stringify(content === undefined ? {} : { content }) },
     ),
   // Reject a staged suggestion on a `review` page — discards it (#220).
   rejectSuggestion: (name: string, pageId: string, suggestionId: string) =>
@@ -252,6 +348,21 @@ export const api = {
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/reject`,
       { method: "POST" },
+    ),
+  // The cross-module pending-suggestions feed (#KB-refactor): drives the chat composer
+  // bubble and the Suggestions page; each item carries its owning module + page id.
+  suggestions: () => request(z.array(PendingSuggestion), `/platform/v1/suggestions`),
+  // Whether a module's agent changes go through review (#KB-refactor). Off ⇒ auto-accept.
+  suggestionsEnabled: (module: string) =>
+    request(
+      z.object({ enabled: z.boolean() }),
+      `/platform/v1/modules/${encodeURIComponent(module)}/suggestions-enabled`,
+    ),
+  setSuggestionsEnabled: (module: string, enabled: boolean) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(module)}/suggestions-enabled`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
     ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
@@ -270,6 +381,12 @@ export const api = {
     request(
       EmailMessage,
       `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
+    ),
+  // A text file's contents for the Files split-screen reader (#KB-refactor, req 6).
+  readModuleText: (module: string, path: string) =>
+    request(
+      FileText,
+      `/platform/v1/modules/${encodeURIComponent(module)}/read?path=${encodeURIComponent(path)}`,
     ),
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).

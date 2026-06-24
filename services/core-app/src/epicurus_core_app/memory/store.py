@@ -18,17 +18,20 @@ from sqlalchemy import (
     func,
     inspect,
     select,
+    update,
 )
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import Attachment, EntityRef
+from epicurus_core_app.agent.activity import MessageActivity
 
 # JSON columns added to agent_messages after the table's first release (v0.2). On an
 # existing deployment these are added in place at init (the store has no migration
-# framework — see ``ConversationStore._ensure_columns``).
-_ADDED_JSON_COLUMNS = ("entity_refs", "attachments")
+# framework — see ``ConversationStore._ensure_columns``). ``activity`` joined them in v0.19
+# (ADR-0041: the assistant turn's persisted thinking + tool steps).
+_ADDED_JSON_COLUMNS = ("entity_refs", "attachments", "activity")
 
 
 class SessionSummary(BaseModel):
@@ -50,6 +53,16 @@ class MessageRecord(BaseModel):
     entity_refs: list[EntityRef] = Field(default_factory=list)
     # Context the user attached to this message (ADR-0019) — rendered as pills.
     attachments: list[Attachment] = Field(default_factory=list)
+    # The assistant turn's process — thinking + tool steps (ADR-0041) — rendered as the
+    # folded activity timeline. None on user messages and on pre-v0.19 assistant rows.
+    activity: MessageActivity | None = None
+
+
+class MessageMeta(BaseModel):
+    """Per-message metadata looked up by id — enriches a recall snippet (role + when)."""
+
+    role: str
+    created_at: datetime
 
 
 class Base(DeclarativeBase):
@@ -71,6 +84,8 @@ class StoredMessage(Base):
     entity_refs: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     # User-supplied attachments for this message (ADR-0019); null for old rows.
     attachments: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    # The assistant turn's thinking + tool steps (ADR-0041); null for user/old rows.
+    activity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class StoredAttachment(Base):
@@ -130,6 +145,7 @@ class ConversationStore:
         content: str,
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> int:
         """Persist a message; returns its id (used as the recall point id)."""
         async with self._session() as session:
@@ -140,6 +156,7 @@ class ConversationStore:
                 content=content,
                 entity_refs=entity_refs,
                 attachments=attachments,
+                activity=activity,
             )
             session.add(message)
             await session.commit()
@@ -205,9 +222,28 @@ class ConversationStore:
                     created_at=m.created_at,
                     entity_refs=[EntityRef.model_validate(r) for r in (m.entity_refs or [])],
                     attachments=[Attachment.model_validate(a) for a in (m.attachments or [])],
+                    activity=MessageActivity.model_validate(m.activity) if m.activity else None,
                 )
                 for m in rows
             ]
+
+    async def metadata_for(self, *, tenant: str, ids: list[int]) -> dict[int, MessageMeta]:
+        """Look up role + created_at for a set of message ids (tenant-scoped).
+
+        Backs the memory view, which gets snippet ids + text from the recall index and joins
+        them back to ``agent_messages`` for display metadata.
+        """
+        if not ids:
+            return {}
+        async with self._session() as session:
+            rows = await session.execute(
+                select(StoredMessage.id, StoredMessage.role, StoredMessage.created_at).where(
+                    StoredMessage.tenant == tenant, StoredMessage.id.in_(ids)
+                )
+            )
+            return {
+                row.id: MessageMeta(role=row.role, created_at=row.created_at) for row in rows.all()
+            }
 
     async def delete_session(self, *, tenant: str, session_id: str) -> int:
         """Delete a session's messages; returns how many were removed."""
@@ -220,6 +256,57 @@ class ConversationStore:
             await session.commit()
             # DELETE always returns a CursorResult; the ORM types it as plain Result.
             return cast("CursorResult[Any]", result).rowcount or 0
+
+    async def last_message_id(
+        self, *, tenant: str, session_id: str, role: str | None = None
+    ) -> int | None:
+        """The id of the session's most recent message (optionally of a given ``role``).
+
+        ``id`` is autoincrement, so "highest id" is the last-inserted message — the reliable
+        anchor for regenerate/edit (truncate everything after the last user turn). Returns
+        ``None`` when the session has no matching message.
+        """
+        async with self._session() as session:
+            stmt = select(StoredMessage.id).where(
+                StoredMessage.tenant == tenant, StoredMessage.session_id == session_id
+            )
+            if role is not None:
+                stmt = stmt.where(StoredMessage.role == role)
+            return cast(
+                "int | None", await session.scalar(stmt.order_by(StoredMessage.id.desc()).limit(1))
+            )
+
+    async def update_content(self, *, tenant: str, message_id: int, content: str) -> None:
+        """Replace one message's content in place (tenant-scoped) — backs an edited turn."""
+        async with self._session() as session:
+            await session.execute(
+                update(StoredMessage)
+                .where(StoredMessage.tenant == tenant, StoredMessage.id == message_id)
+                .values(content=content)
+            )
+            await session.commit()
+
+    async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> list[int]:
+        """Delete the session's messages with ``id > after_id``; returns the removed ids.
+
+        Drops everything inserted after the anchor message — the assistant answer (and any
+        trailing turns) when regenerating or editing. The caller drops the matching recall
+        points. Returns the ids so recall stays consistent with history.
+        """
+        async with self._session() as session:
+            ids = list(
+                await session.scalars(
+                    select(StoredMessage.id).where(
+                        StoredMessage.tenant == tenant,
+                        StoredMessage.session_id == session_id,
+                        StoredMessage.id > after_id,
+                    )
+                )
+            )
+            if ids:
+                await session.execute(delete(StoredMessage).where(StoredMessage.id.in_(ids)))
+                await session.commit()
+            return ids
 
 
 class AttachmentStore:

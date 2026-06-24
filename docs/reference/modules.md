@@ -199,9 +199,28 @@ A `date-time` field can also declare `date_toggle: "<boolean field>"` in its sch
 the form uses to collapse it to a **date** picker (emitting a floating `YYYY-MM-DD`) when
 that sibling boolean is on — the calendar's all-day toggle.
 
+A board may also declare **view controls** (ADR-0049) — `controls: [{id, label, value,
+options:[{value,label}]}]` — labeled selectors the shell renders in the board toolbar. The
+module declares the available `options` and the current `value`; changing a control sets the
+query param `?<id>=<value>` and re-fetches the page (the core forwards page query params
+verbatim, so there is no core change). This keeps regrouping/filtering **module-side** — the
+board carries only rendered cards to the client, not the underlying records — so the shell
+stays a bounded renderer. Tasks uses this for a **Group by** control (Due date / Status /
+Priority / List / None) and a **Show** filter (Open / Completed / All); the module reads the
+params, lays out the columns, and echoes the resolved selection back in each control's
+`value`. The vocabulary is archetype-generic, so any board module reuses it.
+
 ```jsonc
 {
   "title": "Tasks",                                  // optional page heading
+  "controls": [                                      // view controls (ADR-0049)
+    { "id": "group", "label": "Group by", "value": "due",
+      "options": [ { "value": "due", "label": "Due date" },
+                   { "value": "status", "label": "Status" } ] },
+    { "id": "show", "label": "Show", "value": "open",
+      "options": [ { "value": "open", "label": "Open" },
+                   { "value": "all", "label": "All" } ] }
+  ],
   "columns": [
     {
       "id": "today", "title": "Today",
@@ -241,13 +260,28 @@ document/folder tree (content is fetched lazily per document), and it owns sever
     { "id": "projects/a.md", "title": "a", "path": "projects/a.md", "type": "file" },
     { "id": "b.md", "title": "b", "path": "b.md", "type": "file" }
   ],
-  "can_create": false,        // true → shell shows "New note" (Notes module)
-  "can_manage_files": true    // true → shell shows folder CRUD (Knowledge module, #216)
+  "can_create": false,        // true → shell shows a single "New note" control
+  "can_manage_files": true,   // true → shell shows folder CRUD (Knowledge + Notes, #216 / #KB-refactor)
+  "versioned": true           // true → shell shows save-history browse + restore (ADR-0046)
 }
 // GET /pages/{id}/doc?path=<rel>  →  one document's content
 { "path": "projects/a.md", "title": "a", "content": "# A\n…" }
-// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save
+// PUT /pages/{id}/doc?path=<rel>  with { "content": "…" }  →  save (also snapshots a version)
 { "path": "projects/a.md", "indexed": true, "chunk_count": 3 }
+```
+
+When `versioned` is true (notes, knowledge — ADR-0046), every save snapshots the body and
+two read-only endpoints expose the history (newest first, deduped, capped per document).
+Restore is **client-side** — the shell re-saves a past version's content through the normal
+`PUT …/doc`, so there is no restore endpoint:
+
+```jsonc
+// GET /pages/{id}/doc/versions?path=<rel>  →  the save history, newest first
+{ "versions": [ { "version_id": "42", "created_at": "2026-06-23T10:00:00+00:00",
+                  "title": "a", "size": 1280 } ] }
+// GET /pages/{id}/doc/version?path=<rel>&version=<version_id>  →  one past version (404 if absent)
+{ "path": "projects/a.md", "version_id": "42", "created_at": "2026-06-23T10:00:00+00:00",
+  "title": "a", "content": "# A\n…" }
 ```
 
 The following additional endpoints are available when `can_manage_files` is true (#216):
@@ -262,6 +296,8 @@ POST   /pages/{id}/move  { from_path, to_path } →  { "path": "…" }  (404 sou
 Proxied at:
 
 - `GET|PUT /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
+- `GET /platform/v1/modules/{name}/pages/{id}/doc/versions?path=<rel>` (ADR-0046)
+- `GET /platform/v1/modules/{name}/pages/{id}/doc/version?path=<rel>&version=<version_id>` (ADR-0046)
 - `POST /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
@@ -274,10 +310,17 @@ page is the first user, #130) provides the tree + markdown source/preview + save
 module supplies only the data above. The knowledge implementation re-indexes a saved
 document so it stays agent-retrievable.
 
-`can_manage_files` tells the shell to show folder CRUD controls (Knowledge sets this
-`true`; Notes sets it `false` and uses `can_create` instead for its own authoring flow).
-`EditorDoc.type` distinguishes `"file"` entries from `"dir"` entries; the shell builds
-the nested visual tree from the flat list using the path structure.
+`can_manage_files` tells the shell to show folder CRUD controls. **Both** knowledge and
+notes set it `true` — knowledge with a project switcher, notes as a single flat space with
+no switcher (`scope_noun` empty, #KB-refactor). `can_create` is the simpler alternative (a
+single "New note" control, no folders) — no shipped module uses it now that notes have
+folders. `EditorDoc.type` distinguishes `"file"` entries from `"dir"` entries; the shell
+builds the nested visual tree from the flat list using the path structure (dir nodes are
+emitted parent-first so each child can attach).
+
+For notes the editor `path` is a Postgres **slug** (not a filesystem path); folder rows are
+persisted so empty folders survive a reload, and a `move` re-keys the slug. The trust
+boundary is still the module — it validates each path.
 
 **The `review` archetype (suggested-changes queue, #220).** A queue of agent-proposed
 changes the operator approves or rejects, each with a server-computed unified diff. Its

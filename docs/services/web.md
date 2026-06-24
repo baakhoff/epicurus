@@ -18,12 +18,13 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 
 | Screen | What it does |
 | --- | --- |
-| **Chat** | Streaming agent turns (SSE readiness/delta/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **process timeline** of the agent's tool calls (#121), session sidebar (cross-chat memory), per-chat model picker. |
-| **Models** | **Catalog browser** — search and filter a curated catalog of 24 Ollama models by tag (General, Code, Multilingual, Vision, Embedding, Small), pull with live progress; local model list (delete, hide, set global default); **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
+| **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker (shows each model's **size**), and last-turn **Regenerate** / inline **Edit** controls that re-answer in place (#302). When the selected local model can't call tools (its `/api/show` capabilities lack `tools`), the composer shows a **"can't use tools — chat only"** hint. |
+| **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
+| **Models** | **Catalog browser** — search and filter the model catalog by capability/tag (General, Code, Multilingual, **Vision**, **Tools**, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default) — each row **badges what the model can do** (tools / vision / …, from `?capabilities=true`) next to its size; **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
-| **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`) programmatically (ADR-0018). |
+| **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`, `doc-reader`) programmatically (ADR-0018). |
 
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
@@ -45,7 +46,28 @@ each naming one of the module's MCP tools. The shell invokes the tool through th
 (`invokeModuleTool`, validated against the manifest) — a one-tap call, a `confirm` dialog,
 or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the page. The
 tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
-one path, so no module ever ships its own buttons or forms.
+one path, so no module ever ships its own buttons or forms. A board may also declare **view
+controls** (ADR-0049) — labeled selectors (e.g. group-by, filters) the shell renders in the
+toolbar; changing one re-fetches the page with a `?<id>=<value>` query param, so grouping and
+filtering stay module-side while the shell stays a bounded renderer.
+
+The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
+shows immediately, and an Edit/Preview toggle drops to the raw source when you want to
+write (ADR-0042). Because notes/knowledge **re-embed on every save**, the editor does not
+save on each keystroke: a save fires only when you **leave** (switch document, go back, or
+the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
+or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →
+saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only** vault — a
+watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
+and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
+toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
+bar.
+
+When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** control lists
+past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh
+save (so the timeline only ever grows). The shell reads history from the proxied
+`…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
+version's content), so there is no restore endpoint.
 
 ### Right panel / split-screen (ADR-0018)
 
@@ -54,14 +76,26 @@ Zustand store) opened programmatically — `open(view, payload, title)` — e.g.
 entity-reference click (ADR-0019). It is a **resizable right column** on wide screens and a
 **bottom sheet** on phones, with a back-stack (`back()`) and `close()`. Views are a
 **bounded, core-defined vocabulary** — `entity-detail` (the hover-card envelope in full
-form) and `email-reader` (read-only, used by the 3.8 mail reader). The panel never runs
-module markup.
+form), `email-reader` (read-only, used by the 3.8 mail reader), and `doc-reader` (a text/`.md`
+file rendered as markdown, opened from the Files browser via `GET /platform/v1/modules/storage/read`
+— the split-screen reader, #KB-refactor). The panel never runs module markup.
 
 A hover-card's optional `href` is rendered by the shared `CardLink` (`src/components/CardLink.tsx`):
 an **in-app path** (`/m/…`) becomes a same-tab router navigation — e.g. a cited knowledge
 note opening in the Knowledge page (#143) — an external `http(s)` URL opens in a new tab,
 and any other scheme is dropped. `CardLink` is used by both the panel's `entity-detail` view
 and the inline hover-card.
+
+### Assistant prose (markdown)
+
+Assistant replies and the editor preview render GFM markdown through `Markdown.tsx`
+(`react-markdown` + `remark-gfm`, raw HTML skipped) wrapped in `.ep-prose` — the shared
+typeset styles in `src/index.css`. Supported blocks: headings (`h1`–`h6`), unordered /
+ordered / nested / GFM task lists, tables, block quotes, horizontal rules, links (through the
+custom `a` slot, see below), and fenced code blocks with a language label + copy button
+(partial fences are auto-closed mid-stream so streaming code still renders). Because Tailwind's
+preflight resets heading sizes and list markers, `.ep-prose` restores them explicitly — keep
+new block elements styled there or they fall back to plain paragraph text.
 
 ### Entity references in chat (ADR-0019)
 
@@ -81,23 +115,75 @@ context to a turn: upload a **file** (`POST /platform/v1/agent/attachments`), re
 **another chat**, or pick an entity from an **enabled, attachable module** (its picker is
 proxied at `GET /platform/v1/modules/{name}/attachments`). Choices appear as pills above
 the input and are sent on the message as `attachments`; the agent expands them into the
-turn's context. Persisted attachments render as pills under the user's message. An
+turn's context. They render as pills under the user's message — beside the **optimistic
+echo from the moment it is sent** (the chat store carries them on `pendingAttachments`
+alongside `pendingUser`), then handed off seamlessly to the server-stored copy once the
+turn lands. An
 uploaded file is also kept durably in the storage module and shown in the Files page (the
 upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
+
+### Reviewing suggested changes (#KB-refactor, ADR-0033)
+
+Every agent change to a module's content — the knowledge base **and** private **notes** — is
+**staged for operator review**, never applied directly. The shell surfaces the pending queue in
+two places, both reading the cross-module feed `GET /platform/v1/suggestions` (each item tagged
+with its `module` + `page_id`). The feed spans **every** enabled module that declares a `review`
+page, so notes suggestions (notes declares its own `review` page) surface in the same bubble and
+overlay with no special-casing:
+
+- A **suggestion bubble** above the chat composer (`SuggestionBubble` in
+  `src/screens/ChatScreen.tsx`) appears when the assistant has filed suggestions. It names the
+  latest one ("The assistant wants to …") and shows the count when several are pending. A
+  one-tap structural change (move / new folder / new knowledge base) offers **Approve** inline;
+  a richer change offers **Open** (the review window). **Ignore** dismisses the bubble while the
+  suggestion stays on its Suggestions page.
+- The **Suggestions page** (a module's `review` archetype — knowledge's *Suggestions*, notes'
+  *Note suggestions*) opens the same review window.
+
+The **review window** (`src/components/SuggestionReviewModal.tsx`) is a core-owned overlay
+shaped by the operation, with three actions — **Approve**, **Reject**, **Ignore**:
+
+- **edit** (`update` / `create` / `append`) → a **diff with per-hunk checkboxes**: each change
+  can be ticked or unticked, the accepted hunks are merged client-side (`src/lib/linediff.ts`)
+  and sent as the approve `{content}` so only the chosen part is written; a `create` also offers
+  a rendered preview. `append` (notes — the agent supplies only the text to add) is content-like:
+  its diff shows the added text, so it reviews per-hunk like any edit.
+- **delete** → a confirmation showing the document/note body that will be removed.
+- **move** → a `from → to` confirmation; **new folder** / **new knowledge base** → a simple
+  "create this?" confirmation.
+
+The `ReviewSuggestion` operation enum (`src/lib/contracts.ts`) carries
+`create` / `update` / `append` / `delete` / `move` / `mkdir` / `mkproject`.
+
+Approve/reject post to `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/{action}`
+(the core proxies to the module); these are operator-only — the agent never approves its own
+proposals.
+
+The **Suggestions page header** carries a per-module **review on/off** switch — *Review agent
+changes before applying* (#KB-refactor, `src/components/archetypes/ReviewView.tsx`). It reads
+`GET` and writes `PUT /platform/v1/modules/{name}/suggestions-enabled` (`src/lib/api.ts`:
+`suggestionsEnabled` / `setSuggestionsEnabled`). When **off**, the module applies the agent's
+changes directly, so the queue stays empty by design — the page shows a contextual "applied
+automatically" empty state rather than "nothing awaits review". The switch is always shown
+(even with an empty queue) so the operator can turn review back on.
 
 ### The chat SSE protocol
 
 `POST /platform/v1/agent/chat/stream` returns Server-Sent Events: an optional leading
 `readiness` (a warming snapshot — power state, module health, model warm; ADR-0027),
-then `delta` (content tokens), `tool` (a tool call's `running`→`ok`/`error`), `done` (the
-final `AgentTurn`), `error`.
+then `delta` (answer tokens), `thinking` (chain-of-thought tokens, ADR-0041), `tool` (a
+tool call's `running`→`ok`/`error`), `done` (the final `AgentTurn`), `error`.
 
 Before the first token the shell shows the turn's *process*, not a bare caret: a
 **readiness bar** while the system warms (`readiness` events, #122), a **"Thinking…"** cue
-once it is ready and a token is pending, then a **process timeline** that lists each tool
-step with a human-readable label and live status (#121). The timeline folds to a one-line
-summary as the answer streams in, and the whole live turn is replaced by the clean
-server-stored answer on `done`.
+once it is ready and a token is pending, then an **activity timeline** that interleaves the
+model's thinking (collapsible blocks) and its tool steps **in the order they happened** —
+think → call → think — each tool step with a human-readable label and live status (#121,
+ADR-0041, ordering #300). The timeline folds to a one-line summary as the answer streams in.
+On `done` the live turn is replaced by the clean server-stored answer — which **keeps its
+folded activity**, persisted on the message (`MessageRecord.activity.timeline`), so a
+reopened conversation still shows the same ordered timeline. Older turns saved before the
+ordered timeline fall back to a thinking-then-steps render.
 
 ## Configuration
 

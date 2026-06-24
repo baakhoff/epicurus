@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import Task, TaskScope
 from epicurus_tasks.providers import TasksProvider
 
 log = get_logger("epicurus_tasks.router")
@@ -68,11 +68,13 @@ class TasksRouter:
             return self._local
         return self._external.get(account)
 
-    async def list_tasks(self, tenant_id: str, *, list_id: str | None = None) -> list[Task]:
+    async def list_tasks(
+        self, tenant_id: str, *, list_id: str | None = None, scope: TaskScope = "open"
+    ) -> list[Task]:
         prefs = await self._load_prefs()
         if list_id is not None:
             target, ref = self._resolve_collection(list_id, prefs)
-            tasks = await target.list_tasks(tenant_id, list_id=ref.collection or None)
+            tasks = await target.list_tasks(tenant_id, list_id=ref.collection or None, scope=scope)
             titles = await self._title_map(tenant_id, [ref])
             return self._stamp(tasks, ref=ref, title=titles.get((ref.account, ref.collection)))
         targets = prefs.enabled or [_LOCAL_REF]
@@ -83,7 +85,9 @@ class TasksRouter:
             if provider is None:
                 continue  # an unknown / disconnected account is skipped, not fatal
             try:
-                tasks = await provider.list_tasks(tenant_id, list_id=ref.collection or None)
+                tasks = await provider.list_tasks(
+                    tenant_id, list_id=ref.collection or None, scope=scope
+                )
             except Exception as exc:
                 log.warning(
                     "tasks read failed; skipping this source (#209)",

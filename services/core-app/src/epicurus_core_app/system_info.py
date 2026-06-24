@@ -19,6 +19,7 @@ override, not a measured maximum.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -28,7 +29,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from epicurus_core import get_logger
-from epicurus_core_app.llm.models import ModelInfo
+from epicurus_core_app.llm.models import ModelDetails, ModelInfo
 
 log = get_logger("epicurus_core_app.system_info")
 
@@ -52,12 +53,26 @@ _KV_PER_TOKEN_AT_REF_MB = 0.18
 _REF_MODEL_SIZE_MB = 4700.0
 # Clamp bounds for the computed maximum context.
 _MIN_CONTEXT = 2048
+# The *fallback* ceiling when the model's trained context length is unknown (hosted model, or
+# the runtime didn't report it). It is no longer a universal cap: when the trained length is
+# known, that becomes the ceiling instead, so a long-context model on a roomy GPU is no longer
+# clipped to 32k (#context-accuracy).
 _MAX_CONTEXT = 32768
 # Preferred floor for the *suggested* value when it fits (a comfortable working context).
 _PREFERRED_SUGGESTED = 8192
 # With no GPU we lean on system RAM but cap hard — CPU inference with a big context is slow,
 # and RAM is shared with everything else on the box.
 _NO_GPU_MAX_CONTEXT = 8192
+# KV-cache memory scales with the cache's bytes-per-element. The per-token cost below is
+# anchored on f16 (2 bytes); a quantized cache (the operator's OLLAMA_KV_CACHE_TYPE, #310)
+# stores fewer bytes per element, so the same memory buys proportionally more context: q8_0
+# (~1 byte) ≈ half the cost, q4_0 (~½ byte) ≈ a quarter. Unknown/None → the f16 baseline.
+_KV_CACHE_FACTOR: dict[str, float] = {"f16": 1.0, "q8_0": 0.5, "q4_0": 0.25}
+
+
+def _kv_cache_factor(kv_cache_type: str | None) -> float:
+    """The per-token KV-cost multiplier for a cache type (1.0 for f16/unknown)."""
+    return _KV_CACHE_FACTOR.get((kv_cache_type or "").lower(), 1.0)
 
 
 class GpuInfo(BaseModel):
@@ -69,11 +84,25 @@ class GpuInfo(BaseModel):
     vram_free_mb: int | None = None
 
 
+class CpuInfo(BaseModel):
+    """The host CPU. Core counts are ``None`` when they can't be determined."""
+
+    model: str
+    physical_cores: int | None = None
+    logical_cores: int | None = None
+
+
 class ModelSize(BaseModel):
-    """The currently-effective chat model and its on-disk size."""
+    """The currently-effective chat model and the facts behind the suggestion."""
 
     name: str
     size_mb: int | None = None
+    # The model's trained maximum context (from /api/show). The real ceiling for the
+    # suggestion — None when unknown (hosted model, or the runtime didn't report it).
+    context_length: int | None = None
+    # Weight quantization (e.g. "Q4_K_M"), fixed at pull. It already determines the on-disk
+    # size that's counted; surfaced so the suggestion's reasoning is legible in the UI.
+    quantization: str | None = None
 
 
 class SuggestedContext(BaseModel):
@@ -85,12 +114,16 @@ class SuggestedContext(BaseModel):
 
 
 class SystemInfo(BaseModel):
-    """What the Models page needs to suggest a context window."""
+    """What the Models page needs: the host spec + a context-window suggestion."""
 
     gpu: GpuInfo | None = None
+    cpu: CpuInfo | None = None
     ram_total_mb: int | None = None
     model: ModelSize | None = None
     suggested_context: SuggestedContext | None = None
+    # The operator's active Ollama KV-cache type (factored into the suggestion); None = the
+    # runtime default (f16). Surfaced so the UI can show what the estimate assumed.
+    kv_cache_type: str | None = None
 
 
 def _default_runner(argv: list[str]) -> str:
@@ -130,7 +163,12 @@ def _kv_per_token_mb(model_size_mb: float) -> float:
 
 
 def suggest_context(
-    vram_total_mb: int | None, model_size_mb: int | None, *, cap: int = _MAX_CONTEXT
+    vram_total_mb: int | None,
+    model_size_mb: int | None,
+    *,
+    cap: int = _MAX_CONTEXT,
+    kv_cache_type: str | None = None,
+    model_max: int | None = None,
 ) -> SuggestedContext:
     """Suggest a context-window range from available memory and the model's size.
 
@@ -138,27 +176,33 @@ def suggest_context(
     decides which to pass). The math, all an **estimate**:
 
     * ``available = vram_total - model_size - headroom`` (memory left for the KV cache).
-    * ``max = clamp(available / kv_per_token, [2048, cap])`` — how many tokens that
-      memory buys at the rough per-token KV cost (see :func:`_kv_per_token_mb`).
+    * ``per_token = kv_per_token(model) * kv_cache_factor`` — a quantized cache
+      (``kv_cache_type`` ``q8_0``/``q4_0``) costs less per token, so the same memory buys
+      more context (see :func:`_kv_cache_factor`).
+    * ``max = clamp(available / per_token, [2048, ceiling])``.
     * ``suggested`` = the largest power of two ``<= max`` (a clean, runtime-friendly size),
       lifted to 8192 when 8192 still fits — a comfortable working context.
 
-    ``cap`` is the hard ceiling for the maximum (default 32768); the caller passes a lower
-    one when basing the estimate on system RAM (no GPU), where CPU inference makes a huge
-    context impractical. With no memory figure at all, fall back to a safe minimum so the UI
-    still has a value.
+    The ceiling is the model's **trained** maximum context (``model_max``) when known — so a
+    long-context model on a roomy GPU is no longer clipped to 32k. When it is unknown, fall
+    back to ``cap`` (default 32768; the caller passes the lower ``_NO_GPU_MAX_CONTEXT`` for
+    CPU inference, where a huge context is impractical regardless of what the model trained
+    on). With no memory figure at all, fall back to a safe minimum so the UI still has a
+    value.
     """
     if not vram_total_mb or vram_total_mb <= 0:
         return SuggestedContext(min=_MIN_CONTEXT, suggested=_MIN_CONTEXT, max=_MIN_CONTEXT)
 
-    ceiling = max(_MIN_CONTEXT, min(_MAX_CONTEXT, cap))
+    # The trained length is the true ceiling when known; else the conservative fallback cap.
+    ceiling = max(_MIN_CONTEXT, model_max if model_max else cap)
     model_mb = model_size_mb or 0
     available = vram_total_mb - model_mb - _HEADROOM_MB
     if available <= 0:
         # The model barely fits (or doesn't) — there's no room for a generous cache.
         return SuggestedContext(min=_MIN_CONTEXT, suggested=_MIN_CONTEXT, max=_MIN_CONTEXT)
 
-    raw_max = available / _kv_per_token_mb(model_mb)
+    per_token = _kv_per_token_mb(model_mb) * _kv_cache_factor(kv_cache_type)
+    raw_max = available / per_token
     max_ctx = max(_MIN_CONTEXT, min(ceiling, int(raw_max)))
 
     suggested = _next_power_of_two_at_most(max_ctx)
@@ -299,15 +343,57 @@ def read_ram_total_mb(reader: FileReader = _default_file_reader) -> int | None:
         return None
 
 
+def read_cpu_info(reader: FileReader = _default_file_reader) -> CpuInfo | None:
+    """The host CPU model + core counts, parsed from ``/proc/cpuinfo`` (Linux, in-container).
+
+    Logical cores = number of ``processor`` entries; physical cores = ``cpu cores`` times the
+    number of distinct ``physical id``s (sockets). Best-effort: on a non-Linux host (no
+    ``/proc``) it still reports a logical count from ``os.cpu_count()`` when available, else
+    ``None`` and the spec panel simply omits the CPU.
+    """
+    try:
+        text = reader("/proc/cpuinfo")
+    except Exception:  # non-Linux / no /proc — fall back to a bare logical count
+        log.debug("cpuinfo read failed", exc_info=True)
+        logical = os.cpu_count()
+        return CpuInfo(model="CPU", logical_cores=logical) if logical else None
+
+    model = "CPU"
+    logical = 0
+    cpu_cores: int | None = None
+    physical_ids: set[str] = set()
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "model name" and value:
+            model = value
+        elif key == "processor":
+            logical += 1
+        elif key == "cpu cores" and value.isdigit():
+            cpu_cores = int(value)
+        elif key == "physical id":
+            physical_ids.add(value)
+    physical_cores = cpu_cores * (len(physical_ids) or 1) if cpu_cores else None
+    return CpuInfo(
+        model=model, physical_cores=physical_cores, logical_cores=logical or os.cpu_count()
+    )
+
+
 class _ModelSource(Protocol):
-    """Minimal protocol the probe needs from the gateway: list local models with sizes.
+    """Minimal protocol the probe needs from the gateway.
 
     Structurally satisfied by :class:`~epicurus_core_app.llm.gateway.LlmGateway` (and by the
-    test fakes) — the probe depends on the two methods, not the whole gateway.
+    test fakes) — the probe depends on these methods, not the whole gateway: list local
+    models, resolve the active one, read a model's trained context length + quantization
+    (``show``), and read the operator's KV-cache type so the suggestion can account for it.
     """
 
     async def models(self, tenant_id: str | None = None) -> list[ModelInfo]: ...
     async def effective_default(self, tenant_id: str | None = None) -> str: ...
+    async def show(self, model: str) -> ModelDetails: ...
+    async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None: ...
 
 
 async def collect_system_info(
@@ -316,27 +402,44 @@ async def collect_system_info(
     tenant_id: str | None = None,
     detect: Callable[[], GpuInfo | None] = detect_gpu,
     ram: Callable[[], int | None] = read_ram_total_mb,
+    cpu: Callable[[], CpuInfo | None] = read_cpu_info,
 ) -> SystemInfo:
-    """Assemble the :class:`SystemInfo` snapshot for the suggestion.
+    """Assemble the :class:`SystemInfo` snapshot: host spec + the context-window suggestion.
 
-    GPU + RAM detection are injectable (the route passes the real probes; tests pass fakes).
-    The model size comes from the gateway's local-model listing matched to the effective
-    chat model. Memory for the suggestion is GPU VRAM when present, else system RAM.
+    GPU / CPU / RAM detection are injectable (the route passes the real probes; tests pass
+    fakes). The model size comes from the gateway's local-model listing matched to the
+    effective chat model. Memory for the suggestion is GPU VRAM when present, else system RAM.
     """
     gpu = _safe(detect, "gpu detection")
+    cpu_info = _safe(cpu, "cpu detection")
     ram_total = _safe(ram, "ram detection")
     model = await _effective_model_size(gateway, tenant_id)
+    kv_cache_type = await _effective_kv_cache_type(gateway, tenant_id)
 
     model_size = model.size_mb if model else None
+    # The model's trained length is the real ceiling for the suggestion (replacing the flat
+    # 32k); only applied on the GPU path — CPU inference keeps its lower hard cap regardless.
+    model_max = model.context_length if model else None
     suggested = None
     if gpu is not None:
-        suggested = suggest_context(gpu.vram_total_mb, model_size)
+        suggested = suggest_context(
+            gpu.vram_total_mb, model_size, kv_cache_type=kv_cache_type, model_max=model_max
+        )
     elif ram_total:
         # No GPU: base the estimate on system RAM, with a conservative cap — CPU inference
         # with a huge context is slow and RAM is shared with the rest of the box.
-        suggested = suggest_context(ram_total, model_size, cap=_NO_GPU_MAX_CONTEXT)
+        suggested = suggest_context(
+            ram_total, model_size, cap=_NO_GPU_MAX_CONTEXT, kv_cache_type=kv_cache_type
+        )
 
-    return SystemInfo(gpu=gpu, ram_total_mb=ram_total, model=model, suggested_context=suggested)
+    return SystemInfo(
+        gpu=gpu,
+        cpu=cpu_info,
+        ram_total_mb=ram_total,
+        model=model,
+        suggested_context=suggested,
+        kv_cache_type=kv_cache_type,
+    )
 
 
 _T = TypeVar("_T")
@@ -368,9 +471,35 @@ async def _effective_model_size(gateway: _ModelSource, tenant_id: str | None) ->
     for info in models:
         if info.name in (active, bare) or info.name.split(":", 1)[0] == bare:
             size_mb = info.size // (1024 * 1024) if info.size else None
-            return ModelSize(name=info.name, size_mb=size_mb)
+            # /api/show gives the trained context length (the suggestion's real ceiling) and
+            # the weight quantization. Best-effort — it degrades to None on any failure.
+            details = await _safe_show(gateway, info.name)
+            return ModelSize(
+                name=info.name,
+                size_mb=size_mb,
+                context_length=details.context_length,
+                quantization=details.quantization,
+            )
     # The active model isn't a local one (e.g. a hosted provider): no on-disk size.
     return ModelSize(name=active)
+
+
+async def _safe_show(gateway: _ModelSource, model: str) -> ModelDetails:
+    """``gateway.show`` wrapped so any failure degrades to empty details (all ``None``)."""
+    try:
+        return await gateway.show(model)
+    except Exception:  # runtime unreachable / unexpected shape — the facts are simply unknown
+        log.warning("could not read model details for sizing", exc_info=True)
+        return ModelDetails()
+
+
+async def _effective_kv_cache_type(gateway: _ModelSource, tenant_id: str | None) -> str | None:
+    """The operator's KV-cache type, best-effort (``None`` on any failure → f16 baseline)."""
+    try:
+        return await gateway.effective_kv_cache_type(tenant_id)
+    except Exception:  # prefs store hiccup — the suggestion just assumes the f16 baseline
+        log.warning("could not read the KV-cache type", exc_info=True)
+        return None
 
 
 def create_system_router(
@@ -378,12 +507,13 @@ def create_system_router(
     *,
     detect: Callable[[], GpuInfo | None] = detect_gpu,
     ram: Callable[[], int | None] = read_ram_total_mb,
+    cpu: Callable[[], CpuInfo | None] = read_cpu_info,
 ) -> APIRouter:
-    """The ``GET /platform/v1/system/info`` route backing the context-window suggestion."""
+    """The ``GET /platform/v1/system/info`` route backing the spec panel + suggestion."""
     router = APIRouter(prefix="/platform/v1/system", tags=["system"])
 
     @router.get("/info", response_model=SystemInfo)
     async def system_info() -> SystemInfo:
-        return await collect_system_info(gateway, detect=detect, ram=ram)
+        return await collect_system_info(gateway, detect=detect, ram=ram, cpu=cpu)
 
     return router

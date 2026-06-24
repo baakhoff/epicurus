@@ -22,12 +22,16 @@ class _FakeContainer:
         self.labels: dict[str, str] = {_SERVICE: service, _PROJECT: project}
         self.stopped = False
         self.removed = False
+        self.restarted = False
 
     def stop(self, timeout: int = 10) -> None:
         self.stopped = True
 
     def remove(self, force: bool = False) -> None:
         self.removed = True
+
+    def restart(self, timeout: int = 10) -> None:
+        self.restarted = True
 
 
 class _FakeContainers:
@@ -124,3 +128,31 @@ def test_docker_failure_is_wrapped() -> None:
     ctrl = DockerController(_BoomClient(), project="epicurus")
     with pytest.raises(DockerError, match="failed to remove"):
         ctrl.remove_module("tasks")
+
+
+# ── restart_service: the non-destructive, allowlisted restart path (#307) ─────────
+
+
+def test_restart_service_restarts_allowlisted() -> None:
+    c = _FakeContainer("ollama")
+    assert _controller([c]).restart_service("ollama") is True
+    assert c.restarted and not c.removed  # restart never removes
+
+
+def test_restart_service_scopes_to_own_project() -> None:
+    mine = _FakeContainer("ollama", project="epicurus")
+    other = _FakeContainer("ollama", project="other-stack")
+    assert _controller([mine, other], project="epicurus").restart_service("ollama") is True
+    assert mine.restarted and not other.restarted
+
+
+def test_restart_non_allowlisted_raises() -> None:
+    ctrl = _controller([_FakeContainer("core-app"), _FakeContainer("tasks")])
+    # Only RESTARTABLE names are permitted — core/modules/data-plane are all refused.
+    for name in ("core-app", "tasks", "postgres", "web"):
+        with pytest.raises(DockerError, match="not restartable"):
+            ctrl.restart_service(name)
+
+
+def test_restart_service_with_no_container_is_false() -> None:
+    assert _controller([]).restart_service("ollama") is False

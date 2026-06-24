@@ -12,8 +12,9 @@ own MCP tool server (ADR-0004 / ADR-0009).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
@@ -26,26 +27,42 @@ from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_loggi
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
+from epicurus_core_app.agent.builtins import (
+    NOW_SPEC,
+    REMEMBER_SPEC,
+    make_now_handler,
+    make_remember_handler,
+)
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.model_settings import ModelSettingsStore
+from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
+from epicurus_core_app.memory.extraction import FactExtractor
+from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
-from epicurus_core_app.memory.recall import SemanticRecall
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
 from epicurus_core_app.module_prefs import ModulePrefsStore
-from epicurus_core_app.modules import ModuleRegistry, create_modules_router
+from epicurus_core_app.modules import (
+    ModuleRegistry,
+    create_modules_router,
+    create_suggestions_router,
+)
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.settings import CoreAppSettings
 from epicurus_core_app.system_info import create_system_router
+from epicurus_core_app.timezone_prefs import TimezonePrefsStore
+from epicurus_core_app.timezone_routes import create_timezone_router
 
 SERVICE_NAME = "core-app"
 
@@ -71,6 +88,7 @@ def create_app() -> FastAPI:
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
 
     prefs = LlmPrefsStore(engine)
+    model_settings = ModelSettingsStore(engine)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
         default_model=settings.llm_default_model,
@@ -86,6 +104,14 @@ def create_app() -> FastAPI:
         top_p=settings.llm_top_p,
         num_ctx=settings.llm_num_ctx,
         prefs=prefs,
+        model_settings=model_settings,
+    )
+
+    catalog = ModelCatalog(
+        source_url=settings.llm_catalog_url,
+        refresh_seconds=settings.llm_catalog_refresh_seconds,
+        max_models=settings.llm_catalog_max_models,
+        enabled=settings.llm_catalog_enabled,
     )
 
     async def embed(texts: list[str]) -> list[list[float]]:
@@ -94,7 +120,11 @@ def create_app() -> FastAPI:
         # what makes the UI "Embedding model" choice actually drive memory recall.
         return await gateway.embed(texts)
 
-    memory = Memory(ConversationStore(engine), SemanticRecall(qdrant, embed))
+    # Cross-chat memory is a corpus of durable *facts* about the user (ADR-0045), written by
+    # the agent's `remember` tool and by background extraction — not a dump of raw messages.
+    facts = UserFactStore(qdrant, embed)
+    memory = Memory(ConversationStore(engine), facts)
+    extractor = FactExtractor(gateway, facts)
     attachment_store = AttachmentStore(engine)
     attachment_sink = (
         AttachmentSink(settings.attachment_sink_url)
@@ -102,16 +132,24 @@ def create_app() -> FastAPI:
         else None
     )
     module_prefs = ModulePrefsStore(engine)
+    timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
     mcp_host = McpHost(settings.module_mcp_urls)
+    # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
+    # restart-only path for Ollama's KV-cache apply (#307). None when the socket isn't mounted —
+    # removal returns 503, and a KV-cache change saves but isn't applied (manual restart).
+    docker = DockerController.from_env()
     registry = ModuleRegistry(
         settings.module_base_urls,
         mcp=mcp_host,
         secrets=secrets,
         tenant=settings.default_tenant_id,
         prefs=module_prefs,
-        # Privileged, tightly-scoped Docker access for confirmed module removal (#127,
-        # ADR-0028); None when the socket isn't mounted, in which case removal returns 503.
-        docker=DockerController.from_env(),
+        docker=docker,
+    )
+    ollama_runtime = OllamaRuntime(
+        docker,
+        env_path=settings.ollama_runtime_env_path,
+        service=settings.ollama_service_name,
     )
     # Agent tool discovery scans only enabled modules (#126); wired after the registry
     # exists (the host needs the registry and the registry needs the host).
@@ -119,6 +157,29 @@ def create_app() -> FastAPI:
     # Per-tool disable filter (#213): tools the operator has individually turned off are
     # skipped in discover even when their module's URL is included.
     mcp_host.set_tool_filter(registry.disabled_tools_set)
+
+    # Core `now` built-in tool (ADR-0039): reports the operator's configured timezone, and
+    # best-effort the connected calendar's timezone when it differs. Registered after the
+    # registry exists (the calendar lookup proxies the calendar module's /status).
+    async def _calendar_timezone() -> str | None:
+        try:
+            status = await registry.get_status("calendar")
+        except Exception:  # calendar absent / unreachable / not connected — never break `now`
+            return None
+        tz = status.get("google_timezone")
+        return tz if isinstance(tz, str) else None
+
+    mcp_host.register_builtin(
+        "now",
+        NOW_SPEC,
+        make_now_handler(
+            lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+            _calendar_timezone,
+        ),
+    )
+    # Core `remember` built-in tool (ADR-0045): the agent's explicit path for saving a durable
+    # fact about the user to long-term memory; background extraction covers the implicit path.
+    mcp_host.register_builtin("remember", REMEMBER_SPEC, make_remember_handler(memory))
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -126,6 +187,10 @@ def create_app() -> FastAPI:
         max_steps=settings.agent_max_steps,
         default_tenant=settings.default_tenant_id,
         attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
+        extractor=extractor,
+        # Resolve the loop bound per turn from the stored pref (else the env default), so the
+        # operator's UI choice takes effect without a restart (#297).
+        prefs=prefs,
     )
     oauth = OAuthService(
         secrets,
@@ -147,9 +212,17 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
         try:
+            await model_settings.init()
+        except Exception as exc:
+            log.error("model settings init failed; per-model tuning disabled", error=str(exc))
+        try:
             await module_prefs.init()
         except Exception as exc:
             log.error("module prefs init failed; enable/disable unavailable", error=str(exc))
+        try:
+            await timezone_prefs.init()
+        except Exception as exc:
+            log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
         try:
             await registry.reconcile_tombstones()
         except Exception as exc:  # best-effort — a Docker hiccup must never block startup
@@ -158,10 +231,16 @@ def create_app() -> FastAPI:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades
             log.error("memory init failed; cross-chat memory disabled", error=str(exc))
+        # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
+        # startup never blocks on the network; the task self-heals on transient failures.
+        catalog_task = asyncio.create_task(catalog.run_periodic())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
         finally:
+            catalog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await catalog_task
             await bus.close()
             await engine.dispose()
             await qdrant.close()
@@ -177,7 +256,17 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(
-        create_llm_router(gateway, prefs=prefs, default_tenant=settings.default_tenant_id)
+        create_llm_router(
+            gateway,
+            prefs=prefs,
+            default_tenant=settings.default_tenant_id,
+            catalog=catalog,
+            model_settings=model_settings,
+            ollama_runtime=ollama_runtime,
+        )
+    )
+    app.include_router(
+        create_timezone_router(timezone_prefs, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(
@@ -195,6 +284,7 @@ def create_app() -> FastAPI:
     app.include_router(create_readiness_router(readiness))
     app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
+    app.include_router(create_suggestions_router(registry))
     app.include_router(
         create_oauth_router(
             oauth,

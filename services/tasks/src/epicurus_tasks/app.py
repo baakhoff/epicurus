@@ -9,7 +9,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import (
@@ -33,6 +33,8 @@ from epicurus_tasks.service import (
     TaskNotFound,
     build_module,
     build_tasks_board,
+    coerce_group,
+    coerce_scope,
     enabled_write_lists,
     fetch_task,
     task_attachment,
@@ -132,20 +134,25 @@ def create_app() -> FastAPI:
         return view.model_dump()
 
     @app.get("/pages/{page_id}")
-    async def page(page_id: str) -> dict[str, Any]:
-        """Serve the Tasks page's `board` data (ADR-0018/0036); the core proxies this.
+    async def page(page_id: str, request: Request) -> dict[str, Any]:
+        """Serve the Tasks page's `board` data (ADR-0018/0036/0047); the core proxies this.
 
-        Open tasks from every enabled list are aggregated and grouped into due-date
-        columns by ``build_tasks_board``, each card tagged with its list (category). A
-        single failing list is skipped inside the router (#209), so the page degrades
-        rather than blanking; the ``(GoogleTasksError, ValueError) → 502`` is a backstop.
-        The Add form offers a picker of the operator's enabled writable lists.
+        Tasks from every enabled list are aggregated and grouped into columns by
+        ``build_tasks_board``, each card tagged with its list (category). The board's
+        **view controls** drive two forwarded query params (ADR-0049): ``group`` picks the
+        column layout (due / status / priority / list / none) and ``show`` the task scope
+        (open / completed / all) fetched from the providers; both are clamped to known
+        values. A single failing list is skipped inside the router (#209), so the page
+        degrades rather than blanking; the ``(GoogleTasksError, ValueError) → 502`` is a
+        backstop. The Add form offers a picker of the operator's enabled writable lists.
         """
         if page_id != TASKS_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
         tenant = settings.default_tenant_id
+        group_by = coerce_group(request.query_params.get("group"))
+        scope = coerce_scope(request.query_params.get("show"))
         try:
-            tasks = await provider.list_tasks(tenant)
+            tasks = await provider.list_tasks(tenant, scope=scope)
         except (GoogleTasksError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         # The list picker must never fail the board: degrade to "no picker" on any error.
@@ -157,7 +164,14 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.warning("tasks board: list picker unavailable", error=str(exc))
         today = datetime.now(UTC).date().isoformat()
-        return build_tasks_board(tasks, today=today, lists=lists, default_list_id=default_list_id)
+        return build_tasks_board(
+            tasks,
+            today=today,
+            group_by=group_by,
+            scope=scope,
+            lists=lists,
+            default_list_id=default_list_id,
+        )
 
     async def _require_task(ref_id: str) -> Task:
         """Fetch an attached/referenced task, translating misses into proxy errors.

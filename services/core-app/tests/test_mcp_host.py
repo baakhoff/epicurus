@@ -148,3 +148,53 @@ async def test_discover_with_empty_filter_includes_all_tools() -> None:
         specs, _ = await host.discover()
 
     assert {s["function"]["name"] for s in specs} == {"tool_a", "tool_b"}
+
+
+# ── Core built-in tools (ADR-0039) ────────────────────────────────────────────
+
+
+def _spec(name: str) -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {"name": name, "description": "", "parameters": {"type": "object"}},
+    }
+
+
+async def test_discover_includes_registered_builtin() -> None:
+    host = McpHost([])  # no modules — only the built-in
+
+    async def handler(_args: dict[str, object], _tenant: str) -> str:
+        return "ok"
+
+    host.register_builtin("now", _spec("now"), handler)
+    specs, route = await host.discover()
+    assert {s["function"]["name"] for s in specs} == {"now"}
+    assert route["now"] == "__builtin__"
+
+
+async def test_call_dispatches_builtin_in_process_with_tenant() -> None:
+    host = McpHost([])
+
+    async def handler(args: dict[str, object], tenant: str) -> str:
+        return f"got {args.get('timezone')} for {tenant}"
+
+    host.register_builtin("now", _spec("now"), handler)
+    _, route = await host.discover()
+    # the calling tenant is threaded through to the built-in handler
+    out = await host.call("now", {"timezone": "UTC"}, route["now"], tenant="t1")
+    assert out == "got UTC for t1"
+
+
+async def test_builtin_respects_disabled_filter() -> None:
+    async def tool_filter() -> set[str]:
+        return {"now"}
+
+    async def handler(_args: dict[str, object], _tenant: str) -> str:
+        return "ok"
+
+    host = McpHost([])
+    host.set_tool_filter(tool_filter)
+    host.register_builtin("now", _spec("now"), handler)
+    specs, route = await host.discover()
+    assert specs == []
+    assert "now" not in route

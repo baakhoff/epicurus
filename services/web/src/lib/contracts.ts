@@ -14,17 +14,50 @@ export const ModelInfo = z.object({
   size: z.number().nullish(),
   loaded: z.boolean().default(false),
   hidden: z.boolean().default(false),
+  // What the runtime reports the model can do (e.g. "tools", "vision"); only populated when
+  // the list is fetched with `?capabilities=true`, empty otherwise.
+  capabilities: z.array(z.string()).default([]),
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
+
+/** Per-model tuning; null on a field means "inherit" the global / env default. */
+export const ModelSettings = z.object({
+  context_window: z.number().nullable(),
+  keep_alive: z.string().nullable(),
+  // "gpu" | "cpu" | null (auto). Where the model runs (Ollama num_gpu); local models only.
+  device: z.string().nullable(),
+});
+export type ModelSettings = z.infer<typeof ModelSettings>;
+
+/** Read-only facts about a local model from the runtime's `/api/show`. */
+export const ModelDetails = z.object({
+  // Weight quantization is fixed at pull time (e.g. "Q4_K_M") — not a runtime knob.
+  quantization: z.string().nullish(),
+  parameter_size: z.string().nullish(),
+  // The model's trained maximum context (a ceiling for the operator's choice).
+  context_length: z.number().nullish(),
+  family: z.string().nullish(),
+  // Reported capabilities (e.g. "tools", "vision"); drives the chat "can't use tools" hint.
+  capabilities: z.array(z.string()).default([]),
+});
+export type ModelDetails = z.infer<typeof ModelDetails>;
 
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),
   // Operator-chosen Ollama context window (num_ctx); null = the env/runtime default.
   global_context_window: z.number().nullable(),
+  // Operator-chosen Ollama KV-cache type ("f16"|"q8_0"|"q4_0"); null = runtime default.
+  kv_cache_type: z.string().nullable(),
+  // Operator-chosen agent loop bound (tool rounds per turn); null = the env default.
+  global_agent_max_steps: z.number().nullable(),
   hidden: z.array(z.string()),
 });
 export type LlmPrefs = z.infer<typeof LlmPrefs>;
+
+/** The operator's IANA timezone (ADR-0039); used by the agent's `now` tool. */
+export const TimezonePrefs = z.object({ timezone: z.string() });
+export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 
 /* ── system / GPU info (context-window suggestion) ────────────────────────── */
 
@@ -37,10 +70,22 @@ export const GpuInfo = z.object({
 });
 export type GpuInfo = z.infer<typeof GpuInfo>;
 
-/** The currently-effective chat model and its on-disk size. */
+/** The host CPU. Core counts are null when they can't be determined. */
+export const CpuInfo = z.object({
+  model: z.string(),
+  physical_cores: z.number().nullish(),
+  logical_cores: z.number().nullish(),
+});
+export type CpuInfo = z.infer<typeof CpuInfo>;
+
+/** The currently-effective chat model and the facts behind the suggestion. */
 export const ModelSize = z.object({
   name: z.string(),
   size_mb: z.number().nullish(),
+  // Trained maximum context (from /api/show) — the real ceiling for the suggestion.
+  context_length: z.number().nullish(),
+  // Weight quantization (e.g. "Q4_K_M"); fixed at pull, surfaced to explain the estimate.
+  quantization: z.string().nullish(),
 });
 export type ModelSize = z.infer<typeof ModelSize>;
 
@@ -52,12 +97,15 @@ export const SuggestedContext = z.object({
 });
 export type SuggestedContext = z.infer<typeof SuggestedContext>;
 
-/** Host system + GPU snapshot backing the context-window suggestion. */
+/** Host system spec + GPU snapshot backing the spec panel and context-window suggestion. */
 export const SystemInfo = z.object({
   gpu: GpuInfo.nullish(),
+  cpu: CpuInfo.nullish(),
   ram_total_mb: z.number().nullish(),
   model: ModelSize.nullish(),
   suggested_context: SuggestedContext.nullish(),
+  // The operator's active Ollama KV-cache type, factored into the suggestion; null = default.
+  kv_cache_type: z.string().nullish(),
 });
 export type SystemInfo = z.infer<typeof SystemInfo>;
 
@@ -68,6 +116,30 @@ export const ProviderInfo = z.object({
   needs_base_url: z.boolean().default(false),
 });
 export type ProviderInfo = z.infer<typeof ProviderInfo>;
+
+// One browsable, pullable model in the catalog the core parses from upstream (#269).
+// `tags` stays a loose string array (not an enum) so a new upstream capability never
+// fails the whole response; the UI just ignores tags it has no chip for.
+export const CatalogEntry = z.object({
+  id: z.string(),
+  family: z.string(),
+  params: z.string().default(""),
+  size_gb: z.number().nullish(),
+  description: z.string().default(""),
+  tags: z.array(z.string()).default([]),
+  pulls: z.string().nullish(),
+});
+export type CatalogEntry = z.infer<typeof CatalogEntry>;
+
+// The catalog snapshot from GET /platform/v1/llm/catalog. `stale` flags a seed /
+// last-good list served after a failed or skipped upstream refresh.
+export const CatalogResponse = z.object({
+  entries: z.array(CatalogEntry),
+  source: z.string(),
+  updated_at: z.coerce.date().nullable(),
+  stale: z.boolean().default(false),
+});
+export type CatalogResponse = z.infer<typeof CatalogResponse>;
 
 export const SessionSummary = z.object({
   id: z.string(),
@@ -114,14 +186,70 @@ export const ModuleAttachmentItem = z.object({
 });
 export type ModuleAttachmentItem = z.infer<typeof ModuleAttachmentItem>;
 
+/** One tool call the agent made this turn, in the activity timeline (#121, ADR-0041). */
+export const ToolStep = z.object({
+  tool: z.string(),
+  status: z.enum(["running", "ok", "error"]).default("ok"),
+  detail: z.string().nullish(),
+});
+export type ToolStep = z.infer<typeof ToolStep>;
+
+/** One entry on the ordered activity timeline: a run of thinking, or a tool step (#300). */
+export const ActivityItem = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("thinking"), text: z.string().default("") }),
+  z.object({
+    kind: z.literal("tool"),
+    tool: z.string(),
+    status: z.enum(["running", "ok", "error"]).default("ok"),
+    detail: z.string().nullish(),
+  }),
+]);
+export type ActivityItem = z.infer<typeof ActivityItem>;
+
+/**
+ * The assistant turn's process — its thinking and its tool steps — persisted alongside the
+ * message so the folded activity timeline survives a reopen, not only the live stream
+ * (ADR-0041). Null on user messages and on pre-v0.19 assistant rows.
+ *
+ * `timeline` is the chronological interleaving (think → call → think, #300); the flat
+ * `thinking`/`steps` are kept for backward compatibility — older rows have only those, and
+ * the UI falls back to them when `timeline` is empty.
+ */
+export const MessageActivity = z.object({
+  thinking: z.string().default(""),
+  steps: z.array(ToolStep).default([]),
+  timeline: z.array(ActivityItem).default([]),
+});
+export type MessageActivity = z.infer<typeof MessageActivity>;
+
 export const MessageRecord = z.object({
   role: z.string(),
   content: z.string(),
   created_at: z.coerce.date(),
   entity_refs: z.array(EntityRef).default([]),
   attachments: z.array(Attachment).default([]),
+  activity: MessageActivity.nullish(),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
+
+/** One durable fact the assistant remembers about the user (ADR-0043).
+ *  `source` is how it was learned ("tool" = the remember tool, "auto" = background
+ *  extraction); `score` is set only for search results. */
+export const MemoryItem = z.object({
+  id: z.string(),
+  text: z.string(),
+  source: z.string().default("auto"),
+  created_at: z.coerce.date().nullish(),
+  score: z.number().nullish(),
+});
+export type MemoryItem = z.infer<typeof MemoryItem>;
+
+/** A page of remembered facts plus the full corpus size (so the UI can show the rest). */
+export const MemoryListing = z.object({
+  items: z.array(MemoryItem),
+  total: z.number(),
+});
+export type MemoryListing = z.infer<typeof MemoryListing>;
 
 export const AgentTurn = z.object({
   content: z.string(),
@@ -149,7 +277,8 @@ export type Readiness = z.infer<typeof Readiness>;
 
 /** One SSE event of a streaming agent turn (event name == `type`). */
 export const AgentEvent = z.object({
-  type: z.enum(["delta", "tool", "done", "error", "readiness"]),
+  // `thinking` carries a chain-of-thought token, shown in the activity timeline (ADR-0041).
+  type: z.enum(["delta", "tool", "done", "error", "readiness", "thinking"]),
   text: z.string().nullish(),
   tool: z.string().nullish(),
   status: z.enum(["running", "ok", "error"]).nullish(),
@@ -413,10 +542,26 @@ export const BoardColumn = z.object({
 });
 export type BoardColumn = z.infer<typeof BoardColumn>;
 
-/** The `board` archetype's data contract: columns of cards + board-level actions. */
+/**
+ * One declarative view control a `board` surfaces (ADR-0049): a labeled selector — e.g.
+ * "Group by" (the column layout) or "Show" (a filter). The module declares the `options`
+ * and the current `value`; the shell renders a selector and re-fetches the page with
+ * `?<id>=<value>` on change, so regrouping/filtering stays module-side (the board carries
+ * no task fields to the client). Generic and reusable across board modules.
+ */
+export const BoardControl = z.object({
+  id: z.string(),
+  label: z.string(),
+  value: z.string().default(""),
+  options: z.array(z.object({ value: z.string(), label: z.string() })).default([]),
+});
+export type BoardControl = z.infer<typeof BoardControl>;
+
+/** The `board` archetype's data contract: columns of cards + view controls + actions. */
 export const BoardData = z.object({
   title: z.string().nullish(),
   columns: z.array(BoardColumn).default([]),
+  controls: z.array(BoardControl).default([]),
   actions: z.array(BoardAction).default([]),
 });
 export type BoardData = z.infer<typeof BoardData>;
@@ -487,10 +632,31 @@ export const EditorDoc = z.object({
 });
 export type EditorDoc = z.infer<typeof EditorDoc>;
 
+/**
+ * One selectable scope in the editor's switcher (#KB-refactor): a `project` is a
+ * writable knowledge base (a top-level folder); a `reference` scope (the bundled
+ * platform docs) is read-only.
+ */
+export const EditorScope = z.object({
+  id: z.string(),
+  title: z.string(),
+  kind: z.enum(["project", "reference"]).default("project"),
+});
+export type EditorScope = z.infer<typeof EditorScope>;
+
 /** The `editor` archetype's list contract: the browsable document/folder tree. */
 export const EditorData = z.object({
   title: z.string().default("Knowledge"),
   docs: z.array(EditorDoc).default([]),
+  /**
+   * Projects/scopes (#KB-refactor): the knowledge bases the switcher lists, the active
+   * one (`docs` paths are relative to it), the noun for the "New …" control, and whether
+   * the operator may create another. Empty `scope_noun` ⇒ no switcher (Notes).
+   */
+  scopes: z.array(EditorScope).default([]),
+  scope: z.string().default(""),
+  scope_noun: z.string().default(""),
+  can_create_scope: z.boolean().default(false),
   /**
    * Opt into in-app authoring (ADR-0026): when true the shared editor shows a
    * "New note" affordance that saves to a fresh path. Notes sets this; knowledge
@@ -510,6 +676,12 @@ export const EditorData = z.object({
    * this mode, so Obsidian stays the sole author.
    */
   read_only: z.boolean().default(false),
+  /**
+   * Save history (ADR-0046): when true every save snapshots the document, and the shell
+   * shows a History affordance to browse and restore past versions. Notes and knowledge
+   * set this. Restore is client-side (re-save a past version's content).
+   */
+  versioned: z.boolean().default(false),
 });
 export type EditorData = z.infer<typeof EditorData>;
 
@@ -529,6 +701,31 @@ export const EditorSaveResult = z.object({
 });
 export type EditorSaveResult = z.infer<typeof EditorSaveResult>;
 
+/** One entry in an `editor` document's save history (ADR-0046) — metadata only, no body. */
+export const EditorVersion = z.object({
+  version_id: z.string(),
+  created_at: z.string(),
+  title: z.string().default(""),
+  size: z.number().default(0),
+});
+export type EditorVersion = z.infer<typeof EditorVersion>;
+
+/** A document's save history, newest first. */
+export const EditorVersionList = z.object({
+  versions: z.array(EditorVersion).default([]),
+});
+export type EditorVersionList = z.infer<typeof EditorVersionList>;
+
+/** One past version's full content, fetched when the operator views it (ADR-0046). */
+export const EditorVersionContent = z.object({
+  path: z.string(),
+  version_id: z.string(),
+  created_at: z.string(),
+  title: z.string().default(""),
+  content: z.string(),
+});
+export type EditorVersionContent = z.infer<typeof EditorVersionContent>;
+
 /* ── review queue (ADR-0033, #220) ───────────────────────────────────────── */
 
 /**
@@ -541,11 +738,19 @@ export const ReviewSuggestion = z.object({
   id: z.string(),
   title: z.string(),
   path: z.string(),
-  operation: z.enum(["create", "update", "delete"]),
+  // Content ops carry a `diff`; structural ops (move/mkdir/mkproject) are confirmed from
+  // `path`/`to_path`. `append` (notes) is content-like — its diff shows the added text.
+  operation: z.enum(["create", "update", "append", "delete", "move", "mkdir", "mkproject"]),
   origin: z.string().default("agent"),
   note: z.string().default(""),
   created_at: z.string(),
   diff: z.string().default(""),
+  /** Destination for a `move` (empty otherwise). */
+  to_path: z.string().default(""),
+  /** Full texts for the per-hunk review (#KB-refactor): `current` is the live document
+   *  (empty for a create), `content` is the proposal (empty for a delete). */
+  current: z.string().default(""),
+  content: z.string().default(""),
 });
 export type ReviewSuggestion = z.infer<typeof ReviewSuggestion>;
 
@@ -555,6 +760,17 @@ export const ReviewData = z.object({
   suggestions: z.array(ReviewSuggestion).default([]),
 });
 export type ReviewData = z.infer<typeof ReviewData>;
+
+/**
+ * A pending suggestion in the cross-module feed (#KB-refactor): a `ReviewSuggestion` plus
+ * the module + page that owns it, so the chat composer bubble and the Suggestions page can
+ * approve/reject it from anywhere. Served by `GET /platform/v1/suggestions`.
+ */
+export const PendingSuggestion = ReviewSuggestion.extend({
+  module: z.string(),
+  page_id: z.string(),
+});
+export type PendingSuggestion = z.infer<typeof PendingSuggestion>;
 
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 
@@ -579,14 +795,29 @@ export const HoverCard = z.object({
 });
 export type HoverCard = z.infer<typeof HoverCard>;
 
-/** A read-only email shown in the panel's `email-reader` view (used by 3.8 mail). */
+/** An email shown in the panel's `email-reader` view (used by 3.8 mail). */
 export const EmailMessage = z.object({
   subject: z.string().default("(no subject)"),
   from: z.string().nullish(),
   date: z.string().nullish(),
   body: z.string().default(""),
+  /** Owning module + id, so the reader can invoke this message's actions and re-fetch itself. */
+  module: z.string().default("mail"),
+  message_id: z.string().default(""),
+  /** Current read state — drives the status line and which toggle the reader shows. */
+  unread: z.boolean().default(false),
+  /** Tool-backed actions on this message (ADR-0024) — e.g. Mark as read / Mark as unread. */
+  actions: z.array(BoardAction).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
+
+/** A text file's contents for the right-panel `doc-reader` view (#KB-refactor, req 6). */
+export const FileText = z.object({
+  path: z.string(),
+  name: z.string(),
+  content: z.string(),
+});
+export type FileText = z.infer<typeof FileText>;
 
 export const PlatformInfo = z.object({
   contract_version: z.string(),

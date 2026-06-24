@@ -70,3 +70,8 @@ loopback-bound and individually overridable.
 
 > Ollama (`11434`), SearXNG, `blackbox-exporter`, and `node-exporter` are
 > internal-only — not published to the host. They take no host port.
+>
+> The observability ports — Prometheus (`9090`), Alertmanager (`9093`), Loki (`3100`),
+> Tempo (`4317`/`4318`), Grafana (`3000`) — only bind when the stack is started with
+> `--profile observability` (the stack is opt-in). A plain `docker compose up` never
+> publishes them, so they're free for other use unless you enable the profile.

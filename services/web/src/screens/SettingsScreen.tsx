@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { EpsilonMark } from "@/components/Logo";
+import { MemorySection } from "@/components/MemorySection";
 import { Button, Card, Dot, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { ModuleSnapshot } from "@/lib/contracts";
@@ -209,6 +210,143 @@ function OAuthNotice({ message, tone }: { message: string; tone: "ok" | "error" 
   );
 }
 
+/** A short curated list for the picker; the field accepts any IANA name by free text. */
+const COMMON_TIMEZONES = [
+  "UTC",
+  "Europe/Belgrade",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Moscow",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "Asia/Almaty",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+/** The operator's timezone — used by the agent's `now` tool (ADR-0039). Exported for tests. */
+export function TimezoneCard() {
+  const queryClient = useQueryClient();
+  const tz = useQuery({ queryKey: ["timezone"], queryFn: api.timezone });
+  const calStatus = useQuery({
+    queryKey: ["module-status", "calendar"],
+    queryFn: () => api.moduleStatus("calendar"),
+    retry: false,
+  });
+  const save = useMutation({
+    mutationFn: (value: string) => api.setTimezone(value),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["timezone"] }),
+  });
+
+  const current = tz.data?.timezone ?? "";
+  const calendarTz =
+    typeof calStatus.data?.google_timezone === "string" ? calStatus.data.google_timezone : null;
+
+  return (
+    <Card>
+      <h3 className="mb-2 font-serif text-base text-ink">Timezone</h3>
+      <p className="mb-3 text-sm text-ink-dim">
+        The assistant uses this to know your current local time when you mention dates or
+        times — e.g. “add it at 19:00” lands at 19:00 here.
+      </p>
+      {tz.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex flex-col gap-2">
+          <input
+            type="text"
+            list="tz-options"
+            key={current}
+            defaultValue={current}
+            placeholder="e.g. Europe/Belgrade"
+            onBlur={(e) => {
+              const v = e.currentTarget.value.trim();
+              if (v && v !== current) save.mutate(v);
+            }}
+            className="w-full rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          <datalist id="tz-options">
+            {COMMON_TIMEZONES.map((z) => (
+              <option key={z} value={z} />
+            ))}
+          </datalist>
+          {save.isError && <p className="text-xs text-danger">{(save.error as Error).message}</p>}
+          {save.isSuccess && <p className="text-xs text-ok">Saved.</p>}
+          {calendarTz && calendarTz !== current && (
+            <p className="text-xs text-warn">
+              Your Google Calendar is set to <span className="font-mono">{calendarTz}</span>,
+              which differs.{" "}
+              <button
+                type="button"
+                className="underline hover:text-ink"
+                onClick={() => save.mutate(calendarTz)}
+              >
+                Use {calendarTz}
+              </button>
+            </p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** Agent cycles — how many tool-calling rounds a turn runs before it must answer (#297). */
+export function AgentCard() {
+  const queryClient = useQueryClient();
+  const prefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const save = useMutation({
+    mutationFn: (value: number | null) => api.setAgentMaxSteps(value),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
+  });
+  const current = prefs.data?.global_agent_max_steps ?? null;
+
+  return (
+    <Card>
+      <h3 className="mb-2 font-serif text-base text-ink">Agent cycles</h3>
+      <p className="mb-3 text-sm text-ink-dim">
+        How many tool-calling rounds the assistant runs before it must answer. Higher lets it
+        chain more steps (search → read → summarize) but a turn takes longer; lower keeps
+        replies snappy. Leave blank for the default (4); the range is 1–12.
+      </p>
+      {prefs.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={12}
+            step={1}
+            key={current ?? "default"}
+            defaultValue={current ?? ""}
+            placeholder="4"
+            aria-label="Agent cycles"
+            onBlur={(e) => {
+              const raw = e.currentTarget.value.trim();
+              const next = raw === "" ? null : Number(raw);
+              if (next !== current) save.mutate(next);
+            }}
+            className="w-24 rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          {current !== null && (
+            <Button variant="ghost" onClick={() => save.mutate(null)}>
+              Reset to default
+            </Button>
+          )}
+          {save.isError && <p className="text-xs text-danger">{(save.error as Error).message}</p>}
+          {save.isSuccess && <p className="text-xs text-ok">Saved.</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function SettingsScreen() {
   const theme = usePrefs((s) => s.theme);
   const setTheme = usePrefs((s) => s.setTheme);
@@ -295,6 +433,10 @@ export function SettingsScreen() {
           </div>
         </Card>
 
+        <TimezoneCard />
+
+        <AgentCard />
+
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Platform</h3>
           {info.isLoading && <Spinner />}
@@ -310,6 +452,8 @@ export function SettingsScreen() {
           )}
           {info.isError && <p className="text-sm text-warn">core unreachable</p>}
         </Card>
+
+        <MemorySection />
 
         <Card>
           <div className="flex items-start gap-3">

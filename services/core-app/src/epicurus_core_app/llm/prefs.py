@@ -35,6 +35,11 @@ class _LlmPrefRow(_PrefBase):
     embed_default: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # Operator-chosen Ollama context window (num_ctx); NULL means fall back to the env default.
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Operator-chosen Ollama KV-cache type ("f16" | "q8_0" | "q4_0"); NULL = runtime default.
+    # Server-wide, applied via the Ollama container env — not live (see ADR-0046).
+    kv_cache_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Operator-chosen agent loop bound (tool rounds per turn); NULL = the env default.
+    agent_max_steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class LlmPrefsStore:
@@ -64,7 +69,13 @@ class LlmPrefsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_LlmPrefRow.__tablename__)}
-        for name in ("global_default", "embed_default", "context_window"):
+        for name in (
+            "global_default",
+            "embed_default",
+            "context_window",
+            "kv_cache_type",
+            "agent_max_steps",
+        ):
             if name not in existing:
                 type_sql = _LlmPrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -130,4 +141,35 @@ class LlmPrefsStore:
         async with self._session() as session:
             row = await self._get_or_create(session, tenant)
             row.context_window = value
+            await session.commit()
+
+    async def get_kv_cache_type(self, tenant: str) -> str | None:
+        """Return the stored Ollama KV-cache type, or ``None`` if unset."""
+        async with self._session() as session:
+            row = await session.get(_LlmPrefRow, tenant)
+            return row.kv_cache_type if row is not None else None
+
+    async def set_kv_cache_type(self, tenant: str, value: str | None) -> None:
+        """Set or clear the operator's preferred Ollama KV-cache type for ``tenant``.
+
+        Server-wide and applied via the Ollama container's ``OLLAMA_KV_CACHE_TYPE`` env, so
+        it takes effect only after the runtime restarts (the core cannot restart Ollama —
+        ADR-0046). Persisting it lets the UI surface the choice + a restart prompt.
+        """
+        async with self._session() as session:
+            row = await self._get_or_create(session, tenant)
+            row.kv_cache_type = value
+            await session.commit()
+
+    async def get_agent_max_steps(self, tenant: str) -> int | None:
+        """Return the stored agent loop bound (tool rounds per turn), or ``None`` if unset."""
+        async with self._session() as session:
+            row = await session.get(_LlmPrefRow, tenant)
+            return row.agent_max_steps if row is not None else None
+
+    async def set_agent_max_steps(self, tenant: str, value: int | None) -> None:
+        """Set or clear the agent loop bound for ``tenant`` (the route clamps the range)."""
+        async with self._session() as session:
+            row = await self._get_or_create(session, tenant)
+            row.agent_max_steps = value
             await session.commit()

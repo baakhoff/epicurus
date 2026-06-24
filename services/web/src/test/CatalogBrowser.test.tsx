@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CatalogBrowser } from "@/screens/ModelsScreen";
 import { CATALOG, filterCatalog } from "@/data/catalog";
+import { api } from "@/lib/api";
+import type { CatalogResponse } from "@/lib/contracts";
 
 // ── mock downloads store ──────────────────────────────────────────────────────
 
@@ -15,6 +17,22 @@ vi.mock("@/stores/downloads", () => ({
   useDownloads: (selector: (s: unknown) => unknown) =>
     selector({ active: mockActive, pull: mockPull, dismiss: mockDismiss }),
 }));
+
+// ── mock the catalog fetch — CatalogBrowser now reads it from the core (#269) ──
+
+vi.mock("@/lib/api", () => ({ api: { catalog: vi.fn() } }));
+
+const mockCatalog = vi.mocked(api.catalog);
+
+function snapshot(over: Partial<CatalogResponse> = {}): CatalogResponse {
+  return {
+    entries: CATALOG,
+    source: "https://ollama.com/library",
+    updated_at: new Date(),
+    stale: false,
+    ...over,
+  };
+}
 
 function wrapper({ children }: { children: React.ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -88,6 +106,8 @@ describe("filterCatalog", () => {
 beforeEach(() => {
   mockActive = {};
   mockPull.mockClear();
+  mockCatalog.mockReset();
+  mockCatalog.mockResolvedValue(snapshot());
 });
 
 describe("CatalogBrowser", () => {
@@ -97,6 +117,46 @@ describe("CatalogBrowser", () => {
     expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Code" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Embedding" })).toBeInTheDocument();
+    // Capability filters now include Vision and Tools, so the operator can find models that
+    // can call tools / see images (#model-caps).
+    expect(screen.getByRole("button", { name: "Vision" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Tools" })).toBeInTheDocument();
+  });
+
+  it("shows the upstream source once the catalog loads", async () => {
+    mockCatalog.mockResolvedValue(snapshot({ source: "https://ollama.com/library" }));
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    expect(await screen.findByText(/from ollama\.com\/library/i)).toBeInTheDocument();
+  });
+
+  it("falls back to the bundled list and says so when the catalog is unreachable", async () => {
+    mockCatalog.mockRejectedValue(new Error("404"));
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    // The bundled seed still renders (never empty)…
+    expect(screen.getByText("llama3.2:3b")).toBeInTheDocument();
+    // …and the provenance line explains the fallback.
+    expect(await screen.findByText(/showing the built-in list/i)).toBeInTheDocument();
+  });
+
+  it("renders a live entry's params and pull count from the snapshot", async () => {
+    mockCatalog.mockResolvedValue(
+      snapshot({
+        entries: [
+          {
+            id: "qwen3:8b",
+            family: "qwen3",
+            params: "8b",
+            size_gb: null,
+            description: "Live entry parsed upstream.",
+            tags: ["general"],
+            pulls: "31.3M",
+          },
+        ],
+      }),
+    );
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    expect(await screen.findByText("qwen3:8b")).toBeInTheDocument();
+    expect(screen.getByText(/31\.3M pulls/)).toBeInTheDocument();
   });
 
   it("renders Pull buttons for non-installed models", () => {

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_notes.db import NotesStore
+from epicurus_notes.db import NoteFolderStore, NotesStore
 
 TENANT = "test"
 
@@ -16,6 +16,14 @@ async def store() -> NotesStore:
     s = NotesStore(engine)
     await s.init()
     return s
+
+
+@pytest.fixture
+async def folders() -> NoteFolderStore:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    f = NoteFolderStore(engine)
+    await f.init()
+    return f
 
 
 async def test_count_empty(store: NotesStore) -> None:
@@ -63,3 +71,102 @@ async def test_last_updated_at_is_iso(store: NotesStore) -> None:
     from datetime import datetime
 
     datetime.fromisoformat(result)
+
+
+# ── NoteFolderStore (#KB-refactor) ─────────────────────────────────────────────
+
+
+async def test_folder_add_is_idempotent_and_lists_sorted(folders: NoteFolderStore) -> None:
+    assert await folders.add(tenant=TENANT, path="b") is True
+    assert await folders.add(tenant=TENANT, path="a/c") is True
+    assert await folders.add(tenant=TENANT, path="a") is True
+    # A second add of the same path is a no-op (False) — the unique row already exists.
+    assert await folders.add(tenant=TENANT, path="b") is False
+    # Sorted so a parent ("a") precedes its child ("a/c").
+    assert await folders.list(tenant=TENANT) == ["a", "a/c", "b"]
+
+
+async def test_folder_delete_and_tenant_isolation(folders: NoteFolderStore) -> None:
+    await folders.add(tenant="t1", path="shared")
+    await folders.add(tenant="t2", path="shared")
+    assert await folders.delete(tenant="t1", path="shared") is True
+    assert await folders.list(tenant="t1") == []
+    # t2's identically-named folder is untouched.
+    assert await folders.list(tenant="t2") == ["shared"]
+    # Deleting a missing folder is a no-op (False).
+    assert await folders.delete(tenant="t1", path="shared") is False
+
+
+# ── version history (ADR-0046) ────────────────────────────────────────────────
+
+
+async def test_add_version_records_each_distinct_save_newest_first(store: NotesStore) -> None:
+    await store.add_version(tenant=TENANT, slug="a", title="One", content="one")
+    await store.add_version(tenant=TENANT, slug="a", title="Two", content="two")
+    await store.add_version(tenant=TENANT, slug="a", title="Three", content="three")
+
+    versions = await store.list_versions(tenant=TENANT, slug="a")
+    assert [v.title for v in versions] == ["Three", "Two", "One"]
+    # size is the body length, not a stored body.
+    assert [v.size for v in versions] == [len("three"), len("two"), len("one")]
+    # version_id is the stringified row PK, monotonically increasing with insert order.
+    ids = [int(v.version_id) for v in versions]
+    assert ids == sorted(ids, reverse=True)
+
+
+async def test_add_version_dedups_byte_identical_resave(store: NotesStore) -> None:
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="same")
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="same")
+    assert len(await store.list_versions(tenant=TENANT, slug="a")) == 1
+    # A changed body does record a new version; re-saving that again dedups.
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="changed")
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="changed")
+    assert len(await store.list_versions(tenant=TENANT, slug="a")) == 2
+
+
+async def test_add_version_retains_only_newest_max(store: NotesStore) -> None:
+    from epicurus_notes.db import MAX_VERSIONS
+
+    total = MAX_VERSIONS + 10
+    for i in range(total):
+        await store.add_version(tenant=TENANT, slug="a", title=f"v{i}", content=f"body-{i}")
+
+    versions = await store.list_versions(tenant=TENANT, slug="a")
+    assert len(versions) == MAX_VERSIONS
+    # The newest MAX_VERSIONS survive; the oldest 10 are pruned.
+    assert versions[0].title == f"v{total - 1}"
+    assert versions[-1].title == f"v{total - MAX_VERSIONS}"
+
+
+async def test_get_version_returns_full_content(store: NotesStore) -> None:
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="full body here")
+    [summary] = await store.list_versions(tenant=TENANT, slug="a")
+    fetched = await store.get_version(tenant=TENANT, slug="a", version_id=summary.version_id)
+    assert fetched is not None
+    assert fetched.content == "full body here"
+    assert fetched.title == "A"
+    assert fetched.version_id == summary.version_id
+
+
+async def test_get_version_unknown_or_garbage_is_none(store: NotesStore) -> None:
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="x")
+    assert await store.get_version(tenant=TENANT, slug="a", version_id="999999") is None
+    assert await store.get_version(tenant=TENANT, slug="a", version_id="not-an-int") is None
+    assert await store.get_version(tenant=TENANT, slug="a", version_id="") is None
+
+
+async def test_get_version_is_tenant_scoped(store: NotesStore) -> None:
+    await store.add_version(tenant="tenant-a", slug="a", title="A", content="secret")
+    [v] = await store.list_versions(tenant="tenant-a", slug="a")
+    # tenant-b cannot read tenant-a's version by id, and sees no versions of its own.
+    assert await store.get_version(tenant="tenant-b", slug="a", version_id=v.version_id) is None
+    assert await store.list_versions(tenant="tenant-b", slug="a") == []
+
+
+async def test_list_versions_is_slug_scoped(store: NotesStore) -> None:
+    await store.add_version(tenant=TENANT, slug="a", title="A", content="a-body")
+    await store.add_version(tenant=TENANT, slug="b", title="B", content="b-body")
+    a = await store.list_versions(tenant=TENANT, slug="a")
+    assert [v.title for v in a] == ["A"]
+    # A version of "a" is not fetchable under slug "b".
+    assert await store.get_version(tenant=TENANT, slug="b", version_id=a[0].version_id) is None

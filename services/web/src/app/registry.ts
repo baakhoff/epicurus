@@ -14,6 +14,8 @@ export interface Surface {
   icon: LucideIcon;
 }
 
+// Memory is no longer a top-level surface — it lives at the foot of Settings, since it's
+// reference you curate occasionally rather than a place you visit often (ADR-0045).
 export const SURFACES: Surface[] = [
   { path: "/", label: "Chat", icon: MessageCircle },
   { path: "/models", label: "Models", icon: Cpu },

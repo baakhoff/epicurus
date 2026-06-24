@@ -137,6 +137,10 @@ class ChatResult(BaseModel):
     model: str
     content: str
     tool_calls: list[dict[str, Any]] | None = None
+    # The model's reasoning / chain-of-thought, when it exposes one (a reasoning model, or a
+    # local model that inlines ``<think>…</think>``). Surfaced in the activity timeline and
+    # kept out of ``content`` so the answer stays clean (ADR-0041).
+    reasoning: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 

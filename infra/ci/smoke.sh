@@ -171,6 +171,14 @@ printf '%s' "$rdy" | grep -q '"components"' || die "readiness endpoint returned 
 printf '%s' "$rdy" | grep -q '"power"' || die "readiness snapshot missing power state: $rdy"
 ok "readiness endpoint serves a warming snapshot (ADR-0027)"
 
+# Model catalog (#269): the endpoint must serve a non-empty snapshot the instant core is
+# up — the built-in seed guarantees entries even before (or without) the upstream fetch, so
+# this asserts the wiring without depending on CI having outbound internet.
+cat="$(http "http://core-app:8080/platform/v1/llm/catalog" || true)"
+printf '%s' "$cat" | grep -q '"entries"' || die "model catalog endpoint returned no snapshot: $cat"
+printf '%s' "$cat" | grep -q '"id"' || die "model catalog served no entries (seed missing?): $cat"
+ok "model catalog endpoint serves entries (seed or live, #269)"
+
 # qdrant upgrade-recovery guard (#229): the one-shot must complete cleanly, and the
 # new /proc-based healthcheck must report healthy (a crash-looping qdrant binds no port
 # and would be unhealthy). compose-validate can't see either — only a live boot can.

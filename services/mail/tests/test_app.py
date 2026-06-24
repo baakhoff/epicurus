@@ -119,6 +119,33 @@ class TestGetMessage:
         body = resp.json()
         assert "invoice attached" in body["body"]
 
+    def test_includes_module_id_and_read_state(self, client: TestClient) -> None:
+        # The reader needs module + id to invoke actions and re-fetch itself (#277).
+        body = client.get("/messages/msg1").json()
+        assert body["module"] == "mail"
+        assert body["message_id"] == "msg1"
+        assert body["unread"] is False
+
+    def test_read_message_offers_mark_unread_action(self, client: TestClient) -> None:
+        # The default sample is read → the toggle marks it unread.
+        body = client.get("/messages/msg1").json()
+        assert len(body["actions"]) == 1
+        action = body["actions"][0]
+        assert action["tool"] == "mail_mark_unread"
+        assert action["label"] == "Mark as unread"
+        assert action["args"] == {"message_id": "msg1"}
+
+    def test_unread_message_offers_mark_read_action(self) -> None:
+        msg = _sample()
+        msg.unread = True
+        local_client = _client_with_message(msg)
+        body = local_client.get("/messages/msg1").json()
+        assert body["unread"] is True
+        action = body["actions"][0]
+        assert action["tool"] == "mail_mark_read"
+        assert action["label"] == "Mark as read"
+        assert action["args"] == {"message_id": "msg1"}
+
     def test_missing_message_returns_404(self, client: TestClient) -> None:
         with patch("epicurus_mail.app.GmailProvider") as mock_cls:
             provider = AsyncMock(spec=MailProvider)

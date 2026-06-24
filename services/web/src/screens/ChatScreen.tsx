@@ -12,10 +12,12 @@ import {
   History,
   Pencil,
   RefreshCw,
+  Sparkles,
   SquarePen,
   Square,
   SendHorizonal,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -28,6 +30,7 @@ import {
   refsById,
 } from "@/components/EntityRef";
 import { Markdown } from "@/components/Markdown";
+import { SuggestionReviewModal } from "@/components/SuggestionReviewModal";
 import { ProcessTimeline, ReadinessBar, ThinkingIndicator } from "@/components/TurnActivity";
 import {
   Badge,
@@ -41,9 +44,9 @@ import {
   cn,
 } from "@/components/ui";
 import { activityTimeline } from "@/lib/activity";
-import { api } from "@/lib/api";
-import type { Attachment, EntityRef, MessageRecord } from "@/lib/contracts";
-import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
+import { ApiError, api } from "@/lib/api";
+import type { Attachment, EntityRef, MessageRecord, PendingSuggestion } from "@/lib/contracts";
+import { relativeTime, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
@@ -212,7 +215,7 @@ function ModelPicker() {
   const setModel = usePrefs((s) => s.setModel);
   const recents = usePrefs((s) => s.recentModels);
   const [custom, setCustom] = useState("");
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models, enabled: open });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
 
@@ -241,6 +244,7 @@ function ModelPicker() {
                   key={m.name}
                   label={m.name}
                   loaded={m.loaded}
+                  size={m.size}
                   active={model === m.name}
                   onPick={() => {
                     setModel(m.name);
@@ -316,11 +320,13 @@ function PickRow({
   label,
   active,
   loaded = false,
+  size = null,
   onPick,
 }: {
   label: string;
   active: boolean;
   loaded?: boolean;
+  size?: number | null;
   onPick: () => void;
 }) {
   return (
@@ -332,7 +338,8 @@ function PickRow({
       )}
     >
       <span className="truncate">{label}</span>
-      <span className="flex items-center gap-2">
+      <span className="flex shrink-0 items-center gap-2">
+        {size != null && <span className="text-xs text-ink-faint">{formatBytes(size)}</span>}
         {loaded && <Badge tone="ok">loaded</Badge>}
         {active && <Check size={14} />}
       </span>
@@ -386,6 +393,99 @@ function Welcome() {
   );
 }
 
+/* ── suggestion bubble (#KB-refactor) ───────────────────────────────────────── */
+
+const SUGGESTION_VERB: Record<PendingSuggestion["operation"], string> = {
+  create: "add",
+  update: "edit",
+  append: "append to",
+  delete: "delete",
+  move: "move",
+  mkdir: "add a folder",
+  mkproject: "add a knowledge base",
+};
+
+/**
+ * A bubble above the composer when the assistant has filed suggestions (ADR-0033). A
+ * one-tap structural op (move / new folder / new knowledge base) can be approved inline;
+ * a richer change opens the review overlay. Ignore leaves it on the Suggestions page.
+ */
+function SuggestionBubble() {
+  const qc = useQueryClient();
+  const pending = useQuery({
+    queryKey: ["suggestions"],
+    queryFn: api.suggestions,
+    staleTime: 30_000,
+  });
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [reviewing, setReviewing] = useState<PendingSuggestion | null>(null);
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["suggestions"] });
+
+  const approveSimple = useMutation({
+    mutationFn: (s: PendingSuggestion) => api.approveSuggestion(s.module, s.page_id, s.id),
+    onSuccess: invalidate,
+    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not approve."),
+  });
+
+  const active = (pending.data ?? []).filter((s) => !dismissed.has(s.id));
+  const latest = active.at(-1);
+  if (!latest) return null;
+
+  const simple =
+    latest.operation === "move" ||
+    latest.operation === "mkdir" ||
+    latest.operation === "mkproject";
+  const target = latest.operation === "move" ? `${latest.path} → ${latest.to_path}` : latest.path;
+
+  return (
+    <>
+      <div className="mx-auto mb-2 flex max-w-2xl items-center gap-2 rounded-(--radius-card) border border-accent/40 bg-accent-dim px-3 py-2 text-sm">
+        <Sparkles size={15} className="shrink-0 text-accent" />
+        <span className="min-w-0 flex-1 truncate text-ink">
+          {active.length > 1 && (
+            <span className="text-ink-faint">{active.length} suggestions · </span>
+          )}
+          The assistant wants to {SUGGESTION_VERB[latest.operation]}{" "}
+          <span className="font-mono text-xs">{target}</span>
+        </span>
+        {simple ? (
+          <Button
+            variant="primary"
+            className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            busy={approveSimple.isPending}
+            onClick={() => approveSimple.mutate(latest)}
+          >
+            Approve
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            onClick={() => setReviewing(latest)}
+          >
+            Open
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          className="h-7 shrink-0 px-2.5 py-0 text-xs"
+          onClick={() => setDismissed((p) => new Set(p).add(latest.id))}
+        >
+          Ignore
+        </Button>
+      </div>
+      {reviewing && (
+        <SuggestionReviewModal
+          key={reviewing.id}
+          suggestion={reviewing}
+          onClose={() => setReviewing(null)}
+          onResolved={invalidate}
+        />
+      )}
+    </>
+  );
+}
+
 /* ── the screen ─────────────────────────────────────────────────────────── */
 
 export function ChatScreen() {
@@ -416,8 +516,23 @@ export function ChatScreen() {
     queryKey: ["session", chat.sessionId],
     queryFn: () => api.sessionMessages(chat.sessionId),
   });
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+
+  // The model this chat will actually use (the per-chat choice, else the core default). If it's
+  // a local one, check whether it can call tools so we can warn that it's chat-only.
+  const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
+  const effectiveIsLocal = Boolean(effectiveModel) && !effectiveModel!.includes("/");
+  const modelDetails = useQuery({
+    queryKey: ["modelDetails", effectiveModel],
+    queryFn: () => api.modelDetails(effectiveModel!),
+    enabled: effectiveIsLocal,
+  });
+  const caps = modelDetails.data?.capabilities ?? [];
+  // Only warn when the runtime actually reported capabilities and tools isn't among them —
+  // an empty list means "unknown", not "no tools".
+  const toolless = effectiveIsLocal && caps.length > 0 && !caps.includes("tools");
 
   const hasAnyBrain =
     (models.data?.length ?? 0) > 0 ||
@@ -458,6 +573,8 @@ export function ChatScreen() {
       async () => {
         await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        // A turn may have filed knowledge-base suggestions — refresh the composer bubble.
+        void queryClient.invalidateQueries({ queryKey: ["suggestions"] });
       },
       sent,
     );
@@ -657,6 +774,16 @@ export function ChatScreen() {
 
       {/* composer */}
       <div className="border-t border-edge px-4 py-3 pb-safe">
+        {toolless && (
+          <div className="mx-auto mb-2 flex max-w-2xl items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
+            <Wrench size={12} className="shrink-0 text-ink-faint" />
+            <span>
+              <span className="font-medium text-ink">{effectiveModel}</span> can't use tools — it
+              can only chat (no calendar, files, or other actions).
+            </span>
+          </div>
+        )}
+        <SuggestionBubble />
         {attachments.length > 0 && (
           <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
             {attachments.map((a) => (

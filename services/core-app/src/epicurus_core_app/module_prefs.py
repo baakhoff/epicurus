@@ -46,6 +46,10 @@ class _ModulePrefRow(_ModulePrefBase):
     # account/collection module (calendar, tasks) (ADR-0030). Empty (``{}``) means "use the
     # silent local default": no enabled external collection, no active view.
     collections: Mapped[str] = mapped_column(Text, default="{}", server_default="'{}'")
+    # Whether agent-proposed changes go through review (#KB-refactor). Default on (NULL on a
+    # pre-existing row ⇒ on). When off, a module that supports suggestions applies the
+    # agent's change directly instead of staging it for the operator.
+    suggestions_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ModulePrefsStore:
@@ -73,7 +77,7 @@ class ModulePrefsStore:
         """
         inspector = inspect(sync_conn)
         existing = {col["name"] for col in inspector.get_columns(_ModulePrefRow.__tablename__)}
-        for name in ("removed", "models", "disabled_tools", "collections"):
+        for name in ("removed", "models", "disabled_tools", "collections", "suggestions_enabled"):
             if name not in existing:
                 type_sql = _ModulePrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
                 sync_conn.exec_driver_sql(
@@ -169,6 +173,30 @@ class ModulePrefsStore:
                 session.add(_ModulePrefRow(tenant=tenant, module=module, collections=encoded))
             else:
                 row.collections = encoded
+            await session.commit()
+
+    async def get_suggestions_enabled(self, tenant: str, module: str) -> bool:
+        """Whether agent changes to ``module`` go through review (default ``True``) (#KB-refactor).
+
+        A missing row or a NULL column (pre-existing deployment) both mean "on" — review is
+        the safe default; the operator turns it off to auto-accept the agent's changes.
+        """
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None or row.suggestions_enabled is None:
+                return True
+            return row.suggestions_enabled
+
+    async def set_suggestions_enabled(self, tenant: str, module: str, enabled: bool) -> None:
+        """Persist whether ``module``'s agent changes go through review (upsert) (#KB-refactor)."""
+        async with self._session() as session:
+            row = await session.get(_ModulePrefRow, (tenant, module))
+            if row is None:
+                session.add(
+                    _ModulePrefRow(tenant=tenant, module=module, suggestions_enabled=enabled)
+                )
+            else:
+                row.suggestions_enabled = enabled
             await session.commit()
 
     async def get_disabled_tools(self, tenant: str, module: str) -> set[str]:

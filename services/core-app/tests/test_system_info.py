@@ -8,7 +8,7 @@ validated here against synthetic output rather than live cards.
 
 from __future__ import annotations
 
-from epicurus_core_app.llm.models import ModelInfo
+from epicurus_core_app.llm.models import ModelDetails, ModelInfo
 from epicurus_core_app.system_info import (
     GpuInfo,
     ModelSize,
@@ -71,6 +71,39 @@ def test_suggest_context_honors_a_lower_cap_for_no_gpu() -> None:
     s = suggest_context(64000, 4700, cap=8192)
     assert s.max <= 8192
     assert s.suggested <= 8192
+
+
+def test_suggest_context_quantized_kv_cache_buys_more_context() -> None:
+    # A constrained GPU where the cache size is the binding limit. A quantized KV cache stores
+    # fewer bytes per token, so the same VRAM should buy a strictly larger max — and below the
+    # trained ceiling so the cache cost (not the cap) is what's being compared.
+    f16 = suggest_context(12288, 4700, kv_cache_type="f16", model_max=131072)
+    q8 = suggest_context(12288, 4700, kv_cache_type="q8_0", model_max=131072)
+    q4 = suggest_context(12288, 4700, kv_cache_type="q4_0", model_max=131072)
+    assert q8.max > f16.max
+    assert q4.max > q8.max
+    # ~half the per-token cost ≈ ~twice the tokens (allow generous slack for the int/clamp math).
+    assert q8.max >= int(f16.max * 1.8)
+
+
+def test_suggest_context_caps_at_the_models_trained_length() -> None:
+    # Plenty of VRAM, but a short-context model: never suggest more than it was trained for.
+    s = suggest_context(49152, 1000, model_max=4096)
+    assert s.max == 4096
+    assert s.suggested <= 4096
+
+
+def test_suggest_context_trained_length_lifts_the_flat_32k_cap() -> None:
+    # A long-context model on a roomy GPU is no longer clipped to 32k (the old flat ceiling):
+    # the trained length is the ceiling, and the memory-derived max can exceed 32768.
+    s = suggest_context(49152, 1000, kv_cache_type="q4_0", model_max=131072)
+    assert s.max > 32768
+
+
+def test_suggest_context_without_trained_length_falls_back_to_32k() -> None:
+    # When the trained length is unknown, the conservative 32k fallback still caps the max.
+    s = suggest_context(49152, 1000)
+    assert s.max == 32768
 
 
 # ── NVIDIA detection ──────────────────────────────────────────────────────────────
@@ -177,17 +210,32 @@ def test_read_ram_total_missing_file_returns_none() -> None:
 
 
 class _FakeGateway:
-    """A stand-in exposing just the two methods the probe needs."""
+    """A stand-in exposing just the methods the probe needs."""
 
-    def __init__(self, *, default: str, models: list[ModelInfo]) -> None:
+    def __init__(
+        self,
+        *,
+        default: str,
+        models: list[ModelInfo],
+        details: dict[str, ModelDetails] | None = None,
+        kv_cache_type: str | None = None,
+    ) -> None:
         self._default = default
         self._models = models
+        self._details = details or {}
+        self._kv = kv_cache_type
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         return self._default
 
     async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
         return self._models
+
+    async def show(self, model: str) -> ModelDetails:
+        return self._details.get(model, ModelDetails())
+
+    async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None:
+        return self._kv
 
 
 async def test_collect_uses_gpu_and_sizes_the_active_model() -> None:
@@ -252,6 +300,48 @@ async def test_collect_handles_hosted_model_with_no_local_size() -> None:
     assert info.suggested_context is not None
 
 
+async def test_collect_threads_kv_cache_type_and_model_details() -> None:
+    # The active model is long-context and the operator chose a q4_0 KV cache. The snapshot must
+    # surface both facts, and the suggestion must use the trained length as the ceiling (so it
+    # can exceed the old flat 32k) rather than clip to it.
+    gateway = _FakeGateway(
+        default="llama3.1",
+        models=[ModelInfo(name="llama3.1:8b", size=4_700_000_000)],
+        details={
+            "llama3.1:8b": ModelDetails(
+                quantization="Q4_K_M", parameter_size="8B", context_length=131072
+            )
+        },
+        kv_cache_type="q4_0",
+    )
+    info = await collect_system_info(
+        gateway,
+        detect=lambda: GpuInfo(vendor="nvidia", name="RTX 4090", vram_total_mb=49152),
+        ram=lambda: 64000,
+    )
+    assert info.kv_cache_type == "q4_0"
+    assert info.model is not None
+    assert info.model.context_length == 131072
+    assert info.model.quantization == "Q4_K_M"
+    # Trained length is the ceiling and the GPU is roomy → the suggestion clears the old 32k cap.
+    assert info.suggested_context is not None
+    assert info.suggested_context.max > 32768
+
+
+async def test_collect_cpu_path_keeps_its_hard_cap_despite_a_long_context_model() -> None:
+    # No GPU: even a 128k-trained model must not push the RAM-based suggestion past the CPU cap.
+    gateway = _FakeGateway(
+        default="llama3.1",
+        models=[ModelInfo(name="llama3.1:8b", size=4_700_000_000)],
+        details={"llama3.1:8b": ModelDetails(context_length=131072)},
+        kv_cache_type="q4_0",
+    )
+    info = await collect_system_info(gateway, detect=lambda: None, ram=lambda: 64000)
+    assert info.gpu is None
+    assert info.suggested_context is not None
+    assert info.suggested_context.max <= 8192
+
+
 # ── helpers ────────────────────────────────────────────────────────────────────────
 
 
@@ -298,6 +388,12 @@ async def test_collect_system_info_includes_cpu() -> None:
 
         async def effective_default(self, tenant_id: str | None = None) -> str:
             return "llama3.2"
+
+        async def show(self, model: str) -> ModelDetails:
+            return ModelDetails()
+
+        async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None:
+            return None
 
     from epicurus_core_app.system_info import CpuInfo
 

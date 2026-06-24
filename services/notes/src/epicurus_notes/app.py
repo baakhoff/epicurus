@@ -1,6 +1,6 @@
-"""Runnable notes service: ops endpoints, the editor + attach page surface, and the
-MCP app (tool-free), with Postgres + Qdrant + the platform API wired for the lifetime
-of the process."""
+"""Runnable notes service: ops endpoints, the editor + review + attach page surfaces, and
+the MCP app (structure + write tools; no read — notes are private), with Postgres + Qdrant
++ the platform API wired for the lifetime of the process."""
 
 from __future__ import annotations
 
@@ -23,11 +23,17 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_notes.attachments import NotesAttachments, create_attachments_router
-from epicurus_notes.db import NotesStore
+from epicurus_notes.db import NoteFolderStore, NotesStore
 from epicurus_notes.indexer import NotesIndexer
+from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
 from epicurus_notes.service import MODULE_NAME, SAVED_SUBJECT, build_module
 from epicurus_notes.settings import NotesSettings
+from epicurus_notes.suggestions import (
+    NoteSuggestionReview,
+    NoteSuggestionStore,
+    create_note_review_router,
+)
 
 
 def _service_version() -> str:
@@ -47,7 +53,8 @@ def create_app() -> FastAPI:
     engine = create_async_engine(settings.database_url)
     store = NotesStore(engine)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
-    platform = PlatformClient(base_url=settings.platform_url, tenant_id=tenant)
+    # module=MODULE_NAME so the platform client can read this module's suggestions setting.
+    platform = PlatformClient(base_url=settings.platform_url, tenant_id=tenant, module=MODULE_NAME)
     indexer = NotesIndexer(
         qdrant,
         platform,
@@ -56,20 +63,37 @@ def create_app() -> FastAPI:
     )
 
     bus = EventBus.from_settings(settings)
-    module = build_module()
-    mcp_app = module.http_app()
+    suggestion_store = NoteSuggestionStore(engine)
+    folders = NoteFolderStore(engine)
 
     async def _on_saved(slug: str) -> None:
         """Announce a saved note on NATS (tenant-scoped) for downstream consumers."""
         await bus.publish(SAVED_SUBJECT, {"slug": slug}, tenant_id=tenant)
 
-    pages = NotesPages(store, indexer, tenant=tenant, on_saved=_on_saved)
+    # Tenant-scope the file tree (constraint #1): <files-root>/<tenant>/notes. The shared
+    # epicurus-files volume mounts at /data; the on-disk .md mirror lives under the tenant
+    # segment so the layout stays per-tenant even on the shared volume.
+    notes_root = settings.notes_root.parent / tenant / settings.notes_root.name
+    mirror = NotesMirror(notes_root, store, tenant=tenant)
+    pages = NotesPages(
+        store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror, folders=folders
+    )
     attachments = NotesAttachments(store, tenant=tenant)
+    # Applies/discards agent-proposed note changes on the operator's word (ADR-0033).
+    review = NoteSuggestionReview(suggestion_store, pages, store, tenant=tenant)
+    # build_module takes the review + platform so its propose tools can auto-apply when the
+    # operator has turned review off (#KB-refactor).
+    module = build_module(store, suggestion_store, review, platform, tenant=tenant)
+    mcp_app = module.http_app()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await store.init()
+            await suggestion_store.init()
+            await folders.init()
+            # One-time copy of pre-existing notes into the shared file space (#KB-refactor).
+            await mirror.backfill()
             await bus.connect()
             log.info("notes service ready", tenant=tenant)
             try:
@@ -83,6 +107,9 @@ def create_app() -> FastAPI:
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
 
+    # The review page (#KB-refactor): registered BEFORE the editor pages router so its
+    # literal /pages/review route wins over the editor's /pages/{page_id} path param.
+    app.include_router(create_note_review_router(review))
     # The editor page (#134) and the chat-attachment surface — the shell renders both;
     # this module supplies note data only (ADR-0018 / ADR-0019).
     app.include_router(create_pages_router(pages))

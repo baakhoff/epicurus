@@ -1,14 +1,25 @@
 """Knowledge module — MCP tool surface.
 
-Registers the tools the agent can call:
+Registers the tools the agent can call. The knowledge base is organised into **projects**
+(top-level folders, each a "knowledge base"); documents are addressed ``<project>/<path>.md``.
 
-* ``knowledge_search`` — embed a query and return the top-k matching chunks
-  from the indexed vault **and** the bundled platform docs, merged by score.
-* ``knowledge_reindex`` — trigger an incremental re-scan of all sources: the
-  operator vault, the bundled platform docs, and each enabled module's docs.
-* ``knowledge_propose_edit`` — stage a create/update/delete of a vault note for
-  operator review (ADR-0033, #220). The agent has **no** direct vault-write tool;
-  every agent-initiated change goes through the review queue and lands only on approval.
+Read-only navigation (so the agent knows where things live):
+
+* ``knowledge_search`` — embed a query, return the top-k chunks from the vault **and** the
+  bundled platform docs, merged by score.
+* ``knowledge_list_projects`` — list the knowledge bases (projects).
+* ``knowledge_tree`` — the folder/document structure of one or all knowledge bases.
+* ``knowledge_read_document`` — read one document's content by path.
+
+Writes — **every** agent change is staged for operator review (ADR-0033, #220); the agent
+has no direct vault-write tool:
+
+* ``knowledge_propose_edit`` — create/update/delete a document.
+* ``knowledge_propose_move`` — move/rename a document or folder.
+* ``knowledge_propose_rename`` — rename in place (keeps the folder).
+* ``knowledge_propose_folder`` — create a folder.
+* ``knowledge_propose_project`` — create a new knowledge base.
+* ``knowledge_reindex`` — re-scan all sources (vault projects, platform docs, module docs).
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ from epicurus_core import (
     EpicurusModule,
     ModelSlot,
     PageSpec,
+    PlatformClient,
     UiAction,
     UiSection,
     tool_envelope,
@@ -34,10 +46,15 @@ from epicurus_knowledge.refs import (
     SOURCE_NOTE,
     doc_title,
     encode_ref,
+    iter_projects,
+    iter_tree_nodes,
+    safe_dir_relative,
+    safe_project,
     safe_relative,
 )
 from epicurus_knowledge.suggestions import (
     REVIEW_PAGE_ID,
+    SuggestionReview,
     SuggestionStore,
     validate_operation,
 )
@@ -139,6 +156,46 @@ directly; the operator approves or rejects it under **Knowledge → Suggestions*
 
 **Returns** a confirmation that the suggestion was queued. Nothing is written or
 indexed until the operator approves it (ADR-0033).
+
+## Projects (knowledge bases)
+
+The knowledge base is split into **projects** — top-level folders, each an independent
+knowledge base. Documents are addressed ``<project>/<folder>/<doc>.md``. Navigate with the
+read-only tools below; restructure with the propose tools (every change is reviewed).
+
+## knowledge_list_projects
+
+List the knowledge bases (projects). No parameters. Returns their names.
+
+## knowledge_tree
+
+Show the folder/document structure ("schema"). Optional ``project`` to scope to one;
+omitted shows all. Returns an indented tree.
+
+## knowledge_read_document
+
+Read one document's full content. ``path`` is ``<project>/<folder>/<doc>.md``.
+
+## knowledge_propose_move
+
+Propose moving/renaming a document or folder (staged for review). Parameters: ``from_path``,
+``to_path``, optional ``note``.
+
+## knowledge_propose_rename
+
+Propose renaming a document or folder in place (staged for review). Parameters: ``path``,
+``new_name`` (a bare name, no ``/``; the ``.md`` suffix is kept for documents), optional
+``note``.
+
+## knowledge_propose_folder
+
+Propose creating a folder (staged for review). Parameters: ``path`` (``<project>/<folder>``),
+optional ``note``.
+
+## knowledge_propose_project
+
+Propose creating a new knowledge base (staged for review). Parameters: ``name`` (a single
+folder name), optional ``note``.
 """,
     },
 ]
@@ -149,6 +206,8 @@ def build_module(
     docs_indexer: KnowledgeIndexer,
     module_docs_indexer: ModuleDocsIndexer,
     suggestions: SuggestionStore,
+    review: SuggestionReview,
+    platform: PlatformClient,
     *,
     tenant: str,
     vault_path: Path,
@@ -163,15 +222,17 @@ def build_module(
         module_docs_indexer: Indexer for per-module documentation (#215),
             also written to ``<tenant>__docs`` under ``module/<name>/`` prefixes.
         suggestions: Store for agent-proposed vault changes awaiting review (#220).
+        review: Applies a staged change when the operator has review turned off.
+        platform: Reads the suggestions-review on/off setting (#KB-refactor).
         tenant: The tenant whose suggestion queue the propose tool writes to.
         vault_path: Vault root, used to path-confine a proposed edit's target.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.13.0",
+        version="0.16.0",
         description=(
-            "Obsidian vault RAG + platform self-documentation: semantic search"
-            " and incremental indexing."
+            "Obsidian vault RAG + platform self-documentation: semantic search,"
+            " incremental indexing, and multi-project knowledge bases."
         ),
         pages=[
             PageSpec(
@@ -237,6 +298,27 @@ def build_module(
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")
+
+    async def _finalize(sid: str, applied_msg: str, pending_msg: str) -> str:
+        """Leave a staged change pending under review, or auto-apply it when review is off.
+
+        The operator can turn review off per module (#KB-refactor) — then the agent's change
+        is applied immediately (the suggestion is approved right after it is staged), reusing
+        the same apply path the operator would. A failed auto-apply (e.g. a read-only watched
+        vault) leaves the change staged rather than losing it.
+        """
+        try:
+            review_on = await platform.get_suggestions_enabled()
+        except Exception:
+            review_on = True  # if the setting can't be read, default to the safe (review) path
+        if review_on:
+            return tool_envelope(pending_msg, [])
+        try:
+            await review.approve(sid)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"{pending_msg} (review is off but applying failed: {detail})", [])
+        return tool_envelope(applied_msg, [])
 
     @module.tool()
     async def knowledge_search(query: str, k: int = 5) -> str:
@@ -344,6 +426,13 @@ def build_module(
             op = validate_operation(operation)
         except ValueError as exc:
             return tool_envelope(str(exc), [])
+        if op not in ("create", "update", "delete"):
+            return tool_envelope(
+                "knowledge_propose_edit handles create/update/delete only; use"
+                " knowledge_propose_move, knowledge_propose_folder, or"
+                " knowledge_propose_project for structural changes.",
+                [],
+            )
         try:
             # Path-confine to the vault (``.md`` only, no traversal) before staging it.
             safe_relative(vault_path, path)
@@ -359,10 +448,211 @@ def build_module(
             origin="agent",
             note=note,
         )
-        return tool_envelope(
+        return await _finalize(
+            suggestion.sid,
+            f"{op.capitalize()} of '{path}' applied directly — review is off.",
             f"Proposed {op} of '{path}' (suggestion {suggestion.sid[:8]}). It is pending"
             " your review in Knowledge → Suggestions; nothing changes until you approve it.",
-            [],
+        )
+
+    # ── Navigation (read-only): how the agent learns where things live ───────────
+
+    @module.tool()
+    async def knowledge_list_projects() -> str:
+        """List the knowledge bases (projects) — the top-level collections of the KB.
+
+        Each knowledge base is an independent set of notes/folders. Use this to discover
+        what exists before reading, organising, or proposing changes. A document inside a
+        knowledge base is addressed as ``<project>/<path>.md``.
+        """
+        projects = iter_projects(vault_path)
+        if not projects:
+            return "No knowledge bases yet. Propose one with knowledge_propose_project(name)."
+        return "Knowledge bases:\n" + "\n".join(f"- {p}" for p in projects)
+
+    @module.tool()
+    async def knowledge_tree(project: str = "") -> str:
+        """Show the folder/document structure of the knowledge base — its schema.
+
+        Pass a *project* (knowledge base) name for just that one; omit it to see every
+        knowledge base. Use this to learn where notes live so you can read them, decide
+        where new notes belong, or plan a move. Paths are ``<project>/<folder>/<doc>.md``.
+        """
+        projects = [project.strip()] if project.strip() else iter_projects(vault_path)
+        if not projects:
+            return "No knowledge bases yet."
+        lines: list[str] = []
+        for proj in projects:
+            lines.append(f"{proj}/")
+            nodes = iter_tree_nodes(vault_path, subdir=proj)
+            if not nodes:
+                lines.append("  (empty)")
+            for node in nodes:
+                depth = node["path"].count("/") + 1
+                name = node["path"].split("/")[-1]
+                suffix = "/" if node["type"] == "dir" else ""
+                lines.append(f"{'  ' * depth}{name}{suffix}")
+        return "\n".join(lines)
+
+    @module.tool()
+    async def knowledge_read_document(path: str) -> str:
+        """Read a knowledge-base document's full content by its path.
+
+        *path* is ``<project>/<folder>/<doc>.md`` (discover it via knowledge_tree /
+        knowledge_list_projects). Use this to read a note whose location you already know;
+        use knowledge_search for semantic lookup. Returns an error if the path is invalid
+        or the document does not exist.
+        """
+        try:
+            target = safe_relative(vault_path, path)
+        except Exception as exc:  # HTTPException(detail=...) from safe_relative
+            detail = getattr(exc, "detail", str(exc))
+            return f"Cannot read {path!r}: {detail}"
+        if not target.is_file():
+            return f"No such document: {path}"
+        return target.read_text(encoding="utf-8", errors="replace")
+
+    # ── Structural changes (staged for review, like every agent write) ───────────
+
+    @module.tool()
+    async def knowledge_propose_move(from_path: str, to_path: str, note: str = "") -> str:
+        """Propose moving or renaming a document or folder, for operator review (ADR-0033).
+
+        Staged as a suggestion — nothing moves until the operator approves it. Use this to
+        reorganise the knowledge base: move a note into a folder, rename it, or move a whole
+        folder. Paths are knowledge-base-relative (``<project>/<path>``).
+
+        Args:
+            from_path: The current path of the document or folder.
+            to_path: The destination path.
+            note: Optional short rationale shown to the operator.
+        """
+        src, dst = from_path.strip(), to_path.strip()
+        if not src or not dst:
+            return tool_envelope("Both from_path and to_path are required.", [])
+        try:
+            safe_dir_relative(vault_path, src)
+            safe_dir_relative(vault_path, dst)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose move: {detail}", [])
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=src,
+            operation="move",
+            proposed_content="",
+            origin="agent",
+            note=note,
+            to_path=dst,
+        )
+        return await _finalize(
+            suggestion.sid,
+            f"Moved '{src}' to '{dst}' directly — review is off.",
+            f"Proposed move of '{src}' to '{dst}' (suggestion {suggestion.sid[:8]}). Pending"
+            " your review in Knowledge → Suggestions; nothing moves until you approve it.",
+        )
+
+    @module.tool()
+    async def knowledge_propose_rename(path: str, new_name: str, note: str = "") -> str:
+        """Propose renaming a document or folder (keeps it where it is), for review (ADR-0033).
+
+        A convenience over knowledge_propose_move: supply the item's *path* and just the new
+        leaf *new_name* (no slashes) — the same folder is kept. For a ``.md`` document the
+        ``.md`` suffix is preserved. Staged as a move suggestion; applied only on approval.
+
+        Args:
+            path: The current path, ``<project>/<…>/<name>``.
+            new_name: The new leaf name (no ``/``).
+            note: Optional short rationale shown to the operator.
+        """
+        src = path.strip()
+        leaf = new_name.strip()
+        if not src or not leaf:
+            return tool_envelope("Both path and new_name are required.", [])
+        if "/" in leaf or "\\" in leaf:
+            return tool_envelope(
+                "new_name must be a bare name (no '/'); use knowledge_propose_move to relocate.",
+                [],
+            )
+        if src.endswith(".md") and not leaf.endswith(".md"):
+            leaf = f"{leaf}.md"
+        parent = src.rsplit("/", 1)[0] if "/" in src else ""
+        dst = f"{parent}/{leaf}" if parent else leaf
+        try:
+            safe_dir_relative(vault_path, src)
+            safe_dir_relative(vault_path, dst)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose rename: {detail}", [])
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=src,
+            operation="move",
+            proposed_content="",
+            origin="agent",
+            note=note,
+            to_path=dst,
+        )
+        return await _finalize(
+            suggestion.sid,
+            f"Renamed '{src}' to '{dst}' directly — review is off.",
+            f"Proposed rename of '{src}' to '{dst}' (suggestion {suggestion.sid[:8]}). Pending"
+            " your review in Knowledge → Suggestions.",
+        )
+
+    @module.tool()
+    async def knowledge_propose_folder(path: str, note: str = "") -> str:
+        """Propose creating a folder in the knowledge base, for operator review (ADR-0033).
+
+        Staged as a suggestion. *path* is ``<project>/<folder>``. (You can also just propose
+        a document at a new path — its parent folders are created with it on approval.)
+        """
+        rel = path.strip()
+        try:
+            safe_dir_relative(vault_path, rel)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose folder {path!r}: {detail}", [])
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=rel,
+            operation="mkdir",
+            proposed_content="",
+            origin="agent",
+            note=note,
+        )
+        return await _finalize(
+            suggestion.sid,
+            f"Created folder '{rel}' directly — review is off.",
+            f"Proposed new folder '{rel}' (suggestion {suggestion.sid[:8]}). Pending your"
+            " review in Knowledge → Suggestions.",
+        )
+
+    @module.tool()
+    async def knowledge_propose_project(name: str, note: str = "") -> str:
+        """Propose creating a new knowledge base (project), for operator review (ADR-0033).
+
+        A knowledge base is a top-level collection of notes. Staged as a suggestion; it is
+        created only on approval. *name* is a single folder name (no slashes).
+        """
+        try:
+            safe_project(vault_path, name)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose knowledge base {name!r}: {detail}", [])
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=name.strip(),
+            operation="mkproject",
+            proposed_content="",
+            origin="agent",
+            note=note,
+        )
+        return await _finalize(
+            suggestion.sid,
+            f"Created knowledge base '{name.strip()}' directly — review is off.",
+            f"Proposed new knowledge base '{name.strip()}' (suggestion {suggestion.sid[:8]})."
+            " Pending your review in Knowledge → Suggestions.",
         )
 
     return module

@@ -12,17 +12,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_notes.db import NotesStore
+from epicurus_notes.db import NoteFolderStore, NotesStore
 from epicurus_notes.pages import NotesPages, create_pages_router, derive_title
 
 TENANT = "test"
 
 
 class _FakeIndexer:
-    """Records index_note calls; optionally raises to simulate an embed failure."""
+    """Records index_note/delete_note calls; optionally raises to simulate an embed failure."""
 
     def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[str] = []
+        self.deleted: list[str] = []
         self._fail = fail
 
     async def index_note(self, slug: str, content: str) -> int:
@@ -31,8 +32,8 @@ class _FakeIndexer:
             raise RuntimeError("embed unavailable")
         return 2
 
-    async def delete_note(self, slug: str) -> None:  # pragma: no cover - unused here
-        pass
+    async def delete_note(self, slug: str) -> None:
+        self.deleted.append(slug)
 
 
 async def _store() -> NotesStore:
@@ -40,6 +41,15 @@ async def _store() -> NotesStore:
     store = NotesStore(engine)
     await store.init()
     return store
+
+
+async def _pages_with_folders(indexer: _FakeIndexer | None = None) -> NotesPages:
+    """A NotesPages backed by both a notes store and a folder store, sharing one engine."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store, folders = NotesStore(engine), NoteFolderStore(engine)
+    await store.init()
+    await folders.init()
+    return NotesPages(store, indexer or _FakeIndexer(), tenant=TENANT, folders=folders)
 
 
 # ── title derivation ──────────────────────────────────────────────────────────
@@ -63,11 +73,11 @@ def test_derive_title(content: str, expected: str) -> None:
 # ── NotesPages behaviour ──────────────────────────────────────────────────────
 
 
-async def test_list_empty_and_can_create_true() -> None:
+async def test_list_empty_and_can_manage_files() -> None:
     pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
     data = await pages.list_docs()
     assert data.docs == []
-    assert data.can_create is True
+    assert data.can_manage_files is True
     assert data.title == "Notes"
 
 
@@ -152,7 +162,7 @@ async def test_router_create_read_list_roundtrip() -> None:
     listed = client.get("/pages/notes")
     assert listed.status_code == 200
     body = listed.json()
-    assert body["can_create"] is True
+    assert body["can_manage_files"] is True
     assert [d["path"] for d in body["docs"]] == ["idea"]
 
     read = client.get("/pages/notes/doc", params={"path": "idea"})
@@ -168,6 +178,139 @@ async def test_router_invalid_slug_is_400() -> None:
     pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
     resp = _client(pages).get("/pages/notes/doc", params={"path": "   "})
     assert resp.status_code == 400
+
+
+# ── folders (#KB-refactor) ─────────────────────────────────────────────────────
+
+
+async def test_empty_folder_persists_as_dir_node() -> None:
+    pages = await _pages_with_folders()
+    await pages.create_folder("work")
+    data = await pages.list_docs()
+    dirs = [(d.path, d.type) for d in data.docs if d.type == "dir"]
+    assert dirs == [("work", "dir")]
+
+
+async def test_nested_note_implies_ancestor_dirs_before_files() -> None:
+    # A slug with "/" implies its folders; dirs must be emitted before files and
+    # parent-before-child so the shell's tree builder can attach each node.
+    pages = await _pages_with_folders()
+    await pages.write_doc("a/b/note", "# Deep")
+    paths = [(d.path, d.type) for d in (await pages.list_docs()).docs]
+    assert paths == [("a", "dir"), ("a/b", "dir"), ("a/b/note", "file")]
+
+
+async def test_create_duplicate_folder_is_409() -> None:
+    pages = await _pages_with_folders()
+    await pages.create_folder("dup")
+    with pytest.raises(HTTPException) as err:
+        await pages.create_folder("dup")
+    assert err.value.status_code == 409
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "/", "a/../b", "a//b", "."])
+async def test_create_folder_rejects_invalid_paths(bad: str) -> None:
+    pages = await _pages_with_folders()
+    with pytest.raises(HTTPException) as err:
+        await pages.create_folder(bad)
+    assert err.value.status_code == 400
+
+
+async def test_delete_empty_folder_succeeds() -> None:
+    pages = await _pages_with_folders()
+    await pages.create_folder("temp")
+    await pages.delete_folder("temp")
+    assert (await pages.list_docs()).docs == []
+
+
+async def test_delete_folder_with_a_note_is_409() -> None:
+    pages = await _pages_with_folders()
+    await pages.create_folder("keep")
+    await pages.write_doc("keep/note", "x")
+    with pytest.raises(HTTPException) as err:
+        await pages.delete_folder("keep")
+    assert err.value.status_code == 409
+
+
+async def test_delete_folder_with_a_child_folder_is_409() -> None:
+    pages = await _pages_with_folders()
+    await pages.create_folder("parent")
+    await pages.create_folder("parent/child")
+    with pytest.raises(HTTPException) as err:
+        await pages.delete_folder("parent")
+    assert err.value.status_code == 409
+
+
+async def test_delete_missing_folder_is_404() -> None:
+    pages = await _pages_with_folders()
+    with pytest.raises(HTTPException) as err:
+        await pages.delete_folder("ghost")
+    assert err.value.status_code == 404
+
+
+# ── move / rename (#KB-refactor) ───────────────────────────────────────────────
+
+
+async def test_move_rekeys_note_and_reindexes() -> None:
+    indexer = _FakeIndexer()
+    pages = await _pages_with_folders(indexer)
+    await pages.write_doc("old", "# Title\n\nbody")
+    result = await pages.move_item("old", "new")
+    assert result == {"path": "new"}
+    assert (await pages.read_doc("new")).content == "# Title\n\nbody"
+    with pytest.raises(HTTPException) as err:
+        await pages.read_doc("old")
+    assert err.value.status_code == 404
+    assert "new" in indexer.calls and "old" in indexer.deleted
+
+
+async def test_move_into_a_folder() -> None:
+    pages = await _pages_with_folders()
+    await pages.write_doc("note", "# N")
+    await pages.move_item("note", "work/note")
+    paths = [(d.path, d.type) for d in (await pages.list_docs()).docs]
+    assert paths == [("work", "dir"), ("work/note", "file")]
+
+
+async def test_move_missing_source_is_404() -> None:
+    pages = await _pages_with_folders()
+    with pytest.raises(HTTPException) as err:
+        await pages.move_item("ghost", "x")
+    assert err.value.status_code == 404
+
+
+async def test_move_to_existing_destination_is_409() -> None:
+    pages = await _pages_with_folders()
+    await pages.write_doc("a", "A")
+    await pages.write_doc("b", "B")
+    with pytest.raises(HTTPException) as err:
+        await pages.move_item("a", "b")
+    assert err.value.status_code == 409
+
+
+# ── router (folder/move/delete HTTP surface) ───────────────────────────────────
+
+
+async def test_router_folder_and_move_roundtrip() -> None:
+    pages = await _pages_with_folders()
+    client = _client(pages)
+
+    assert client.post("/pages/notes/folder", params={"path": "proj"}).status_code == 200
+    client.put("/pages/notes/doc", params={"path": "proj/n"}, json={"content": "# N"})
+    moved = client.post(
+        "/pages/notes/move", json={"from_path": "proj/n", "to_path": "proj/renamed"}
+    )
+    assert moved.status_code == 200
+    assert moved.json()["path"] == "proj/renamed"
+
+    # The doc under the folder moved; the folder still lists.
+    paths = {d["path"] for d in client.get("/pages/notes").json()["docs"]}
+    assert {"proj", "proj/renamed"} <= paths
+
+    # Delete the doc, then the now-empty folder.
+    assert client.delete("/pages/notes/doc", params={"path": "proj/renamed"}).status_code == 204
+    assert client.delete("/pages/notes/folder", params={"path": "proj"}).status_code == 204
+    assert client.get("/pages/notes").json()["docs"] == []
 
 
 # ── version history (ADR-0046) ────────────────────────────────────────────────

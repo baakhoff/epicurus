@@ -11,9 +11,11 @@ import {
   type CollectionPrefs,
   EditorDocContent,
   EditorSaveResult,
+  EditorScope,
   EditorVersionContent,
   EditorVersionList,
   EmailMessage,
+  FileText,
   HoverCard,
   LlmPrefs,
   LogEntry,
@@ -27,6 +29,7 @@ import {
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
+  PendingSuggestion,
   PlatformInfo,
   PowerStatus,
   ProviderInfo,
@@ -80,7 +83,11 @@ export const api = {
       body: JSON.stringify({ state }),
     }),
 
-  models: () => request(z.array(ModelInfo), "/platform/v1/llm/models"),
+  models: (withCapabilities = false) =>
+    request(
+      z.array(ModelInfo),
+      `/platform/v1/llm/models${withCapabilities ? "?capabilities=true" : ""}`,
+    ),
   // The browsable model catalog the core parses from upstream on a schedule (#269).
   catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>
@@ -104,13 +111,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
-  // Global Ollama KV-cache type ("f16"|"q8_0"|"q4_0"|null). Applied via the Ollama container
-  // env on restart — not live (ADR-0046); the UI surfaces the restart requirement.
+  // Global Ollama KV-cache type ("q8_0"|"q4_0"|null=default f16). The core writes Ollama's env
+  // file and restarts it to apply (#307); `applied` is false when Docker isn't wired, so the UI
+  // falls back to the manual-restart instructions.
   setKvCacheType: (value: string | null) =>
-    request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/kv-cache-type", {
-      method: "PUT",
-      body: JSON.stringify({ value }),
-    }),
+    request(
+      z.object({ status: z.string(), applied: z.boolean() }),
+      "/platform/v1/llm/prefs/kv-cache-type",
+      { method: "PUT", body: JSON.stringify({ value }) },
+    ),
   // Agent loop bound (tool rounds per turn); null = the env default. The core clamps 1-12.
   setAgentMaxSteps: (value: number | null) =>
     request(
@@ -282,6 +291,13 @@ export const api = {
       { method: "POST" },
     );
   },
+  // Create a new knowledge base (project) — a top-level scope (#KB-refactor).
+  createModuleProject: (name: string, pageId: string, projectName: string) =>
+    request(
+      EditorScope,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/project?project=${encodeURIComponent(projectName)}`,
+      { method: "POST" },
+    ),
   // Delete a document from an editor page's store (#216).
   deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
     const response = await fetch(
@@ -314,11 +330,17 @@ export const api = {
       { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
     ),
   // Approve a staged suggestion on a `review` page — applies + indexes it (#220).
-  approveSuggestion: (name: string, pageId: string, suggestionId: string) =>
+  // `content` (optional) is the operator's per-hunk-merged result for an edit (#KB-refactor).
+  approveSuggestion: (
+    name: string,
+    pageId: string,
+    suggestionId: string,
+    content?: string,
+  ) =>
     request(
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/approve`,
-      { method: "POST" },
+      { method: "POST", body: JSON.stringify(content === undefined ? {} : { content }) },
     ),
   // Reject a staged suggestion on a `review` page — discards it (#220).
   rejectSuggestion: (name: string, pageId: string, suggestionId: string) =>
@@ -326,6 +348,21 @@ export const api = {
       z.record(z.string(), z.unknown()),
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/suggestions/${encodeURIComponent(suggestionId)}/reject`,
       { method: "POST" },
+    ),
+  // The cross-module pending-suggestions feed (#KB-refactor): drives the chat composer
+  // bubble and the Suggestions page; each item carries its owning module + page id.
+  suggestions: () => request(z.array(PendingSuggestion), `/platform/v1/suggestions`),
+  // Whether a module's agent changes go through review (#KB-refactor). Off ⇒ auto-accept.
+  suggestionsEnabled: (module: string) =>
+    request(
+      z.object({ enabled: z.boolean() }),
+      `/platform/v1/modules/${encodeURIComponent(module)}/suggestions-enabled`,
+    ),
+  setSuggestionsEnabled: (module: string, enabled: boolean) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/modules/${encodeURIComponent(module)}/suggestions-enabled`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
     ),
   // Resolve an entity reference to its hover-card envelope, proxied by the core (ADR-0019).
   resolveEntity: (name: string, kind: string, refId: string) =>
@@ -344,6 +381,12 @@ export const api = {
     request(
       EmailMessage,
       `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
+    ),
+  // A text file's contents for the Files split-screen reader (#KB-refactor, req 6).
+  readModuleText: (module: string, path: string) =>
+    request(
+      FileText,
+      `/platform/v1/modules/${encodeURIComponent(module)}/read?path=${encodeURIComponent(path)}`,
     ),
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).

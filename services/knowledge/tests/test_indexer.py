@@ -28,6 +28,31 @@ def _suggestions() -> Any:
     return SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
 
 
+def _module_for(vault_indexer: Any, docs_indexer: Any, module_docs: Any, vault: Path) -> Any:
+    """build_module with a store + review + a review-on platform mock (#KB-refactor)."""
+    from epicurus_core import PlatformClient
+    from epicurus_knowledge.pages import VaultPages
+    from epicurus_knowledge.service import build_module
+    from epicurus_knowledge.suggestions import SuggestionReview
+
+    store = _suggestions()
+    review = SuggestionReview(
+        store, VaultPages(vault, vault_indexer), vault_indexer, vault_path=vault, tenant=TENANT
+    )
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    return build_module(
+        vault_indexer,
+        docs_indexer,
+        module_docs,
+        store,
+        review,
+        platform,
+        tenant=TENANT,
+        vault_path=vault,
+    )
+
+
 def _fake_vectors(texts: list[str]) -> list[list[float]]:
     return [[float(i), 0.0, 0.0, 0.0] for i in range(len(texts))]
 
@@ -250,21 +275,12 @@ def _make_docs_indexer(tmp_path: Path) -> KnowledgeIndexer:
 
 
 async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Path) -> None:
-    from epicurus_knowledge.service import build_module
-
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    module = build_module(
-        vault_indexer,
-        docs_indexer,
-        module_docs_stub,
-        _suggestions(),
-        tenant=TENANT,
-        vault_path=vault,
-    )
+    module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
@@ -274,19 +290,10 @@ async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Pa
 async def test_manifest_declares_tool_and_event(
     note_index: NoteIndex, vault: Path, tmp_path: Path
 ) -> None:
-    from epicurus_knowledge.service import build_module
-
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(
-        vault_indexer,
-        docs_indexer,
-        MagicMock(),
-        _suggestions(),
-        tenant=TENANT,
-        vault_path=vault,
-    )
+    module = _module_for(vault_indexer, docs_indexer, MagicMock(), vault)
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert "knowledge_reindex" in tool_names
@@ -363,8 +370,6 @@ async def test_search_skips_hits_with_no_payload(note_index: NoteIndex, vault: P
 async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Path) -> None:
     from unittest.mock import MagicMock
 
-    from epicurus_knowledge.service import build_module
-
     qdrant = _make_mock_qdrant()
     hit = MagicMock()
     hit.score = 0.8
@@ -380,14 +385,7 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Pat
     )
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
-    module = build_module(
-        vault_indexer,
-        docs_indexer,
-        MagicMock(),
-        _suggestions(),
-        tenant=TENANT,
-        vault_path=vault,
-    )
+    module = _module_for(vault_indexer, docs_indexer, MagicMock(), vault)
     _content, structured = await module.mcp.call_tool("knowledge_search", {"query": "B", "k": 1})
     assert structured is not None
 
@@ -419,8 +417,6 @@ async def test_merged_search_returns_hits_from_both_sources(
 ) -> None:
     """knowledge_search merges vault + docs results ranked by score."""
     from unittest.mock import MagicMock
-
-    from epicurus_knowledge.service import build_module
 
     vault_qdrant = _make_mock_qdrant()
     vault_hit = MagicMock()
@@ -461,14 +457,7 @@ async def test_merged_search_returns_hits_from_both_sources(
 
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    module = build_module(
-        vault_indexer,
-        docs_indexer,
-        module_docs_stub,
-        _suggestions(),
-        tenant=TENANT,
-        vault_path=vault,
-    )
+    module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
     from epicurus_core.contracts import ToolEnvelope
 
     content, _ = await module.mcp.call_tool("knowledge_search", {"query": "platform", "k": 5})
@@ -487,8 +476,6 @@ async def test_reindex_sums_both_sources(
 ) -> None:
     """knowledge_reindex returns summed counts across vault and docs."""
     from sqlalchemy.ext.asyncio import create_async_engine
-
-    from epicurus_knowledge.service import build_module
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     doc_idx = DocIndex(engine)
@@ -510,14 +497,7 @@ async def test_reindex_sums_both_sources(
 
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
-    module = build_module(
-        vault_indexer,
-        docs_indexer,
-        module_docs_stub,
-        _suggestions(),
-        tenant=TENANT,
-        vault_path=vault,
-    )
+    module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
     _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]

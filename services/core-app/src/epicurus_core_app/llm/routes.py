@@ -13,6 +13,7 @@ from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, ProviderInfo
+from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 
@@ -108,6 +109,7 @@ def create_llm_router(
     default_tenant: str = "local",
     catalog: ModelCatalog | None = None,
     model_settings: ModelSettingsStore | None = None,
+    ollama_runtime: OllamaRuntime | None = None,
 ) -> APIRouter:
     """Gateway management routes — installed models, the browse catalog, providers,
     pulls, and prefs.
@@ -119,8 +121,11 @@ def create_llm_router(
     router = APIRouter(prefix="/platform/v1/llm", tags=["llm"])
 
     @router.get("/models", response_model=list[ModelInfo])
-    async def list_models() -> list[ModelInfo]:
-        return await gateway.models()
+    async def list_models(capabilities: bool = False) -> list[ModelInfo]:
+        """List local models. ``?capabilities=true`` additionally fills each model's reported
+        capabilities (tools/vision/…) from ``/api/show`` — opt-in, one call per model, so the
+        Models page can badge them while the chat picker stays light."""
+        return await gateway.models(with_capabilities=capabilities)
 
     @router.get("/catalog", response_model=CatalogResponse)
     async def get_catalog() -> CatalogResponse:
@@ -247,16 +252,19 @@ def create_llm_router(
         return {"status": "ok", "value": request.value}
 
     @router.put("/prefs/kv-cache-type")
-    async def set_kv_cache_type(request: SetKvCacheTypeRequest) -> dict[str, str | None]:
-        """Set or clear the operator's preferred Ollama KV-cache type for this tenant.
+    async def set_kv_cache_type(request: SetKvCacheTypeRequest) -> dict[str, str | bool | None]:
+        """Set the operator's Ollama KV-cache type and apply it to the live runtime.
 
-        Persists the choice; it is applied via the Ollama container's `OLLAMA_KV_CACHE_TYPE`
-        env and takes effect only after the runtime restarts (the core cannot restart Ollama
-        — ADR-0046). The UI surfaces the restart requirement."""
+        Persists the choice, then — when Docker is wired — writes Ollama's start-up env file and
+        restarts the container so it takes effect; flash attention is enabled automatically for
+        the quantized types (#307, amends ADR-0046). ``applied`` is ``False`` when Docker is
+        unavailable, in which case the UI falls back to the manual-restart instructions.
+        """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_kv_cache_type(default_tenant, request.value)
-        return {"status": "ok", "value": request.value}
+        applied = ollama_runtime.apply_kv_cache_type(request.value) if ollama_runtime else False
+        return {"status": "ok", "value": request.value, "applied": applied}
 
     @router.put("/prefs/agent-max-steps")
     async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | None | str]:

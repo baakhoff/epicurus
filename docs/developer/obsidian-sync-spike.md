@@ -26,8 +26,10 @@ other process keeps in step with Obsidian — epicurus just indexes that folder.
 The operator runs Obsidian (with Sync) on the same host as epicurus, or onto a folder
 that host can see, and bind-mounts that vault directory into the `knowledge` container.
 
-epicurus **already supports the mount**: `KNOWLEDGE_HOST_VAULT` maps a host directory
-to `/vault` (read-write, container uid 10001 — see [knowledge](../services/knowledge.md)).
+epicurus **already supports the mount**: the shared file space (`EPICURUS_FILES_ROOT`, the
+tenant-scoped `knowledge/` subfolder mounted at `/data/<tenant>/knowledge` — read-write,
+container uid 10001; `<tenant>` = `DEFAULT_TENANT_ID`; see
+[knowledge](../services/knowledge.md)) holds the vault.
 So the only real gap is **change detection**: today the index refreshes on startup or on
 an explicit `knowledge_reindex`; edits that Obsidian Sync lands in the folder aren't
 picked up until then.
@@ -39,8 +41,9 @@ picked up until then.
   a desktop/home-server box, awkward for a headless remote VPS; two writers (the
   Obsidian client and the knowledge **editor page**, #130) touch the same files, so
   write-back needs care (see *Conflicts*).
-- **What it needs of the user:** point `KNOWLEDGE_HOST_VAULT` at the Obsidian-synced
-  vault folder and keep an Obsidian client syncing it on that machine.
+- **What it needs of the user:** make the shared file space's `knowledge/` subfolder
+  (`EPICURUS_FILES_ROOT`) the Obsidian-synced vault and keep an Obsidian client syncing it
+  on that machine.
 - **Implementation gap (the follow-up):** a file-watcher (e.g. `watchfiles`) in the
   knowledge service that debounces filesystem changes under the vault and triggers an
   **incremental** re-index (the indexer is already hash/mtime-incremental, so a watch

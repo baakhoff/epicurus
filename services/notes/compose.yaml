@@ -21,6 +21,18 @@ services:
       # Embeddings come from the core's LLM gateway — the module holds no model key
       # (ADR-0010). Service name on the internal network is `core-app`, not `core`.
       PLATFORM_URL: http://core-app:8080
+      # Notes' folder in the shared file space (#KB-refactor): the on-disk .md mirror is
+      # tenant-scoped (constraint #1) to <files-root>/<tenant>/notes — NOTES_ROOT is the base
+      # path; the service inserts the DEFAULT_TENANT_ID segment. Each saved note is mirrored
+      # as <slug>.md so the storage module shows notes in the Files view. Postgres stays the
+      # source of truth; the mirror is read-only output.
+      NOTES_ROOT: ${NOTES_ROOT:-/data/notes}
+    volumes:
+      # The SHARED file space (#KB-refactor), read-write: notes writes its .md mirror under
+      # the tenant-scoped /data/<tenant>/notes (files-init makes it writable by uid 10001).
+      # storage mounts the same volume read-only for the Files view; knowledge owns
+      # /data/<tenant>/knowledge.
+      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     # Host port is overridable via NOTES_PORT and registered in
@@ -28,6 +40,9 @@ services:
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${NOTES_PORT:-8092}:8080"
     depends_on:
+      # files-init (data plane) creates + chowns /data/<tenant>/notes before notes starts.
+      files-init:
+        condition: service_completed_successfully
       nats:
         condition: service_started
       postgres:

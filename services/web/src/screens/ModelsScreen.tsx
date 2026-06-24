@@ -33,6 +33,7 @@ import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag
 import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
 import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
+import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit } from "@/lib/modelFit";
 import { useDownloads } from "@/stores/downloads";
 
@@ -260,7 +261,9 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
 
 function LocalModels() {
   const queryClient = useQueryClient();
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  // Ask for capabilities here so each model can be badged with what it does (tools/vision/…).
+  // Keyed under ["models", …] so the mutations' `["models"]` invalidation still refreshes it.
+  const models = useQuery({ queryKey: ["models", "capabilities"], queryFn: () => api.models(true) });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -308,12 +311,25 @@ function LocalModels() {
               model.hidden && "opacity-60",
             )}
           >
-            <div className="flex min-w-0 flex-1 items-center gap-2">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
               <span className="truncate text-sm text-ink">{model.name}</span>
               {model.loaded && <Badge tone="ok">loaded</Badge>}
               {globalDefault === model.name && <Badge tone="accent">default</Badge>}
               {model.hidden && <Badge tone="dim">hidden</Badge>}
               <FitBadge system={system.data} sizeMb={model.size ? Math.round(model.size / (1024 * 1024)) : null} />
+              {shownCapabilities(model.capabilities).map((cap) => {
+                const Icon = CAPABILITY_META[cap].icon;
+                return (
+                  <span
+                    key={cap}
+                    title={`Supports ${CAPABILITY_META[cap].label.toLowerCase()}`}
+                    className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-ink-faint"
+                  >
+                    <Icon size={11} className="shrink-0" />
+                    {CAPABILITY_META[cap].label}
+                  </span>
+                );
+              })}
             </div>
             <span className="text-xs text-ink-faint">{formatBytes(model.size)}</span>
             <button
@@ -397,6 +413,7 @@ export function ContextWindow() {
   const cpu = system.data?.cpu ?? null;
   const ram = system.data?.ram_total_mb ?? null;
   const model = system.data?.model ?? null;
+  const kvCacheType = system.data?.kv_cache_type ?? null;
 
   // The in-progress edit. `undefined` = untouched (show the stored/suggested value);
   // a number = the operator is editing; deriving the displayed value (rather than seeding
@@ -465,6 +482,18 @@ export function ContextWindow() {
             {model ? model.name : "—"}
             {model?.size_mb ? ` · ${formatMb(model.size_mb)}` : ""}
           </p>
+          {model && (model.quantization || model.context_length) && (
+            <p className="mt-0.5 truncate text-xs text-ink-dim">
+              {[
+                model.quantization,
+                model.context_length
+                  ? `trained ${model.context_length.toLocaleString()} ctx`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )}
         </div>
       </div>
 
@@ -490,7 +519,9 @@ export function ContextWindow() {
         </div>
       )}
       <p className="mb-3 text-[11px] italic leading-relaxed text-ink-faint">
-        The suggestion is a rough estimate from your VRAM and the model's size — a sensible
+        The suggestion is a rough estimate from your VRAM, the model's size, and its trained
+        context limit
+        {kvCacheType ? `, with your ${kvCacheType} KV cache factored in` : ""} — a sensible
         starting point, not a measured maximum. Tune it if replies run short or the runtime
         complains.
       </p>
@@ -505,7 +536,7 @@ export function ContextWindow() {
             <TextInput
               type="number"
               min={CTX_FLOOR}
-              max={CTX_CEILING}
+              max={sliderMax}
               step={CTX_STEP}
               value={value}
               aria-label="Context window tokens"
@@ -783,11 +814,12 @@ const KV_CACHE_OPTIONS = [
 
 /**
  * KV-cache type — quantizes the attention cache to fit a longer context in less VRAM. It's a
- * **server-wide** Ollama start flag (and q8_0/q4_0 need flash attention), so the core can't
- * change it live (Ollama is a protected container). We persist the choice and wire the
- * compose env; applying it needs an Ollama restart, which this card spells out.
+ * **server-wide** Ollama start flag (and q8_0/q4_0 need flash attention). Picking one persists
+ * the choice and, when Docker is wired, the core writes Ollama's env file and restarts it to
+ * apply (#307) — flash attention enabled automatically. If the core can't reach Docker it falls
+ * back to spelling out the manual env + restart.
  */
-function KvCache() {
+export function KvCache() {
   const queryClient = useQueryClient();
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const current = llmPrefs.data?.kv_cache_type ?? "";
@@ -802,7 +834,7 @@ function KvCache() {
       <h3 className="mb-1 font-serif text-base text-ink">KV-cache type</h3>
       <p className="mb-3 text-xs leading-relaxed text-ink-dim">
         Quantize the attention cache to fit a longer context in less VRAM (a small quality
-        trade-off). Applies to all local models.
+        trade-off). Applies to all local models; flash attention is enabled automatically.
       </p>
       {llmPrefs.isLoading ? (
         <Spinner />
@@ -823,13 +855,21 @@ function KvCache() {
           </select>
         </label>
       )}
-      <p className="mt-2 text-[11px] leading-relaxed text-warn">
-        Takes effect after the Ollama container restarts — the core can't restart it. Set{" "}
-        <code className="font-mono">OLLAMA_KV_CACHE_TYPE</code>
-        {current && current !== "" ? ` (${current})` : ""} and{" "}
-        <code className="font-mono">OLLAMA_FLASH_ATTENTION=1</code> in your environment, then
-        restart Ollama.
-      </p>
+      {save.isPending ? (
+        <p className="mt-2 text-[11px] text-ink-faint">Applying — restarting Ollama…</p>
+      ) : save.isSuccess && save.data.applied ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-ink-dim">
+          Applied — Ollama restarted with the new cache type (a few seconds to warm back up).
+        </p>
+      ) : save.isSuccess && !save.data.applied ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-warn">
+          Saved, but the core couldn’t restart Ollama (no Docker access). Set{" "}
+          <code className="font-mono">OLLAMA_KV_CACHE_TYPE</code>
+          {current ? ` (${current})` : ""} and{" "}
+          <code className="font-mono">OLLAMA_FLASH_ATTENTION=1</code> in your environment, then
+          restart Ollama.
+        </p>
+      ) : null}
       {save.isError && <p className="mt-1 text-sm text-danger">{(save.error as Error).message}</p>}
     </Card>
   );
@@ -839,7 +879,7 @@ function KvCache() {
 
 function EmbedDefault() {
   const queryClient = useQueryClient();
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -1034,7 +1074,7 @@ function Providers() {
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export function ModelsScreen() {
-  const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const installed = new Set((models.data ?? []).map((m) => m.name));
 
   return (

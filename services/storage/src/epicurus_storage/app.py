@@ -29,8 +29,9 @@ from epicurus_storage.service import (
     build_page_data,
     ingest_object,
     load_object_download,
+    load_text_file,
 )
-from epicurus_storage.settings import StorageSettings
+from epicurus_storage.settings import READ_MAX_BYTES, StorageSettings
 
 
 def _attachment_disposition(name: str) -> str:
@@ -60,11 +61,20 @@ def create_app() -> FastAPI:
         secret_key=settings.minio_secret_key,
     )
     bus = EventBus.from_settings(settings)
+    # Tenant-scope the served/indexed tree (constraint #1): /data/<tenant>. The whole
+    # epicurus-files volume mounts at /data (storage gets it read-only); we serve, index,
+    # and confine reads/downloads to the tenant subtree so knowledge (/data/<tenant>/knowledge)
+    # and notes (/data/<tenant>/notes) show up, while sibling tenants stay invisible. The
+    # relative_to() confinement on /read + /download then scopes to this subtree automatically.
+    served_root = settings.storage_root / settings.default_tenant_id
     module = build_module(
         index,
         objects,
-        storage_root=str(settings.storage_root),
+        storage_root=str(served_root),
         tenant=settings.default_tenant_id,
+        hidden_prefixes=tuple(
+            p.strip() for p in settings.agent_hidden_prefixes.split(",") if p.strip()
+        ),
     )
     mcp_app = module.http_app()
 
@@ -75,11 +85,11 @@ def create_app() -> FastAPI:
             await bus.connect()
             log.info(
                 "storage service ready",
-                root=str(settings.storage_root),
+                root=str(served_root),
                 tenant=settings.default_tenant_id,
             )
             try:
-                await scan(settings.storage_root, index, tenant=settings.default_tenant_id)
+                await scan(served_root, index, tenant=settings.default_tenant_id)
             except Exception as exc:
                 log.warning("initial scan failed", error=str(exc))
             try:
@@ -93,7 +103,7 @@ def create_app() -> FastAPI:
     add_manifest_route(app, module)
     app.mount("/mcp", mcp_app)
 
-    _root = settings.storage_root
+    _root = served_root
     _tenant = settings.default_tenant_id
     _download_base = f"/platform/v1/modules/{MODULE_NAME}/download"
 
@@ -165,6 +175,33 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="path is not a file")
 
         return FileResponse(str(resolved), filename=resolved.name)
+
+    @app.get("/read")
+    async def read_text(
+        path: str = Query(..., description="Path relative to the storage root"),
+    ) -> dict[str, object]:
+        """Return a text file's contents for the Files split-screen reader (#KB-refactor).
+
+        A catalogued ``uploads/…`` object is decoded from MinIO; every other *path* is read
+        from the read-only tree. 400 traversal, 404 missing, 413 too large, 415 binary.
+        """
+        if path == UPLOADS_PREFIX or path.startswith(f"{UPLOADS_PREFIX}/"):
+            try:
+                obj = await load_object_download(
+                    index=index, objects=objects, tenant=_tenant, path=path
+                )
+            except Exception as exc:  # an index/object hiccup must not break fs reads
+                log.warning("object read lookup failed", path=path, error=str(exc))
+                obj = None
+            if obj is not None:
+                if len(obj.data) > READ_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="file is too large to preview")
+                try:
+                    text = obj.data.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
+                return {"path": path, "name": obj.name, "content": text}
+        return load_text_file(_root, path).model_dump()
 
     @app.get("/pages/{page_id}")
     async def page(

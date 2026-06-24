@@ -38,6 +38,9 @@ services:
     # mount to disable removal entirely (the endpoint then returns 503).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # KV-cache apply (#307): the core writes ollama.env here; Ollama mounts it read-only and
+      # sources it on (re)start. A named volume, so the choice persists across reconciles.
+      - ollama-runtime:/etc/epicurus
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     ports:

@@ -1,6 +1,15 @@
 # Observability stack — a compose fragment (ADR-0006), assembled into the
 # top-level stack via the root compose.yaml `include`.
 #
+# OPT-IN. Every service here is gated behind the `observability` compose profile, so a plain
+# `docker compose up` runs a lean stack *without* it. epicurus doesn't depend on any of these
+# at runtime — services expose `/metrics` and `/health` regardless — so a self-hosted operator
+# who is happy with `docker logs` (or who points their own Prometheus/Grafana at the exposed
+# endpoints) pays nothing for a stack they won't open. Bring it up when you want the dashboards:
+#
+#   docker compose --profile observability up -d        # with Grafana/Prometheus/Loki/Tempo
+#   docker compose up -d                                # without (the default)
+#
 # Prometheus (metrics) scrapes services' /metrics; Alloy ships container logs to
 # Loki; Tempo receives OTLP traces directly (gRPC/HTTP, no separate collector);
 # Grafana ties them together with pre-provisioned datasources.
@@ -12,6 +21,8 @@ services:
   prometheus:
     image: prom/prometheus:v3.1.0
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     # Root so Docker service discovery can read the (read-only) docker socket —
     # the stock image's `nobody` user cannot. Acceptable for a local,
     # loopback-bound stack; swap in a docker-socket proxy if this ever hardens.
@@ -34,6 +45,8 @@ services:
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.25.0
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     command: ["--config.file=/etc/blackbox_exporter/config.yml"]
     volumes:
       - ./blackbox/config.yml:/etc/blackbox_exporter/config.yml:ro
@@ -45,6 +58,8 @@ services:
   node-exporter:
     image: prom/node-exporter:v1.8.2
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     command:
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
@@ -63,6 +78,8 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.27.0
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
@@ -74,6 +91,8 @@ services:
   loki:
     image: grafana/loki:3.3.2
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     command: ["-config.file=/etc/loki/config.yml"]
     volumes:
       - ./loki/config.yml:/etc/loki/config.yml:ro
@@ -85,6 +104,8 @@ services:
   tempo:
     image: grafana/tempo:2.7.0
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     command: ["-config.file=/etc/tempo/config.yml"]
     volumes:
       - ./tempo/config.yml:/etc/tempo/config.yml:ro
@@ -98,6 +119,8 @@ services:
   alloy:
     image: grafana/alloy:v1.5.1
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
@@ -111,6 +134,8 @@ services:
   grafana:
     image: grafana/grafana:11.4.0
     restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin

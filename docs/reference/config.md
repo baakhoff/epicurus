@@ -68,6 +68,8 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | Field | Env var | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). |
+| `ollama_runtime_env_path` | `OLLAMA_RUNTIME_ENV_PATH` | `str` | `/etc/epicurus/ollama.env` | Where the core writes Ollama's start-up env file (KV-cache type) for it to source on restart (#307). A shared volume; override only if you remap the mount. |
+| `ollama_service_name` | `OLLAMA_SERVICE_NAME` | `str` | `ollama` | Compose service the core restarts to apply a KV-cache change (#307). |
 | `llm_default_model` | `LLM_DEFAULT_MODEL` | `str` | `llama3.2` | Model used when a request names none. |
 | `llm_keep_alive` | `LLM_KEEP_ALIVE` | `str` | `5m` | How long Ollama keeps a model loaded after use (ADR-0005). |
 | `llm_fallbacks` | `LLM_FALLBACKS` | `str` | `""` | Comma-separated fallback models, tried in order (e.g. `claude/claude-3-5-sonnet-latest,gpt/gpt-4o`). |
@@ -95,6 +97,30 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 - **`module_base_urls -> list[str]`** — the `module_urls`, trimmed of a trailing `/`.
 - **`module_mcp_urls -> list[str]`** — each module's `<base>/mcp` endpoint.
 - **`attachment_allowed_type_list -> list[str]`** — the `attachment_allowed_types`, parsed + lowercased.
+
+## Shared file space (per-module storage roots)
+
+The file-owning modules (storage, knowledge, notes) share **one** file tree — the *shared
+file space* (#KB-refactor). One deployment-level env var mounts it; the module settings below
+are the in-container paths under it.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for storage (read-only), knowledge (read-write), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. The on-disk tree is tenant-scoped: a one-shot `files-init` container creates `/data/<tenant>/knowledge` + `/data/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`) and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
+| `STORAGE_ROOT` | `/data` | storage | In-container **base** of the shared-file-space mount; storage serves and indexes the tenant subtree `STORAGE_ROOT/<tenant>` read-only (tenant-scoped, constraint #1). |
+| `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | storage | Comma-separated top-level subtrees (relative to the served tenant subtree) hidden from the **agent's** file tools (`storage_list`/`storage_search`/`storage_read`); the operator-facing Files page / `/read` / `/download` are unaffected (#KB-refactor, storage v0.5.0). `notes/` holds private note bodies the agent must not read. Set empty to hide nothing. |
+| `VAULT_PATH` | `/data/knowledge` | knowledge | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge`, and each top-level folder under it is a project (knowledge base). Was `/vault` before #KB-refactor. |
+| `NOTES_ROOT` | `/data/notes` | notes | Notes' path within the shared file space; the on-disk `.md` mirror is tenant-scoped to `<files-root>/<tenant>/notes`. Each saved note is mirrored as `<slug>.md`; Postgres stays the source of truth (#KB-refactor). |
+
+The on-disk file tree is **tenant-scoped** (constraint #1): the three modules build their
+roots as `<files-root>/<tenant>/{knowledge,notes}` (and storage serves `<files-root>/<tenant>`),
+where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The volume mount stays `/data` —
+only the in-container path carries the tenant segment.
+
+**Migration note for existing deployments.** `EPICURUS_FILES_ROOT` replaces
+`KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. Move old vault contents into
+`<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default
+`local`; each project is a top-level folder) so they appear as knowledge bases.
 
 ## Type aliases
 

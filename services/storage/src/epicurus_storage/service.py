@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fastapi import HTTPException
+from pydantic import BaseModel
+
 from epicurus_core import EpicurusModule, PageSpec, UiAction, UiSection
 from epicurus_storage.db import FileEntry, FileIndex
 from epicurus_storage.object_store import ObjectStore
@@ -172,20 +175,76 @@ async def load_object_download(
     return ObjectDownload(name=entry.name, data=stored.data, content_type=stored.content_type)
 
 
+# ── Inline text read (split-screen reader, #KB-refactor req 6) ────────────────
+
+
+class TextContent(BaseModel):
+    """A text file's contents for the right-panel reader: ``{path, name, content}``."""
+
+    path: str
+    name: str
+    content: str
+
+
+def load_text_file(root: Path, path: str) -> TextContent:
+    """Read a UTF-8 text file under *root* for inline preview (the Files split-screen).
+
+    Path-safety mirrors ``storage_read``. Raises ``HTTPException``: 400 (bad/traversal
+    path or not a file), 404 (absent), 413 (larger than ``READ_MAX_BYTES``), 415 (binary
+    / non-UTF-8). The read-only tree is the source — uploaded objects are handled by the
+    route, which checks the object store first.
+    """
+    root_resolved = root.resolve()
+    try:
+        resolved = (root_resolved / path).resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid path") from exc
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="path escapes storage root") from exc
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    if not resolved.is_file():
+        raise HTTPException(status_code=400, detail="path is not a file")
+    if resolved.stat().st_size > READ_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file is too large to preview")
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
+    return TextContent(path=path, name=resolved.name, content=text)
+
+
 def build_module(
     index: FileIndex,
     objects: ObjectStore,
     *,
     storage_root: str,
     tenant: str,
+    hidden_prefixes: tuple[str, ...] = (),
 ) -> EpicurusModule:
-    """Build the storage module and register its MCP tools."""
+    """Build the storage module and register its MCP tools.
+
+    ``hidden_prefixes`` are top-level subtrees the **agent's** file tools never see — e.g.
+    ``notes`` is private/attach-only, so the agent must not read note bodies through
+    ``storage_read`` even though the operator browses them in the Files page (#KB-refactor).
+    The operator-facing surfaces (the Files page, ``/read``, ``/download``) are unaffected.
+    """
+    hidden = tuple(p.strip("/") for p in hidden_prefixes if p.strip("/"))
+
+    def _is_hidden(path: str) -> bool:
+        clean = path.replace("\\", "/").strip("/")
+        return any(clean == h or clean.startswith(h + "/") for h in hidden)
+
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.3.0",
+        version="0.5.0",
         description=(
-            "File-tree index (list, search, read) over the operator's HDD, "
-            "plus app-managed object storage via MinIO and durable chat-upload ingest."
+            "File-tree index (list, search, read) over the shared file space, plus "
+            "app-managed object storage via MinIO, durable chat-upload ingest, and "
+            "inline text preview for the Files split-screen reader. Private subtrees "
+            "(e.g. notes) are hidden from the agent's file tools."
         ),
         ui=UiSection(
             icon="folder",
@@ -241,7 +300,10 @@ def build_module(
         Pass an empty string (the default) to list the root.
         Returns directories before files, both sorted by name.
         """
-        return await index.browse(tenant=tenant, path=path)
+        if _is_hidden(path):
+            return []
+        entries = await index.browse(tenant=tenant, path=path)
+        return [e for e in entries if not _is_hidden(e.path)]
 
     @module.tool()
     async def storage_search(query: str, limit: int = 50) -> list[FileEntry]:
@@ -251,7 +313,8 @@ def build_module(
         """
         if not query.strip():
             return []
-        return await index.search(tenant=tenant, query=query, limit=max(1, min(limit, 200)))
+        results = await index.search(tenant=tenant, query=query, limit=max(1, min(limit, 200)))
+        return [e for e in results if not _is_hidden(e.path)]
 
     @module.tool()
     async def storage_read(path: str) -> str:
@@ -261,6 +324,9 @@ def build_module(
         Files larger than 256 KB are rejected — use the /download endpoint instead.
         Binary (non-UTF-8) files are also rejected with an explanatory message.
         """
+        # Private subtrees (e.g. notes) are never readable by the agent (#KB-refactor).
+        if _is_hidden(path):
+            return "Error: not available"
         root = Path(storage_root).resolve()
         try:
             resolved = (root / path).resolve()

@@ -48,6 +48,24 @@ or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the
 tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
 one path, so no module ever ships its own buttons or forms.
 
+The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
+shows immediately, and an Edit/Preview toggle drops to the raw source when you want to
+write (ADR-0042). Because notes/knowledge **re-embed on every save**, the editor does not
+save on each keystroke: a save fires only when you **leave** (switch document, go back, or
+the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
+or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →
+saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only** vault — a
+watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
+and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
+toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
+bar.
+
+When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** control lists
+past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh
+save (so the timeline only ever grows). The shell reads history from the proxied
+`…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
+version's content), so there is no restore endpoint.
+
 ### Right panel / split-screen (ADR-0018)
 
 A core-owned side panel (`src/components/Panel.tsx`, driven by the `src/stores/panel.ts`
@@ -95,12 +113,14 @@ tool call's `running`→`ok`/`error`), `done` (the final `AgentTurn`), `error`.
 
 Before the first token the shell shows the turn's *process*, not a bare caret: a
 **readiness bar** while the system warms (`readiness` events, #122), a **"Thinking…"** cue
-once it is ready and a token is pending, then an **activity timeline** that shows the
-model's thinking (a collapsible block) and lists each tool step with a human-readable label
-and live status (#121, ADR-0041). The timeline folds to a one-line summary as the answer
-streams in. On `done` the live turn is replaced by the clean server-stored answer — which
-**keeps its folded activity**, persisted on the message (`MessageRecord.activity`), so a
-reopened conversation still shows the timeline (thinking + tool steps).
+once it is ready and a token is pending, then an **activity timeline** that interleaves the
+model's thinking (collapsible blocks) and its tool steps **in the order they happened** —
+think → call → think — each tool step with a human-readable label and live status (#121,
+ADR-0041, ordering #300). The timeline folds to a one-line summary as the answer streams in.
+On `done` the live turn is replaced by the clean server-stored answer — which **keeps its
+folded activity**, persisted on the message (`MessageRecord.activity.timeline`), so a
+reopened conversation still shows the same ordered timeline. Older turns saved before the
+ordered timeline fall back to a thinking-then-steps render.
 
 ## Configuration
 

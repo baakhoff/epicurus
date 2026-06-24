@@ -4,7 +4,17 @@
  * (key entry → core → OpenBao; the key never comes back).
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Cpu, Eye, EyeOff, KeyRound, Search, Sparkles, Star, Trash2 } from "lucide-react";
+import {
+  Cpu,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Search,
+  Sparkles,
+  SlidersHorizontal,
+  Star,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -158,11 +168,13 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
         ))}
       </div>
 
-      {/* Entries */}
+      {/* Entries — capped to roughly five rows tall with its own scroll so the full
+          catalog (dozens of models) never pushes the rest of the page away. The search
+          and tag filters above stay put; only this list scrolls. */}
       {entries.length === 0 ? (
         <p className="py-4 text-center text-sm text-ink-dim">No models match your search.</p>
       ) : (
-        <div className="flex flex-col divide-y divide-edge">
+        <div className="flex max-h-[30rem] flex-col divide-y divide-edge overflow-y-auto overscroll-contain">
           {entries.map((entry) => {
             const dl = active[entry.id];
             const inProgress = dl && !dl.done;
@@ -222,6 +234,7 @@ function LocalModels() {
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
 
   const globalDefault = llmPrefs.data?.global_default ?? null;
 
@@ -273,6 +286,13 @@ function LocalModels() {
             </div>
             <span className="text-xs text-ink-faint">{formatBytes(model.size)}</span>
             <button
+              aria-label={`Settings for ${model.name}`}
+              onClick={() => setSettingsFor(model.name)}
+              className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+            >
+              <SlidersHorizontal size={15} />
+            </button>
+            <button
               aria-label={globalDefault === model.name ? "Clear global default" : `Set ${model.name} as global default`}
               onClick={() => setDefault.mutate(globalDefault === model.name ? null : model.name)}
               className={cn(
@@ -312,6 +332,7 @@ function LocalModels() {
           setConfirming(null);
         }}
       />
+      <ModelSettingsSheet model={settingsFor} onClose={() => setSettingsFor(null)} />
     </Card>
   );
 }
@@ -489,12 +510,198 @@ export function ContextWindow() {
   );
 }
 
+// ── Per-model settings sheet ────────────────────────────────────────────────────
+
+/**
+ * Model settings — per-model tuning for any local model (chat or embedding), opened from a
+ * model row. Context window and keep-alive are live runtime knobs (resolved per model:
+ * this value → the global default → the env). Quantization is read-only — it's baked in when
+ * the model is pulled, so changing it means pulling a different variant, which this sheet
+ * offers as a shortcut.
+ */
+export function ModelSettingsSheet({
+  model,
+  onClose,
+}: {
+  model: string | null;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const pull = useDownloads((s) => s.pull);
+  const settings = useQuery({
+    queryKey: ["modelSettings", model],
+    queryFn: () => api.modelSettings(model!),
+    enabled: model !== null,
+  });
+  const details = useQuery({
+    queryKey: ["modelDetails", model],
+    queryFn: () => api.modelDetails(model!),
+    enabled: model !== null,
+  });
+
+  // Draft form state, seeded once per opened model (adjust-state-during-render, not an
+  // effect — the React-recommended way to reset state when a prop changes).
+  const [ctx, setCtx] = useState("");
+  const [keepAlive, setKeepAlive] = useState("");
+  const [variant, setVariant] = useState("");
+  const [seeded, setSeeded] = useState<string | null>(null);
+
+  if (model === null) {
+    if (seeded !== null) setSeeded(null); // reset so the next open re-seeds fresh
+  } else if (settings.data && seeded !== model) {
+    setCtx(settings.data.context_window != null ? String(settings.data.context_window) : "");
+    setKeepAlive(settings.data.keep_alive ?? "");
+    setVariant(model.split(":")[0]);
+    setSeeded(model);
+  }
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.setModelSettings(model!, {
+        context_window: ctx.trim() === "" ? null : Number(ctx),
+        keep_alive: keepAlive.trim() === "" ? null : keepAlive.trim(),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["modelSettings", model] });
+      onClose();
+    },
+  });
+
+  if (model === null) return null;
+
+  const trainedMax = details.data?.context_length ?? null;
+  const sliderMax = Math.max(CTX_CEILING, trainedMax ?? 0, Number(ctx) || 0);
+  const ctxNum = ctx.trim() === "" ? null : Number(ctx);
+
+  const startPull = () => {
+    const tag = variant.trim();
+    if (!tag) return;
+    void pull(tag, () => queryClient.invalidateQueries({ queryKey: ["models"] }));
+    onClose();
+  };
+
+  return (
+    <Sheet open onClose={onClose} title="Model settings">
+      <div className="flex flex-col gap-5">
+        <p className="-mt-1 font-mono text-sm break-all text-ink">{model}</p>
+
+        {/* read-only facts from the runtime */}
+        <div className="flex flex-wrap gap-1.5">
+          {details.isLoading ? (
+            <Spinner />
+          ) : (
+            <>
+              {details.data?.quantization && <Badge tone="dim">{details.data.quantization}</Badge>}
+              {details.data?.parameter_size && (
+                <Badge tone="dim">{details.data.parameter_size}</Badge>
+              )}
+              {trainedMax != null && (
+                <Badge tone="dim">trained {trainedMax.toLocaleString()} ctx</Badge>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* context window */}
+        <div>
+          <Label hint="Ollama num_ctx for this model. Leave blank to inherit the global default.">
+            Context window
+          </Label>
+          <div className="flex items-center gap-3">
+            <TextInput
+              type="number"
+              min={CTX_FLOOR}
+              max={trainedMax ?? CTX_CEILING}
+              step={CTX_STEP}
+              value={ctx}
+              placeholder="inherit"
+              aria-label="Per-model context window tokens"
+              className="w-32"
+              onChange={(e) => setCtx(e.target.value)}
+            />
+            {ctxNum != null && (
+              <input
+                type="range"
+                min={CTX_FLOOR}
+                max={sliderMax}
+                step={CTX_STEP}
+                value={Math.min(Math.max(ctxNum, CTX_FLOOR), sliderMax)}
+                aria-label="Per-model context window slider"
+                className="flex-1 accent-accent"
+                onChange={(e) => setCtx(e.target.value)}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* keep-alive */}
+        <div>
+          <Label hint="How long the runtime keeps this model loaded after use — e.g. 5m, 30m, 0 (unload now), -1 (forever). Blank inherits the default.">
+            Keep-alive
+          </Label>
+          <TextInput
+            value={keepAlive}
+            placeholder="inherit"
+            aria-label="Keep-alive"
+            className="w-40"
+            onChange={(e) => setKeepAlive(e.target.value)}
+          />
+        </div>
+
+        {save.isError && <p className="text-sm text-danger">{(save.error as Error).message}</p>}
+        <div className="flex items-center gap-2">
+          <Button variant="primary" busy={save.isPending} onClick={() => save.mutate()}>
+            Save
+          </Button>
+          {(settings.data?.context_window != null || settings.data?.keep_alive) && (
+            <Button
+              variant="ghost"
+              disabled={save.isPending}
+              onClick={() => {
+                setCtx("");
+                setKeepAlive("");
+                save.mutate();
+              }}
+            >
+              Reset to defaults
+            </Button>
+          )}
+        </div>
+
+        {/* quantization — read-only + re-pull shortcut */}
+        <div className="border-t border-edge pt-4">
+          <Label hint="Quantization is fixed when a model is pulled. To change it, pull a different variant tag (e.g. model:8b-q8_0) — it downloads alongside this one.">
+            Quantization
+          </Label>
+          <p className="mb-2 text-sm text-ink">
+            {details.data?.quantization ?? "unknown"}
+            <span className="text-ink-faint"> · read-only</span>
+          </p>
+          <div className="flex items-center gap-2">
+            <TextInput
+              value={variant}
+              aria-label="Variant tag to pull"
+              placeholder="model:tag"
+              className="flex-1 font-mono"
+              onChange={(e) => setVariant(e.target.value)}
+            />
+            <Button variant="outline" onClick={startPull} disabled={!variant.trim()}>
+              Pull variant
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
 // ── Embedding default ─────────────────────────────────────────────────────────
 
 function EmbedDefault() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const current = llmPrefs.data?.global_embed_default ?? "";
   const available = (models.data ?? []).filter((m) => !m.hidden);
@@ -514,26 +721,42 @@ function EmbedDefault() {
       {llmPrefs.isLoading ? (
         <Spinner />
       ) : (
-        <label className="block">
-          <span className="sr-only">Global embedding model</span>
-          <select
-            className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
-            value={current}
-            disabled={setEmbedDefault.isPending}
-            onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
-          >
-            <option value="">System default</option>
-            {available.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="block flex-1">
+            <span className="sr-only">Global embedding model</span>
+            <select
+              className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+              value={current}
+              disabled={setEmbedDefault.isPending}
+              onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
+            >
+              <option value="">System default</option>
+              {available.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {current && (
+            <Button
+              variant="ghost"
+              aria-label={`Settings for ${current}`}
+              onClick={() => setSettingsOpen(true)}
+            >
+              <SlidersHorizontal size={14} />
+              Settings
+            </Button>
+          )}
+        </div>
       )}
       {setEmbedDefault.isError && (
         <p className="mt-2 text-sm text-danger">{(setEmbedDefault.error as Error).message}</p>
       )}
+      <ModelSettingsSheet
+        model={settingsOpen && current ? current : null}
+        onClose={() => setSettingsOpen(false)}
+      />
     </Card>
   );
 }

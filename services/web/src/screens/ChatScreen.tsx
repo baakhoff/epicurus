@@ -38,10 +38,11 @@ import {
   TextArea,
   cn,
 } from "@/components/ui";
+import { activityTimeline } from "@/lib/activity";
 import { api } from "@/lib/api";
 import type { Attachment, EntityRef } from "@/lib/contracts";
 import { relativeTime, PROVIDER_MODEL_HINTS } from "@/lib/format";
-import { useChat, type ToolRun } from "@/stores/chat";
+import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 
@@ -67,14 +68,13 @@ function AssistantRow({ children }: { children: ReactNode }) {
  */
 function AssistantBlock({
   text,
-  runs = [],
-  thinking = "",
+  timeline = [],
   streaming,
   entityRefs = [],
 }: {
   text: string;
-  runs?: ToolRun[];
-  thinking?: string;
+  /** The turn's process (thinking + tool steps) in chronological order (#300). */
+  timeline?: ActivityItem[];
   streaming: boolean;
   entityRefs?: EntityRef[];
 }) {
@@ -89,9 +89,7 @@ function AssistantBlock({
   return (
     <AssistantRow>
       {/* The activity timeline folds to its summary header once the answer starts. */}
-      {(runs.length > 0 || thinking.length > 0) && (
-        <ProcessTimeline runs={runs} thinking={thinking} collapsed={text.length > 0} />
-      )}
+      {timeline.length > 0 && <ProcessTimeline items={timeline} collapsed={text.length > 0} />}
       <EntityRefsContext.Provider value={refsMap}>
         {text && <Markdown>{text}</Markdown>}
       </EntityRefsContext.Provider>
@@ -115,11 +113,10 @@ function LiveTurn() {
   const segments = useChat((s) => s.segments);
   const streaming = useChat((s) => s.streaming);
   const readiness = useChat((s) => s.readiness);
-  const thinking = useChat((s) => s.thinking);
-  if (segments.length === 0 && !thinking && !streaming) return null;
+  if (segments.length === 0 && !streaming) return null;
 
   // Before any thinking, token, or tool: warming progress (#122), then a thinking cue (#121).
-  if (streaming && segments.length === 0 && !thinking) {
+  if (streaming && segments.length === 0) {
     return (
       <div className="ep-settle">
         <AssistantRow>
@@ -134,10 +131,18 @@ function LiveTurn() {
   }
 
   const text = segments.flatMap((s) => (s.kind === "text" ? [s.text] : [])).join("\n");
-  const runs = segments.flatMap((s) => (s.kind === "tool" ? [s.run] : []));
+  // The process timeline = the thinking + tool segments, in the order they streamed (#300);
+  // the text segments are the answer, rendered below by AssistantBlock.
+  const timeline: ActivityItem[] = segments.flatMap((s): ActivityItem[] =>
+    s.kind === "thinking"
+      ? [{ kind: "thinking", text: s.text }]
+      : s.kind === "tool"
+        ? [{ kind: "tool", run: s.run }]
+        : [],
+  );
   return (
     <div className="ep-settle">
-      <AssistantBlock text={text} runs={runs} thinking={thinking} streaming={streaming} />
+      <AssistantBlock text={text} timeline={timeline} streaming={streaming} />
     </div>
   );
 }
@@ -510,11 +515,7 @@ export function ChatScreen() {
               <AssistantBlock
                 key={i}
                 text={message.content}
-                runs={(message.activity?.steps ?? []).map((s) => ({
-                  ...s,
-                  detail: s.detail ?? undefined,
-                }))}
-                thinking={message.activity?.thinking ?? ""}
+                timeline={activityTimeline(message.activity)}
                 streaming={false}
                 entityRefs={message.entity_refs}
               />

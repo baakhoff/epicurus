@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 
 from epicurus_core import SecretError
 from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -50,6 +51,17 @@ async def _fresh_prefs() -> LlmPrefsStore:
     return prefs
 
 
+async def _fresh_model_settings() -> ModelSettingsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = ModelSettingsStore(engine)
+    await store.init()
+    return store
+
+
 def _gateway(
     power: PowerController | None = None,
     secrets: Any = None,
@@ -59,6 +71,7 @@ def _gateway(
     top_p: float | None = None,
     num_ctx: int | None = None,
     prefs: LlmPrefsStore | None = None,
+    model_settings: ModelSettingsStore | None = None,
 ) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
@@ -74,6 +87,7 @@ def _gateway(
         top_p=top_p,
         num_ctx=num_ctx,
         prefs=prefs,
+        model_settings=model_settings,
     )
 
 
@@ -807,3 +821,142 @@ async def test_context_window_pref_not_sent_to_hosted(monkeypatch: pytest.Monkey
         [ChatMessage(role="user", content="hi")], model="claude/claude-3-5-sonnet-latest"
     )
     assert "num_ctx" not in captured  # Ollama-only runtime option, never sent to hosted
+
+
+# ── per-model settings: context window + keep-alive (chat & embed) ────────────────
+
+
+async def test_per_model_context_and_keep_alive_win(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(context_window=4096, keep_alive="1h"))
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 4096
+    assert captured["keep_alive"] == "1h"  # overrides the "5m" env default
+
+
+async def test_per_model_context_overrides_global_pref(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 16384)  # global pref
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2", ModelSettings(context_window=4096))  # this model wins
+    await _gateway(prefs=prefs, model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 4096
+
+
+async def test_per_model_settings_match_by_family_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Stored under the runtime's tagged name; a request for the bare default must still match.
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2:latest", ModelSettings(context_window=2048))
+    # Request uses the bare default model "llama3.2"; settings keyed by the tag must match.
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["num_ctx"] == 2048
+
+
+async def test_per_model_falls_back_to_env_keep_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()  # store present but no row for this model
+    await _gateway(model_settings=ms).chat([ChatMessage(role="user", content="hi")])
+    assert captured["keep_alive"] == "5m"  # env default
+    assert "num_ctx" not in captured  # no per-model, no global pref, no env num_ctx
+
+
+async def test_embed_applies_per_model_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.1, 0.2]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "nomic-embed-text", ModelSettings(context_window=512, keep_alive="10m"))
+    vectors = await _gateway(model_settings=ms).embed(["hello"], model="nomic-embed-text")
+    assert vectors == [[0.1, 0.2]]
+    assert captured["num_ctx"] == 512
+    assert captured["keep_alive"] == "10m"
+
+
+async def test_embed_unset_passes_no_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    ms = await _fresh_model_settings()
+    await _gateway(model_settings=ms).embed(["hello"], model="nomic-embed-text")
+    assert "num_ctx" not in captured  # embeddings stay opt-in — unchanged when nothing set
+    assert "keep_alive" not in captured
+
+
+async def test_show_parses_quantization_and_context_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _HttpResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "details": {
+                    "family": "llama",
+                    "parameter_size": "8.0B",
+                    "quantization_level": "Q4_K_M",
+                },
+                "model_info": {"general.architecture": "llama", "llama.context_length": 131072},
+            }
+
+    class _Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, Any]) -> _HttpResponse:
+            assert path == "/api/show"
+            return _HttpResponse()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", _Client)
+    details = await _gateway().show("llama3.2:latest")
+    assert details.quantization == "Q4_K_M"
+    assert details.parameter_size == "8.0B"
+    assert details.context_length == 131072
+    assert details.family == "llama"

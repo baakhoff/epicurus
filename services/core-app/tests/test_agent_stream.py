@@ -40,7 +40,7 @@ class _FakeMcp:
         specs = [{"type": "function", "function": {"name": "echo"}}]
         return specs, {"echo": "http://echo:8080/mcp"}
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str) -> str:
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
         if self._fail:
             raise RuntimeError("boom")
         return self._outputs.get(name, "out")
@@ -180,3 +180,48 @@ async def test_stream_max_steps_forces_final_answer() -> None:
     assert events[-1].turn is not None
     assert events[-1].turn.stopped == "max_steps"
     assert events[-1].turn.content == "final"
+
+
+async def test_stream_timeline_preserves_think_tool_think_order() -> None:
+    # A reasoning model thinks, calls a tool, then thinks again before answering. The
+    # persisted timeline must keep that interleaved order — not "all thinking, then tools".
+    class _ScriptGateway:
+        def __init__(self, rounds: list[tuple[list[str], list[str], ChatResult]]) -> None:
+            self._rounds = list(rounds)
+
+        async def stream_chat(
+            self,
+            messages: list[ChatMessage],
+            *,
+            model: str | None = None,
+            tools: Any = None,
+            tenant_id: str | None = None,
+        ) -> AsyncIterator[StreamEvent]:
+            reasoning, deltas, result = self._rounds.pop(0)
+            for r in reasoning:
+                yield StreamEvent(reasoning=r)
+            for d in deltas:
+                yield StreamEvent(delta=d)
+            yield StreamEvent(result=result)
+
+    tool_round = ChatResult(model="m", content="", tool_calls=[_tool_call()])
+    gw = _ScriptGateway(
+        [
+            (["plan: ", "search"], [], tool_round),
+            (["now answer"], ["done"], ChatResult(model="m", content="done")),
+        ]
+    )
+    events = await _collect(
+        Agent(gateway=gw, mcp=_FakeMcp(outputs={"echo": "pong"})),  # type: ignore[arg-type]
+        "go",
+    )
+    turn = events[-1].turn
+    assert turn is not None
+    items = [i.model_dump() for i in turn.activity.timeline]
+    assert [i["kind"] for i in items] == ["thinking", "tool", "thinking"]
+    assert items[0]["text"] == "plan: search"  # consecutive reasoning coalesced
+    assert items[1]["tool"] == "echo"
+    assert items[2]["text"] == "now answer"
+    # the flat fields are still derived for back-compat
+    assert turn.activity.thinking == "plan: searchnow answer"
+    assert [s.tool for s in turn.activity.steps] == ["echo"]

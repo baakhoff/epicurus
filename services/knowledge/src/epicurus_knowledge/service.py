@@ -14,7 +14,8 @@ Read-only navigation (so the agent knows where things live):
 Writes — **every** agent change is staged for operator review (ADR-0033, #220); the agent
 has no direct vault-write tool:
 
-* ``knowledge_propose_edit`` — create/update/delete a document.
+* ``knowledge_create_document`` — create a new document (single-purpose create tool).
+* ``knowledge_propose_edit`` — update/delete an existing document (also accepts create).
 * ``knowledge_propose_move`` — move/rename a document or folder.
 * ``knowledge_propose_rename`` — rename in place (keeps the folder).
 * ``knowledge_propose_folder`` — create a folder.
@@ -142,10 +143,26 @@ Incrementally re-index all sources: vault, platform docs, and module docs.
 **Returns** ``{"indexed": N, "deleted": M, "unchanged": K}`` summed across
 all sources.
 
+## knowledge_create_document
+
+Create a **new** document — the single-purpose tool for adding a note (reach for this
+whenever you want to write a new document, rather than the multi-operation
+``knowledge_propose_edit``). Staged for operator review like every change; written and
+indexed on approval, or applied immediately when review is off.
+
+**Parameters**
+- ``path`` (string) — vault-relative ``.md`` path of the new note, e.g.
+  ``projects/goals.md``. Must not already exist.
+- ``content`` (string) — full markdown content of the new document.
+- ``note`` (string, optional) — short rationale shown beside the diff.
+
+**Returns** a confirmation that the document was created (or queued for review), or an
+error if the path is invalid or already exists.
+
 ## knowledge_propose_edit
 
-Propose a create/update/delete of a vault note **for operator review** — the
-agent's only way to change the knowledge base. The edit is staged, never applied
+Propose an **update or delete** of an existing vault note **for operator review** (to
+*create* a note, prefer ``knowledge_create_document``). The edit is staged, never applied
 directly; the operator approves or rejects it under **Knowledge → Suggestions**.
 
 **Parameters**
@@ -229,7 +246,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.17.0",
+        version="0.18.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -399,6 +416,64 @@ def build_module(
             ),
         }
 
+    async def _stage_doc_write(
+        op: str, path: str, content: str, note: str, *, reject_existing: bool = False
+    ) -> str:
+        """Path-confine, stage a create/update/delete suggestion, and finalize it.
+
+        Shared by ``knowledge_create_document`` and ``knowledge_propose_edit`` so both take the
+        exact same review path — staged for the operator's approval, or applied directly when
+        review is off. ``reject_existing`` guards the create tool against clobbering a note that
+        already exists.
+        """
+        try:
+            # Path-confine to the vault (``.md`` only, no traversal) before staging it.
+            target = safe_relative(vault_path, path)
+        except Exception as exc:  # HTTPException(detail=...) from safe_relative
+            detail = getattr(exc, "detail", str(exc))
+            return tool_envelope(f"Cannot propose change to {path!r}: {detail}", [])
+        if reject_existing and target.exists():
+            return tool_envelope(
+                f"{path!r} already exists — use knowledge_propose_edit to update it instead.",
+                [],
+            )
+        proposed = "" if op == "delete" else content
+        suggestion = await suggestions.add(
+            tenant=tenant,
+            path=path,
+            operation=op,
+            proposed_content=proposed,
+            origin="agent",
+            note=note,
+        )
+        return await _finalize(
+            suggestion.sid,
+            f"{op.capitalize()} of '{path}' applied directly — review is off.",
+            f"Proposed {op} of '{path}' (suggestion {suggestion.sid[:8]}). It is pending"
+            " your review in Knowledge → Suggestions; nothing changes until you approve it.",
+        )
+
+    @module.tool()
+    async def knowledge_create_document(path: str, content: str, note: str = "") -> str:
+        """Create a NEW document in the knowledge base.
+
+        This is the single-purpose tool to **add** a note/document — reach for it whenever you
+        want to write a new note. The document is staged for the operator to review
+        (Knowledge → Suggestions) and is written + indexed on approval; when review is off it is
+        created immediately. To change an existing note use ``knowledge_propose_edit``; for
+        folders or knowledge bases use ``knowledge_propose_folder`` / ``knowledge_propose_project``.
+
+        Args:
+            path: Vault-relative path of the new note, e.g. ``projects/goals.md``. Must end in
+                ``.md``, stay inside the vault (no ``..`` traversal), and not already exist.
+            content: The full markdown content of the new document.
+            note: An optional short rationale shown to the operator alongside the diff.
+
+        Returns confirmation that the document was created (or queued for review), or an error
+        describing why the path was rejected (e.g. it already exists).
+        """
+        return await _stage_doc_write("create", path, content, note, reject_existing=True)
+
     @module.tool()
     async def knowledge_propose_edit(
         path: str,
@@ -406,12 +481,14 @@ def build_module(
         operation: str = "update",
         note: str = "",
     ) -> str:
-        """Propose a change to a vault note for the operator to review (ADR-0033, #220).
+        """Update or delete an existing vault note, staged for the operator to review (ADR-0033).
 
-        This does **not** modify the vault. The change is staged as a suggestion the
-        operator approves or rejects in the **Knowledge → Suggestions** page; only on
-        approval is it written and indexed. Use this whenever you want to add, edit, or
-        remove a note — it is your only path to changing the knowledge base.
+        This does **not** modify the vault directly. The change is staged as a suggestion the
+        operator approves or rejects in the **Knowledge → Suggestions** page; only on approval
+        is it written and indexed (when review is off it is applied immediately).
+
+        To **create** a new note, prefer ``knowledge_create_document`` — the single-purpose
+        create tool. This tool still accepts ``operation="create"`` for completeness.
 
         Args:
             path: Vault-relative path of the note, e.g. ``projects/goals.md``. Must end
@@ -436,27 +513,7 @@ def build_module(
                 " knowledge_propose_project for structural changes.",
                 [],
             )
-        try:
-            # Path-confine to the vault (``.md`` only, no traversal) before staging it.
-            safe_relative(vault_path, path)
-        except Exception as exc:  # HTTPException(detail=...) from safe_relative
-            detail = getattr(exc, "detail", str(exc))
-            return tool_envelope(f"Cannot propose change to {path!r}: {detail}", [])
-        proposed = "" if op == "delete" else content
-        suggestion = await suggestions.add(
-            tenant=tenant,
-            path=path,
-            operation=op,
-            proposed_content=proposed,
-            origin="agent",
-            note=note,
-        )
-        return await _finalize(
-            suggestion.sid,
-            f"{op.capitalize()} of '{path}' applied directly — review is off.",
-            f"Proposed {op} of '{path}' (suggestion {suggestion.sid[:8]}). It is pending"
-            " your review in Knowledge → Suggestions; nothing changes until you approve it.",
-        )
+        return await _stage_doc_write(op, path, content, note)
 
     # ── Navigation (read-only): how the agent learns where things live ───────────
 

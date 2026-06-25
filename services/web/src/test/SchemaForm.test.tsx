@@ -217,4 +217,24 @@ describe("SchemaForm", () => {
     fireEvent.click(screen.getByRole("switch", { name: /All day/ }));
     expect(screen.getByLabelText("Start")).toHaveAttribute("type", "datetime-local");
   });
+
+  it("constrains inputs and the submit so the form fits a narrow mobile sheet (#335)", () => {
+    render(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: {
+            start: { type: "string", format: "date-time", title: "Start" },
+            mode: { type: "string", title: "Mode", enum: ["a", "b"] },
+          },
+        }}
+        onSubmit={() => {}}
+      />,
+    );
+    // `min-w-0` lets a native date picker shrink to the sheet instead of overflowing it.
+    expect(screen.getByLabelText("Start").className).toContain("min-w-0");
+    expect(screen.getByRole("combobox").className).toContain("min-w-0");
+    // The submit reads as a full-width action bar at the foot of the sheet.
+    expect(screen.getByRole("button", { name: "Save" }).className).toContain("w-full");
+  });
 });

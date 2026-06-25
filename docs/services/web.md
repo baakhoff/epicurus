@@ -36,10 +36,18 @@ settings *Sheet*. The old layout broke on a phone — there is no hover, so the 
 were either invisible or pushed off-screen and the name was squeezed. Now the **whole
 collapsed row is the touch target** (name, `loaded`/`default`/`hidden` badges, a suitability
 status icon (#327), capability icons, size, a chevron); tapping it opens a panel that holds **every**
-control: **Set as default / Hide / Delete** as full buttons, plus the per-model **context
-window**, **keep-alive**, and **run-on** (GPU / CPU / Auto), and the read-only
+control: **Set as default / Unload / Hide / Delete** as full buttons, plus the per-model
+**context window**, **keep-alive**, and **run-on** (GPU / CPU / Auto), and the read-only
 **quantization** with a **variant pick-list** + manual *pull-variant* shortcut. One panel is
 open at a time.
+
+**Unload** (#331) drops a model from memory now (`keep_alive=0`,
+`POST /platform/v1/llm/unload`) **without** changing power state — per-model in the panel when
+the model is `loaded`, and **Unload all** in the card header when any is. Previously unloading
+only happened as a side-effect of the power *Pause* toggle, behind a hover-only control that a
+phone couldn't reach. The `loaded` badge is also kept **live**: the local-models query polls
+while the page is visible and refetches on tab focus, so unloading on another device shows up
+here without a reload (the old badge went stale on the PWA).
 
 The quant pick-list (#330) is the on-demand registry lookup
 (`GET /platform/v1/llm/catalog/variants`): the library catalog lists *sizes*, not quants, so

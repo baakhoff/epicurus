@@ -85,6 +85,9 @@ def build_module(
             ),
         ],
         attachable=True,
+        # Notes are embedded into <tenant>__notes: re-embed on demand when the embedding model
+        # changes, via POST /reindex (the core's re-embed fan-out, #332).
+        reindexable=True,
         ui=UiSection(
             icon="pencil",
             summary=(

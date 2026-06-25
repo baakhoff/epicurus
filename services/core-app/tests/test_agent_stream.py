@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from epicurus_core_app.agent.agent import Agent, AgentEvent
+from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
 
 
@@ -271,3 +275,125 @@ async def test_reanswer_streams_from_stored_tail_without_a_new_user_message() ->
     sent = gw.calls[0]
     assert any(m.role == "system" and "tea" in (m.content or "") for m in sent)
     assert any(m.role == "user" and m.content == "the original question" for m in sent)
+
+
+# ── ask_user pause / resume (ADR-0053) ────────────────────────────────────────
+
+
+async def _suspend_store() -> SuspendedRunStore:
+    store = SuspendedRunStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    return store
+
+
+def _ask_user_call(question: str, call_id: str = "c1") -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "ask_user", "arguments": json.dumps({"question": question})},
+    }
+
+
+async def test_ask_user_suspends_the_turn() -> None:
+    store = await _suspend_store()
+    gw = _FakeStreamGateway(
+        [([], ChatResult(model="m", content="", tool_calls=[_ask_user_call("which file?")]))]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), suspended=store)  # type: ignore[arg-type]
+    events = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="open the file")], session_id="s1", model="m"
+        )
+    ]
+    types = [e.type for e in events]
+    assert "awaiting_input" in types  # the turn paused…
+    assert "done" not in types  # …and did not complete
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.question == "which file?"
+    assert awaiting.run_id
+    # The in-progress run was persisted with the assistant's tool-call message.
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    assert run.pending_call_id == "c1"
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in run.conversation)
+
+
+async def test_ask_user_resume_continues_the_turn() -> None:
+    store = await _suspend_store()
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_ask_user_call("which file?")])),
+            (["the ", "report"], ChatResult(model="m", content="the report")),
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), suspended=store)  # type: ignore[arg-type]
+    first = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="open it")], session_id="s1", model="m"
+        )
+    ]
+    awaiting = next(e for e in first if e.type == "awaiting_input")
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    convo = [ChatMessage.model_validate(m) for m in run.conversation]
+    convo.append(
+        ChatMessage(
+            role="tool", tool_call_id=run.pending_call_id, name="ask_user", content="report.md"
+        )
+    )
+    resumed = [
+        e async for e in agent.run_stream([], session_id="s1", model="m", resume_convo=convo)
+    ]
+    assert resumed[-1].type == "done"
+    assert resumed[-1].turn is not None
+    assert resumed[-1].turn.content == "the report"
+    # The model continued the same turn with the user's answer as the ask_user tool result.
+    assert any(m.role == "tool" and m.content == "report.md" for m in gw.calls[1])
+
+
+async def test_ask_user_without_store_degrades_and_answers() -> None:
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_ask_user_call("which?")])),
+            (["best guess"], ChatResult(model="m", content="best guess")),
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp())  # no suspend store wired  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    assert "awaiting_input" not in [e.type for e in events]
+    assert events[-1].type == "done"
+    assert events[-1].turn is not None and events[-1].turn.content == "best guess"
+    # Without a store the loop feeds an instruction back as the ask_user result and continues.
+    assert any(
+        m.role == "tool" and m.name == "ask_user" and (m.content or "").startswith("error:")
+        for m in gw.calls[1]
+    )
+
+
+async def test_ask_user_runs_sibling_tools_before_suspending() -> None:
+    store = await _suspend_store()
+    gw = _FakeStreamGateway(
+        [
+            (
+                [],
+                ChatResult(
+                    model="m",
+                    content="",
+                    tool_calls=[_tool_call(), _ask_user_call("which?", call_id="c2")],
+                ),
+            )
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(outputs={"echo": "pong"}), suspended=store)  # type: ignore[arg-type]
+    events = [
+        e async for e in agent.run_stream([ChatMessage(role="user", content="go")], session_id="s1")
+    ]
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    # The sibling tool ran (its result is in the persisted convo) so the convo stays valid;
+    # ask_user has no result yet — that arrives on resume.
+    assert any(m.get("role") == "tool" and m.get("content") == "pong" for m in run.conversation)
+    assert not any(m.get("tool_call_id") == "c2" for m in run.conversation)

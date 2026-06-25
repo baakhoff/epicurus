@@ -104,8 +104,33 @@ def _safe_name(filename: str) -> str:
 
 
 def _index_row(path: str, name: str, size: int, kind: str) -> dict[str, object]:
-    """An ``upsert_batch`` entry; uploads carry no filesystem mtime, hence 0.0."""
+    """An ``upsert_batch`` entry; objects carry no filesystem mtime, hence 0.0."""
     return {"path": path, "name": name, "size": size, "mtime": 0.0, "kind": kind}
+
+
+def _normalize_key(key: str) -> str:
+    """Normalise an object key to a POSIX-relative path safe for the index and the browser.
+
+    Collapses back-slashes and drops empty / ``.`` / ``..`` segments (no traversal), so the
+    one string addresses the object in MinIO, its row in the index, and its node in the Files
+    tree. Returns ``""`` only for an all-junk key; callers supply a fallback.
+    """
+    parts = [seg for seg in key.replace("\\", "/").split("/") if seg not in ("", ".", "..")]
+    return "/".join(parts)
+
+
+def _object_index_rows(key: str, *, name: str, size: int) -> list[dict[str, object]]:
+    """Index rows that make a stored object at *key* browsable (mirrors a scanned file).
+
+    Every parent segment of *key* becomes a ``dir`` row so the Files tree can drill into it,
+    and the leaf is a ``file`` row carrying the display *name* and byte *size*. ``source`` is
+    stamped ``"object"`` by the :meth:`FileIndex.upsert_batch` caller. *key* must already be
+    normalised (see :func:`_normalize_key`).
+    """
+    parts = key.split("/")
+    rows = [_index_row("/".join(parts[: i + 1]), parts[i], 0, "dir") for i in range(len(parts) - 1)]
+    rows.append(_index_row(key, name, size, "file"))
+    return rows
 
 
 async def ingest_object(
@@ -140,12 +165,35 @@ async def ingest_object(
     await index.upsert_batch(
         tenant=tenant,
         source="object",
-        entries=[
-            _index_row(UPLOADS_PREFIX, UPLOADS_PREFIX, 0, "dir"),
-            _index_row(key, name, len(data), "file"),
-        ],
+        entries=_object_index_rows(key, name=name, size=len(data)),
     )
     return {"key": key, "name": name, "size": len(data)}
+
+
+async def put_object(
+    *, index: FileIndex, objects: ObjectStore, tenant: str, key: str, content: str
+) -> dict[str, str]:
+    """Store a UTF-8 text object under *key* and catalogue it so it shows in the Files UI.
+
+    The agent's ``storage_object_put`` tool writes here. Like :func:`ingest_object`, the bytes
+    land in the tenant object bucket **and** a ``source="object"`` index row (plus any ancestor
+    directory rows) makes the object browsable, searchable, readable, and downloadable through
+    the same surfaces as a scanned file. Cataloguing is the crux: without it the object lives in
+    MinIO but never appears in the Files page, which lists the index — not the bucket (#347).
+
+    The key is normalised (see :func:`_normalize_key`) and the same normalised string is used
+    for the bucket key, the index path, and the returned ``key`` so a later read/download
+    resolves. Returns ``{"status": "ok", "key": <normalised-key>}``.
+    """
+    clean = _normalize_key(key) or "file"
+    size = len(content.encode("utf-8"))
+    await objects.put(tenant=tenant, key=clean, content=content)
+    await index.upsert_batch(
+        tenant=tenant,
+        source="object",
+        entries=_object_index_rows(clean, name=clean.rsplit("/", 1)[-1], size=size),
+    )
+    return {"status": "ok", "key": clean}
 
 
 @dataclass(frozen=True)
@@ -239,7 +287,7 @@ def build_module(
 
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.5.0",
+        version="0.5.1",
         description=(
             "File-tree index (list, search, read) over the shared file space, plus "
             "app-managed object storage via MinIO, durable chat-upload ingest, and "
@@ -327,6 +375,23 @@ def build_module(
         # Private subtrees (e.g. notes) are never readable by the agent (#KB-refactor).
         if _is_hidden(path):
             return "Error: not available"
+        # An agent-written object (source="object") lives in MinIO, not on disk — read it back
+        # from the store so a file the agent just saved is readable through the same tool that
+        # now lists it (#347). Everything else is a file on the read-only tree, handled below.
+        entry = await index.get(tenant=tenant, path=path)
+        if entry is not None and entry.source == "object" and entry.kind == "file":
+            stored = await objects.get_object(tenant=tenant, key=entry.path)
+            if stored is None:
+                return "Error: file not found"
+            if len(stored.data) > READ_MAX_BYTES:
+                return (
+                    f"Error: file is too large ({len(stored.data):,} bytes); "
+                    f"maximum is {READ_MAX_BYTES:,} bytes — use /download instead"
+                )
+            try:
+                return stored.data.decode("utf-8")
+            except UnicodeDecodeError:
+                return "Error: file is not valid UTF-8 (binary file)"
         root = Path(storage_root).resolve()
         try:
             resolved = (root / path).resolve()
@@ -374,14 +439,18 @@ def build_module(
 
     @module.tool()
     async def storage_object_put(key: str, content: str) -> dict[str, str]:
-        """Store *content* (UTF-8 text) as an object under *key*.
+        """Store *content* (UTF-8 text) as an object under *key*, visible in the Files page.
 
-        Objects are scoped to the current tenant's bucket and are writable —
-        unlike the read-only file tree, these are platform-managed.
-        Returns ``{"status": "ok", "key": key}``.
+        Objects are scoped to the current tenant's bucket and are writable — unlike the
+        read-only file tree, these are platform-managed. The object is catalogued on write, so
+        it appears in the Files page and is searchable, readable, and downloadable like any
+        other file; a nested key (e.g. ``reports/q2.md``) creates the enclosing folders. The
+        returned ``key`` is the normalised path actually used. Returns
+        ``{"status": "ok", "key": key}``.
         """
-        await objects.put(tenant=tenant, key=key, content=content)
-        return {"status": "ok", "key": key}
+        return await put_object(
+            index=index, objects=objects, tenant=tenant, key=key, content=content
+        )
 
     @module.tool()
     async def storage_object_get(key: str) -> dict[str, str | None]:
@@ -390,7 +459,7 @@ def build_module(
         Returns ``{"key": key, "content": "..."}`` or
         ``{"key": key, "content": null}`` if the key does not exist.
         """
-        content = await objects.get(tenant=tenant, key=key)
+        content = await objects.get(tenant=tenant, key=_normalize_key(key) or key)
         return {"key": key, "content": content}
 
     return module

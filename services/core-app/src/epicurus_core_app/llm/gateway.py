@@ -56,6 +56,53 @@ USAGE_SUBJECT = "llm.usage"
 _TRIM_NOTE = "(Earlier messages in this conversation were trimmed to fit the context window.)"
 
 
+def _normalize_arguments(raw: Any) -> str:
+    """Coerce a tool call's ``arguments`` to exactly one valid JSON string.
+
+    A provider replay (LiteLLM → Ollama) runs ``json.loads`` over every stored tool call
+    when it builds the next request, so the value must be a single loadable JSON document.
+    Two things break that: Ollama streams arguments as a dict, and a local model that emits
+    the same call twice yields two concatenated objects (``{…}{…}``) — both surface on the
+    *next* turn as ``JSONDecodeError: Extra data`` (an ``APIConnectionError`` that kills the
+    turn). Repair to a canonical string here: a dict is dumped, a leading JSON value is
+    salvaged from any trailing junk, and anything unparseable degrades to ``{}`` rather than
+    poisoning the conversation. A value that is already one valid JSON string is returned
+    verbatim (no re-encoding).
+    """
+    if isinstance(raw, dict):
+        return json.dumps(raw)
+    if not isinstance(raw, str) or not raw.strip():
+        return "{}"
+    try:
+        json.loads(raw)
+    except json.JSONDecodeError:
+        try:  # salvage the first JSON value, dropping any trailing junk after it
+            value, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+        except json.JSONDecodeError:
+            return "{}"
+        return json.dumps(value)
+    return raw
+
+
+def _normalize_tool_calls(
+    tool_calls: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Return ``tool_calls`` with every ``function.arguments`` a single valid JSON string.
+
+    Guards the conversation against a malformed stream poisoning a later turn's replay
+    (see :func:`_normalize_arguments`). A no-op for already-clean calls; copies rather than
+    mutating the inputs.
+    """
+    if not tool_calls:
+        return tool_calls
+    normalized: list[dict[str, Any]] = []
+    for call in tool_calls:
+        function = {**(call.get("function") or {})}
+        function["arguments"] = _normalize_arguments(function.get("arguments"))
+        normalized.append({**call, "function": function})
+    return normalized
+
+
 class UnknownProviderError(LookupError):
     """Raised when a provider alias does not exist or cannot hold a key."""
 
@@ -320,7 +367,7 @@ class LlmGateway:
         result = ChatResult(
             model=data.get("model") or config["model"],
             content=answer,
-            tool_calls=message.get("tool_calls"),
+            tool_calls=_normalize_tool_calls(message.get("tool_calls")),
             reasoning=reasoning,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
@@ -424,6 +471,7 @@ class LlmGateway:
         reasoning_parts: list[str] = []
         splitter = ThinkSplitter()
         calls: dict[int, dict[str, Any]] = {}
+        slot = 0  # active accumulator slot for providers that stream no fragment index
         async for chunk in response:
             choices = chunk.choices
             if not choices:
@@ -444,17 +492,28 @@ class LlmGateway:
                     content_parts.append(answer_delta)
                     yield StreamEvent(delta=answer_delta)
             for fragment in delta.tool_calls or []:
-                index = fragment.index or 0
+                function = getattr(fragment, "function", None)
+                name = getattr(function, "name", None) if function is not None else None
+                # Choose the slot this fragment accumulates into. OpenAI streams one call as
+                # partial fragments that share an `index` (continuations carry no name), so
+                # those must coalesce. Ollama streams each *complete* call with a name but no
+                # index (LiteLLM leaves it unset) — honoring `index or 0` collapsed them all
+                # into slot 0 and concatenated their argument strings into invalid JSON, which
+                # then crashed the next turn on replay ("Extra data"). So an un-indexed
+                # fragment that names a tool starts a fresh slot instead of overwriting.
+                if fragment.index is not None:
+                    slot = fragment.index
+                elif name and calls:
+                    slot = max(calls) + 1
                 entry = calls.setdefault(
-                    index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                    slot, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
                 )
                 if fragment.id:
                     entry["id"] = fragment.id
-                function = getattr(fragment, "function", None)
                 if function is None:
                     continue
-                if function.name:
-                    entry["function"]["name"] = function.name
+                if name:
+                    entry["function"]["name"] = name
                 arguments = function.arguments
                 if isinstance(arguments, str):
                     entry["function"]["arguments"] += arguments
@@ -471,7 +530,7 @@ class LlmGateway:
         result = ChatResult(
             model=config["model"],
             content="".join(content_parts),
-            tool_calls=[calls[i] for i in sorted(calls)] or None,
+            tool_calls=_normalize_tool_calls([calls[i] for i in sorted(calls)]) or None,
             reasoning="".join(reasoning_parts) or None,
         )
         yield StreamEvent(result=result)
@@ -734,12 +793,17 @@ class LlmGateway:
             response = await client.request("DELETE", "/api/delete", json={"model": model})
             response.raise_for_status()
 
-    async def unload(self) -> None:
-        """Best-effort: ask the runtime to drop loaded models now (``keep_alive=0``)."""
+    async def unload(self, model: str | None = None) -> None:
+        """Best-effort: ask the runtime to drop loaded models now (``keep_alive=0``).
+
+        With ``model`` set, unload just that one (the on-demand per-model Unload, #331);
+        otherwise unload every installed model (the power-pause path). Never raises — a
+        runtime hiccup is logged, not surfaced.
+        """
         try:
-            models = await self.models()
+            targets = [model] if model is not None else [info.name for info in await self.models()]
             async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
-                for info in models:
-                    await client.post("/api/generate", json={"model": info.name, "keep_alive": 0})
+                for name in targets:
+                    await client.post("/api/generate", json={"model": name, "keep_alive": 0})
         except (httpx.HTTPError, KeyError):
-            log.warning("ollama unload failed", exc_info=True)
+            log.warning("ollama unload failed", model=model, exc_info=True)

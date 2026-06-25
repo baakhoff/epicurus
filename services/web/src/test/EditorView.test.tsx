@@ -10,6 +10,7 @@ const mockModulePage = vi.fn();
 const mockModulePageDoc = vi.fn();
 const mockSave = vi.fn();
 const mockCreateProject = vi.fn();
+const mockDeleteProject = vi.fn();
 const mockVersions = vi.fn();
 const mockVersion = vi.fn();
 vi.mock("@/lib/api", () => ({
@@ -18,6 +19,7 @@ vi.mock("@/lib/api", () => ({
     modulePageDoc: (...args: unknown[]) => mockModulePageDoc(...args),
     saveModulePageDoc: (...args: unknown[]) => mockSave(...args),
     createModuleProject: (...args: unknown[]) => mockCreateProject(...args),
+    deleteModuleProject: (...args: unknown[]) => mockDeleteProject(...args),
     modulePageDocVersions: (...args: unknown[]) => mockVersions(...args),
     modulePageDocVersion: (...args: unknown[]) => mockVersion(...args),
   },
@@ -42,6 +44,7 @@ beforeEach(() => {
   mockModulePageDoc.mockReset();
   mockSave.mockReset();
   mockCreateProject.mockReset();
+  mockDeleteProject.mockReset();
   mockVersions.mockReset();
   mockVersion.mockReset();
 });
@@ -388,6 +391,38 @@ describe("EditorView — knowledge bases (scopes)", () => {
     await waitFor(() =>
       expect(mockCreateProject).toHaveBeenCalledWith("knowledge", "vault", "Research"),
     );
+  });
+
+  it("deletes a knowledge base via the switcher after confirming (#340)", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    mockDeleteProject.mockResolvedValue(undefined);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: "kb" })); // open the switcher
+    // Each project row carries a delete affordance; remove the non-active "work" base.
+    fireEvent.click(await screen.findByRole("button", { name: "Delete work" }));
+    // The confirm dialog gates the destructive call; confirming invokes the delete.
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(mockDeleteProject).toHaveBeenCalledWith("knowledge", "vault", "work"),
+    );
+  });
+
+  it("filters the document tree by the search box (#339)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+        { id: "beta.md", title: "beta", path: "beta.md", type: "file" as const },
+      ],
+    });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    expect(await screen.findByText("alpha")).toBeInTheDocument();
+    expect(screen.getByText("beta")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Search documents"), { target: { value: "beta" } });
+    // Only the matching document remains; the non-match is filtered out.
+    expect(screen.queryByText("alpha")).not.toBeInTheDocument();
+    expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
   it("renders the platform-docs reference scope as read-only", async () => {

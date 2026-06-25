@@ -101,7 +101,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.0",
+        version="0.11.0",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -312,6 +312,25 @@ def build_module(
             )
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
+
+    @module.tool()
+    async def tasks_delete(task_id: str, list_id: str | None = None) -> str:
+        """Delete a task permanently.
+
+        This removes the task entirely and cannot be undone — unlike ``tasks_complete``,
+        which keeps the task but marks it done. Get the ``task_id`` from ``tasks_list``.
+
+        Args:
+            task_id: The provider-specific task identifier (from ``tasks_list``).
+            list_id: The list containing the task.  Omit for the default list.
+
+        Returns a short confirmation string.
+        """
+        try:
+            await provider.delete_task(tenant_id, task_id, list_id=list_id)
+        except (GoogleTasksError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+        return "Task deleted."
 
     return module
 
@@ -600,13 +619,24 @@ def _task_card(
         if done
         else {"tool": "tasks_complete", "label": "Complete", "icon": "check", "args": args}
     )
+    # Permanent delete (#336): destructive, so it carries intent=danger + a confirm prompt the
+    # shell gates behind a dialog (ActionControl/Confirm). It routes to the same tasks_delete
+    # tool the chat agent can call, so the contract has one delete path (validated by the core).
+    delete_action: dict[str, Any] = {
+        "tool": "tasks_delete",
+        "label": "Delete",
+        "icon": "trash",
+        "intent": "danger",
+        "confirm": "Delete this task permanently? This cannot be undone.",
+        "args": args,
+    }
     return {
         "id": task.id,
         "title": task.title,
         "subtitle": task.notes or None,
         "badges": badges,
         "done": done,
-        "actions": [primary_action, edit_action],
+        "actions": [primary_action, edit_action, delete_action],
     }
 
 
@@ -675,6 +705,8 @@ def build_tasks_board(
         "label": "Add task",
         "intent": "primary",
         "icon": "plus",
+        # Render as a compact icon-only "+" (#337); the label moves to a tooltip/aria-label.
+        "icon_only": True,
         "form": True,
         "fields": ["title", "notes", "due", "priority", "tags"],
         "field_options": _TASK_FIELD_OPTIONS,

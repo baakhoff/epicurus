@@ -23,19 +23,31 @@ from fastapi.responses import JSONResponse
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
+from epicurus_core import (
+    EventBus,
+    SecretStore,
+    add_ops_routes,
+    build_file_store,
+    configure_logging,
+    get_logger,
+)
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.builtins import (
+    ASK_USER_SPEC,
+    ASK_USER_TOOL,
     NOW_SPEC,
     REMEMBER_SPEC,
+    make_ask_user_handler,
     make_now_handler,
     make_remember_handler,
 )
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.files_routes import create_files_router
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
@@ -43,6 +55,7 @@ from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
+from epicurus_core_app.llm.variants import VariantLookup
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
 from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
@@ -114,6 +127,8 @@ def create_app() -> FastAPI:
         max_models=settings.llm_catalog_max_models,
         enabled=settings.llm_catalog_enabled,
     )
+    # On-demand quant-variant lookup against the OCI registry (#330).
+    variant_lookup = VariantLookup(registry_url=settings.llm_registry_url)
 
     async def embed(texts: list[str]) -> list[list[float]]:
         # No explicit model → the gateway resolves the operator's Embedding-model pref
@@ -138,6 +153,9 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # Durable state behind ask_user pause/resume (ADR-0053): a paused turn lives here until
+    # the operator answers (or it expires).
+    suspended_runs = SuspendedRunStore(engine, ttl_hours=settings.ask_user_ttl_hours)
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
     # restart-only path for Ollama's KV-cache apply (#307). None when the socket isn't mounted —
@@ -185,6 +203,10 @@ def create_app() -> FastAPI:
     # Core `remember` built-in tool (ADR-0045): the agent's explicit path for saving a durable
     # fact about the user to long-term memory; background extraction covers the implicit path.
     mcp_host.register_builtin("remember", REMEMBER_SPEC, make_remember_handler(memory))
+    # Core `ask_user` built-in tool (ADR-0053): lets the model pause the turn to ask a
+    # clarifying question. The agent loop intercepts the call to suspend; this handler is a
+    # safety net (the spec reaches the model via the same discovery path as now/remember).
+    mcp_host.register_builtin(ASK_USER_TOOL, ASK_USER_SPEC, make_ask_user_handler())
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -202,6 +224,7 @@ def create_app() -> FastAPI:
         # Resolve the loop bound per turn from the stored pref (else the env default), so the
         # operator's UI choice takes effect without a restart (#297).
         prefs=prefs,
+        suspended=suspended_runs,
     )
     # Nightly fact-extraction runner (ADR-0051): drains the queue once a day, in the operator's
     # timezone, serially — so extraction happens off-hours, never against a live turn.
@@ -224,6 +247,15 @@ def create_app() -> FastAPI:
         registry=registry,
         default_tenant=settings.default_tenant_id,
     )
+    # Core-owned file space (ADR-0052): the swappable backend behind /platform/v1/files that
+    # modules consume instead of mounting the shared volume. Default backend is the local FS.
+    file_store = build_file_store(
+        backend=settings.files_backend,
+        root=settings.files_root,
+        s3_url=settings.files_s3_url,
+        s3_access_key=settings.files_s3_access_key,
+        s3_secret_key=settings.files_s3_secret_key,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -245,6 +277,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
         try:
+            await suspended_runs.init()
+        except Exception as exc:
+            log.error("suspended-run store init failed; ask_user pause/resume off", error=str(exc))
+        try:
             await registry.reconcile_tombstones()
         except Exception as exc:  # best-effort — a Docker hiccup must never block startup
             log.error("tombstone reconcile failed", error=str(exc))
@@ -256,6 +292,14 @@ def create_app() -> FastAPI:
             await extraction_queue.init()
         except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
             log.error("extraction queue init failed; nightly extraction off", error=str(exc))
+        # Provision the tenant's file-space root (core-owned provisioning, ADR-0052). Until the
+        # shared volume is mounted into the core (a follow-up phase), the local root won't exist
+        # yet — skip cleanly rather than logging an error on every boot.
+        if settings.files_backend != "local" or settings.files_root.exists():
+            try:
+                await file_store.ensure_tenant_root(tenant=settings.default_tenant_id)
+            except Exception as exc:  # never block startup on a provisioning hiccup
+                log.warning("file-space provisioning failed", error=str(exc))
         # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
         # startup never blocks on the network; the task self-heals on transient failures.
         catalog_task = asyncio.create_task(catalog.run_periodic())
@@ -286,12 +330,14 @@ def create_app() -> FastAPI:
             default_tenant=settings.default_tenant_id,
         )
     )
+    app.include_router(create_files_router(file_store, default_tenant=settings.default_tenant_id))
     app.include_router(
         create_llm_router(
             gateway,
             prefs=prefs,
             default_tenant=settings.default_tenant_id,
             catalog=catalog,
+            variants=variant_lookup,
             model_settings=model_settings,
             ollama_runtime=ollama_runtime,
         )
@@ -308,6 +354,7 @@ def create_app() -> FastAPI:
             attachment_store,
             sink=attachment_sink,
             probe=readiness,
+            suspended=suspended_runs,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

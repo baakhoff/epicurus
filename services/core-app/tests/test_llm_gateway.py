@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -11,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
 from epicurus_core import SecretError
-from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.gateway import LlmGateway, _normalize_tool_calls
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
@@ -467,6 +468,106 @@ async def test_stream_chat_assembles_tool_call_fragments(monkeypatch: pytest.Mon
     assert call["function"]["name"] == "echo"
     # the two argument fragments were concatenated into valid JSON
     assert call["function"]["arguments"] == '{"message": "hi"}'
+
+
+async def test_stream_chat_keeps_unindexed_tool_calls_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for the "Extra data" crash: LiteLLM's Ollama stream parser emits each
+    # *complete* tool call with no `index` (and a fresh id). Keying on `index or 0`
+    # collapsed two calls into one slot and concatenated their argument strings into
+    # `{…}{…}`, which loaded fine when invoking the tool but threw JSONDecodeError on the
+    # next turn's replay. Each un-indexed, named fragment must land in its own slot, and
+    # every stored `arguments` must stay loadable JSON.
+    class _Fn:
+        def __init__(self, name: str | None = None, arguments: str | None = None) -> None:
+            self.name = name
+            self.arguments = arguments
+
+    class _Fragment:
+        def __init__(
+            self,
+            index: int | None = None,
+            call_id: str | None = None,
+            name: str | None = None,
+            arguments: str | None = None,
+        ) -> None:
+            self.index = index
+            self.id = call_id
+            self.function = _Fn(name, arguments)
+
+    class _Delta:
+        def __init__(self, tool_calls: list[_Fragment] | None = None) -> None:
+            self.content = None
+            self.tool_calls = tool_calls
+
+    class _Choice:
+        def __init__(self, delta: _Delta) -> None:
+            self.delta = delta
+
+    class _Chunk:
+        def __init__(self, delta: _Delta) -> None:
+            self.choices = [_Choice(delta)]
+
+    async def fake_chunks() -> AsyncIterator[_Chunk]:
+        # Two distinct complete calls, Ollama-style: named, full JSON args, no index.
+        yield _Chunk(
+            _Delta([_Fragment(call_id="a", name="create_project", arguments='{"name": "Recipes"}')])
+        )
+        yield _Chunk(
+            _Delta([_Fragment(call_id="b", name="create_project", arguments='{"name": "Travel"}')])
+        )
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[_Chunk]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    events = [
+        event
+        async for event in _gateway().stream_chat(
+            [ChatMessage(role="user", content="make two projects")],
+            tools=[{"type": "function", "function": {"name": "create_project"}}],
+        )
+    ]
+
+    results = [e.result for e in events if e.result is not None]
+    assert len(results) == 1
+    calls = results[0].tool_calls or []
+    assert len(calls) == 2  # not collapsed into one
+    # Every stored arguments string loads on its own — exactly what replay does (and used
+    # to crash on). The two calls stay separate, not concatenated into invalid JSON.
+    decoded = [json.loads(c["function"]["arguments"]) for c in calls]
+    assert {d["name"] for d in decoded} == {"Recipes", "Travel"}
+    # And the assistant message the agent loop replays round-trips cleanly.
+    replay = ChatMessage(role="assistant", tool_calls=calls).provider_dump()
+    for tool_call in replay["tool_calls"]:
+        json.loads(tool_call["function"]["arguments"])  # no JSONDecodeError
+
+
+def test_normalize_tool_calls_repairs_arguments() -> None:
+    # The defense-in-depth layer: whatever a provider hands us, every replayed arguments
+    # value is exactly one loadable JSON string.
+    repaired = _normalize_tool_calls(
+        [
+            {"id": "1", "type": "function", "function": {"name": "a", "arguments": {"k": 1}}},
+            {
+                "id": "2",
+                "type": "function",
+                "function": {"name": "b", "arguments": '{"k": 1}{"k": 2}'},
+            },
+            {"id": "3", "type": "function", "function": {"name": "c", "arguments": "not json"}},
+            {"id": "4", "type": "function", "function": {"name": "d", "arguments": '{"ok": true}'}},
+        ]
+    )
+    assert repaired is not None
+    decoded = [json.loads(c["function"]["arguments"]) for c in repaired]
+    assert decoded[0] == {"k": 1}  # a dict is serialized
+    assert decoded[1] == {"k": 1}  # trailing duplicate object dropped
+    assert decoded[2] == {}  # unparseable junk degrades to {}
+    assert decoded[3] == {"ok": True}  # already-valid value preserved
+    assert repaired[3]["function"]["arguments"] == '{"ok": true}'  # verbatim, no re-encoding
+    assert _normalize_tool_calls(None) is None
+    assert _normalize_tool_calls([]) == []
 
 
 # ── reasoning / thinking capture (ADR-0041) ──────────────────────────────────────

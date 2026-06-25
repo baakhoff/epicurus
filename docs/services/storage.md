@@ -1,6 +1,6 @@
 # storage — file-tree index + object store
 
-**`epicurus-storage`** v0.5.0 is a sidecar module that gives the agent access to a file
+**`epicurus-storage`** v0.5.1 is a sidecar module that gives the agent access to a file
 tree on disk — a **read-only index** it can list, search, and read — plus **app-managed
 object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
@@ -37,6 +37,14 @@ mirror (private note bodies) is excluded from `storage_list`/`storage_search`/`s
 configurable via `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`). The operator's Files page,
 `/read`, and `/download` are unchanged — notes stay browsable and readable for the human.
 
+v0.5.1 **makes agent-written objects appear in Files** (#347): `storage_object_put` now
+catalogues the object it stores (a `source="object"` index row plus any ancestor folder rows),
+so a file the agent saves shows up in the Files page and is searchable, readable, and
+downloadable — exactly like a chat upload. Previously the bytes landed in MinIO but no index
+row existed, so the browser (which lists the index, not the bucket) never showed them. `/read`,
+`/download`, and `storage_read` now resolve **any** catalogued object by its `source`, no longer
+only those under the `uploads/` prefix.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -50,10 +58,10 @@ configurable via `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`). The operator
 | --- | --- |
 | `storage_list(path="")` | List the direct children of `path` (dirs before files). A hidden subtree (e.g. `notes/`) yields nothing. |
 | `storage_search(query, limit=50)` | Case-insensitive name/path search (max 200). Hits under a hidden subtree are filtered out. |
-| `storage_read(path)` | Return a text file's contents. Rejects files > **256 KB** and non-UTF-8 (binary) with an explanatory message; a path under a hidden subtree returns `Error: not available`. |
+| `storage_read(path)` | Return a text file's contents — a tree file **or** an agent-written object. Rejects files > **256 KB** and non-UTF-8 (binary) with an explanatory message; a path under a hidden subtree returns `Error: not available`. |
 | `storage_status()` | Configured root + indexed file/dir counts. |
 | `storage_rescan()` | Re-walk the tree and refresh the index. |
-| `storage_object_put(key, content)` | Store a text object under `key` (tenant bucket). |
+| `storage_object_put(key, content)` | Store a text object under `key` (tenant bucket) **and catalogue it** so it appears in the Files page and is searchable / readable / downloadable; a nested key (`reports/q2.md`) creates the folder tree. Returns the normalised key used. |
 | `storage_object_get(key)` | Retrieve a stored object (or `null`). |
 
 ### HTTP
@@ -62,8 +70,8 @@ configurable via `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`). The operator
 | --- | --- |
 | `POST /ingest?filename=…&att_id=…` | **Chat upload sink (ADR-0025).** Body is the raw file bytes; `Content-Type` carries the media type. Stores the bytes in the object store under `uploads/<att_id>-<name>`, catalogues them (browsable + downloadable), and returns `{key, name, size}`. Called by the core's attachment-upload route. |
 | `GET /pages/files?path=…&q=…` | `BrowserData`-shaped payload for the Files left-nav page (ADR-0018). `path` browses a directory (empty = root); `q` runs a search. Proxied by the core at `GET /platform/v1/modules/storage/pages/files`. |
-| `GET /read?path=…` | **Split-screen reader (#KB-refactor).** Return a UTF-8 text file's contents → `{path, name, content}` — an `uploads/…` object decoded from MinIO, or a file from the read-only tree. **400** traversal, **404** missing, **413** larger than 256 KB, **415** binary / non-UTF-8. Proxied by the core at `GET /platform/v1/modules/storage/read`. |
-| `GET /download?path=…` | Stream a file (binary-safe) — an `uploads/…` object from MinIO, or a file from the read-only tree. Path-traversal attempts → **HTTP 400**. Proxied by the core at `GET /platform/v1/modules/storage/download`. |
+| `GET /read?path=…` | **Split-screen reader (#KB-refactor).** Return a UTF-8 text file's contents → `{path, name, content}` — a catalogued object (chat upload or agent-written) decoded from MinIO, or a file from the read-only tree. **400** traversal, **404** missing, **413** larger than 256 KB, **415** binary / non-UTF-8. Proxied by the core at `GET /platform/v1/modules/storage/read`. |
+| `GET /download?path=…` | Stream a file (binary-safe) — a catalogued object (chat upload or agent-written) from MinIO, or a file from the read-only tree. Path-traversal attempts → **HTTP 400**. Proxied by the core at `GET /platform/v1/modules/storage/download`. |
 | `GET /health` · `GET /metrics` · `GET /manifest` | Ops + the module manifest. |
 
 > **Path safety.** For tree files, both `storage_read` and `/download` resolve `(root / path)`
@@ -146,13 +154,16 @@ tenant subtree. `EPICURUS_FILES_ROOT` **replaces** the old per-module `STORAGE_H
 
 - **Postgres `storage_files`** — one row per indexed entry: `id`, `tenant`, `path`,
   `name`, `size`, `mtime`, `kind` (`file`/`dir`), `updated_at`, and `source`
-  (`fs` = scanned, read-only · `object` = an `uploads/…` object in MinIO); unique on
-  `(tenant, path)`. Tenant-scoped; a re-scan upserts and purges stale **`fs`** rows only.
-  The `source` column is added in place at init on a pre-v0.3 deployment (no migration
-  tool — the index uses `create_all`), backfilled to `fs`.
+  (`fs` = scanned, read-only · `object` = a MinIO-backed object — a chat upload **or** an
+  agent-written file); unique on `(tenant, path)`. Tenant-scoped; a re-scan upserts and purges
+  stale **`fs`** rows only, so object rows survive every scan. The `source` column is added in
+  place at init on a pre-v0.3 deployment (no migration tool — the index uses `create_all`),
+  backfilled to `fs`.
 - **MinIO bucket `{tenant}-storage`** (`scope_bucket`) — app-managed objects, created
   lazily, one bucket per tenant. Chat uploads live here under the `uploads/` prefix; the
-  `storage_object_*` tools store text objects in the same bucket.
+  `storage_object_*` tools store text objects in the same bucket under the agent's chosen key.
+  Either way the object is catalogued in `storage_files` (a `source="object"` row plus ancestor
+  folder rows) so it appears in the Files page (#347).
 
 ## Dependencies
 
@@ -169,6 +180,6 @@ Package `epicurus_storage`: `scanner.py` (walk + incremental upsert), `db.py`
 (`storage_files` + queries + `source` column), `object_store.py` (MinIO via aioboto3 —
 text **and** binary `put_bytes`/`get_object`), `service.py` (the MCP tools + the
 `hidden_prefixes` filter that keeps private subtrees out of the agent's file tools + manifest
-UI + `build_page_data` + `ingest_object`/`load_object_download` + `load_text_file` for the
-inline reader), `app.py` (lifespan + `/ingest` + `/download` + `/read` + `/pages/files`; parses
+UI + `build_page_data` + `ingest_object`/`put_object`/`load_object_download` + `load_text_file`
+for the inline reader; `put_object` is the catalogue-on-write the `storage_object_put` tool wraps), `app.py` (lifespan + `/ingest` + `/download` + `/read` + `/pages/files`; parses
 `STORAGE_AGENT_HIDDEN_PREFIXES` into the module's `hidden_prefixes`).

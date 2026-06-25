@@ -419,6 +419,49 @@ async def test_propose_edit_rejects_non_md_path(tmp_path: Path) -> None:
     assert await store.list(tenant=TENANT) == []
 
 
+# ── the dedicated knowledge_create_document tool ──────────────────────────────
+
+
+async def test_create_document_stages_a_create_suggestion(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_create_document",
+        {"path": "ideas/new.md", "content": "# Idea\n"},
+    )
+    env = _envelope(content)
+    assert "pending your review" in env.text.lower()
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1
+    assert rows[0].path == "ideas/new.md"
+    assert rows[0].operation == "create"
+    assert rows[0].origin == "agent"
+
+
+async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
+    (tmp_path / "existing.md").write_text("# Already here\n", encoding="utf-8")
+    store = await _store()
+    module = _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_create_document",
+        {"path": "existing.md", "content": "# New\n"},
+    )
+    env = _envelope(content)
+    assert "already exists" in env.text.lower()
+    assert await store.list(tenant=TENANT) == []  # nothing staged
+
+
+async def test_create_document_applies_directly_when_review_off(tmp_path: Path) -> None:
+    store = await _store()
+    module = _module_with_store(store, tmp_path, review_on=False)
+    content, _ = await module.mcp.call_tool(
+        "knowledge_create_document",
+        {"path": "kb/auto.md", "content": "# Auto\n"},
+    )
+    env = _envelope(content)
+    assert "applied directly" in env.text.lower()
+
+
 async def test_manifest_declares_review_page(tmp_path: Path) -> None:
     store = await _store()
     manifest = await _module_with_store(store, tmp_path).manifest()

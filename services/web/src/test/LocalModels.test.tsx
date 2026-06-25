@@ -24,6 +24,7 @@ const mockSetGlobalDefault = vi.fn();
 const mockSetModelHidden = vi.fn();
 const mockDeleteModel = vi.fn();
 const mockSetModelSettings = vi.fn();
+const mockModelVariants = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -32,6 +33,7 @@ vi.mock("@/lib/api", () => ({
     systemInfo: () => mockSystemInfo(),
     modelSettings: (m: string) => mockModelSettings(m),
     modelDetails: (m: string) => mockModelDetails(m),
+    modelVariants: (m: string) => mockModelVariants(m),
     setGlobalDefault: (m: string | null) => mockSetGlobalDefault(m),
     setModelHidden: (m: string, h: boolean) => mockSetModelHidden(m, h),
     deleteModel: (m: string) => mockDeleteModel(m),
@@ -66,6 +68,7 @@ beforeEach(() => {
   mockSetModelHidden.mockResolvedValue({ status: "ok", hidden: [] });
   mockDeleteModel.mockResolvedValue({ status: "ok" });
   mockSetModelSettings.mockResolvedValue({ status: "ok" });
+  mockModelVariants.mockResolvedValue({ model: "x", variants: [] });
 });
 
 describe("LocalModels", () => {
@@ -129,6 +132,27 @@ describe("LocalModels", () => {
     await waitFor(() =>
       expect(mockSetGlobalDefault).toHaveBeenCalledWith("nomic-embed-text:latest"),
     );
+  });
+
+  it("lists registry quant variants in the panel and pulls one on tap (#330)", async () => {
+    mockModelVariants.mockResolvedValue({
+      model: "llama3.2:latest",
+      variants: [
+        { tag: "llama3.2:3b-instruct-q4_K_M", quant: "q4_K_M" },
+        { tag: "llama3.2:3b-instruct-q8_0", quant: "q8_0" },
+      ],
+    });
+    render(<LocalModels />, { wrapper });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Show settings for llama3.2:latest" }),
+    );
+    // Variants render with their quant labels; the smallest is listed first.
+    expect(await screen.findByText("q8_0")).toBeInTheDocument();
+    const pullButtons = screen.getAllByRole("button", { name: /^pull$/i });
+    fireEvent.click(pullButtons[0]);
+    // Pulling reuses the download flow with the chosen tag (q4 sorts first).
+    expect(mockPull).toHaveBeenCalledWith("llama3.2:3b-instruct-q4_K_M", expect.any(Function));
   });
 
   it("deletes a model after the confirm dialog", async () => {

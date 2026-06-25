@@ -24,6 +24,7 @@ import {
   ModelDetails,
   ModelInfo,
   ModelSettings,
+  ModelVariants,
   ModuleAttachmentItem,
   ModuleSnapshot,
   OAuthClientStatus,
@@ -148,6 +149,9 @@ export const api = {
   // Read-only facts (quantization, parameter size, trained context length) for the sheet.
   modelDetails: (model: string) =>
     request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),
+  // The quant variants available for a model, looked up on demand from the registry (#330).
+  modelVariants: (model: string) =>
+    request(ModelVariants, `/platform/v1/llm/catalog/variants?model=${encodeURIComponent(model)}`),
 
   timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
   setTimezone: (timezone: string) =>

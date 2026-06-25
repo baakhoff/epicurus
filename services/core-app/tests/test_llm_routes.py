@@ -13,6 +13,7 @@ from epicurus_core_app.llm.models import ModelDetails
 from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
+from epicurus_core_app.llm.variants import VariantLookup
 
 
 class _StubGateway:
@@ -52,6 +53,7 @@ async def _fresh_model_settings() -> ModelSettingsStore:
 def _app(
     prefs: LlmPrefsStore | None = None,
     catalog: ModelCatalog | None = None,
+    variants: VariantLookup | None = None,
     model_settings: ModelSettingsStore | None = None,
     ollama_runtime: OllamaRuntime | None = None,
 ) -> FastAPI:
@@ -62,6 +64,7 @@ def _app(
             prefs=prefs,
             default_tenant="local",
             catalog=catalog,
+            variants=variants,
             model_settings=model_settings,
             ollama_runtime=ollama_runtime,
         )
@@ -107,6 +110,36 @@ async def test_catalog_route_serves_the_snapshot() -> None:
     assert body["source"] == "http://example/library"
     assert [e["id"] for e in body["entries"]] == ["llama3.2:3b"]
     assert body["entries"][0]["tags"] == ["general"]
+
+
+async def test_variants_route_without_lookup_returns_empty() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(variants=None)), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/platform/v1/llm/catalog/variants", params={"model": "llama3.1:8b"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["model"] == "llama3.1:8b"
+    assert body["variants"] == []
+
+
+async def test_variants_route_serves_the_lookup() -> None:
+    async def fetch(url: str) -> dict[str, object]:
+        return {"tags": ["latest", "8b", "8b-instruct-q8_0", "70b"]}
+
+    lookup = VariantLookup(registry_url="http://registry.example", fetch=fetch)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(variants=lookup)), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/platform/v1/llm/catalog/variants", params={"model": "llama3.1:8b"}
+        )
+    assert resp.status_code == 200
+    tags = [v["tag"] for v in resp.json()["variants"]]
+    assert "llama3.1:8b-instruct-q8_0" in tags
+    assert "llama3.1:70b" not in tags  # filtered to the requested size
 
 
 def test_prefs_routes_present() -> None:

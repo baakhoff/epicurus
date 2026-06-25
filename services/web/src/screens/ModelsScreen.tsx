@@ -40,6 +40,12 @@ import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
 import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit } from "@/lib/modelFit";
 import { recommendKvCache } from "@/lib/kvCacheFit";
+import {
+  estimateVariantSizeMb,
+  formatVariantSize,
+  recommendVariantTag,
+  sortVariants,
+} from "@/lib/quantVariants";
 import { useDownloads } from "@/stores/downloads";
 
 // ── "Good for your system?" status icon ─────────────────────────────────────────
@@ -664,6 +670,12 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
   });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
+  // Quant variants for this model, looked up on demand from the registry (#330). Best-effort:
+  // an empty list (offline / non-library model) just hides the pick-list and keeps the manual box.
+  const variantsQuery = useQuery({
+    queryKey: ["modelVariants", model],
+    queryFn: () => api.modelVariants(model),
+  });
 
   // Draft form state, seeded once when the per-model settings arrive
   // (adjust-state-during-render, not an effect — the React-recommended pattern).
@@ -710,6 +722,19 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
     void pull(tag, () => queryClient.invalidateQueries({ queryKey: ["models"] }));
     onSaved?.();
   };
+
+  // Pull a variant from the pick-list — keep the panel open so the download tray shows progress.
+  const pullVariant = (tag: string) => {
+    void pull(tag, () => queryClient.invalidateQueries({ queryKey: ["models"] }));
+  };
+
+  const paramSize = details.data?.parameter_size;
+  const variantList = sortVariants(variantsQuery.data?.variants ?? []);
+  const recommendedTag = recommendVariantTag(
+    variantsQuery.data?.variants ?? [],
+    paramSize,
+    system.data,
+  );
 
   const hasOverrides =
     settings.data?.context_window != null ||
@@ -841,15 +866,58 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
         )}
       </div>
 
-      {/* quantization — read-only + re-pull shortcut */}
+      {/* quantization — read-only fact + a pick-list of available variants + manual fallback */}
       <div className="border-t border-edge pt-4">
-        <Label hint="Quantization is fixed when a model is pulled. To change it, pull a different variant tag (e.g. model:8b-q8_0) — it downloads alongside this one.">
+        <Label hint="Quantization is fixed when a model is pulled. Pick another variant below to download it alongside this one — a smaller quant frees VRAM, a larger one keeps more quality.">
           Quantization
         </Label>
         <p className="mb-2 text-sm text-ink">
           {details.data?.quantization ?? "unknown"}
-          <span className="text-ink-faint"> · read-only</span>
+          <span className="text-ink-faint"> · read-only (this model)</span>
         </p>
+
+        {/* available variants from the registry (#330) */}
+        {variantsQuery.isLoading ? (
+          <div className="mb-3">
+            <Spinner />
+          </div>
+        ) : variantList.length > 0 ? (
+          <div className="mb-3 flex max-h-56 flex-col divide-y divide-edge overflow-y-auto overscroll-contain rounded-(--radius-field) border border-edge">
+            {variantList.map((v) => {
+              const installed = v.tag === model;
+              const recommended = v.tag === recommendedTag;
+              const sizeMb = estimateVariantSizeMb(paramSize, v.quant);
+              return (
+                <div key={v.tag} className="flex items-center gap-2 px-2.5 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-xs text-ink">{v.quant || "default"}</span>
+                      {recommended && (
+                        <Badge tone="accent">
+                          <Sparkles size={10} className="shrink-0" /> recommended
+                        </Badge>
+                      )}
+                      {installed && <Badge tone="ok">installed</Badge>}
+                    </div>
+                    <p className="truncate font-mono text-[10px] text-ink-faint">
+                      {v.tag}
+                      {sizeMb != null ? ` · ${formatVariantSize(sizeMb)}` : ""}
+                    </p>
+                  </div>
+                  {installed ? (
+                    <span className="shrink-0 text-[11px] text-ink-faint">current</span>
+                  ) : (
+                    <Button variant="outline" onClick={() => pullVariant(v.tag)}>
+                      Pull
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {/* manual fallback — a specific tag (e.g. a non-library or HF model) */}
         <div className="flex items-center gap-2">
           <TextInput
             value={variant}

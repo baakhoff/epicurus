@@ -16,6 +16,7 @@ from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, Pr
 from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.variants import ModelVariantsResponse, VariantLookup
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -108,6 +109,7 @@ def create_llm_router(
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
     catalog: ModelCatalog | None = None,
+    variants: VariantLookup | None = None,
     model_settings: ModelSettingsStore | None = None,
     ollama_runtime: OllamaRuntime | None = None,
 ) -> APIRouter:
@@ -138,6 +140,16 @@ def create_llm_router(
         if catalog is None:
             return CatalogResponse(entries=[], source="", updated_at=None, stale=True)
         return await catalog.snapshot()
+
+    @router.get("/catalog/variants", response_model=ModelVariantsResponse)
+    async def get_variants(model: str) -> ModelVariantsResponse:
+        """The quant variants available for a model (#330), looked up on demand from the
+        registry. ``model`` is a query param (names carry ``:``). Best-effort: an empty list
+        means none were found / the lookup is unwired, and the UI falls back to the manual box.
+        """
+        if variants is None:
+            return ModelVariantsResponse(model=model, variants=[])
+        return await variants.variants(model)
 
     @router.delete("/models")
     async def delete_model(name: str) -> dict[str, str]:

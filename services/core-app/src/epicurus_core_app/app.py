@@ -43,6 +43,7 @@ from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
+from epicurus_core_app.llm.variants import VariantLookup
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
 from epicurus_core_app.memory.extraction import FactExtractor
@@ -113,6 +114,8 @@ def create_app() -> FastAPI:
         max_models=settings.llm_catalog_max_models,
         enabled=settings.llm_catalog_enabled,
     )
+    # On-demand quant-variant lookup against the OCI registry (#330).
+    variant_lookup = VariantLookup(registry_url=settings.llm_registry_url)
 
     async def embed(texts: list[str]) -> list[list[float]]:
         # No explicit model → the gateway resolves the operator's Embedding-model pref
@@ -261,6 +264,7 @@ def create_app() -> FastAPI:
             prefs=prefs,
             default_tenant=settings.default_tenant_id,
             catalog=catalog,
+            variants=variant_lookup,
             model_settings=model_settings,
             ollama_runtime=ollama_runtime,
         )

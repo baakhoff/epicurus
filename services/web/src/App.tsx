@@ -132,8 +132,10 @@ export function Shell() {
         </div>
       </nav>
 
-      {/* main column */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      {/* main column — min-w-0 lets it shrink to the flex track instead of growing to its
+          widest child (a Tasks board / Modules grid), which would otherwise overflow the row
+          and cover the side rail on odd aspect ratios (#343). */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* top bar (phones) */}
         <header className="flex items-center justify-between border-b border-edge px-4 py-2.5 pt-safe sm:hidden">
           <div className="flex items-center gap-2.5">
@@ -143,7 +145,7 @@ export function Shell() {
           <PowerOrb />
         </header>
 
-        <main className="min-h-0 flex-1">
+        <main className="min-h-0 min-w-0 flex-1">
           <Routes>
             <Route path="/" element={<ChatScreen />} />
             <Route path="/models" element={<ModelsScreen />} />

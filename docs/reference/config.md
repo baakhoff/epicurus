@@ -90,6 +90,10 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
 | `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |
 | `default_timezone` | `DEFAULT_TIMEZONE` | `str` | `UTC` | Fallback IANA timezone the agent's `now` tool reports when the operator hasn't set one in Settings (ADR-0039). |
+| `files_backend` | `FILES_BACKEND` | `str` | `local` | Core-owned file-space backend (ADR-0052): `local` (filesystem) or `s3` (MinIO/S3). See [file space](files.md). |
+| `files_root` | `FILES_ROOT` | `str` | `/data` | Local-backend base; the tenant file tree is `FILES_ROOT/<tenant>`. |
+| `files_s3_url` | `FILES_S3_URL` | `str` | `http://minio:9000` | S3 endpoint when `files_backend=s3`. |
+| `files_s3_access_key` / `files_s3_secret_key` | `FILES_S3_ACCESS_KEY` / `FILES_S3_SECRET_KEY` | `str` | `epicurus` / `epicurus-dev` | S3 credentials (dev defaults; OpenBao later). |
 
 ### Properties
 

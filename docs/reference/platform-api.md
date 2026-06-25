@@ -8,6 +8,10 @@ the internal Docker network; the API is never exposed externally by default.
 Use the typed [`PlatformClient`](#platformclient) from `epicurus_core` rather
 than crafting HTTP calls by hand.
 
+> The **file space** endpoints (`/platform/v1/files/*`) — the core-owned, swappable per-tenant
+> file store that modules read and write through `PlatformClient.files_*` (ADR-0052) — are
+> documented on their own page: [file space](files.md).
+
 ---
 
 ## `GET /platform/v1/info`

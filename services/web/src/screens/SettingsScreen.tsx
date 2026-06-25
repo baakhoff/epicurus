@@ -125,6 +125,11 @@ function OAuthProviderRow({ providerId }: { providerId: string }) {
 
   const connected = status.data?.connected ?? false;
   const credentialsConfigured = clientStatus.data?.configured ?? false;
+  // Show a permission *count*, not the raw space-separated list of googleapis scope URLs (it
+  // overflowed on mobile and was noise on desktop, #344). The full list stays on hover (title).
+  const scopeCount = status.data?.scope
+    ? status.data.scope.split(/\s+/).filter(Boolean).length
+    : 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -133,8 +138,10 @@ function OAuthProviderRow({ providerId }: { providerId: string }) {
           <Dot tone={connected ? "ok" : "dim"} />
           <div>
             <p className="text-sm text-ink">{connected ? "Connected" : "Not connected"}</p>
-            {connected && status.data?.scope && (
-              <p className="text-xs text-ink-faint">{status.data.scope}</p>
+            {connected && scopeCount > 0 && (
+              <p className="text-xs text-ink-faint" title={status.data?.scope ?? undefined}>
+                {scopeCount} permission{scopeCount === 1 ? "" : "s"} granted
+              </p>
             )}
           </div>
         </div>

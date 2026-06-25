@@ -24,8 +24,8 @@ import { Link } from "react-router-dom";
 
 import { AttachButton, AttachmentPill } from "@/components/AttachMenu";
 import {
-  EntityRefChip,
   EntityRefsContext,
+  SourcesPill,
   inlinedRefIds,
   refsById,
 } from "@/components/EntityRef";
@@ -102,13 +102,7 @@ function AssistantBlock({
       {streaming && text.length > 0 && (
         <span className="ep-caret ml-0.5 inline-block h-4 w-2 translate-y-0.5 rounded-[2px] bg-accent" />
       )}
-      {rowRefs.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {rowRefs.map((ref) => (
-            <EntityRefChip key={ref.ref_id} entref={ref} />
-          ))}
-        </div>
-      )}
+      {rowRefs.length > 0 && <SourcesPill refs={rowRefs} />}
     </AssistantRow>
   );
 }
@@ -399,9 +393,10 @@ function Welcome() {
 /**
  * A bubble above the composer when the assistant has filed suggestions (ADR-0033). A
  * one-tap structural op (move / new folder / new knowledge base) can be approved inline;
- * a richer change opens the review overlay. Ignore leaves it on the Suggestions page.
+ * a richer change opens the review overlay. Reject discards the suggestion outright without
+ * opening anything (#341); Ignore just hides the bubble, leaving it on the Suggestions page.
  */
-function SuggestionBubble() {
+export function SuggestionBubble() {
   const qc = useQueryClient();
   const pending = useQuery({
     queryKey: ["suggestions"],
@@ -417,6 +412,15 @@ function SuggestionBubble() {
     onSuccess: invalidate,
     onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not approve."),
   });
+
+  // Reject discards the suggestion server-side and never opens the review overlay (#341) —
+  // for any proposal type, including folder / knowledge-base creation.
+  const reject = useMutation({
+    mutationFn: (s: PendingSuggestion) => api.rejectSuggestion(s.module, s.page_id, s.id),
+    onSuccess: invalidate,
+    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not reject."),
+  });
+  const busy = approveSimple.isPending || reject.isPending;
 
   const active = (pending.data ?? []).filter((s) => !dismissed.has(s.id));
   const latest = active.at(-1);
@@ -443,6 +447,7 @@ function SuggestionBubble() {
           <Button
             variant="primary"
             className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            disabled={busy}
             busy={approveSimple.isPending}
             onClick={() => approveSimple.mutate(latest)}
           >
@@ -452,14 +457,25 @@ function SuggestionBubble() {
           <Button
             variant="primary"
             className="h-7 shrink-0 px-2.5 py-0 text-xs"
+            disabled={busy}
             onClick={() => setReviewing(latest)}
           >
             Open
           </Button>
         )}
         <Button
+          variant="outline"
+          className="h-7 shrink-0 px-2.5 py-0 text-xs"
+          disabled={busy}
+          busy={reject.isPending}
+          onClick={() => reject.mutate(latest)}
+        >
+          Reject
+        </Button>
+        <Button
           variant="ghost"
           className="h-7 shrink-0 px-2.5 py-0 text-xs"
+          disabled={busy}
           onClick={() => setDismissed((p) => new Set(p).add(latest.id))}
         >
           Ignore

@@ -52,6 +52,27 @@ describe("BrowserView", () => {
     expect(await screen.findByText("hello — echoed back.")).toBeInTheDocument();
   });
 
+  it("navigates up one level from a subdirectory (#338)", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Files",
+      items: [{ id: "docs", title: "docs", nav_path: "docs/sub" }],
+    });
+    render(<BrowserView module="storage" pageId="files" />, { wrapper });
+
+    // Drill into docs/sub, which surfaces the breadcrumb toolbar (and the up control).
+    fireEvent.click(await screen.findByText("docs"));
+    await waitFor(() =>
+      expect(mockModulePage).toHaveBeenLastCalledWith("storage", "files", { path: "docs/sub" }),
+    );
+
+    // Up one level → the parent directory ("docs"). The control appears once the
+    // sub-directory finishes loading (the browser shows a spinner mid-navigation).
+    fireEvent.click(await screen.findByRole("button", { name: /up one level/i }));
+    await waitFor(() =>
+      expect(mockModulePage).toHaveBeenLastCalledWith("storage", "files", { path: "docs" }),
+    );
+  });
+
   it("fetches the page through the core proxy by module + page id", async () => {
     mockModulePage.mockResolvedValue({ items: [] });
     render(<BrowserView module="files" pageId="browse" />, { wrapper });

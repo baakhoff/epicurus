@@ -5,10 +5,11 @@
  * right panel. The hover-card / panel shapes are core-owned; modules supply only data.
  */
 import { useQuery } from "@tanstack/react-query";
-import { AtSign } from "lucide-react";
+import { AtSign, ChevronDown, Library } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
 import { CardLink } from "@/components/CardLink";
+import { cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { EntityRef, HoverCard } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
@@ -113,6 +114,37 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
         <HoverCardBody data={data} loading={card.isLoading} />
       </span>
     </span>
+  );
+}
+
+/**
+ * A message's referenced entities, collapsed into one expandable "Sources (N)" pill (#333)
+ * rather than a wide row of chips. Click discloses the individual {@link EntityRefChip}s, each
+ * of which keeps its own hover-card and click-to-open behaviour.
+ */
+export function SourcesPill({ refs }: { refs: EntityRef[] }) {
+  const [open, setOpen] = useState(false);
+  if (refs.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-2.5 py-0.5 text-[13px] leading-5 text-ink-dim transition-colors hover:border-accent hover:text-ink"
+      >
+        <Library size={12} className="shrink-0" />
+        <span>Sources ({refs.length})</span>
+        <ChevronDown size={12} className={cn("transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {refs.map((ref) => (
+            <EntityRefChip key={ref.ref_id} entref={ref} />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

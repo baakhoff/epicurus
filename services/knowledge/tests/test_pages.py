@@ -18,10 +18,11 @@ from epicurus_knowledge.pages import DOCS_SCOPE_ID, VaultPages, create_pages_rou
 
 
 class _FakeIndexer:
-    """Records index_path calls; optionally raises to simulate an embed failure."""
+    """Records index_path / remove_under calls; optionally raises to simulate a failure."""
 
     def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[str] = []
+        self.removed_prefixes: list[str] = []
         self._fail = fail
 
     async def index_path(self, rel: str) -> int:
@@ -29,6 +30,10 @@ class _FakeIndexer:
         if self._fail:
             raise RuntimeError("embed unavailable")
         return 3
+
+    async def remove_under(self, prefix: str) -> int:
+        self.removed_prefixes.append(prefix)
+        return 0
 
 
 def _vault(tmp_path: Path) -> Path:
@@ -118,6 +123,46 @@ def test_create_project_makes_top_level_folder(tmp_path: Path) -> None:
     assert scope.id == "Research"
     assert (vault / "Research").is_dir()
     assert "Research" in [s.id for s in pages.list_scopes()]
+
+
+async def test_delete_project_removes_dir_and_deindexes(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    (vault / "research").mkdir()
+    (vault / "research" / "idea.md").write_text("# Idea\n", encoding="utf-8")
+    indexer = _FakeIndexer()
+    pages = VaultPages(vault, indexer)
+
+    await pages.delete_project("research")
+    assert not (vault / "research").exists()
+    # The project's documents are de-indexed by its `<name>/` prefix (Qdrant + ledger).
+    assert "research/" in indexer.removed_prefixes
+    # Other knowledge bases are untouched.
+    assert (vault / "kb").is_dir()
+
+
+async def test_delete_project_unknown_is_404(tmp_path: Path) -> None:
+    pages = VaultPages(_vault(tmp_path), _FakeIndexer())
+    with pytest.raises(HTTPException) as err:
+        await pages.delete_project("ghost")
+    assert err.value.status_code == 404
+
+
+async def test_delete_project_invalid_name_is_400(tmp_path: Path) -> None:
+    pages = VaultPages(_vault(tmp_path), _FakeIndexer())
+    with pytest.raises(HTTPException) as err:
+        await pages.delete_project("../escape")
+    assert err.value.status_code == 400
+
+
+async def test_delete_project_read_only_is_409(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    indexer = _FakeIndexer()
+    pages = VaultPages(vault, indexer, read_only=True)
+    with pytest.raises(HTTPException) as err:
+        await pages.delete_project("kb")
+    assert err.value.status_code == 409
+    assert (vault / "kb").is_dir()  # nothing removed
+    assert indexer.removed_prefixes == []
 
 
 def test_create_project_409_when_exists(tmp_path: Path) -> None:
@@ -271,6 +316,19 @@ def test_router_creates_project(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert resp.json()["id"] == "research"
     assert (vault / "research").is_dir()
+
+
+def test_router_deletes_project(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    (vault / "research").mkdir()
+    (vault / "research" / "idea.md").write_text("# Idea\n", encoding="utf-8")
+    indexer = _FakeIndexer()
+    app = FastAPI()
+    app.include_router(create_pages_router(VaultPages(vault, indexer)))
+    resp = TestClient(app).delete("/pages/vault/project", params={"name": "research"})
+    assert resp.status_code == 204
+    assert not (vault / "research").exists()
+    assert "research/" in indexer.removed_prefixes
 
 
 def test_router_reads_a_document(tmp_path: Path) -> None:

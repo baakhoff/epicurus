@@ -75,6 +75,7 @@ def _make_mock_qdrant() -> Any:
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()
+    qdrant.delete_collection = AsyncMock()
     qdrant.query_points = AsyncMock(return_value=_query_response([]))
     return qdrant
 
@@ -121,6 +122,23 @@ async def test_second_run_skips_unchanged_notes(note_index: NoteIndex, vault: Pa
     assert result["indexed"] == 0
 
 
+async def test_reset_drops_collection_and_clears_ledger(note_index: NoteIndex, vault: Path) -> None:
+    # The re-embed action (#332) must force a full rebuild — drop the vectors AND the ledger so
+    # the next run can't skip "unchanged" files (their vectors are stale after a model change).
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()
+    assert await note_index.count(tenant=TENANT) == 2
+
+    await indexer.reset()
+    indexer._qdrant.delete_collection.assert_awaited()  # type: ignore[attr-defined]
+    assert await note_index.count(tenant=TENANT) == 0  # ledger cleared
+
+    # With the ledger cleared, the next run re-embeds every note from scratch.
+    result = await indexer.run()
+    assert result["indexed"] == 2
+    assert result["unchanged"] == 0
+
+
 async def test_modified_note_is_reindexed(note_index: NoteIndex, vault: Path) -> None:
     indexer = _make_indexer(note_index, vault)
     await indexer.run()
@@ -151,6 +169,34 @@ async def test_deleted_note_is_removed(note_index: NoteIndex, vault: Path) -> No
     # The deleted note should no longer appear in the index.
     remaining = await note_index.list_paths(tenant=TENANT)
     assert "note_b.md" not in remaining
+
+
+async def test_remove_under_deindexes_notes_below_prefix(
+    note_index: NoteIndex, tmp_path: Path
+) -> None:
+    # Two knowledge bases: kb_a (deleted) and kb_b (kept).
+    (tmp_path / "kb_a").mkdir()
+    (tmp_path / "kb_a" / "one.md").write_text("# One\n\nA.")
+    (tmp_path / "kb_a" / "two.md").write_text("# Two\n\nB.")
+    (tmp_path / "kb_b").mkdir()
+    (tmp_path / "kb_b" / "keep.md").write_text("# Keep\n\nC.")
+    indexer = _make_indexer(note_index, tmp_path)
+    await indexer.run()
+    qdrant = indexer._qdrant  # type: ignore[attr-defined]
+    qdrant.delete.reset_mock()
+
+    removed = await indexer.remove_under("kb_a/")
+    assert removed == 2
+    qdrant.delete.assert_awaited()  # vectors purged for the removed notes
+    remaining = await note_index.list_paths(tenant=TENANT)
+    assert "kb_b/keep.md" in remaining
+    assert all(not p.startswith("kb_a/") for p in remaining)
+
+
+async def test_remove_under_unknown_prefix_is_noop(note_index: NoteIndex, vault: Path) -> None:
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()
+    assert await indexer.remove_under("nonexistent/") == 0
 
 
 async def test_index_path_indexes_a_single_file(note_index: NoteIndex, vault: Path) -> None:

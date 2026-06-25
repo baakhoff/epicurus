@@ -21,6 +21,7 @@ EpicurusModule(
     ui: UiSection | None = None,
     pages: list[PageSpec] | None = None,
     docs_url: str | None = None,
+    reindexable: bool = False,
 )
 ```
 
@@ -86,6 +87,7 @@ app = module.http_app()
 | `collections` | `CollectionsSpec \| None` | `None` | account/collection model (ADR-0030): the module serves `GET /accounts` and reads its selection via `PlatformClient.get_collections`; the shell renders a connected-accounts section. `CollectionsSpec` = `{noun: str, multi: bool, providers: list[str]}` |
 | `oauth_scopes` | `dict[str, list[str]]` | `{}` | OAuth API scopes the module needs per provider (#241), e.g. `{"google": ["https://www.googleapis.com/auth/calendar"]}`. The shell unions these across modules and requests them at connect (`?scope=`); the core always adds the default identity scopes. Empty = only identity scopes needed |
 | `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/module-docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
+| `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054) |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
@@ -185,7 +187,9 @@ core-rendered board edits without any module markup. `args` are fixed values mer
 every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_schema`
 (narrowed to `fields`, prefilled with `form_values`) before invoking; `confirm` gates a
 one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
-After a successful call the shell refetches the page. A form field renders as a `<select>`
+`icon_only: true` renders the action as a compact icon button (the `label` moves to a tooltip +
+`aria-label`) — for toolbar affordances that should stay small, e.g. a board's **"+"** Add (#337);
+ignored when the action has no `icon`. After a successful call the shell refetches the page. A form field renders as a `<select>`
 when the action supplies options for it: `field_options` (`{field: [value, …]}`) for plain
 string enums, or `field_choices` (`{field: [{value, label}, …]}`) when the submitted value
 isn't human-friendly and needs a separate label — e.g. a list picker whose value is a list
@@ -302,6 +306,12 @@ Proxied at:
 - `DELETE /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `POST /platform/v1/modules/{name}/pages/{id}/move`
+
+Scope (knowledge-base) management — gated on `can_create_scope` — adds
+`POST /pages/{id}/project?name=<name>` (create a top-level scope → `{id, title, kind}`) and
+`DELETE /pages/{id}/project?name=<name>` (delete the scope's folder **and de-index its
+documents**, `204`; 409 when read-only, #340), proxied at
+`POST|DELETE /platform/v1/modules/{name}/pages/{id}/project?project=<name>`.
 
 `path` is module-relative and the module **must** confine it to its own store (reject
 `..`, absolute paths, and — for doc paths — non-``.md`` files) — the editor writes real

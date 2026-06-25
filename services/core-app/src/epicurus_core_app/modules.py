@@ -204,6 +204,37 @@ class ModuleRegistry:
             if snap.status.healthy and snap.enabled and not snap.removed
         ]
 
+    async def _post_reindex(self, base: str) -> None:
+        """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``)."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{base}/reindex")
+            resp.raise_for_status()
+
+    async def reembed(self) -> list[dict[str, str]]:
+        """Re-embed every reindexable, enabled module (#332).
+
+        Fans out ``POST {base}/reindex`` to each healthy, enabled, non-removed module whose
+        manifest declares ``reindexable`` — the action behind the Models page's "Re-embed
+        everything" after the embedding model changes (vectors are model-specific). Best-effort
+        per module: one module's failure is logged and reported, never aborts the rest. Each
+        module re-embeds its own tenant's corpus (single-tenant in v1, so it matches ours).
+        """
+        snaps = await self.snapshot()
+        results: list[dict[str, str]] = []
+        for snap, base in zip(snaps, self._bases, strict=True):
+            if not (snap.status.healthy and snap.enabled and not snap.removed):
+                continue
+            if not snap.manifest.reindexable:
+                continue
+            name = snap.manifest.name
+            try:
+                await self._post_reindex(base)
+                results.append({"module": name, "status": "started"})
+            except httpx.HTTPError as exc:
+                log.warning("re-embed fan-out failed", module=name, error=str(exc))
+                results.append({"module": name, "status": "error"})
+        return results
+
     async def set_enabled(self, name: str, enabled: bool) -> None:
         """Enable or disable a module, persisting the operator's choice (#126).
 
@@ -682,6 +713,19 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def delete_page_project(self, name: str, page_id: str, project_name: str) -> None:
+        """Proxy ``DELETE /pages/{page_id}/project`` to the module (#340).
+
+        Deletes a knowledge base (a top-level scope); the module also de-indexes its
+        documents. 404 if it does not exist; the module enforces name-safety and the
+        read-only (watch-mode) guard. A longer timeout than the other tree ops since
+        de-indexing a large base touches one Qdrant delete per document.
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=30) as client:
+            resp = await client.delete(f"/pages/{page_id}/project", params={"name": project_name})
+            resp.raise_for_status()
+
     async def delete_page_doc(self, name: str, page_id: str, path: str) -> None:
         """Proxy ``DELETE /pages/{page_id}/doc`` to the module (#216).
 
@@ -916,6 +960,13 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
         return [snap for snap in await registry.snapshot() if not snap.removed]
 
+    @router.post("/reembed")
+    async def reembed() -> dict[str, Any]:
+        """Re-embed every reindexable module (#332) — the Models page's "Re-embed everything"
+        after the embedding model changes. Fans out to each module's ``/reindex`` and returns a
+        per-module status. A literal route, so it's declared before the ``/{name}/…`` paths."""
+        return {"modules": await registry.reembed()}
+
     @router.get("/{name}/config")
     async def get_config(name: str) -> dict[str, Any]:
         return await registry.get_config(name)
@@ -1062,6 +1113,12 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     ) -> dict[str, Any]:
         """Create a new knowledge base (project) in an editor page's store (#KB-refactor)."""
         return await registry.create_page_project(name, page_id, project)
+
+    @router.delete("/{name}/pages/{page_id}/project")
+    async def delete_module_project(name: str, page_id: str, project: str = Query(...)) -> Response:
+        """Delete a knowledge base (project) and de-index its documents (#340)."""
+        await registry.delete_page_project(name, page_id, project)
+        return Response(status_code=204)
 
     @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/approve")
     async def approve_suggestion(

@@ -173,3 +173,53 @@ def make_remember_handler(
         return f"Saved to memory: {saved.text}"
 
     return handler
+
+
+# ── ask_user (ADR-0053) ─────────────────────────────────────────────────────
+
+#: The tool name the agent loop intercepts to suspend the turn for a clarifying question.
+ASK_USER_TOOL = "ask_user"
+
+ASK_USER_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": ASK_USER_TOOL,
+        "description": (
+            "Ask the user a single clarifying question and PAUSE until they answer. Call this "
+            "when the request is ambiguous or missing a detail you genuinely need to proceed "
+            "correctly — instead of guessing. The turn suspends; the user's reply comes back "
+            "as this tool's result and you continue from there. Ask one focused question; do "
+            "not use this for rhetorical questions or to confirm something you already know."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The single clarifying question to put to the user.",
+                }
+            },
+            "required": ["question"],
+        },
+    },
+}
+
+
+def make_ask_user_handler() -> Callable[[dict[str, Any], str], Awaitable[str]]:
+    """Build the ``ask_user`` safety-net handler (ADR-0053).
+
+    The agent loop intercepts ``ask_user`` to suspend the turn (persist + emit
+    ``awaiting_input`` + end the stream), so this handler is **not** used on the normal path.
+    It exists only so ``ask_user`` is a registered built-in — its spec reaches the model via
+    the same discovery path as ``now``/``remember`` — and so a turn that somehow reaches it
+    without suspend support degrades to a clear instruction rather than failing.
+    """
+
+    async def handler(arguments: dict[str, Any], _tenant: str) -> str:
+        question = str(arguments.get("question") or "").strip()
+        return (
+            "error: cannot pause for input right now; proceed with your best assumption "
+            f"and state it. (Question was: {question})"
+        )
+
+    return handler

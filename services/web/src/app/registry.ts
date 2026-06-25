@@ -4,7 +4,7 @@
  * entries here without restructuring the shell.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, Blocks, Cpu, MessageCircle, Settings } from "lucide-react";
+import { Activity, Blocks, Cpu, Inbox, MessageCircle, Settings } from "lucide-react";
 
 import type { ModuleSnapshot, PageArchetype } from "@/lib/contracts";
 
@@ -18,6 +18,9 @@ export interface Surface {
 // reference you curate occasionally rather than a place you visit often (ADR-0045).
 export const SURFACES: Surface[] = [
   { path: "/", label: "Chat", icon: MessageCircle },
+  // One inbox for every module's agent-proposed changes (#KB-refactor). The per-module review
+  // pages no longer get their own nav entry — this surface aggregates them all.
+  { path: "/suggestions", label: "Suggestions", icon: Inbox },
   { path: "/models", label: "Models", icon: Cpu },
   { path: "/modules", label: "Modules", icon: Blocks },
   { path: "/settings", label: "Settings", icon: Settings },
@@ -64,4 +67,13 @@ export function modulePageNavs(modules: ModuleSnapshot[]): ModulePageNav[] {
       })),
     )
     .sort((a, b) => a.navOrder - b.navOrder || a.label.localeCompare(b.label));
+}
+
+/**
+ * The `review`-archetype pages — every module's agent-proposal queue. The unified Suggestions
+ * inbox aggregates these, and the rail filters them out of its module-page list (they no longer
+ * get a per-module nav entry). Derived from the same reachable+enabled modules.
+ */
+export function reviewPageNavs(modules: ModuleSnapshot[]): ModulePageNav[] {
+  return modulePageNavs(modules).filter((p) => p.archetype === "review");
 }

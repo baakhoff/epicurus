@@ -20,6 +20,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker (shows each model's **size**), and last-turn **Regenerate** / inline **Edit** controls that re-answer in place (#302). When the selected local model can't call tools (its `/api/show` capabilities lack `tools`), the composer shows a **"can't use tools — chat only"** hint. |
 | **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
+| **Suggestions** | **One inbox** for every module's agent-proposed changes (`GET /platform/v1/suggestions`), grouped by module — each group carries that module's review on/off toggle and its pending changes, each opening the shared review window. Replaces the per-module `review`-archetype nav entries (see **Reviewing suggested changes** below). |
 | **Models** | **Catalog browser** — search and filter the model catalog by capability/tag (General, Code, Multilingual, **Vision**, **Tools**, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list: each row is a **tap-to-expand disclosure** ([per-model rows](#models--per-model-rows-328)) — collapsed it shows name + `loaded`/`default`/`hidden` badges + a **suitability status icon** (✓ fits / ⚠ tight / ✕ too big, full reason on hover; #327) + capability icons + size; expanded it reveals the model's settings inline. **Global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence — with a **Re-embed everything** action (#332) that rebuilds every embedding-backed module's vectors after a model change (changing the model alone doesn't re-embed existing data); a server-wide **KV-cache type** with a **hardware-aware suggested** pick (q8_0 / q4_0 on tight VRAM, f16 when ample; #329); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
@@ -169,8 +170,8 @@ Every agent change to a module's content — the knowledge base **and** private 
 **staged for operator review**, never applied directly. The shell surfaces the pending queue in
 two places, both reading the cross-module feed `GET /platform/v1/suggestions` (each item tagged
 with its `module` + `page_id`). The feed spans **every** enabled module that declares a `review`
-page, so notes suggestions (notes declares its own `review` page) surface in the same bubble and
-overlay with no special-casing:
+page, so knowledge *and* notes suggestions surface in the same bubble and inbox with no
+special-casing:
 
 - A **suggestion bubble** above the chat composer (`SuggestionBubble` in
   `src/screens/ChatScreen.tsx`) appears when the assistant has filed suggestions. It names the
@@ -178,10 +179,14 @@ overlay with no special-casing:
   one-tap structural change (move / new folder / new knowledge base) offers **Approve** inline;
   a richer change offers **Open** (the review window). **Reject** discards the suggestion
   server-side without opening anything (#341) — for any proposal type, including folder /
-  knowledge-base creation; **Ignore** only hides the bubble while the suggestion stays on its
-  Suggestions page.
-- The **Suggestions page** (a module's `review` archetype — knowledge's *Suggestions*, notes'
-  *Note suggestions*) opens the same review window.
+  knowledge-base creation; **Ignore** only hides the bubble while the suggestion stays in the
+  Suggestions inbox.
+- The top-level **Suggestions** inbox (`src/screens/SuggestionsScreen.tsx`) — **one place** for
+  every module's proposals. It groups the same feed by module; each group carries that module's
+  **review on/off** toggle (`suggestions-enabled`) and its pending changes, each opening the
+  review window. This replaces the per-module `review`-archetype nav entries (knowledge's
+  *Suggestions*, notes' *Note suggestions*), which the rail now filters out — the module pages
+  still exist at `/m/{module}/{review-page}` for deep links, just without their own rail link.
 
 The **review window** (`src/components/SuggestionReviewModal.tsx`) is a core-owned overlay
 shaped by the operation, with three actions — **Approve**, **Reject**, **Ignore**:

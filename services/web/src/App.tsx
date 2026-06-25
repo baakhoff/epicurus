@@ -18,6 +18,7 @@ import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
 import { ObservabilityScreen } from "@/screens/ObservabilityScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
+import { SuggestionsScreen } from "@/screens/SuggestionsScreen";
 
 /** Shared NavLink class logic so core surfaces + module pages render identically. */
 const railLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -90,7 +91,9 @@ export function Shell() {
   // Module-contributed pages join the nav at runtime (ADR-0018): the shell renders
   // them, the modules only declare which archetype + supply data.
   const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
-  const modulePages = modulePageNavs(modules.data ?? []);
+  // Review pages are aggregated into the top-level Suggestions inbox (#KB-refactor), so they
+  // no longer get their own per-module rail entry.
+  const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");
 
   return (
     // `overflow-hidden` pins the fixed-height shell so the page body never scrolls —
@@ -148,6 +151,7 @@ export function Shell() {
         <main className="min-h-0 min-w-0 flex-1">
           <Routes>
             <Route path="/" element={<ChatScreen />} />
+            <Route path="/suggestions" element={<SuggestionsScreen />} />
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />

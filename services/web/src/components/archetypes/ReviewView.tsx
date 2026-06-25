@@ -14,29 +14,8 @@ import { useState } from "react";
 import { SuggestionReviewModal } from "@/components/SuggestionReviewModal";
 import { Badge, Button, EmptyState, Spinner, Switch } from "@/components/ui";
 import { api } from "@/lib/api";
-import { type PendingSuggestion, ReviewData, type ReviewSuggestion } from "@/lib/contracts";
-
-/** Badge tone per operation — additive green, removal danger, structural/edit accent. */
-function operationTone(op: ReviewSuggestion["operation"]): "ok" | "accent" | "danger" {
-  if (op === "create" || op === "mkdir" || op === "mkproject") return "ok";
-  if (op === "delete") return "danger";
-  return "accent";
-}
-
-function summary(s: ReviewSuggestion): string {
-  return s.operation === "move" ? `${s.path} → ${s.to_path}` : s.path;
-}
-
-function formatWhen(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+import { type PendingSuggestion, ReviewData } from "@/lib/contracts";
+import { formatWhen, operationTone, suggestionTarget } from "@/lib/suggestions";
 
 export function ReviewView({ module, pageId }: { module: string; pageId: string }) {
   const qc = useQueryClient();
@@ -123,9 +102,9 @@ export function ReviewView({ module, pageId }: { module: string; pageId: string 
                   <FileText size={14} className="shrink-0 text-ink-faint" />
                   <span
                     className="min-w-0 flex-1 truncate font-mono text-xs text-ink"
-                    title={summary(s)}
+                    title={suggestionTarget(s)}
                   >
-                    {summary(s)}
+                    {suggestionTarget(s)}
                   </span>
                   <span className="shrink-0 text-xs text-ink-faint">
                     {s.origin} · {formatWhen(s.created_at)}

@@ -7,6 +7,8 @@ integration marker) in test_storage_objects.py.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -14,8 +16,10 @@ from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore, StoredObject
 from epicurus_storage.service import (
     UPLOADS_PREFIX,
+    build_module,
     ingest_object,
     load_object_download,
+    put_object,
 )
 
 TENANT = "test"
@@ -284,3 +288,88 @@ async def test_init_adds_source_column_to_a_legacy_table() -> None:
     entry = await idx.get(tenant="test", path="docs/readme.txt")
     assert entry is not None
     assert entry.source == "fs"
+
+
+# ── put_object: an agent-written file appears in the Files UI (#347) ───────────
+
+
+async def test_put_object_indexes_so_the_browser_lists_it(
+    index: FileIndex, objects: _FakeObjectStore
+) -> None:
+    # The bug: storage_object_put wrote bytes to MinIO but created no index row, so the Files
+    # browser — which lists the index, not the bucket — never showed the file. Now it does.
+    result = await put_object(
+        index=index, objects=objects, tenant=TENANT, key="report.md", content="hello"
+    )
+    assert result == {"status": "ok", "key": "report.md"}
+
+    root = await index.browse(tenant=TENANT, path="")
+    entry = next(e for e in root if e.name == "report.md")
+    assert entry.kind == "file"
+    assert entry.source == "object"
+    assert entry.path == "report.md"
+    assert entry.size == len(b"hello")
+
+    # …and it resolves as an object download (bytes served from the store, not the disk tree).
+    dl = await load_object_download(index=index, objects=objects, tenant=TENANT, path="report.md")
+    assert dl is not None and dl.data == b"hello"
+
+
+async def test_put_object_nested_key_creates_navigable_folders(
+    index: FileIndex, objects: _FakeObjectStore
+) -> None:
+    await put_object(
+        index=index, objects=objects, tenant=TENANT, key="reports/2026/q2.md", content="x"
+    )
+    # Each ancestor segment is a navigable directory row, down to the file itself.
+    assert "reports" in {e.name for e in await index.browse(tenant=TENANT, path="")}
+    assert "2026" in {e.name for e in await index.browse(tenant=TENANT, path="reports")}
+    leaf = await index.browse(tenant=TENANT, path="reports/2026")
+    assert [(e.name, e.kind, e.source) for e in leaf] == [("q2.md", "file", "object")]
+
+
+async def test_put_object_normalizes_key_and_strips_traversal(
+    index: FileIndex, objects: _FakeObjectStore
+) -> None:
+    # Redundant separators / "." collapse and ".." is dropped — no traversal in the index
+    # path, and the one normalised key addresses both the store and the index.
+    result = await put_object(
+        index=index, objects=objects, tenant=TENANT, key="../docs//./guide.md", content="g"
+    )
+    assert result["key"] == "docs/guide.md"
+    dl = await load_object_download(
+        index=index, objects=objects, tenant=TENANT, path="docs/guide.md"
+    )
+    assert dl is not None and dl.data == b"g"
+
+
+async def test_put_object_is_findable_by_search(
+    index: FileIndex, objects: _FakeObjectStore
+) -> None:
+    await put_object(
+        index=index, objects=objects, tenant=TENANT, key="quarterly-summary.md", content="x"
+    )
+    hits = await index.search(tenant=TENANT, query="quarterly")
+    assert any(h.name == "quarterly-summary.md" and h.source == "object" for h in hits)
+
+
+async def test_put_object_survives_a_rescan(index: FileIndex, objects: _FakeObjectStore) -> None:
+    # Object rows persist across a directory rescan (purge_stale removes only fs rows).
+    await put_object(index=index, objects=objects, tenant=TENANT, key="keep.md", content="k")
+    deleted = await index.purge_stale(tenant=TENANT, seen_paths=set())
+    assert deleted == 0
+    assert "keep.md" in {e.name for e in await index.browse(tenant=TENANT, path="")}
+
+
+async def test_agent_reads_back_an_object_it_saved(
+    index: FileIndex, objects: _FakeObjectStore, tmp_path: Path
+) -> None:
+    # storage_read serves source="object" entries from the store, so a file the agent saved
+    # via storage_object_put reads back through the same tool that now lists it.
+    module = build_module(index, objects, storage_root=str(tmp_path), tenant=TENANT)
+    await module.mcp.call_tool(
+        "storage_object_put", {"key": "memo.md", "content": "agent wrote it"}
+    )
+    _content, structured = await module.mcp.call_tool("storage_read", {"path": "memo.md"})
+    payload = structured.get("result") or structured
+    assert payload == "agent wrote it"

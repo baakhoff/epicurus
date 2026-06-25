@@ -21,6 +21,7 @@ EpicurusModule(
     ui: UiSection | None = None,
     pages: list[PageSpec] | None = None,
     docs_url: str | None = None,
+    reindexable: bool = False,
 )
 ```
 
@@ -86,6 +87,7 @@ app = module.http_app()
 | `collections` | `CollectionsSpec \| None` | `None` | account/collection model (ADR-0030): the module serves `GET /accounts` and reads its selection via `PlatformClient.get_collections`; the shell renders a connected-accounts section. `CollectionsSpec` = `{noun: str, multi: bool, providers: list[str]}` |
 | `oauth_scopes` | `dict[str, list[str]]` | `{}` | OAuth API scopes the module needs per provider (#241), e.g. `{"google": ["https://www.googleapis.com/auth/calendar"]}`. The shell unions these across modules and requests them at connect (`?scope=`); the core always adds the default identity scopes. Empty = only identity scopes needed |
 | `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/module-docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
+| `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054) |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).

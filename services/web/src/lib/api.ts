@@ -24,6 +24,7 @@ import {
   ModelDetails,
   ModelInfo,
   ModelSettings,
+  ModelVariants,
   ModuleAttachmentItem,
   ModuleSnapshot,
   OAuthClientStatus,
@@ -106,6 +107,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  // Re-embed everything (#332): fan out to every reindexable module's /reindex so existing
+  // vectors are rebuilt with the current embedding model. Returns a per-module status.
+  reembed: () =>
+    request(
+      z.object({
+        modules: z.array(z.object({ module: z.string(), status: z.string() })),
+      }),
+      "/platform/v1/modules/reembed",
+      { method: "POST" },
+    ),
   setContextWindow: (value: number | null) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
       method: "PUT",
@@ -148,6 +159,16 @@ export const api = {
   // Read-only facts (quantization, parameter size, trained context length) for the sheet.
   modelDetails: (model: string) =>
     request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),
+  // The quant variants available for a model, looked up on demand from the registry (#330).
+  modelVariants: (model: string) =>
+    request(ModelVariants, `/platform/v1/llm/catalog/variants?model=${encodeURIComponent(model)}`),
+  // Unload model(s) from memory now (keep_alive=0) without changing power state (#331).
+  // `model` null/omitted unloads every loaded model.
+  unloadModel: (model: string | null = null) =>
+    request(z.object({ status: z.string(), model: z.string() }), "/platform/v1/llm/unload", {
+      method: "POST",
+      body: JSON.stringify({ model }),
+    }),
 
   timezone: () => request(TimezonePrefs, "/platform/v1/timezone"),
   setTimezone: (timezone: string) =>

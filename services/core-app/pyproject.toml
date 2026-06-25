@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core-app"
-version = "0.35.0"
+version = "0.38.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
@@ -20,6 +20,9 @@ dependencies = [
     # IANA timezone database for zoneinfo (the `now` tool, ADR-0039) — so timezone lookups
     # work on hosts without a system tz database (Windows dev, minimal images).
     "tzdata>=2024.1",
+    # The core owns the file space (ADR-0052); aioboto3 powers the S3 FileStore backend so the
+    # operator can select it (FILES_BACKEND=s3) with no separate install. Local FS is default.
+    "aioboto3>=13.0",
 ]
 
 [build-system]

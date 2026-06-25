@@ -77,3 +77,18 @@ async def test_delete_note_removes_vectors() -> None:
     await idx.delete_note("my-note")
 
     qdrant.delete.assert_awaited_once()
+
+
+async def test_reindex_drops_collection_and_re_embeds_every_note() -> None:
+    # The re-embed action (#332): drop the whole collection (vectors are model-specific), then
+    # re-embed every note with the current model.
+    qdrant = AsyncMock()
+    qdrant.collection_exists = AsyncMock(return_value=True)
+    platform = _FakePlatform()
+    idx = _indexer(qdrant, platform)
+
+    total = await idx.reindex([("a", "# A\n\nbody a"), ("b", "# B\n\nbody b")])
+
+    qdrant.delete_collection.assert_awaited_once()
+    assert total >= 2
+    assert len(platform.embedded) == 2  # one embed pass per note

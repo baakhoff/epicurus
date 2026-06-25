@@ -295,6 +295,9 @@ def build_module(
         ],
         # Contribute usage docs for the knowledge module itself (#215).
         docs_url="/module-docs",
+        # Holds embeddings (vault + platform/module docs): re-embed on demand when the
+        # embedding model changes, via POST /reindex (the core's re-embed fan-out, #332).
+        reindexable=True,
     )
 
     module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")

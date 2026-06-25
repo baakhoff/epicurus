@@ -24,7 +24,6 @@ from epicurus_storage.scanner import scan
 from epicurus_storage.service import (
     MODULE_NAME,
     STORAGE_PAGE_ID,
-    UPLOADS_PREFIX,
     build_module,
     build_page_data,
     ingest_object,
@@ -136,28 +135,30 @@ def create_app() -> FastAPI:
     async def download(
         path: str = Query(..., description="Path relative to the storage root"),
     ) -> Response:
-        """Stream a file — an object-store upload or a file from the indexed tree.
+        """Stream a file — a catalogued object or a file from the indexed tree.
 
-        A catalogued ``uploads/…`` object (a chat attachment) is streamed from MinIO;
-        every other *path* is resolved against the configured storage root, with
+        Any ``source="object"`` entry (a chat upload or a file the agent saved) is streamed
+        from MinIO; every other *path* is resolved against the configured storage root, with
         path-traversal attempts (``..`` components) rejected with HTTP 400.
         """
-        # Object-backed uploads live under the uploads prefix; the index entry's source
-        # is the authority, so the prefix test just spares ordinary files a DB round-trip.
-        if path == UPLOADS_PREFIX or path.startswith(f"{UPLOADS_PREFIX}/"):
-            try:
-                obj = await load_object_download(
-                    index=index, objects=objects, tenant=_tenant, path=path
-                )
-            except Exception as exc:  # an index/object hiccup must not break fs downloads
-                log.warning("object download lookup failed", path=path, error=str(exc))
-                obj = None
-            if obj is not None:
-                return Response(
-                    content=obj.data,
-                    media_type=obj.content_type,
-                    headers={"content-disposition": _attachment_disposition(obj.name)},
-                )
+        # The index entry's source is the sole authority for object-vs-filesystem: an object
+        # (a chat upload OR a file the agent saved under any key) streams from MinIO, everything
+        # else resolves against the read-only tree. We can't shortcut by an `uploads/` prefix —
+        # agent objects aren't confined to it (#347) — so we always consult the catalogue first;
+        # `load_object_download` returns None for a filesystem entry before touching MinIO.
+        try:
+            obj = await load_object_download(
+                index=index, objects=objects, tenant=_tenant, path=path
+            )
+        except Exception as exc:  # an index/object hiccup must not break fs downloads
+            log.warning("object download lookup failed", path=path, error=str(exc))
+            obj = None
+        if obj is not None:
+            return Response(
+                content=obj.data,
+                media_type=obj.content_type,
+                headers={"content-disposition": _attachment_disposition(obj.name)},
+            )
 
         try:
             resolved = (_root / path).resolve()
@@ -182,25 +183,27 @@ def create_app() -> FastAPI:
     ) -> dict[str, object]:
         """Return a text file's contents for the Files split-screen reader (#KB-refactor).
 
-        A catalogued ``uploads/…`` object is decoded from MinIO; every other *path* is read
-        from the read-only tree. 400 traversal, 404 missing, 413 too large, 415 binary.
+        A catalogued ``source="object"`` entry (upload or agent-written) is decoded from MinIO;
+        every other *path* is read from the read-only tree. 400 traversal, 404 missing, 413 too
+        large, 415 binary.
         """
-        if path == UPLOADS_PREFIX or path.startswith(f"{UPLOADS_PREFIX}/"):
+        # Same source-led routing as /download: an object (upload or agent-written) decodes
+        # from MinIO, anything else reads from the read-only tree (#347).
+        try:
+            obj = await load_object_download(
+                index=index, objects=objects, tenant=_tenant, path=path
+            )
+        except Exception as exc:  # an index/object hiccup must not break fs reads
+            log.warning("object read lookup failed", path=path, error=str(exc))
+            obj = None
+        if obj is not None:
+            if len(obj.data) > READ_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="file is too large to preview")
             try:
-                obj = await load_object_download(
-                    index=index, objects=objects, tenant=_tenant, path=path
-                )
-            except Exception as exc:  # an index/object hiccup must not break fs reads
-                log.warning("object read lookup failed", path=path, error=str(exc))
-                obj = None
-            if obj is not None:
-                if len(obj.data) > READ_MAX_BYTES:
-                    raise HTTPException(status_code=413, detail="file is too large to preview")
-                try:
-                    text = obj.data.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
-                return {"path": path, "name": obj.name, "content": text}
+                text = obj.data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
+            return {"path": path, "name": obj.name, "content": text}
         return load_text_file(_root, path).model_dump()
 
     @app.get("/pages/{page_id}")

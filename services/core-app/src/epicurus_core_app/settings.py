@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import field_validator
 
 from epicurus_core import CoreSettings
+from epicurus_core.files import FileStoreBackend
 
 
 class CoreAppSettings(CoreSettings):
@@ -90,6 +93,17 @@ class CoreAppSettings(CoreSettings):
     # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
     # deployment sets its own in the Settings screen (persisted) or via this env.
     default_timezone: str = "UTC"
+
+    # ── File space (ADR-0052) ───────────────────────────────────────────────────
+    # The core owns the per-tenant user file space behind a swappable backend (constraint #3).
+    # "local" serves the shared volume at FILES_ROOT/<tenant>; "s3" serves a per-tenant
+    # {tenant}-files bucket on the MinIO/S3 endpoint. Modules consume it via the
+    # /platform/v1/files/* API (PlatformClient.files_*) rather than mounting the volume.
+    files_backend: FileStoreBackend = "local"
+    files_root: Path = Path("/data")
+    files_s3_url: str = "http://minio:9000"
+    files_s3_access_key: str = "epicurus"
+    files_s3_secret_key: str = "epicurus-dev"
 
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.

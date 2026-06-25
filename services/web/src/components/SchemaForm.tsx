@@ -126,7 +126,7 @@ function FieldFor({
           aria-label={title}
           value={String(value ?? "")}
           onChange={(e) => onChange(e.target.value)}
-          className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+          className="box-border w-full min-w-0 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
         >
           <option value="" disabled>
             choose…
@@ -285,7 +285,9 @@ export function SchemaForm({
           onChange={(next) => setValues((prev) => ({ ...prev, [name]: next }))}
         />
       ))}
-      <Button type="submit" variant="primary" busy={busy} disabled={missing}>
+      {/* Full-width submit so the action reads as a clear bar at the foot of a narrow
+          mobile sheet rather than a stray button (#335). */}
+      <Button type="submit" variant="primary" className="w-full" busy={busy} disabled={missing}>
         {submitLabel}
       </Button>
     </form>

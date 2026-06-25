@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.10.0"
+    assert manifest.version == "0.11.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -59,6 +59,7 @@ async def test_manifest(module_fixture: object) -> None:
         "tasks_add",
         "tasks_complete",
         "tasks_update",
+        "tasks_delete",
     }
     # The Tasks left-nav page is declared as a core `board` archetype (ADR-0018).
     pages = {p.id: p for p in manifest.pages}
@@ -118,9 +119,32 @@ async def test_tasks_complete(module_fixture: object) -> None:
     )
     assert done["completed"]
 
+
+async def test_tasks_delete(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Throwaway"}
+    )
+    task_id = task["id"]
+
+    content, _ = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_delete", {"task_id": task_id}
+    )
+    assert "deleted" in content[0].text.lower()
+
+    # The task is gone — listing returns nothing.
     content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
     envelope = _parse_envelope(content)
-    assert all(r.ref_id != task_id for r in envelope.entity_refs)
+    assert envelope.entity_refs == []
+
+
+async def test_tasks_delete_unknown_id_is_a_noop(module_fixture: object) -> None:
+    mod = module_fixture
+    # The local store deletes by id without error, so deleting a missing task is harmless.
+    content, _ = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_delete", {"task_id": "does-not-exist"}
+    )
+    assert "deleted" in content[0].text.lower()
 
 
 async def test_complete_nonexistent_raises(module_fixture: object) -> None:

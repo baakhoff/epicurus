@@ -122,6 +122,21 @@ describe("BoardView", () => {
     expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
   });
 
+  it("renders an icon_only board action as a compact button with a tooltip label (#337)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...BOARD,
+      actions: [{ ...BOARD.actions[0], icon_only: true }],
+    });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    // Still reachable by its accessible name (the label becomes the aria-label + tooltip).
+    const add = await screen.findByRole("button", { name: "Add task" });
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Add task");
+    // And it still opens the same form.
+    fireEvent.click(add);
+    expect(await screen.findByRole("dialog", { name: "Add task" })).toBeInTheDocument();
+  });
+
   it("invokes a card's one-tap action through the core with its fixed args", async () => {
     mockModulePage.mockResolvedValue(BOARD);
     mockInvoke.mockResolvedValue({ result: "{}" });

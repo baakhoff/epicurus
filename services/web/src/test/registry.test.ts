@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { modulePageNavs, modulePagePath } from "@/app/registry";
+import { modulePageNavs, modulePagePath, reviewPageNavs } from "@/app/registry";
 import { ModuleSnapshot } from "@/lib/contracts";
 
 function snapshot(
@@ -43,5 +43,31 @@ describe("modulePageNavs", () => {
 
   it("returns nothing for a module with no pages", () => {
     expect(modulePageNavs([snapshot("plain", true, [])])).toEqual([]);
+  });
+});
+
+describe("reviewPageNavs", () => {
+  it("returns only the review-archetype pages (what the Suggestions inbox aggregates)", () => {
+    const navs = reviewPageNavs([
+      snapshot("knowledge", true, [
+        { id: "vault", title: "Knowledge", archetype: "editor", nav_order: 30 },
+        { id: "review", title: "Suggestions", archetype: "review", nav_order: 31 },
+      ]),
+      snapshot("notes", true, [{ id: "notes", title: "Notes", archetype: "editor" }]),
+    ]);
+    expect(navs.map((n) => n.module)).toEqual(["knowledge"]);
+    expect(navs[0].pageId).toBe("review");
+    expect(navs[0].archetype).toBe("review");
+  });
+
+  it("omits review pages from unreachable or disabled modules", () => {
+    const down = reviewPageNavs([
+      snapshot("k", false, [{ id: "review", title: "Suggestions", archetype: "review" }]),
+    ]);
+    const off = reviewPageNavs([
+      snapshot("k", true, [{ id: "review", title: "Suggestions", archetype: "review" }], false),
+    ]);
+    expect(down).toEqual([]);
+    expect(off).toEqual([]);
   });
 });

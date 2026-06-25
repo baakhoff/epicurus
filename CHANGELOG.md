@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **One Suggestions inbox for every module's agent-proposed changes** — agent edits are staged
+  for review (knowledge's vault, notes' notebook, and any module that adopts the `review`
+  archetype), but each module surfaced its own queue as a separate left-nav page (knowledge's
+  *Suggestions*, notes' *Note suggestions*) — two places for the same kind of thing. They are now
+  a single top-level **Suggestions** surface (`src/screens/SuggestionsScreen.tsx`) that reads the
+  existing cross-module feed (`GET /platform/v1/suggestions`) and **groups it by module**: each
+  group carries that module's **review on/off** toggle (`suggestions-enabled`) and its pending
+  changes, each opening the shared review window (Approve / Reject / Ignore). The per-module
+  `review`-archetype nav entries are filtered out of the rail (`reviewPageNavs`); the pages still
+  exist at `/m/{module}/{review-page}` for deep links. It shares the `["suggestions"]` query with
+  the chat composer's suggestion bubble, so acting in one updates the other (`web` → 0.47.0).
 - **Model capabilities are surfaced — tool support, vision, and more — and a tool-less model
   just answers in text** — the runtime reports what each model can do (`/api/show`
   `capabilities`), but nothing used it. Now: (1) the **agent offers tools only to a

@@ -44,6 +44,7 @@ log.info("service starting", service=settings.service_name)
 | [`observability`](observability.md) | `add_ops_routes`, `create_ops_router`, `HealthResponse` |
 | [`secrets`](secrets.md) | `SecretStore`, `SecretError` |
 | [`platform-client`](platform-client.md) | `PlatformClient`, `PlatformMessage` — a module's typed access to core inference |
+| [`files`](files.md) | `FileStore`, `FileEntry`, `build_file_store` — the core-owned, swappable per-tenant file space (ADR-0052) |
 
 The module↔core **wire contract** (the HTTP endpoints behind `PlatformClient`) is
 documented in [platform-api](platform-api.md). The running services that consume all of

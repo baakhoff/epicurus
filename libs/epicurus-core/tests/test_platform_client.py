@@ -40,12 +40,25 @@ class _HttpClient:
     async def __aexit__(self, *_: Any) -> None:
         return None
 
-    async def post(self, url: str, *, json: Any) -> _Resp:
+    async def post(self, url: str, *, json: Any = None, params: Any = None) -> _Resp:
         self._capture["url"] = url
         self._capture["body"] = json
+        self._capture["params"] = params
         return self._response
 
     async def get(self, url: str, *, params: Any = None) -> _Resp:
+        self._capture["url"] = url
+        self._capture["params"] = params
+        return self._response
+
+    async def put(self, url: str, *, json: Any = None, params: Any = None) -> _Resp:
+        self._capture["url"] = url
+        self._capture["body"] = json
+        self._capture["params"] = params
+        return self._response
+
+    async def request(self, method: str, url: str, *, params: Any = None) -> _Resp:
+        self._capture["method"] = method
         self._capture["url"] = url
         self._capture["params"] = params
         return self._response
@@ -262,3 +275,80 @@ async def test_get_collections_requires_module_name() -> None:
     client = PlatformClient(base_url="http://core:8080", tenant_id="local")
     with pytest.raises(ValueError, match="module must be set"):
         await client.get_collections()
+
+
+# ── file space (ADR-0052) ─────────────────────────────────────────────────────
+
+
+def _patch_http(monkeypatch: pytest.MonkeyPatch, resp: _Resp, captured: dict[str, Any]) -> None:
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture=captured),
+    )
+
+
+async def test_files_list_parses_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_http(
+        monkeypatch,
+        _Resp(body={"entries": [{"path": "docs", "name": "docs", "kind": "dir"}]}),
+        captured,
+    )
+    entries = await PlatformClient(base_url="http://core:8080", tenant_id="local").files_list("")
+    assert captured["url"] == "/platform/v1/files/list"
+    assert captured["params"] == {"path": "", "tenant_id": "local"}
+    assert len(entries) == 1 and entries[0].kind == "dir"
+
+
+async def test_files_read_returns_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_http(
+        monkeypatch, _Resp(body={"path": "a.md", "name": "a.md", "content": "hi"}), captured
+    )
+    content = await PlatformClient(base_url="http://core:8080", tenant_id="local").files_read(
+        "a.md"
+    )
+    assert content == "hi"
+    assert captured["url"] == "/platform/v1/files/read"
+    assert captured["params"] == {"path": "a.md", "tenant_id": "local"}
+
+
+async def test_files_write_sends_content_and_returns_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_http(
+        monkeypatch,
+        _Resp(body={"path": "a.md", "name": "a.md", "kind": "file", "size": 2}),
+        captured,
+    )
+    entry = await PlatformClient(base_url="http://core:8080", tenant_id="local").files_write(
+        "a.md", "hi"
+    )
+    assert captured["url"] == "/platform/v1/files/write"
+    assert captured["body"] == {"content": "hi"}
+    assert captured["params"] == {"path": "a.md", "tenant_id": "local"}
+    assert entry.kind == "file" and entry.size == 2
+
+
+async def test_files_stat_returns_none_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_http(monkeypatch, _Resp(body={}, status_code=404), {})
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local")
+    assert await client.files_stat("ghost") is None
+
+
+async def test_files_delete_returns_bool(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_http(monkeypatch, _Resp(body={"deleted": True}), captured)
+    deleted = await PlatformClient(base_url="http://core:8080", tenant_id="local").files_delete(
+        "f.txt"
+    )
+    assert deleted is True
+    assert captured["method"] == "DELETE"
+    assert captured["url"] == "/platform/v1/files"
+
+
+async def test_files_make_dir_returns_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_http(monkeypatch, _Resp(body={"path": "p", "name": "p", "kind": "dir"}), captured)
+    entry = await PlatformClient(base_url="http://core:8080", tenant_id="local").files_make_dir("p")
+    assert captured["url"] == "/platform/v1/files/dir"
+    assert entry.kind == "dir"

@@ -13,7 +13,7 @@ import { Loader2 } from "lucide-react";
 import { createElement, useMemo, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
-import { Button, Confirm, Sheet, cn } from "@/components/ui";
+import { Button, Confirm, Sheet, Tooltip, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { BoardAction } from "@/lib/contracts";
 import { moduleIcon } from "@/lib/icons";
@@ -124,10 +124,36 @@ export function ActionControl({
         : "text-ink-dim hover:bg-surface-2 hover:text-ink";
   const fullVariant =
     action.intent === "danger" ? "danger" : action.intent === "primary" ? "primary" : "outline";
+  // Icon-only (#337): a compact square button whose label lives in a tooltip + aria-label.
+  // Only when the module both asks for it and supplies an icon to show.
+  const iconOnly = action.icon_only && Boolean(action.icon);
 
   return (
     <>
-      {compact ? (
+      {iconOnly ? (
+        <Tooltip label={action.label} side="bottom">
+          <button
+            type="button"
+            onClick={onClick}
+            disabled={invoke.isPending}
+            aria-label={action.label}
+            className={cn(
+              "inline-flex items-center justify-center rounded-(--radius-field) p-2 transition-colors disabled:opacity-50",
+              action.intent === "danger"
+                ? "border border-danger/40 text-danger hover:bg-danger/10"
+                : action.intent === "primary"
+                  ? "bg-accent text-canvas hover:bg-accent-strong"
+                  : "border border-edge-strong text-ink hover:border-accent hover:text-accent-strong",
+            )}
+          >
+            {invoke.isPending ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              createElement(moduleIcon(action.icon ?? undefined), { size: 16 })
+            )}
+          </button>
+        </Tooltip>
+      ) : compact ? (
         <button
           type="button"
           onClick={onClick}

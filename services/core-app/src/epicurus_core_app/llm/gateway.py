@@ -793,12 +793,17 @@ class LlmGateway:
             response = await client.request("DELETE", "/api/delete", json={"model": model})
             response.raise_for_status()
 
-    async def unload(self) -> None:
-        """Best-effort: ask the runtime to drop loaded models now (``keep_alive=0``)."""
+    async def unload(self, model: str | None = None) -> None:
+        """Best-effort: ask the runtime to drop loaded models now (``keep_alive=0``).
+
+        With ``model`` set, unload just that one (the on-demand per-model Unload, #331);
+        otherwise unload every installed model (the power-pause path). Never raises — a
+        runtime hiccup is logged, not surfaced.
+        """
         try:
-            models = await self.models()
+            targets = [model] if model is not None else [info.name for info in await self.models()]
             async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
-                for info in models:
-                    await client.post("/api/generate", json={"model": info.name, "keep_alive": 0})
+                for name in targets:
+                    await client.post("/api/generate", json={"model": name, "keep_alive": 0})
         except (httpx.HTTPError, KeyError):
-            log.warning("ollama unload failed", exc_info=True)
+            log.warning("ollama unload failed", model=model, exc_info=True)

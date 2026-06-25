@@ -101,9 +101,10 @@ at a time. `EditorData` carries the list of selectable scopes and which is activ
 - `can_create_scope` — whether the operator may create another knowledge base.
 
 The switcher lets the operator move between knowledge bases, **New knowledge base** creates a
-top-level folder (`POST /pages/{page_id}/project?name=`), and the shell offers a **New
-document** control (a root-level create — previously a document could only be added inside an
-existing folder). Tree `docs` paths are **scope-relative** — the shell prepends the active
+top-level folder (`POST /pages/{page_id}/project?name=`), a per-project **Remove** (trash)
+affordance deletes one behind a confirm dialog (`DELETE …/project`, dir + Qdrant points, #340),
+and the shell offers a **New document** control (a root-level create — previously a document
+could only be added inside an existing folder). Tree `docs` paths are **scope-relative** — the shell prepends the active
 `scope` when it reads, saves, or manages files — so a project's contents show without the
 project folder itself appearing as a node.
 
@@ -238,10 +239,12 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**). |
+| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**, **`reindexable`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `POST /reindex` | **Force a full re-embed** of every source (vault + platform docs + module docs) with the current embedding model → `{status: "started"}` (#332, ADR-0054). Unlike the incremental `knowledge_reindex` tool, this **drops the Qdrant collections and clears the ledgers first**, so vectors built with a previous model are rebuilt rather than skipped as "unchanged". Runs in the background; watch `GET /status`. Called by the core's re-embed fan-out (the manifest sets `reindexable`). |
 | `GET /pages/{page_id}?scope=<id>` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only, versioned, scopes:[{id, title, kind}], scope, scope_noun, can_create_scope}` (page id `vault`). `scope` selects the knowledge base (empty = the first project, or the reserved `__docs__` for the read-only platform docs). `type` is `"file"` or `"dir"`; `docs` paths are scope-relative. `can_manage_files: true` enables folder CRUD; `versioned: true` enables save-history browse/restore (#ADR-0046); `read_only: true` (watch mode #232, or the `__docs__` scope) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `POST /pages/{page_id}/project?name=<name>` | Create a new knowledge base — a top-level folder under the knowledge root → `{id, title, kind}` (#KB-refactor). 409 if it already exists, 400 for an invalid name (single segment, no separators / `..` / `.`/`_` prefix). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/project`. |
+| `DELETE /pages/{page_id}/project?name=<name>` | Delete a knowledge base — removes the top-level folder **and de-indexes its documents** (drops every Qdrant vector + ledger row under `<name>/`, tenant-scoped) so it leaves search at once (#340). `204` on success. 404 if absent, 400 for an invalid name, **409** when the vault is read-only (watch mode, #232). The operator's **Remove** affordance — the agent never deletes a base (no tool, no review op). Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/project`. |
 | `GET /pages/{page_id}/doc?path=<rel>` | One document's content `{path, title, content}`. `path` is scope-relative and strictly confined (no traversal, `.md` only); a `__docs__/…` path reads the read-only platform docs. |
 | `PUT /pages/{page_id}/doc?path=<rel>` | Save a document `{content}` → `{path, indexed, chunk_count}`; writes the file then re-indexes it, and records a version-history snapshot (#ADR-0046, see *Version history* below). The write is the source of truth — a failed re-index returns `indexed: false`, never losing the edit. **409** when the vault is externally owned (watch mode, #232) or the path targets the read-only `__docs__` scope; the folder/delete/move write routes behave likewise. |
 | `GET /pages/{page_id}/doc/versions?path=<rel>` | A document's save-snapshot history (#ADR-0046), newest first → `{versions:[{version_id, created_at, title, size}]}`. `version_id` is opaque; `size` is the snapshot's character count. Allowed even when the vault is read-only (viewing history is not a write). Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}/doc/versions`. |

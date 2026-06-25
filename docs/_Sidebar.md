@@ -34,6 +34,7 @@
 - [platform API](reference/platform-api.md)
 - [OAuth 2.0](reference/oauth.md)
 - [platform client](reference/platform-client.md)
+- [file space](reference/files.md)
 - [host-port registry](reference/ports.md)
 
 **Infrastructure**

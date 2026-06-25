@@ -242,6 +242,62 @@ async def test_set_config_for_unknown_module_is_404() -> None:
         await registry.set_config("ghost", {"a": 1})
 
 
+# ── re-embed fan-out (#332) ────────────────────────────────────────────────────
+
+
+def _reindexable_manifest() -> ModuleManifest:
+    return ModuleManifest(name="knowledge", version="0.16.0", reindexable=True)
+
+
+class _ReembedRegistry(_StubRegistry):
+    """A stub registry that records re-embed fan-out POSTs instead of hitting the network."""
+
+    def __init__(self, *, fail: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.posted: list[str] = []
+        self._fail = fail
+
+    async def _post_reindex(self, base: str) -> None:
+        if self._fail:
+            raise httpx.ConnectError("boom")
+        self.posted.append(base)
+
+
+def _reembed_registry(**kwargs: Any) -> _ReembedRegistry:
+    return _ReembedRegistry(
+        mcp=_FakeMcp(),
+        secrets=_FakeSecrets(),
+        tenant="local",
+        prefs=_FakeModulePrefs(),
+        docker=None,
+        **kwargs,
+    )
+
+
+async def test_reembed_fans_out_to_reindexable_modules() -> None:
+    registry = _reembed_registry(manifest=_reindexable_manifest())
+    result = await registry.reembed()
+    assert registry.posted == ["http://echo:8080"]
+    assert result == [{"module": "knowledge", "status": "started"}]
+
+
+async def test_reembed_skips_non_reindexable_modules() -> None:
+    registry = _reembed_registry(manifest=_echo_manifest())  # reindexable defaults to False
+    result = await registry.reembed()
+    assert registry.posted == []
+    assert result == []
+
+
+async def test_reembed_skips_unhealthy_modules() -> None:
+    registry = _reembed_registry(manifest=_reindexable_manifest(), healthy=False)
+    assert await registry.reembed() == []
+
+
+async def test_reembed_reports_a_module_that_fails() -> None:
+    registry = _reembed_registry(manifest=_reindexable_manifest(), fail=True)
+    assert await registry.reembed() == [{"module": "knowledge", "status": "error"}]
+
+
 async def test_get_status_proxies_module_status_url() -> None:
     from unittest.mock import MagicMock
 

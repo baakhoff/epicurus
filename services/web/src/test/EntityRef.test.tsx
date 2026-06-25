@@ -7,6 +7,7 @@ import {
   EntityRefChip,
   EntityRefsContext,
   SmartLink,
+  SourcesPill,
   inlinedRefIds,
   refsById,
 } from "@/components/EntityRef";
@@ -56,6 +57,28 @@ describe("EntityRefChip", () => {
     render(<EntityRefChip entref={REF} />, { wrapper });
     fireEvent.mouseEnter(screen.getByRole("button", { name: /Standup/ }).parentElement!);
     await waitFor(() => expect(mockResolve).toHaveBeenCalledWith("calendar", "event", "e1"));
+  });
+});
+
+describe("SourcesPill (#333)", () => {
+  const REFS: EntityRef[] = [
+    REF,
+    { ref_id: "e2", module: "knowledge", kind: "doc", title: "Roadmap", summary: null },
+  ];
+
+  it("collapses the refs behind one pill, expanding to the chips on click", () => {
+    render(<SourcesPill refs={REFS} />, { wrapper });
+    // Collapsed: a single "Sources (N)" pill — no per-source chips on screen yet.
+    expect(screen.getByRole("button", { name: /Sources \(2\)/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Standup/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Sources \(2\)/ }));
+    expect(screen.getByRole("button", { name: /Standup/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Roadmap/ })).toBeInTheDocument();
+  });
+
+  it("renders nothing when there are no refs", () => {
+    const { container } = render(<SourcesPill refs={[]} />, { wrapper });
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

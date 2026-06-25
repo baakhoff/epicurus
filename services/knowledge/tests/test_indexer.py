@@ -171,6 +171,34 @@ async def test_deleted_note_is_removed(note_index: NoteIndex, vault: Path) -> No
     assert "note_b.md" not in remaining
 
 
+async def test_remove_under_deindexes_notes_below_prefix(
+    note_index: NoteIndex, tmp_path: Path
+) -> None:
+    # Two knowledge bases: kb_a (deleted) and kb_b (kept).
+    (tmp_path / "kb_a").mkdir()
+    (tmp_path / "kb_a" / "one.md").write_text("# One\n\nA.")
+    (tmp_path / "kb_a" / "two.md").write_text("# Two\n\nB.")
+    (tmp_path / "kb_b").mkdir()
+    (tmp_path / "kb_b" / "keep.md").write_text("# Keep\n\nC.")
+    indexer = _make_indexer(note_index, tmp_path)
+    await indexer.run()
+    qdrant = indexer._qdrant  # type: ignore[attr-defined]
+    qdrant.delete.reset_mock()
+
+    removed = await indexer.remove_under("kb_a/")
+    assert removed == 2
+    qdrant.delete.assert_awaited()  # vectors purged for the removed notes
+    remaining = await note_index.list_paths(tenant=TENANT)
+    assert "kb_b/keep.md" in remaining
+    assert all(not p.startswith("kb_a/") for p in remaining)
+
+
+async def test_remove_under_unknown_prefix_is_noop(note_index: NoteIndex, vault: Path) -> None:
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()
+    assert await indexer.remove_under("nonexistent/") == 0
+
+
 async def test_index_path_indexes_a_single_file(note_index: NoteIndex, vault: Path) -> None:
     indexer = _make_indexer(note_index, vault)
     (vault / "note_c.md").write_text("# Note C\n\nFresh content.")

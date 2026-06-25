@@ -713,6 +713,19 @@ class ModuleRegistry:
             data: dict[str, Any] = resp.json()
             return data
 
+    async def delete_page_project(self, name: str, page_id: str, project_name: str) -> None:
+        """Proxy ``DELETE /pages/{page_id}/project`` to the module (#340).
+
+        Deletes a knowledge base (a top-level scope); the module also de-indexes its
+        documents. 404 if it does not exist; the module enforces name-safety and the
+        read-only (watch-mode) guard. A longer timeout than the other tree ops since
+        de-indexing a large base touches one Qdrant delete per document.
+        """
+        base = await self._resolve_editor_page(name, page_id)
+        async with httpx.AsyncClient(base_url=base, timeout=30) as client:
+            resp = await client.delete(f"/pages/{page_id}/project", params={"name": project_name})
+            resp.raise_for_status()
+
     async def delete_page_doc(self, name: str, page_id: str, path: str) -> None:
         """Proxy ``DELETE /pages/{page_id}/doc`` to the module (#216).
 
@@ -1100,6 +1113,12 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     ) -> dict[str, Any]:
         """Create a new knowledge base (project) in an editor page's store (#KB-refactor)."""
         return await registry.create_page_project(name, page_id, project)
+
+    @router.delete("/{name}/pages/{page_id}/project")
+    async def delete_module_project(name: str, page_id: str, project: str = Query(...)) -> Response:
+        """Delete a knowledge base (project) and de-index its documents (#340)."""
+        await registry.delete_page_project(name, page_id, project)
+        return Response(status_code=204)
 
     @router.post("/{name}/pages/{page_id}/suggestions/{suggestion_id}/approve")
     async def approve_suggestion(

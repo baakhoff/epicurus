@@ -13,10 +13,19 @@
  * view and selecting an item slides to its detail (with a back affordance).
  */
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { BookOpen, ChevronLeft, ChevronRight, Download, Folder, Search, X } from "lucide-react";
+import {
+  ArrowUp,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Folder,
+  Search,
+  X,
+} from "lucide-react";
 import { useRef, useState } from "react";
 
-import { Button, EmptyState, Spinner, cn } from "@/components/ui";
+import { Button, EmptyState, Spinner, Tooltip, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
@@ -39,6 +48,13 @@ function crumbs(path: string): Crumb[] {
   if (!path) return [];
   const parts = path.split("/").filter(Boolean);
   return parts.map((label, i) => ({ label, path: parts.slice(0, i + 1).join("/") }));
+}
+
+/** The parent directory of `path` (one level up); `""` (root) for a top-level dir or root. */
+function parentPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
 }
 
 function ItemIcon({ item }: { item: BrowserItem }) {
@@ -129,6 +145,16 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
           {/* breadcrumbs */}
           {breadcrumbs.length > 0 && (
             <nav className="flex min-w-0 flex-1 items-center gap-1 text-xs text-ink-dim">
+              {/* Up one level (#338): jump to the parent of the current directory. */}
+              <Tooltip label="Up one level" side="bottom">
+                <button
+                  onClick={() => navigateTo(parentPath(currentPath))}
+                  className="-ml-1 shrink-0 rounded-(--radius-field) p-1 hover:bg-surface-2 hover:text-ink"
+                  aria-label="Up one level"
+                >
+                  <ArrowUp size={13} />
+                </button>
+              </Tooltip>
               <button
                 onClick={() => navigateTo("")}
                 className="hover:text-ink shrink-0"

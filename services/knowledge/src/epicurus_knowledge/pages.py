@@ -272,6 +272,27 @@ class VaultPages:
         log.info("knowledge base created", name=target.name)
         return EditorScope(id=target.name, title=target.name, kind="project")
 
+    async def delete_project(self, name: str) -> int:
+        """Delete a knowledge base (a top-level folder) and de-index its documents (#340).
+
+        Removes the project directory recursively, then drops every Qdrant vector + ledger
+        row for documents under it (tenant-scoped) so the base stops surfacing in search at
+        once. 404 if it does not exist, 400 for an invalid name (``safe_project`` rejects the
+        reserved ``_``-prefixed scope ids, so the platform-docs scope can never be a target),
+        409 when the vault is externally owned (watch mode, #232). Returns the de-indexed count.
+        """
+        self._ensure_writable()
+        target = safe_project(self._vault, name)
+        if not target.is_dir():
+            raise HTTPException(status_code=404, detail=f"no such knowledge base: {name}")
+        # De-index first (Qdrant vectors + ledger rows) so nothing lingers in search, then
+        # remove the files. The project folder is a single top-level segment, so its
+        # vault-relative path is just its name; documents under it are `<name>/…`.
+        removed = await self._indexer.remove_under(f"{target.name}/")
+        shutil.rmtree(target)
+        log.info("knowledge base deleted", name=target.name, deindexed=removed)
+        return removed
+
     def read_doc(self, rel: str) -> EditorDocContent:
         """One document's content. 404 if it does not exist.
 
@@ -509,6 +530,13 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
     async def delete_folder(page_id: str, path: str = Query(...)) -> None:
         _require_known_page(page_id)
         pages.delete_folder(path)
+
+    @router.delete("/pages/{page_id}/project", status_code=204)
+    async def delete_project(page_id: str, name: str = Query(...)) -> None:
+        # Delete a knowledge base (top-level folder) and de-index its documents (#340). The
+        # operator's "Remove" affordance; the agent never deletes a base (no tool, no review).
+        _require_known_page(page_id)
+        await pages.delete_project(name)
 
     @router.post("/pages/{page_id}/move")
     async def post_move(page_id: str, body: MoveBody) -> dict[str, str]:

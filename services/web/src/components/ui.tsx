@@ -115,7 +115,10 @@ export function Card({ className, children }: { className?: string; children: Re
 /* ── Fields ─────────────────────────────────────────────────────────────── */
 
 const fieldBase =
-  "w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink " +
+  // `min-w-0` lets inputs shrink to their container instead of their intrinsic min-content
+  // width — without it, native date/`datetime-local` pickers overflow a narrow mobile sheet
+  // and force horizontal scroll (#335). `box-border` keeps `w-full` honest with the padding.
+  "box-border w-full min-w-0 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink " +
   "placeholder:text-ink-faint focus:border-accent focus:outline-none";
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
@@ -274,6 +277,45 @@ export function Confirm({
         </div>
       </Card>
     </div>
+  );
+}
+
+/* ── Tooltip (hover/focus label for icon-only controls) ─────────────────── */
+
+/**
+ * A lightweight, dependency-free tooltip: a label that fades in on hover/focus of its
+ * trigger. Built on the same group-hover pattern as the entity hover-card. The label is
+ * always in the DOM (just `opacity-0`) so it stays discoverable to assistive tech and tests;
+ * for icon-only triggers also give the control its own `aria-label`. `pointer-events-none`
+ * keeps the tip from stealing clicks from the trigger beneath it.
+ */
+export function Tooltip({
+  label,
+  side = "top",
+  className,
+  children,
+}: {
+  label: ReactNode;
+  side?: "top" | "bottom";
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <span className={cn("group/tip relative inline-flex", className)}>
+      {children}
+      <span
+        role="tooltip"
+        className={cn(
+          "pointer-events-none absolute left-1/2 z-50 -translate-x-1/2 whitespace-nowrap",
+          "rounded-(--radius-field) border border-edge bg-surface px-2 py-1 text-[11px] leading-4 text-ink-dim",
+          "opacity-0 shadow-(--ep-shadow) transition-opacity duration-100",
+          "group-hover/tip:opacity-100 group-focus-within/tip:opacity-100",
+          side === "top" ? "bottom-full mb-1.5" : "top-full mt-1.5",
+        )}
+      >
+        {label}
+      </span>
+    </span>
   );
 }
 

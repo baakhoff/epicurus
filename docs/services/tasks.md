@@ -61,6 +61,13 @@ core change. Completed cards are struck through and offer **Reopen** in place of
 The provider read seam gains a `scope` (`open` / `done` / `all`) so completed tasks can be
 fetched (local filters the `completed` flag; Google sets `showCompleted`/`showHidden`).
 
+**v0.11.0** adds **task deletion** (#336) and a tidier add affordance (#337). A new
+**`tasks_delete`** tool (agent-usable) and a per-card **Delete** board action (operator,
+confirm-gated) both route to the provider's existing `delete_task` via the `TasksRouter` — one
+delete path, validated against the manifest. The bulky **Add task** toolbar button becomes a
+compact icon-only **"+"** via a new `icon_only` board-action hint the shell renders (the label
+moves to a tooltip + `aria-label`).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -72,6 +79,7 @@ fetched (local filters the `completed` flag; Google sets `showCompleted`/`showHi
 | `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`) | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
 | `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?)` | `task_id`: provider task ID; only the fields passed change. `to_list_id`: **move** the task to this list | The updated `Task` (the moved task on a move). |
+| `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
 
 All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
 **aggregates open tasks across every enabled list**; with a `list_id` it reads just that
@@ -145,14 +153,16 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   **Reopen** (`tasks_update status=open`) in place of **Complete**.
 - **Mutations are declarative actions** that name an MCP tool; the shell invokes it through
   the core (validated against the manifest) and refetches. Each card offers **Complete**
-  (`tasks_complete`, one-tap) and **Edit** (`tasks_update`, a form prefilled from the card),
-  both carrying the task's `list_id` so the mutation routes to the **owning** list; the board
+  (`tasks_complete`, one-tap), **Edit** (`tasks_update`, a form prefilled from the card), and
+  **Delete** (`tasks_delete`, a `danger` action gated behind a confirm dialog, #336) — all
+  carrying the task's `list_id` so the mutation routes to the **owning** list; the board
   offers **Add task** (`tasks_add`, a form) whose **list picker** chooses the target list
   (a labeled `field_choices` entry, value = list id → label = title). With **two or more**
   writable lists the Edit form also gains a **List** picker bound to `to_list_id` (prefilled
   to the task's current list); choosing another **moves** the task there — a recreate+delete
-  on Google (ADR-0038). The board never carries credentials or business logic — it is data
-  plus tool references.
+  on Google (ADR-0038). The **Add task** action sets `icon_only: true` so the shell renders it
+  as a compact **"+"** with a tooltip label (#337). The board never carries credentials or
+  business logic — it is data plus tool references.
 
 ### Connected accounts & collections (ADR-0030)
 
@@ -297,6 +307,6 @@ Package `epicurus_tasks`:
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete). |
 | `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038). |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls** and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls** and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
 | `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

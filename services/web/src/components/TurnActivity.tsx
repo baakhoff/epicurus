@@ -8,7 +8,7 @@
 import { Brain, Check, ChevronDown, Loader2, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { Spinner, cn } from "@/components/ui";
+import { Spinner, Tooltip, cn } from "@/components/ui";
 import { readinessProgress, readinessSummary, toolLabel } from "@/lib/activity";
 import type { Readiness } from "@/lib/contracts";
 import type { ActivityItem, ToolRun } from "@/stores/chat";
@@ -16,11 +16,17 @@ import type { ActivityItem, ToolRun } from "@/stores/chat";
 /* ── thinking (model warm, first token pending) ─────────────────────────── */
 
 export function ThinkingIndicator() {
+  // Icon-only (#334): the label lives in the tooltip so the cue stays compact in the chat.
   return (
-    <div className="flex items-center gap-2 text-sm text-ink-dim" aria-live="polite">
-      <Loader2 size={13} className="animate-spin" />
-      <span>Thinking…</span>
-    </div>
+    <Tooltip label="Thinking…">
+      <span
+        className="inline-flex items-center text-ink-dim"
+        aria-live="polite"
+        aria-label="Thinking…"
+      >
+        <Loader2 size={15} className="animate-spin" />
+      </span>
+    </Tooltip>
   );
 }
 
@@ -161,25 +167,31 @@ export function ProcessTimeline({
   const running = items.some((i) => i.kind === "tool" && i.run.status === "running");
   const stepLabel =
     toolCount > 0 ? `${toolCount} step${toolCount > 1 ? "s" : ""}` : "Thought process";
+  // Icon-only summary (#334): the wordy label ("Working…", "N steps", "Thought process")
+  // moves into a hover tooltip so the chat stays uncluttered. The compact toggle sits on its
+  // own (tooltips can't escape an `overflow-hidden` box) with the step list in a panel below.
+  const label = running ? "Working…" : stepLabel;
   const toggle = () => {
     userToggled.current = true;
     setOpen((v) => !v);
   };
 
   return (
-    <div className="my-2 overflow-hidden rounded-(--radius-field) border border-edge">
-      <button
-        type="button"
-        onClick={toggle}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs text-ink-dim hover:text-ink"
-        aria-expanded={open}
-      >
-        {running ? <Spinner className="size-3" /> : toolCount > 0 ? <Wrench size={12} /> : <Brain size={12} />}
-        <span>{running ? "Working…" : stepLabel}</span>
-        <ChevronDown size={12} className={cn("ml-auto transition-transform", open && "rotate-180")} />
-      </button>
+    <div className="my-2">
+      <Tooltip label={label}>
+        <button
+          type="button"
+          onClick={toggle}
+          aria-label={label}
+          aria-expanded={open}
+          className="inline-flex items-center gap-1.5 rounded-(--radius-field) px-1.5 py-1 text-xs text-ink-dim transition-colors hover:bg-surface-2 hover:text-ink"
+        >
+          {running ? <Spinner className="size-3" /> : toolCount > 0 ? <Wrench size={13} /> : <Brain size={13} />}
+          <ChevronDown size={11} className={cn("transition-transform", open && "rotate-180")} />
+        </button>
+      </Tooltip>
       {open && (
-        <div className="flex flex-col border-t border-edge px-2.5 pb-1">
+        <div className="mt-1 flex flex-col overflow-hidden rounded-(--radius-field) border border-edge px-2.5 py-1">
           {items.map((item, i) =>
             item.kind === "thinking" ? (
               <ThinkingBlock key={i} text={item.text} />

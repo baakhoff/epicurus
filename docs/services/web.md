@@ -145,7 +145,9 @@ click opens it in the right panel. A resolver may include an `href` that deep-li
 module page — the knowledge resolver points a cited vault note at `/m/knowledge/vault?doc=…`,
 and the `editor` archetype reads that `?doc=` param to open the document (#143). Refs the
 assistant links inline (an `epicurus://entity/{module}/{kind}/{ref_id}` markdown link) render
-inline through the Markdown `a` slot; any remaining refs appear as a chip row beneath the message.
+inline through the Markdown `a` slot; any remaining refs collapse into a single expandable
+**"Sources (N)"** pill beneath the message (`SourcesPill`, #333) that discloses the individual
+chips on click — keeping a multi-source row from crowding the chat.
 
 ### Attachments in chat (ADR-0019)
 
@@ -174,8 +176,10 @@ overlay with no special-casing:
   `src/screens/ChatScreen.tsx`) appears when the assistant has filed suggestions. It names the
   latest one ("The assistant wants to …") and shows the count when several are pending. A
   one-tap structural change (move / new folder / new knowledge base) offers **Approve** inline;
-  a richer change offers **Open** (the review window). **Ignore** dismisses the bubble while the
-  suggestion stays on its Suggestions page.
+  a richer change offers **Open** (the review window). **Reject** discards the suggestion
+  server-side without opening anything (#341) — for any proposal type, including folder /
+  knowledge-base creation; **Ignore** only hides the bubble while the suggestion stays on its
+  Suggestions page.
 - The **Suggestions page** (a module's `review` archetype — knowledge's *Suggestions*, notes'
   *Note suggestions*) opens the same review window.
 
@@ -254,7 +258,11 @@ screens add an entry, not a restructure. Installable PWA; `/platform` is exclude
 service worker so streams always hit the network.
 
 The shared primitive kit is one file — `src/components/ui.tsx` (`Button`, `Badge`, `Card`,
-the text fields, `Switch`, `Sheet`, `Confirm`). `Switch` is the single on/off control used
+the text fields, `Switch`, `Sheet`, `Confirm`, `Tooltip`). `Tooltip` (#334) is a dependency-free
+hover/focus label for **icon-only** controls — the icon keeps its `aria-label` and the wordy
+label moves into the tip; used by the turn-activity summary, the board's compact "+" Add, and
+the Files up-nav. Text inputs carry `min-w-0` so native date/`datetime-local` pickers can't
+overflow a narrow mobile sheet (#335). `Switch` is the single on/off control used
 everywhere (per-tool toggles, module enable/disable, boolean schema fields). Its **track
 colour carries the state** — accent when on, muted when off — while the thumb stays a
 constant, bright, evenly-inset circle that simply slides between ends. Keep that convention

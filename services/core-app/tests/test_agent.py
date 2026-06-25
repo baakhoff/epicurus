@@ -444,3 +444,70 @@ async def test_agent_skips_extraction_without_an_answer() -> None:
     )
     await _drain(extractor)
     assert extractor.calls == []
+
+
+# ── deferred (nightly) extraction + bounded recall (ADR-0051) ─────────────────────
+
+
+class _FakeQueue:
+    def __init__(self) -> None:
+        self.enqueued: list[tuple[str, str, str]] = []  # tenant, user_text, assistant_text
+
+    async def enqueue(self, *, tenant: str, user_text: str, assistant_text: str) -> int:
+        self.enqueued.append((tenant, user_text, assistant_text))
+        return len(self.enqueued)
+
+
+async def _settle() -> None:
+    """Yield to the loop a few times so a scheduled background task runs (deterministic)."""
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+async def test_agent_defers_extraction_by_enqueuing_the_exchange() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="Nice to meet you, Sam.")])
+    queue = _FakeQueue()
+    extractor = _FakeExtractor()
+    # Default mode is deferred: the exchange is queued for the nightly runner, not distilled now.
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor, queue=queue)  # type: ignore[arg-type]
+    await agent.run([ChatMessage(role="user", content="My name is Sam.")])
+    await _settle()
+    assert queue.enqueued == [("local", "My name is Sam.", "Nice to meet you, Sam.")]
+    assert extractor.calls == []  # the extractor is NOT called on the response path
+
+
+async def test_agent_immediate_mode_extracts_even_with_a_queue() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="Hi Sam.")])
+    queue = _FakeQueue()
+    extractor = _FakeExtractor()
+    agent = Agent(
+        gateway=gw,
+        mcp=_FakeMcp(),
+        extractor=extractor,
+        queue=queue,  # type: ignore[arg-type]
+        defer_extraction=False,
+    )
+    await agent.run([ChatMessage(role="user", content="I'm Sam.")])
+    await _drain(extractor)
+    assert extractor.calls == [("local", "I'm Sam.", "Hi Sam.")]
+    assert queue.enqueued == []  # immediate mode never defers
+
+
+class _SlowMemory(_FakeMemory):
+    """A memory whose recall hangs longer than any sane budget."""
+
+    async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
+        await asyncio.sleep(1)
+        return ["should not appear"]
+
+
+async def test_agent_recall_timeout_degrades_to_no_recall() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    memory = _SlowMemory(recalled=["should not appear"])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory, recall_timeout_s=0.01)
+    turn = await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
+    assert turn.content == "answer"
+    # recall timed out → no recalled-context system message reached the model …
+    assert all("should not appear" not in (m.content or "") for m in gw.calls[0])
+    # … but history assembly and persistence still happened (the turn isn't lost)
+    assert ("user", "hi") in memory.remembered

@@ -90,6 +90,11 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `database_url` | `DATABASE_URL` | `str` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for conversation persistence. |
 | `qdrant_url` | `QDRANT_URL` | `str` | `http://localhost:6333` | Qdrant endpoint for semantic recall. |
 | `memory_embed_model` | `MEMORY_EMBED_MODEL` | `str` | `nomic-embed-text` | Local embedding model used for recall. |
+| `memory_extraction_mode` | `MEMORY_EXTRACTION_MODE` | `str` | `nightly` | When durable-fact extraction runs: `nightly` (defer each exchange to a queue drained off-hours, ADR-0051) or `immediate` (a background task right after the turn, ADR-0045). Any value other than `immediate` means deferred. |
+| `memory_extraction_hour` | `MEMORY_EXTRACTION_HOUR` | `int` | `3` | Local hour (0-23) of the nightly drain, in the operator's configured timezone (the Settings timezone, else `DEFAULT_TIMEZONE`). |
+| `memory_extraction_model` | `MEMORY_EXTRACTION_MODEL` | `str` | `""` | Optional dedicated model for the extraction LLM call (e.g. `llama3.2:3b`) — a small, fast model keeps the nightly pass cheap and off the chat model. Blank = the operator's default chat model. |
+| `memory_extraction_batch_limit` | `MEMORY_EXTRACTION_BATCH_LIMIT` | `int` | `200` | Max exchanges distilled per nightly drain (a safety bound on one run's cost). |
+| `memory_recall_timeout_s` | `MEMORY_RECALL_TIMEOUT_S` | `float` | `2.0` | Seconds the inline recall embed may take before a turn proceeds without it — bounds the only memory step still on the response path (ADR-0051). |
 | `default_timezone` | `DEFAULT_TIMEZONE` | `str` | `UTC` | Fallback IANA timezone the agent's `now` tool reports when the operator hasn't set one in Settings (ADR-0039). |
 | `files_backend` | `FILES_BACKEND` | `str` | `local` | Core-owned file-space backend (ADR-0052): `local` (filesystem) or `s3` (MinIO/S3). See [file space](files.md). |
 | `files_root` | `FILES_ROOT` | `str` | `/data` | Local-backend base; the tenant file tree is `FILES_ROOT/<tenant>`. |
@@ -102,6 +107,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 - **`module_base_urls -> list[str]`** — the `module_urls`, trimmed of a trailing `/`.
 - **`module_mcp_urls -> list[str]`** — each module's `<base>/mcp` endpoint.
 - **`attachment_allowed_type_list -> list[str]`** — the `attachment_allowed_types`, parsed + lowercased.
+- **`defer_extraction -> bool`** — whether fact extraction is deferred to the nightly runner (`memory_extraction_mode` is anything but `immediate`).
 
 ## Shared file space (per-module storage roots)
 

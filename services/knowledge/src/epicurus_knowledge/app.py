@@ -234,6 +234,30 @@ def create_app() -> FastAPI:
         """
         return module_docs()
 
+    async def _force_reindex() -> None:
+        """Re-embed every source from scratch (#332): reset each indexer (drop its vectors +
+        ledger) so nothing is skipped as "unchanged", then re-run the resilient index runner so
+        ``GET /status`` reports progress as it rebuilds with the current embedding model."""
+        for indexer in (vault_indexer, docs_indexer, module_docs_indexer):
+            await indexer.reset()
+        await index_runner.run_with_retry()
+
+    # Holds the detached re-embed task so it isn't garbage-collected mid-run (RUF006).
+    reindex_tasks: set[asyncio.Task[None]] = set()
+
+    @app.post("/reindex")
+    async def reindex_all() -> dict[str, str]:
+        """Re-embed every source with the current embedding model (#332).
+
+        The core's re-embed fan-out calls this when the operator changes the embedding model —
+        vectors built with the old model are incompatible, so the whole corpus is rebuilt. Runs
+        in the background (a full re-embed takes minutes); ``GET /status`` reports progress.
+        """
+        task = asyncio.create_task(_force_reindex())
+        reindex_tasks.add(task)
+        task.add_done_callback(reindex_tasks.discard)
+        return {"status": "started"}
+
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
         """Index statistics for the manifest-driven UI status panel.

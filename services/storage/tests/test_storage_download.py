@@ -178,3 +178,52 @@ async def test_pages_404_for_second_unknown(storage_app: object) -> None:
     ) as client:
         resp = await client.get("/pages/not-a-real-page-id")
     assert resp.status_code == 404
+
+
+# ── object served under ANY key (agent-written files — #347) ──────────────────
+# Agent objects are no longer confined to the uploads/ prefix; the route consults the
+# catalogue for every path. We stub the object resolver so no MinIO is needed.
+
+
+@pytest.mark.anyio
+async def test_download_serves_an_object_under_any_key(
+    storage_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import epicurus_storage.app as amod
+    from epicurus_storage.service import ObjectDownload
+
+    async def fake_load(*, index: object, objects: object, tenant: str, path: str) -> object:
+        if path == "report.md":
+            return ObjectDownload(name="report.md", data=b"agent bytes", content_type="text/plain")
+        return None
+
+    monkeypatch.setattr(amod, "load_object_download", fake_load)
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/download", params={"path": "report.md"})
+    assert resp.status_code == 200
+    assert resp.content == b"agent bytes"
+
+
+@pytest.mark.anyio
+async def test_read_serves_an_object_under_any_key(
+    storage_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import epicurus_storage.app as amod
+    from epicurus_storage.service import ObjectDownload
+
+    async def fake_load(*, index: object, objects: object, tenant: str, path: str) -> object:
+        if path == "report.md":
+            return ObjectDownload(name="report.md", data=b"agent text", content_type="text/plain")
+        return None
+
+    monkeypatch.setattr(amod, "load_object_download", fake_load)
+    async with AsyncClient(
+        transport=ASGITransport(app=storage_app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as client:
+        resp = await client.get("/read", params={"path": "report.md"})
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "report.md", "name": "report.md", "content": "agent text"}

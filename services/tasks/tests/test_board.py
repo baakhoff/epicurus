@@ -76,9 +76,9 @@ def test_card_carries_complete_and_edit_actions() -> None:
     assert card["subtitle"] == "2 litres"
 
     tools = [a["tool"] for a in card["actions"]]
-    assert tools == ["tasks_complete", "tasks_update"]
+    assert tools == ["tasks_complete", "tasks_update", "tasks_delete"]
 
-    complete, edit = card["actions"]
+    complete, edit, delete = card["actions"]
     # Each card carries its list_id so a mutation routes to the owning list (ADR-0036).
     assert complete["args"] == {"task_id": "t1", "list_id": None}
     assert "form" not in complete  # one-tap, no form
@@ -91,6 +91,13 @@ def test_card_carries_complete_and_edit_actions() -> None:
     assert edit["form_values"]["title"] == "Buy milk"
     assert edit["form_values"]["notes"] == "2 litres"
     assert edit["form_values"]["status"] == "open"
+
+    # Delete (#336) is destructive: danger intent + a confirm prompt (the shell gates it),
+    # routing the owning list through the same tasks_delete tool the agent can call.
+    assert delete["tool"] == "tasks_delete"
+    assert delete["intent"] == "danger"
+    assert delete["confirm"]
+    assert delete["args"] == {"task_id": "t1", "list_id": None}
 
 
 def test_due_badge_tone_tracks_bucket() -> None:
@@ -140,6 +147,8 @@ def test_board_offers_add_action_even_when_empty() -> None:
     add = board["actions"][0]
     assert add["tool"] == "tasks_add"
     assert add["intent"] == "primary"
+    # The Add affordance is a compact icon-only "+" (#337).
+    assert add["icon_only"] is True
     assert add["form"] is True
     assert add["fields"] == ["title", "notes", "due", "priority", "tags"]
     assert add["field_options"]["priority"] == ["low", "medium", "high"]

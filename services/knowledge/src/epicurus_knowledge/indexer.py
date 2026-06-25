@@ -268,6 +268,25 @@ class KnowledgeIndexer:
         await self._notes.delete(tenant=self._tenant, note_path=rel)
         log.debug("de-indexed single note", path=rel)
 
+    async def remove_under(self, prefix: str) -> int:
+        """De-index every note whose path is under *prefix* (e.g. a deleted folder/project).
+
+        Drops each matching note's Qdrant vectors and ledger row so a removed knowledge base
+        stops surfacing in search immediately, rather than lingering until the next full
+        ``run`` reconciles the filesystem. *prefix* should end with ``"/"`` to match a
+        directory boundary. Returns the number of notes removed. Idempotent: an unknown
+        prefix removes nothing. Used when deleting a knowledge base (#340).
+        """
+        paths = [
+            p for p in await self._notes.list_paths(tenant=self._tenant) if p.startswith(prefix)
+        ]
+        for rel in paths:
+            await self._delete_note_vectors(rel)
+            await self._notes.delete(tenant=self._tenant, note_path=rel)
+        if paths:
+            log.info("de-indexed notes under prefix", prefix=prefix, count=len(paths))
+        return len(paths)
+
     async def index_path(self, rel: str) -> int:
         """Re-index a single file by its vault-relative path; returns the chunk count.
 
@@ -319,6 +338,19 @@ class KnowledgeIndexer:
         await self._notes.clear(tenant=self._tenant)
         self._ensured = False
         return True
+
+    async def reset(self) -> None:
+        """Drop this source's vectors **and** ledger so the next ``run`` re-embeds from scratch.
+
+        The re-embed action (#332) calls this when the embedding model changes: vectors made
+        with the old model are incompatible, and the incremental ledger would otherwise skip
+        every "unchanged" file. Held under the run-lock so it can't race an in-flight ``run``.
+        """
+        async with self._run_lock:
+            if await self._qdrant.collection_exists(self._collection):
+                await self._qdrant.delete_collection(self._collection)
+            await self._notes.clear(tenant=self._tenant)
+            self._ensured = False
 
     async def run(self) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.

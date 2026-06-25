@@ -290,6 +290,16 @@ class ModuleDocsIndexer:
         await self._ledger.clear(tenant=self._tenant)
         return True
 
+    async def reset(self) -> None:
+        """Drop the module-docs vectors + ledger so the next ``run`` re-embeds from scratch (#332).
+
+        Note the shared ``<tenant>__docs`` collection: the platform-docs indexer's ``reset``
+        may already have dropped it, so the ``collection_exists`` guard makes this idempotent.
+        """
+        if await self._qdrant.collection_exists(self._collection):
+            await self._qdrant.delete_collection(self._collection)
+        await self._ledger.clear(tenant=self._tenant)
+
     async def run(self) -> dict[str, int]:
         """Sync module docs: index new/changed, purge disabled/removed modules.
 

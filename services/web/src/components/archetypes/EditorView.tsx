@@ -33,12 +33,24 @@ import {
   Library,
   MoreHorizontal,
   Plus,
+  Search,
+  Trash2,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
-import { Badge, Button, EmptyState, Spinner, TextArea, TextInput, cn } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Confirm,
+  EmptyState,
+  Spinner,
+  TextArea,
+  TextInput,
+  cn,
+} from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
@@ -332,17 +344,21 @@ function ScopeSwitcher({
   active,
   noun,
   canCreate,
+  canDelete,
   creating,
   onSelect,
   onStartCreate,
+  onDelete,
 }: {
   scopes: EditorScope[];
   active: string;
   noun: string;
   canCreate: boolean;
+  canDelete: boolean;
   creating: boolean;
   onSelect: (id: string) => void;
   onStartCreate: () => void;
+  onDelete: (scope: EditorScope) => void;
 }) {
   const [open, setOpen] = useState(false);
   const projects = scopes.filter((s) => s.kind === "project");
@@ -379,20 +395,41 @@ function ScopeSwitcher({
               </div>
             )}
             {projects.map((s) => (
-              <button
+              <div
                 key={s.id}
-                onClick={() => {
-                  onSelect(s.id);
-                  setOpen(false);
-                }}
                 className={cn(
-                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
-                  s.id === active ? "bg-accent-dim text-accent-strong" : "text-ink hover:bg-surface-2",
+                  "flex items-center",
+                  s.id === active ? "bg-accent-dim" : "hover:bg-surface-2",
                 )}
               >
-                <Library size={13} className="shrink-0 text-ink-faint" />
-                <span className="truncate">{s.title}</span>
-              </button>
+                <button
+                  onClick={() => {
+                    onSelect(s.id);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-sm",
+                    s.id === active ? "text-accent-strong" : "text-ink",
+                  )}
+                >
+                  <Library size={13} className="shrink-0 text-ink-faint" />
+                  <span className="truncate">{s.title}</span>
+                </button>
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onDelete(s);
+                      setOpen(false);
+                    }}
+                    aria-label={`Delete ${s.title}`}
+                    title={`Delete this ${noun}`}
+                    className="mr-1 shrink-0 rounded-(--radius-field) p-1 text-ink-faint transition-colors hover:bg-danger/10 hover:text-danger"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
             ))}
             {refs.length > 0 && (
               <div className="mt-1 border-t border-edge px-3 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-ink-faint">
@@ -457,6 +494,8 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [newFolderName, setNewFolderName] = useState("");
   // The folder inside which a new file is being created (null = root)
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
+  // Client-side tree filter (#339): matches document titles/paths in the active scope.
+  const [treeFilter, setTreeFilter] = useState("");
 
   // The active scope (knowledge base / project, #KB-refactor). Empty = let the module
   // default to the first project; the switcher and create-project flow drive it. Paths in
@@ -464,6 +503,8 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [activeScope, setActiveScope] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
+  // The knowledge base awaiting a delete confirm (#340); null = no dialog open.
+  const [scopeToDelete, setScopeToDelete] = useState<EditorScope | null>(null);
 
   // Version history (ADR-0046): the dropdown's open state and the past version being
   // previewed (read-only) in place of the live buffer. `null` = editing the current doc.
@@ -653,6 +694,26 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
   });
 
+  const deleteProject = useMutation({
+    mutationFn: (scopeId: string) => api.deleteModuleProject(module, pageId, scopeId),
+    onSuccess: (_result, scopeId) => {
+      setScopeToDelete(null);
+      // If the deleted base was active, fall back to the module's default (first project).
+      if (scopeId === scope) {
+        setActiveScope("");
+        setSelectedPath(null);
+        setIsNew(false);
+        setTreeFilter("");
+      }
+      invalidateList();
+    },
+    onError: (err) => {
+      setScopeToDelete(null);
+      const msg = err instanceof ApiError ? err.detail : String(err);
+      window.alert(`Could not delete knowledge base: ${msg}`);
+    },
+  });
+
   const deleteDoc = useMutation({
     mutationFn: (path: string) => api.deleteModuleDoc(module, pageId, toModulePath(path)),
     onSuccess: (_, path) => {
@@ -713,6 +774,20 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const data = listData ?? EditorData.parse({});
   const tree = buildTree(data.docs);
 
+  // Tree search (#339): a client-side filter over the active scope's documents. When a query
+  // is present the tree is replaced by a flat list of matching files (title or path match);
+  // the box only appears when there are files to search.
+  const fileDocs = data.docs.filter((d) => d.type === "file");
+  const hasAnyDocs = data.docs.length > 0;
+  const filterQuery = treeFilter.trim().toLowerCase();
+  const filterMatches = filterQuery
+    ? fileDocs.filter(
+        (d) =>
+          d.title.toLowerCase().includes(filterQuery) ||
+          d.path.toLowerCase().includes(filterQuery),
+      )
+    : [];
+
   // Scope (knowledge base) state derived from the page data (#KB-refactor).
   const showSwitcher = data.scope_noun !== "";
   const hasProjects = data.scopes.some((s) => s.kind === "project");
@@ -726,6 +801,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setNewFolderCreating(false);
     setCreatingProject(false);
     setCollapsed(new Set());
+    setTreeFilter("");
   };
 
   const submitNewProject = (event: FormEvent) => {
@@ -894,12 +970,26 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
               active={scope}
               noun={data.scope_noun}
               canCreate={data.can_create_scope}
+              canDelete={data.can_create_scope}
               creating={createProject.isPending}
               onSelect={handleSelectScope}
               onStartCreate={() => {
                 setCreatingProject(true);
                 setNewProjectName("");
               }}
+              onDelete={(s) => setScopeToDelete(s)}
+            />
+            <Confirm
+              open={scopeToDelete !== null}
+              danger
+              message={
+                scopeToDelete
+                  ? `Delete the ${data.scope_noun} “${scopeToDelete.title}” and all its documents? This cannot be undone.`
+                  : ""
+              }
+              confirmLabel="Delete"
+              onCancel={() => setScopeToDelete(null)}
+              onConfirm={() => scopeToDelete && deleteProject.mutate(scopeToDelete.id)}
             />
             {creatingProject && (
               <form
@@ -1016,8 +1106,33 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           </div>
         )}
 
-        {data.docs.filter((d) => d.type === "file").length === 0 &&
-        data.docs.filter((d) => d.type === "dir").length === 0 ? (
+        {/* search box (#339) — filter the active scope's documents by title/path */}
+        {fileDocs.length > 0 && (
+          <div className="border-b border-edge p-2">
+            <div className="relative flex items-center">
+              <Search size={13} className="pointer-events-none absolute left-2 text-ink-faint" />
+              <input
+                value={treeFilter}
+                onChange={(e) => setTreeFilter(e.target.value)}
+                placeholder="Search documents…"
+                aria-label="Search documents"
+                className="h-8 w-full rounded-(--radius-field) border border-edge bg-surface-2 pl-7 pr-7 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+              />
+              {treeFilter && (
+                <button
+                  type="button"
+                  onClick={() => setTreeFilter("")}
+                  aria-label="Clear search"
+                  className="absolute right-2 text-ink-faint hover:text-ink"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!hasAnyDocs ? (
           showSwitcher && !hasProjects ? (
             <EmptyState quote={`No ${data.scope_noun}s yet — create one to begin.`} />
           ) : isReferenceScope ? (
@@ -1028,6 +1143,34 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
             <EmptyState quote="No notes yet — create one with New note." />
           ) : (
             <EmptyState quote="An empty vault. Add notes in Obsidian and they appear here." />
+          )
+        ) : filterQuery ? (
+          filterMatches.length > 0 ? (
+            <ul className="flex flex-col p-2">
+              {filterMatches.map((d) => (
+                <li key={d.id}>
+                  <button
+                    onClick={() => openDoc(d.path)}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-(--radius-field) px-2 py-1.5 text-left transition-colors",
+                      d.path === selectedPath
+                        ? "bg-accent-dim text-accent-strong"
+                        : "text-ink hover:bg-surface-2",
+                    )}
+                  >
+                    <FileText size={14} className="shrink-0 text-ink-faint" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm">{d.title}</span>
+                      {d.path !== d.title && (
+                        <span className="block truncate text-xs text-ink-faint">{d.path}</span>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState quote="No matching documents." />
           )
         ) : (
           <ul className="flex flex-col p-2">

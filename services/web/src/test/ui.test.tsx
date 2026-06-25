@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { Switch } from "@/components/ui";
+import { Switch, Tooltip } from "@/components/ui";
 
 function thumb(sw: HTMLElement): HTMLElement {
   const span = sw.querySelector("span");
@@ -66,5 +66,28 @@ describe("Switch", () => {
     const t = thumb(sw);
     expect(t.className).toContain("absolute");
     expect(t.className).toContain("left-0"); // explicit resting edge, engine-agnostic
+  });
+});
+
+// The shared Tooltip (#334): icon-only controls move their label here. The label is always
+// in the DOM (just faded) so it stays discoverable to assistive tech and tests.
+describe("Tooltip", () => {
+  it("renders the trigger and exposes the label via role=tooltip", () => {
+    render(
+      <Tooltip label="Working…">
+        <button>icon</button>
+      </Tooltip>,
+    );
+    expect(screen.getByRole("button", { name: "icon" })).toBeInTheDocument();
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Working…");
+  });
+
+  it("keeps the label non-interactive so it never steals the trigger's click", () => {
+    render(
+      <Tooltip label="hi">
+        <button>icon</button>
+      </Tooltip>,
+    );
+    expect(screen.getByRole("tooltip").className).toContain("pointer-events-none");
   });
 });

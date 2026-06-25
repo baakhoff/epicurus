@@ -103,7 +103,9 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) from `/api/show` — opt-in (one call per model), so the Models page can badge them while the chat picker stays light. |
 | `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported). Backs the model-settings sheet and the chat "can't use tools" hint. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
+| `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the OCI registry (the library page lists *sizes*, not quants). Returns `{model, variants:[{tag, quant}]}`; best-effort — an empty list (offline, or a non-library model) makes the UI fall back to a manual tag box. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
+| `POST /platform/v1/llm/unload` | Drop model(s) from memory now (`keep_alive=0`) **without** changing power state (#331). Body `{model: str\|null}` — `null`/omitted unloads every loaded model, a name unloads just that one. Returns `{status, model}` (`"all"` when none given). The standalone unload the Models page calls; the `loaded` flag refreshes on the next poll. |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
 | `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `kv_cache_type` (Ollama KV-cache), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
@@ -133,6 +135,27 @@ empty. The catalog is **global, not tenant-scoped** — it mirrors a public regi
 no tenant data, and is identical for every tenant (like the provider registry). The web
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
+
+A **quant-variant lookup** (`llm/variants.py`, #330) complements the catalog: the library
+page lists a model's parameter *sizes* but not its *quantizations*, so to pull a different
+quant the operator used to have to type the exact tag. `VariantLookup` queries the OCI
+registry on demand (`LLM_REGISTRY_URL`, Ollama's public registry by default) —
+`/v2/library/<family>/tags/list` — and parses the tags for the requested size into a small
+`{tag, quant}` list the Models page renders as a pick-list. It is deliberately best-effort
+(any failure → empty list, UI falls back to the manual box) and, like the catalog, global
+rather than tenant-scoped.
+
+#### Re-embedding (#332, ADR-0054)
+
+Changing the embedding model doesn't re-embed existing data on its own — vectors built with the
+old model don't match queries embedded with the new one. `POST /platform/v1/modules/reembed`
+(the Models page's "Re-embed everything") **fans out** to every healthy, enabled module whose
+manifest declares `reindexable` and calls its `POST /reindex`, which **drops the module's
+Qdrant collection and rebuilds it** with the current embedding model in the background. The
+fan-out is best-effort and returns a per-module `started`/`error` status; progress shows on
+each module's `/status`. Only embedding-backed modules opt in (knowledge — covering its vault
+**and** the shared module-docs collection — and notes); storage holds no embeddings. Single-
+tenant in v1: each module re-embeds its own tenant's corpus, which matches the core's.
 
 #### Per-model settings (ADR-0044)
 
@@ -189,6 +212,7 @@ untouched, as are calls with no known window. The common case (a short chat) is 
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. |
+| `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, ADR-0028): stop + remove the module's container via the Docker socket, then tombstone it. Refuses core-app / web / data-plane, scoped to the core's own Compose project. **403** protected · **503** no Docker access · **404** unknown. |

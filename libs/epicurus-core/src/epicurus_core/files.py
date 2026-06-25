@@ -390,8 +390,11 @@ class S3FileStore(FileStore):
                         keys.append({"Key": obj["Key"]})
             if not keys:
                 return False
-            for batch in (keys[i : i + 1000] for i in range(0, len(keys), 1000)):
-                await s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            # Delete one object per call: S3's batch DeleteObjects requires a Content-MD5
+            # header that newer botocore no longer adds automatically, which MinIO rejects
+            # (MissingContentMD5). Per-object deletes are portable and these trees are small.
+            for obj in keys:
+                await s3.delete_object(Bucket=bucket, Key=obj["Key"])
             return True
 
     async def ensure_dir(self, *, tenant: str, path: str) -> FileEntry:

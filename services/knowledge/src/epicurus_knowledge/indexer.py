@@ -268,6 +268,25 @@ class KnowledgeIndexer:
         await self._notes.delete(tenant=self._tenant, note_path=rel)
         log.debug("de-indexed single note", path=rel)
 
+    async def remove_under(self, prefix: str) -> int:
+        """De-index every note whose path is under *prefix* (e.g. a deleted folder/project).
+
+        Drops each matching note's Qdrant vectors and ledger row so a removed knowledge base
+        stops surfacing in search immediately, rather than lingering until the next full
+        ``run`` reconciles the filesystem. *prefix* should end with ``"/"`` to match a
+        directory boundary. Returns the number of notes removed. Idempotent: an unknown
+        prefix removes nothing. Used when deleting a knowledge base (#340).
+        """
+        paths = [
+            p for p in await self._notes.list_paths(tenant=self._tenant) if p.startswith(prefix)
+        ]
+        for rel in paths:
+            await self._delete_note_vectors(rel)
+            await self._notes.delete(tenant=self._tenant, note_path=rel)
+        if paths:
+            log.info("de-indexed notes under prefix", prefix=prefix, count=len(paths))
+        return len(paths)
+
     async def index_path(self, rel: str) -> int:
         """Re-index a single file by its vault-relative path; returns the chunk count.
 

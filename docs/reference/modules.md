@@ -185,7 +185,9 @@ core-rendered board edits without any module markup. `args` are fixed values mer
 every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_schema`
 (narrowed to `fields`, prefilled with `form_values`) before invoking; `confirm` gates a
 one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
-After a successful call the shell refetches the page. A form field renders as a `<select>`
+`icon_only: true` renders the action as a compact icon button (the `label` moves to a tooltip +
+`aria-label`) — for toolbar affordances that should stay small, e.g. a board's **"+"** Add (#337);
+ignored when the action has no `icon`. After a successful call the shell refetches the page. A form field renders as a `<select>`
 when the action supplies options for it: `field_options` (`{field: [value, …]}`) for plain
 string enums, or `field_choices` (`{field: [{value, label}, …]}`) when the submitted value
 isn't human-friendly and needs a separate label — e.g. a list picker whose value is a list
@@ -302,6 +304,12 @@ Proxied at:
 - `DELETE /platform/v1/modules/{name}/pages/{id}/doc?path=<rel>`
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `POST /platform/v1/modules/{name}/pages/{id}/move`
+
+Scope (knowledge-base) management — gated on `can_create_scope` — adds
+`POST /pages/{id}/project?name=<name>` (create a top-level scope → `{id, title, kind}`) and
+`DELETE /pages/{id}/project?name=<name>` (delete the scope's folder **and de-index its
+documents**, `204`; 409 when read-only, #340), proxied at
+`POST|DELETE /platform/v1/modules/{name}/pages/{id}/project?project=<name>`.
 
 `path` is module-relative and the module **must** confine it to its own store (reject
 `..`, absolute paths, and — for doc paths — non-``.md`` files) — the editor writes real

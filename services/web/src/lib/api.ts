@@ -298,6 +298,18 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/project?project=${encodeURIComponent(projectName)}`,
       { method: "POST" },
     ),
+  // Delete a knowledge base (project) and its indexed documents (#340).
+  deleteModuleProject: async (name: string, pageId: string, projectName: string): Promise<void> => {
+    const response = await fetch(
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/project?project=${encodeURIComponent(projectName)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail ?? detail; } catch { /* non-JSON */ }
+      throw new ApiError(response.status, detail);
+    }
+  },
   // Delete a document from an editor page's store (#216).
   deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
     const response = await fetch(

@@ -30,6 +30,7 @@ import httpx
 # ``ChatResult`` — re-exported here so existing
 # ``from epicurus_core.platform_client import PlatformChatResponse`` keeps resolving.
 from epicurus_core.contracts import CollectionPrefs, PlatformChatResponse, PlatformMessage
+from epicurus_core.files import FileEntry
 
 __all__ = ["PlatformChatResponse", "PlatformClient", "PlatformMessage"]
 
@@ -224,3 +225,63 @@ class PlatformClient:
             )
             resp.raise_for_status()
             return resp.json()["documents"]  # type: ignore[no-any-return]
+
+    # ── Core-owned file space (ADR-0052) ─────────────────────────────────────────
+    # Modules consume the tenant file space through these instead of mounting /data and
+    # doing their own I/O. The core owns the backend (local-FS ↔ S3) and tenant scoping.
+
+    def _files_params(self, path: str) -> dict[str, str]:
+        return {"path": path, "tenant_id": self._tenant_id}
+
+    async def files_list(self, path: str = "") -> list[FileEntry]:
+        """List the direct children of *path* in the tenant file space (empty = root)."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get("/platform/v1/files/list", params=self._files_params(path))
+            resp.raise_for_status()
+            return [FileEntry.model_validate(e) for e in resp.json()["entries"]]
+
+    async def files_read(self, path: str) -> str:
+        """Read a UTF-8 text file from the tenant file space.
+
+        Raises ``httpx.HTTPStatusError``: 404 (missing), 413 (too large), 415 (binary).
+        """
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get("/platform/v1/files/read", params=self._files_params(path))
+            resp.raise_for_status()
+            return str(resp.json()["content"])
+
+    async def files_write(self, path: str, content: str) -> FileEntry:
+        """Write UTF-8 *content* at *path* (creating parents); returns the stored entry."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.put(
+                "/platform/v1/files/write",
+                params=self._files_params(path),
+                json={"content": content},
+            )
+            resp.raise_for_status()
+            return FileEntry.model_validate(resp.json())
+
+    async def files_stat(self, path: str) -> FileEntry | None:
+        """Return the entry at *path*, or ``None`` if it does not exist."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get("/platform/v1/files/stat", params=self._files_params(path))
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return FileEntry.model_validate(resp.json())
+
+    async def files_delete(self, path: str) -> bool:
+        """Delete the file or directory tree at *path*; returns whether it existed."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.request(
+                "DELETE", "/platform/v1/files", params=self._files_params(path)
+            )
+            resp.raise_for_status()
+            return bool(resp.json()["deleted"])
+
+    async def files_make_dir(self, path: str) -> FileEntry:
+        """Create the directory at *path* (and parents) if absent; returns its entry."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.post("/platform/v1/files/dir", params=self._files_params(path))
+            resp.raise_for_status()
+            return FileEntry.model_validate(resp.json())

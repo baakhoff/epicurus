@@ -26,7 +26,9 @@ from epicurus_core_app.agent.activity import (
     append_thinking,
     append_tool,
 )
+from epicurus_core_app.agent.builtins import ASK_USER_TOOL
 from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -118,16 +120,21 @@ class AgentEvent(BaseModel):
     ``delta`` carries a content token; ``tool`` reports a tool call's progress
     (``running`` → ``ok``/``error``); ``done`` carries the final turn; ``error``
     ends a failed stream. A ``readiness`` event may *lead* the stream (warming
-    progress; emitted by the route, not the loop) — see ADR-0027.
+    progress; emitted by the route, not the loop) — see ADR-0027. ``awaiting_input``
+    ends the stream when the model calls ``ask_user``: it carries the ``question`` and a
+    ``run_id`` the client posts the answer to, to resume the turn (ADR-0053).
     """
 
-    type: str  # "delta" | "tool" | "done" | "error" | "readiness"
+    type: str  # "delta" | "tool" | "done" | "error" | "readiness" | "awaiting_input"
     text: str | None = None
     tool: str | None = None
     status: str | None = None
     turn: AgentTurn | None = None
     detail: str | None = None
     readiness: Readiness | None = None
+    # awaiting_input (ask_user, ADR-0053): the question to put to the user + the run to resume.
+    run_id: str | None = None
+    question: str | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -161,6 +168,7 @@ class Agent:
         attachments: AttachmentExpander | None = None,
         extractor: FactExtractor | None = None,
         prefs: LlmPrefsStore | None = None,
+        suspended: SuspendedRunStore | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
@@ -173,6 +181,9 @@ class Agent:
         self._extractor = extractor
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._prefs = prefs
+        # Suspend store for ask_user pause/resume (ADR-0053). None disables pausing (the loop
+        # then degrades: ask_user gets an instruction to proceed rather than suspending).
+        self._suspended = suspended
 
     async def _effective_max_steps(self, tenant_id: str | None) -> int:
         """The active agent loop bound: the stored pref if set, else the env default.
@@ -216,6 +227,7 @@ class Agent:
         tenant_id: str | None = None,
         session_id: str | None = None,
         persist_input: bool = True,
+        resume_convo: list[ChatMessage] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Stream one turn as it happens: deltas, tool progress, then ``done``.
 
@@ -225,13 +237,20 @@ class Agent:
 
         ``persist_input=False`` with empty ``messages`` re-answers the stored tail without
         adding a new user message (regenerate / edit, #302).
+
+        ``resume_convo`` continues a turn that ``ask_user`` paused (ADR-0053): the caller
+        passes the rehydrated conversation (history + the answer as the pending tool result),
+        so assembly/persistence of new input is skipped and the loop just continues.
         """
         tenant = tenant_id or self._default_tenant
         max_steps = await self._effective_max_steps(tenant)
-        messages = await self._expand_attachments(messages, tenant=tenant)
-        convo = await self._assemble(
-            messages, tenant=tenant, session_id=session_id, persist_input=persist_input
-        )
+        if resume_convo is not None:
+            convo = resume_convo
+        else:
+            messages = await self._expand_attachments(messages, tenant=tenant)
+            convo = await self._assemble(
+                messages, tenant=tenant, session_id=session_id, persist_input=persist_input
+            )
         parts: list[str] = []
         timeline: list[ActivityItem] = []
         tools_used: list[str] = []
@@ -263,8 +282,30 @@ class Agent:
                         role="assistant", content=result.content, tool_calls=result.tool_calls
                     )
                 )
+                pending: tuple[str, str] | None = None  # (call_id, question) for ask_user
                 for call in result.tool_calls:
                     name, arguments, call_id = _parse_tool_call(call)
+                    if name == ASK_USER_TOOL:
+                        # Don't execute — ask_user suspends the turn (ADR-0053). Defer the
+                        # suspend until this step's other calls have run, so every tool_call
+                        # gets a result and the conversation stays valid on resume.
+                        if pending is None:
+                            pending = (call_id, str(arguments.get("question") or "").strip())
+                            tools_used.append(name)
+                            append_tool(timeline, name, "ok", _tool_detail(arguments))
+                            yield AgentEvent(
+                                type="tool", tool=name, status="ok", detail=pending[1] or None
+                            )
+                        else:  # a second ask_user in one step — stub it so the convo stays valid
+                            convo.append(
+                                ChatMessage(
+                                    role="tool",
+                                    tool_call_id=call_id,
+                                    name=name,
+                                    content="(answered together with the question above)",
+                                )
+                            )
+                        continue
                     tools_used.append(name)
                     detail = _tool_detail(arguments)
                     yield AgentEvent(type="tool", tool=name, status="running", detail=detail)
@@ -276,6 +317,29 @@ class Agent:
                     append_tool(timeline, name, status, detail)
                     convo.append(
                         ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
+                    )
+                if pending is not None:
+                    call_id, question = pending
+                    run_id = await self._suspend(
+                        convo=convo,
+                        model=model,
+                        tenant=tenant,
+                        session_id=session_id,
+                        pending_call_id=call_id,
+                        question=question,
+                    )
+                    if run_id is not None:
+                        # Pause the turn: the client posts the answer to resume (no `done`).
+                        yield AgentEvent(type="awaiting_input", run_id=run_id, question=question)
+                        return
+                    # No suspend store wired — degrade: give the model a result and keep going.
+                    convo.append(
+                        ChatMessage(
+                            role="tool",
+                            tool_call_id=call_id,
+                            name=ASK_USER_TOOL,
+                            content="error: cannot pause for input; use your best assumption",
+                        )
                     )
             else:  # steps exhausted — stream one final answer without tools
                 stopped = "max_steps"
@@ -342,6 +406,36 @@ class Agent:
             )
         except Exception as exc:  # a failed write must not lose the answer
             log.warning("memory write failed", error=str(exc))
+
+    async def _suspend(
+        self,
+        *,
+        convo: list[ChatMessage],
+        model: str | None,
+        tenant: str,
+        session_id: str | None,
+        pending_call_id: str,
+        question: str,
+    ) -> str | None:
+        """Persist the in-progress run so an answer can resume it (ADR-0053).
+
+        Returns the run id, or ``None`` when no suspend store is wired — the caller then
+        degrades gracefully (instructs the model to proceed) instead of pausing.
+        """
+        if self._suspended is None:
+            return None
+        try:
+            return await self._suspended.save(
+                tenant=tenant,
+                session_id=session_id,
+                model=model,
+                pending_call_id=pending_call_id,
+                question=question,
+                conversation=[m.model_dump(exclude_none=True) for m in convo],
+            )
+        except Exception as exc:  # a failed persist must not crash the turn
+            log.warning("suspend persist failed; proceeding without pause", error=str(exc))
+            return None
 
     async def _expand_attachments(
         self, messages: list[ChatMessage], *, tenant: str

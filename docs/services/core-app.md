@@ -38,12 +38,13 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `done` (final turn) · `error`. The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `awaiting_input` (the turn paused on `ask_user` — carries `{run_id, question}`, ADR-0053) · `done` (final turn) · `error`. The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a conversation — its history rows. Facts the user is remembered by are kept (ADR-0045). |
 | `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message, then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace the last user message with `{content}` (and `{model?}`) and re-answer it in place — edits the message, truncates the tail, then streams. An `error` event on empty content or no user turn (#302). |
+| `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
@@ -81,6 +82,14 @@ per-tool disable filter as module tools.
   precisely so `remember` can scope its write. A near-duplicate of an existing fact is a
   no-op. The *implicit* path is background extraction (below); together they are the corpus
   that recall pulls into later chats.
+- **`ask_user(question)`** — pause the turn to ask the operator a clarifying question
+  (ADR-0053). Unlike other built-ins it is **not executed inline**: the agent loop intercepts
+  the call, persists the in-progress run (`agent_suspended_runs`), emits an `awaiting_input`
+  SSE event, and ends the stream. The web shows the question + an input; the answer is POSTed
+  to `…/agent/runs/{run_id}/resume`, which rehydrates the run and continues the same turn with
+  the answer as the tool result. The suspended run is consumed on resume and reaped after
+  `ASK_USER_TTL_HOURS`. With no suspend store wired the loop degrades — the model is told to
+  proceed with its best assumption rather than pausing.
 
 ### LLM gateway (ADR-0010)
 
@@ -237,6 +246,7 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `LLM_NUM_CTX` | — | Ollama context window (`num_ctx`); local models only. |
 | `MODULE_URLS` | `http://echo:8080,…` | Module base URLs the host discovers tools from. |
 | `AGENT_MAX_STEPS` | `4` | Max tool-calling rounds per turn. |
+| `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
@@ -273,6 +283,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   default collection. Post-release columns are added in place at startup (no migration framework).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
+- **Postgres `agent_suspended_runs`** — a turn paused by `ask_user` (ADR-0053): `id` (run_id),
+  `tenant`, `session_id`, `model`, `pending_call_id`, `question`, `conversation` (JSON),
+  `created_at`. Written on suspend, **consumed** on resume, reaped after `ASK_USER_TTL_HOURS`.
 - **Qdrant `<tenant>__facts`** — durable **facts about the user** for cross-chat recall
   (cosine), one collection per tenant (ADR-0045). Each point is a short standalone fact
   under an opaque UUID id, payload `{text, source, created_at}` (`source` = `tool` | `auto`).

@@ -63,6 +63,9 @@ class CoreAppSettings(CoreSettings):
     )
     # Max tool-calling rounds in one agent turn before it must answer.
     agent_max_steps: int = 4
+    # How long a turn paused by `ask_user` (ADR-0053) waits for an answer before its suspended
+    # run is reaped (hours). If it expires the model can simply ask again on the next turn.
+    ask_user_ttl_hours: int = 24
     # Base URL of the module that durably keeps chat uploads (ADR-0025). The attachment
     # upload route best-effort POSTs each uploaded file's bytes to <url>/ingest so it
     # becomes browsable in the Files page. Empty disables the sink (e.g. an OSS build

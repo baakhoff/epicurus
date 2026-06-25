@@ -12,6 +12,8 @@ from pydantic import BaseModel
 from epicurus_core import get_logger
 from epicurus_core_app.agent.agent import Agent, AgentEvent, AgentTurn
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
+from epicurus_core_app.agent.builtins import ASK_USER_TOOL
+from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory, MemoryItem
 from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
@@ -72,6 +74,12 @@ class EditRequest(BaseModel):
     model: str | None = None
 
 
+class ResumeRequest(BaseModel):
+    """Body for POST /runs/{run_id}/resume — the user's answer to an ``ask_user`` question."""
+
+    answer: str
+
+
 class AttachmentUploaded(BaseModel):
     """The handle the composer keeps for an uploaded file (ADR-0019)."""
 
@@ -99,6 +107,7 @@ def create_agent_router(
     sink: AttachmentSink | None = None,
     probe: ReadinessProbe | None = None,
     *,
+    suspended: SuspendedRunStore | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
@@ -212,6 +221,40 @@ def create_agent_router(
                 [], model=request.model, session_id=session_id, persist_input=False
             ):
                 yield chunk
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+    @router.post("/runs/{run_id}/resume")
+    async def resume_run(run_id: str, request: ResumeRequest) -> StreamingResponse:
+        """Resume a turn paused by ``ask_user``, supplying the user's answer (ADR-0053).
+
+        Takes the suspended run (consuming it), appends the answer as the pending tool call's
+        result, and continues the same turn — same SSE protocol as ``/chat/stream``. Emits an
+        ``error`` event if the run is unknown / expired / already answered."""
+
+        async def events() -> AsyncIterator[str]:
+            run = None if suspended is None else await suspended.take(tenant=tenant, run_id=run_id)
+            if run is None:
+                yield _sse(
+                    AgentEvent(
+                        type="error",
+                        detail="this question has expired or was already answered",
+                    )
+                )
+                return
+            convo = [ChatMessage.model_validate(m) for m in run.conversation]
+            convo.append(
+                ChatMessage(
+                    role="tool",
+                    tool_call_id=run.pending_call_id,
+                    name=ASK_USER_TOOL,
+                    content=request.answer,
+                )
+            )
+            async for event in agent.run_stream(
+                [], model=run.model, session_id=run.session_id, resume_convo=convo
+            ):
+                yield _sse(event)
 
         return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
 

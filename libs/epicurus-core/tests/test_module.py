@@ -53,6 +53,16 @@ async def test_manifest_required_models_defaults_empty() -> None:
     assert (await _greeter().manifest()).required_models == []
 
 
+async def test_manifest_carries_reindexable() -> None:
+    # A module that holds embeddings opts into the core's re-embed fan-out (#332).
+    module = EpicurusModule("knowledge", reindexable=True)
+    assert (await module.manifest()).reindexable is True
+
+
+async def test_manifest_reindexable_defaults_false() -> None:
+    assert (await _greeter().manifest()).reindexable is False
+
+
 async def test_tool_is_callable() -> None:
     content, structured = await _greeter().mcp.call_tool("greet", {"name": "ada"})
     assert structured == {"result": "hello ada"}

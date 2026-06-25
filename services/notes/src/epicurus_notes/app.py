@@ -4,6 +4,7 @@ the MCP app (structure + write tools; no read — notes are private), with Postg
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
@@ -114,6 +115,27 @@ def create_app() -> FastAPI:
     # this module supplies note data only (ADR-0018 / ADR-0019).
     app.include_router(create_pages_router(pages))
     app.include_router(create_attachments_router(attachments))
+
+    async def _force_reindex() -> None:
+        """Re-embed every note from scratch (#332): read all notes from the store and rebuild
+        the ``<tenant>__notes`` collection with the current embedding model."""
+        records = await store.list_all(tenant=tenant)
+        await indexer.reindex([(r.slug, r.content) for r in records])
+
+    # Holds the detached re-embed task so it isn't garbage-collected mid-run (RUF006).
+    reindex_tasks: set[asyncio.Task[None]] = set()
+
+    @app.post("/reindex")
+    async def reindex_all() -> dict[str, str]:
+        """Re-embed every note with the current embedding model (#332).
+
+        The core's re-embed fan-out calls this when the operator changes the embedding model —
+        vectors built with the old model are incompatible. Runs in the background.
+        """
+        task = asyncio.create_task(_force_reindex())
+        reindex_tasks.add(task)
+        task.add_done_callback(reindex_tasks.discard)
+        return {"status": "started"}
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:

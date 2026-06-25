@@ -12,6 +12,7 @@ import {
   EyeOff,
   KeyRound,
   MemoryStick,
+  RefreshCw,
   Search,
   Sparkles,
   SlidersHorizontal,
@@ -1097,7 +1098,7 @@ export function KvCache() {
 
 // ── Embedding default ─────────────────────────────────────────────────────────
 
-function EmbedDefault() {
+export function EmbedDefault() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
@@ -1110,6 +1111,10 @@ function EmbedDefault() {
     mutationFn: (model: string | null) => api.setGlobalEmbedDefault(model),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
   });
+
+  // Re-embed everything (#332): rebuild every reindexable module's vectors with the current
+  // embedding model. Changing the model above doesn't re-embed existing data on its own.
+  const reembed = useMutation({ mutationFn: () => api.reembed() });
 
   return (
     <Card>
@@ -1153,6 +1158,42 @@ function EmbedDefault() {
       {setEmbedDefault.isError && (
         <p className="mt-2 text-sm text-danger">{(setEmbedDefault.error as Error).message}</p>
       )}
+
+      {/* re-embed everything (#332) */}
+      <div className="mt-4 border-t border-edge pt-3">
+        <p className="mb-2 text-xs leading-relaxed text-ink-dim">
+          Changing the embedding model doesn't re-embed existing data on its own — vectors built
+          with the old model won't match new queries. Re-embed to rebuild every module's index
+          with the current model. It runs in the background and can take a while.
+        </p>
+        <Button variant="outline" busy={reembed.isPending} onClick={() => reembed.mutate()}>
+          <RefreshCw size={14} />
+          Re-embed everything
+        </Button>
+        {reembed.isSuccess &&
+          (reembed.data.modules.length === 0 ? (
+            <p className="mt-2 text-[11px] text-ink-dim">
+              No embedding-backed modules to re-embed.
+            </p>
+          ) : (
+            <div className="mt-2 text-[11px] text-ink-dim">
+              Re-embedding started — rebuilding in the background:
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {reembed.data.modules.map((m) => (
+                  <li key={m.module} className="flex items-center gap-1.5">
+                    <Dot tone={m.status === "started" ? "accent" : "danger"} />
+                    <span className="font-mono">{m.module}</span>
+                    <span>· {m.status === "started" ? "started" : "failed to start"}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        {reembed.isError && (
+          <p className="mt-2 text-sm text-danger">{(reembed.error as Error).message}</p>
+        )}
+      </div>
+
       <ModelSettingsSheet
         model={settingsOpen && current ? current : null}
         onClose={() => setSettingsOpen(false)}

@@ -218,3 +218,8 @@ class ModuleManifest(BaseModel):
     # ``GET /platform/v1/modules/{name}/docs``. Do NOT use ``/docs`` — it is FastAPI's built-in
     # Swagger UI and would shadow the route. Omit when the module has no docs to contribute.
     docs_url: str | None = None
+    # The module re-embeds its corpus on demand: it serves ``POST /reindex`` (drop + rebuild its
+    # Qdrant collection with the current embedding model), and the core's re-embed fan-out
+    # (#332) calls it when the operator changes the embedding model. Modules that hold no
+    # embeddings leave this ``False``.
+    reindexable: bool = False

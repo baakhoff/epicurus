@@ -59,6 +59,7 @@ class EpicurusModule:
         collections: CollectionsSpec | None = None,
         oauth_scopes: dict[str, list[str]] | None = None,
         docs_url: str | None = None,
+        reindexable: bool = False,
     ) -> None:
         self._name = name
         self._version = version
@@ -74,6 +75,7 @@ class EpicurusModule:
         self._collections = collections
         self._oauth_scopes = dict(oauth_scopes or {})
         self._docs_url = docs_url
+        self._reindexable = reindexable
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -142,6 +144,7 @@ class EpicurusModule:
             collections=self._collections,
             oauth_scopes=dict(self._oauth_scopes),
             docs_url=self._docs_url,
+            reindexable=self._reindexable,
         )
 
     def http_app(self) -> Starlette:

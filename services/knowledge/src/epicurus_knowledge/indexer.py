@@ -339,6 +339,19 @@ class KnowledgeIndexer:
         self._ensured = False
         return True
 
+    async def reset(self) -> None:
+        """Drop this source's vectors **and** ledger so the next ``run`` re-embeds from scratch.
+
+        The re-embed action (#332) calls this when the embedding model changes: vectors made
+        with the old model are incompatible, and the incremental ledger would otherwise skip
+        every "unchanged" file. Held under the run-lock so it can't race an in-flight ``run``.
+        """
+        async with self._run_lock:
+            if await self._qdrant.collection_exists(self._collection):
+                await self._qdrant.delete_collection(self._collection)
+            await self._notes.clear(tenant=self._tenant)
+            self._ensured = False
+
     async def run(self) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.
 

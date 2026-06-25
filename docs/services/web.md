@@ -20,7 +20,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker (shows each model's **size**), and last-turn **Regenerate** / inline **Edit** controls that re-answer in place (#302). When the selected local model can't call tools (its `/api/show` capabilities lack `tools`), the composer shows a **"can't use tools — chat only"** hint. |
 | **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
-| **Models** | **Catalog browser** — search and filter the model catalog by capability/tag (General, Code, Multilingual, **Vision**, **Tools**, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list (delete, hide, set global default) — each row **badges what the model can do** (tools / vision / …, from `?capabilities=true`) next to its size; **global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence; hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
+| **Models** | **Catalog browser** — search and filter the model catalog by capability/tag (General, Code, Multilingual, **Vision**, **Tools**, Embedding, Small), pull with live progress. The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list: each row is a **tap-to-expand disclosure** ([per-model rows](#models--per-model-rows-328)) — collapsed it shows name + `loaded`/`default`/`hidden` badges + a **suitability status icon** (✓ fits / ⚠ tight / ✕ too big, full reason on hover; #327) + capability icons + size; expanded it reveals the model's settings inline. **Global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence — with a **Re-embed everything** action (#332) that rebuilds every embedding-backed module's vectors after a model change (changing the model alone doesn't re-embed existing data); a server-wide **KV-cache type** with a **hardware-aware suggested** pick (q8_0 / q4_0 on tight VRAM, f16 when ample; #329); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
 | **Settings** | Theme (dark/light/system), default model. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
@@ -28,6 +28,45 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
+
+### Models — per-model rows (#328)
+
+Each local model is an **inline disclosure**, not a row of hover-only icons behind a
+settings *Sheet*. The old layout broke on a phone — there is no hover, so the action icons
+were either invisible or pushed off-screen and the name was squeezed. Now the **whole
+collapsed row is the touch target** (name, `loaded`/`default`/`hidden` badges, a suitability
+status icon (#327), capability icons, size, a chevron); tapping it opens a panel that holds **every**
+control: **Set as default / Unload / Hide / Delete** as full buttons, plus the per-model
+**context window**, **keep-alive**, and **run-on** (GPU / CPU / Auto), and the read-only
+**quantization** with a **variant pick-list** + manual *pull-variant* shortcut. One panel is
+open at a time.
+
+**Unload** (#331) drops a model from memory now (`keep_alive=0`,
+`POST /platform/v1/llm/unload`) **without** changing power state — per-model in the panel when
+the model is `loaded`, and **Unload all** in the card header when any is. Previously unloading
+only happened as a side-effect of the power *Pause* toggle, behind a hover-only control that a
+phone couldn't reach. The `loaded` badge is also kept **live**: the local-models query polls
+while the page is visible and refetches on tab focus, so unloading on another device shows up
+here without a reload (the old badge went stale on the PWA).
+
+The quant pick-list (#330) is the on-demand registry lookup
+(`GET /platform/v1/llm/catalog/variants`): the library catalog lists *sizes*, not quants, so
+this enumerates the model's available quantizations as a tappable list — each with its quant
+label, an estimated size, a **recommended** mark (the best quality that fits VRAM, from
+`src/lib/quantVariants.ts`), and an `installed`/`current` badge — and pulling one reuses the
+normal download flow. A manual tag box remains for non-library or HF models the lookup can't
+enumerate.
+
+The **context window is per-model and live**. The panel seeds from the model's own stored
+value and reads out the tokens it will *actually* use, resolved the way the gateway resolves
+it — this model's value → the **global default** → the system suggestion → 4096 — so a blank
+(inherit) field still shows the inherited number and echoes it as the input placeholder.
+Saving applies immediately (the models query is invalidated, **no page reload**). The
+standalone **Default context window** card sets the global fallback every model inherits.
+
+The form body (`ModelSettingsForm` in `src/screens/ModelsScreen.tsx`) is shared: it renders
+inline in each row here **and** inside the embedding-default Sheet, so the two surfaces stay
+identical.
 
 ### Module pages (core-rendered archetypes — ADR-0018)
 

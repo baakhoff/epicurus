@@ -118,3 +118,17 @@ class NotesIndexer:
     async def delete_note(self, slug: str) -> None:
         """Drop all vectors for a deleted note."""
         await self._delete_vectors(slug)
+
+    async def reindex(self, notes: list[tuple[str, str]]) -> int:
+        """Re-embed every note from scratch (#332): drop the whole collection, then re-index
+        each ``(slug, content)`` with the current embedding model.
+
+        Used by the core's re-embed fan-out when the embedding model changes — vectors built
+        with the old model are incompatible. Returns the total chunks written.
+        """
+        if await self._qdrant.collection_exists(self._collection):
+            await self._qdrant.delete_collection(self._collection)
+        total = 0
+        for slug, content in notes:
+            total += await self.index_note(slug, content)
+        return total

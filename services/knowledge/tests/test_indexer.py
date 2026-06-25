@@ -75,6 +75,7 @@ def _make_mock_qdrant() -> Any:
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()
+    qdrant.delete_collection = AsyncMock()
     qdrant.query_points = AsyncMock(return_value=_query_response([]))
     return qdrant
 
@@ -119,6 +120,23 @@ async def test_second_run_skips_unchanged_notes(note_index: NoteIndex, vault: Pa
     result = await indexer.run()
     assert result["unchanged"] == 2
     assert result["indexed"] == 0
+
+
+async def test_reset_drops_collection_and_clears_ledger(note_index: NoteIndex, vault: Path) -> None:
+    # The re-embed action (#332) must force a full rebuild — drop the vectors AND the ledger so
+    # the next run can't skip "unchanged" files (their vectors are stale after a model change).
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()
+    assert await note_index.count(tenant=TENANT) == 2
+
+    await indexer.reset()
+    indexer._qdrant.delete_collection.assert_awaited()  # type: ignore[attr-defined]
+    assert await note_index.count(tenant=TENANT) == 0  # ledger cleared
+
+    # With the ledger cleared, the next run re-embeds every note from scratch.
+    result = await indexer.run()
+    assert result["indexed"] == 2
+    assert result["unchanged"] == 0
 
 
 async def test_modified_note_is_reindexed(note_index: NoteIndex, vault: Path) -> None:

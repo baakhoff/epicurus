@@ -179,8 +179,9 @@ data flows through the core.
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, the `notes.saved` event, `attachable: true`, `pages`, UI). |
+| `GET /manifest` | Module manifest (tools, the `notes.saved` event, `attachable: true`, `reindexable: true`, `pages`, UI). |
 | `GET /status` | Live stats `{note_count, last_updated_at}`. Proxied at `GET /platform/v1/modules/notes/status`. |
+| `POST /reindex` | **Force a full re-embed** of every note with the current embedding model → `{status: "started"}` (#332, ADR-0054). Drops the `<tenant>__notes` collection and re-embeds each note (notes are otherwise indexed only on save), so vectors built with a previous model are rebuilt. Runs in the background. Called by the core's re-embed fan-out (the manifest sets `reindexable`). |
 | `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files: true}` (page id `notes`). Dir nodes (`type: "dir"`) come from `note_folders` ∪ slug prefixes, emitted parent-first before file nodes. |
 | `GET /pages/{page_id}/doc?path=<slug>` | One note's content `{path, title, content}`. |
 | `PUT /pages/{page_id}/doc?path=<slug>` | Save (create-on-absent) `{content}` → `{path, indexed, chunk_count}`. The note is the source of truth — a failed re-index returns `indexed: false`, never losing the write. Each save also snapshots the body for version history (ADR-0046). |

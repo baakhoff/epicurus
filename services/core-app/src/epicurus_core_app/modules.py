@@ -204,6 +204,37 @@ class ModuleRegistry:
             if snap.status.healthy and snap.enabled and not snap.removed
         ]
 
+    async def _post_reindex(self, base: str) -> None:
+        """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``)."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{base}/reindex")
+            resp.raise_for_status()
+
+    async def reembed(self) -> list[dict[str, str]]:
+        """Re-embed every reindexable, enabled module (#332).
+
+        Fans out ``POST {base}/reindex`` to each healthy, enabled, non-removed module whose
+        manifest declares ``reindexable`` — the action behind the Models page's "Re-embed
+        everything" after the embedding model changes (vectors are model-specific). Best-effort
+        per module: one module's failure is logged and reported, never aborts the rest. Each
+        module re-embeds its own tenant's corpus (single-tenant in v1, so it matches ours).
+        """
+        snaps = await self.snapshot()
+        results: list[dict[str, str]] = []
+        for snap, base in zip(snaps, self._bases, strict=True):
+            if not (snap.status.healthy and snap.enabled and not snap.removed):
+                continue
+            if not snap.manifest.reindexable:
+                continue
+            name = snap.manifest.name
+            try:
+                await self._post_reindex(base)
+                results.append({"module": name, "status": "started"})
+            except httpx.HTTPError as exc:
+                log.warning("re-embed fan-out failed", module=name, error=str(exc))
+                results.append({"module": name, "status": "error"})
+        return results
+
     async def set_enabled(self, name: str, enabled: bool) -> None:
         """Enable or disable a module, persisting the operator's choice (#126).
 
@@ -928,6 +959,13 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def list_modules() -> list[ModuleSnapshot]:
         # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
         return [snap for snap in await registry.snapshot() if not snap.removed]
+
+    @router.post("/reembed")
+    async def reembed() -> dict[str, Any]:
+        """Re-embed every reindexable module (#332) — the Models page's "Re-embed everything"
+        after the embedding model changes. Fans out to each module's ``/reindex`` and returns a
+        per-module status. A literal route, so it's declared before the ``/{name}/…`` paths."""
+        return {"modules": await registry.reembed()}
 
     @router.get("/{name}/config")
     async def get_config(name: str) -> dict[str, Any]:

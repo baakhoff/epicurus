@@ -16,6 +16,7 @@ from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, Pr
 from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.variants import ModelVariantsResponse, VariantLookup
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -26,6 +27,12 @@ SSE_HEADERS = {
 
 class PullRequest(BaseModel):
     model: str
+
+
+class UnloadRequest(BaseModel):
+    # None = unload every loaded model; a name = just that one. Frees VRAM/RAM now without
+    # touching power state (#331).
+    model: str | None = None
 
 
 class ProviderKeyRequest(BaseModel):
@@ -108,6 +115,7 @@ def create_llm_router(
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
     catalog: ModelCatalog | None = None,
+    variants: VariantLookup | None = None,
     model_settings: ModelSettingsStore | None = None,
     ollama_runtime: OllamaRuntime | None = None,
 ) -> APIRouter:
@@ -139,6 +147,16 @@ def create_llm_router(
             return CatalogResponse(entries=[], source="", updated_at=None, stale=True)
         return await catalog.snapshot()
 
+    @router.get("/catalog/variants", response_model=ModelVariantsResponse)
+    async def get_variants(model: str) -> ModelVariantsResponse:
+        """The quant variants available for a model (#330), looked up on demand from the
+        registry. ``model`` is a query param (names carry ``:``). Best-effort: an empty list
+        means none were found / the lookup is unwired, and the UI falls back to the manual box.
+        """
+        if variants is None:
+            return ModelVariantsResponse(model=model, variants=[])
+        return await variants.variants(model)
+
     @router.delete("/models")
     async def delete_model(name: str) -> dict[str, str]:
         """Remove a local model. ``name`` is a query param — model names contain
@@ -153,6 +171,14 @@ def create_llm_router(
         context length) from the runtime's ``/api/show``, for the model-settings sheet.
         ``model`` is a query param for the same name-mangling reason as ``delete``."""
         return await gateway.show(model)
+
+    @router.post("/unload")
+    async def unload_models(request: UnloadRequest) -> dict[str, str]:
+        """Drop model(s) from memory now (``keep_alive=0``) **without** changing power state
+        (#331) — the standalone unload the Models page calls. ``model`` omitted unloads every
+        loaded model; the ``loaded`` badge refreshes on success / the next poll."""
+        await gateway.unload(request.model)
+        return {"status": "ok", "model": request.model or "all"}
 
     @router.get("/providers", response_model=list[ProviderInfo])
     async def list_providers() -> list[ProviderInfo]:

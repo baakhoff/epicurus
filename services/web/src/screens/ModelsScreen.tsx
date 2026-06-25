@@ -39,6 +39,7 @@ import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from
 import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
 import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit } from "@/lib/modelFit";
+import { recommendKvCache } from "@/lib/kvCacheFit";
 import { useDownloads } from "@/stores/downloads";
 
 // ── "Good for your system?" status icon ─────────────────────────────────────────
@@ -904,7 +905,11 @@ const KV_CACHE_OPTIONS = [
 export function KvCache() {
   const queryClient = useQueryClient();
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const current = llmPrefs.data?.kv_cache_type ?? "";
+
+  // Hardware-aware suggestion (#329): tight VRAM → q8_0/q4_0, ample → f16.
+  const rec = recommendKvCache(system.data);
 
   const save = useMutation({
     mutationFn: (value: string | null) => api.setKvCacheType(value),
@@ -932,11 +937,37 @@ export function KvCache() {
             {KV_CACHE_OPTIONS.map((opt) => (
               <option key={opt.value || "default"} value={opt.value}>
                 {opt.label}
+                {rec && rec.value === opt.value ? " · suggested" : ""}
               </option>
             ))}
           </select>
         </label>
       )}
+
+      {/* hardware-aware suggestion — mirrors the context-window "Suggested" hint (#329) */}
+      {rec && rec.value !== current && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-(--radius-field) border border-accent/30 bg-accent-dim/40 px-3 py-2 text-sm">
+          <Sparkles size={14} className="shrink-0 text-accent" />
+          <span className="text-ink">
+            Suggested <strong>{rec.name}</strong>
+          </span>
+          <Button
+            variant="outline"
+            className="ml-auto"
+            onClick={() => save.mutate(rec.value || null)}
+            disabled={save.isPending}
+          >
+            Use {rec.name}
+          </Button>
+        </div>
+      )}
+      {rec && (
+        <p className="mt-2 text-[11px] italic leading-relaxed text-ink-faint">
+          {rec.value === current ? "Recommended for your hardware — " : ""}
+          {rec.reason}
+        </p>
+      )}
+
       {save.isPending ? (
         <p className="mt-2 text-[11px] text-ink-faint">Applying — restarting Ollama…</p>
       ) : save.isSuccess && save.data.applied ? (

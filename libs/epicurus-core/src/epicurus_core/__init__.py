@@ -31,6 +31,14 @@ from epicurus_core.contracts import (
     tool_envelope,
 )
 from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
+from epicurus_core.files import (
+    FileEntry,
+    FileKind,
+    FileStore,
+    LocalFileStore,
+    S3FileStore,
+    build_file_store,
+)
 from epicurus_core.logging import configure_logging, get_logger
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
@@ -84,10 +92,14 @@ __all__ = [
     "EventBus",
     "EventHandler",
     "EventSpec",
+    "FileEntry",
+    "FileKind",
+    "FileStore",
     "HealthResponse",
     "HoverCard",
     "HoverCardDetail",
     "HoverCardLink",
+    "LocalFileStore",
     "LogLevel",
     "ModelRole",
     "ModelSlot",
@@ -100,6 +112,7 @@ __all__ = [
     "PlatformMessage",
     "Replier",
     "Role",
+    "S3FileStore",
     "SecretError",
     "SecretStore",
     "TenantError",
@@ -110,6 +123,7 @@ __all__ = [
     "__version__",
     "add_manifest_route",
     "add_ops_routes",
+    "build_file_store",
     "configure_logging",
     "create_ops_router",
     "current_tenant",

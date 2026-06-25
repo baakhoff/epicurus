@@ -23,7 +23,14 @@ from fastapi.responses import JSONResponse
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import EventBus, SecretStore, add_ops_routes, configure_logging, get_logger
+from epicurus_core import (
+    EventBus,
+    SecretStore,
+    add_ops_routes,
+    build_file_store,
+    configure_logging,
+    get_logger,
+)
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
@@ -36,6 +43,7 @@ from epicurus_core_app.agent.builtins import (
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.files_routes import create_files_router
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
@@ -206,6 +214,15 @@ def create_app() -> FastAPI:
         registry=registry,
         default_tenant=settings.default_tenant_id,
     )
+    # Core-owned file space (ADR-0052): the swappable backend behind /platform/v1/files that
+    # modules consume instead of mounting the shared volume. Default backend is the local FS.
+    file_store = build_file_store(
+        backend=settings.files_backend,
+        root=settings.files_root,
+        s3_url=settings.files_s3_url,
+        s3_access_key=settings.files_s3_access_key,
+        s3_secret_key=settings.files_s3_secret_key,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -234,6 +251,14 @@ def create_app() -> FastAPI:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades
             log.error("memory init failed; cross-chat memory disabled", error=str(exc))
+        # Provision the tenant's file-space root (core-owned provisioning, ADR-0052). Until the
+        # shared volume is mounted into the core (a follow-up phase), the local root won't exist
+        # yet — skip cleanly rather than logging an error on every boot.
+        if settings.files_backend != "local" or settings.files_root.exists():
+            try:
+                await file_store.ensure_tenant_root(tenant=settings.default_tenant_id)
+            except Exception as exc:  # never block startup on a provisioning hiccup
+                log.warning("file-space provisioning failed", error=str(exc))
         # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
         # startup never blocks on the network; the task self-heals on transient failures.
         catalog_task = asyncio.create_task(catalog.run_periodic())
@@ -258,6 +283,7 @@ def create_app() -> FastAPI:
             default_tenant=settings.default_tenant_id,
         )
     )
+    app.include_router(create_files_router(file_store, default_tenant=settings.default_tenant_id))
     app.include_router(
         create_llm_router(
             gateway,

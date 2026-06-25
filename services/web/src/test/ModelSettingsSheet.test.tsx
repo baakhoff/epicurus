@@ -8,12 +8,17 @@ import { ModelSettingsSheet } from "@/screens/ModelsScreen";
 const mockModelSettings = vi.fn();
 const mockModelDetails = vi.fn();
 const mockSetModelSettings = vi.fn();
+const mockLlmPrefs = vi.fn();
+const mockSystemInfo = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     modelSettings: (m: string) => mockModelSettings(m),
     modelDetails: (m: string) => mockModelDetails(m),
     setModelSettings: (m: string, s: unknown) => mockSetModelSettings(m, s),
+    // The form resolves the effective context from these two (per-model → global → suggested).
+    llmPrefs: () => mockLlmPrefs(),
+    systemInfo: () => mockSystemInfo(),
   },
 }));
 
@@ -26,7 +31,11 @@ beforeEach(() => {
   mockModelSettings.mockReset();
   mockModelDetails.mockReset();
   mockSetModelSettings.mockReset();
+  mockLlmPrefs.mockReset();
+  mockSystemInfo.mockReset();
   mockSetModelSettings.mockResolvedValue({ status: "ok" });
+  mockLlmPrefs.mockResolvedValue({ global_context_window: null });
+  mockSystemInfo.mockResolvedValue({ suggested_context: { min: 2048, suggested: 16384, max: 24000 } });
   mockModelDetails.mockResolvedValue({
     quantization: "Q4_K_M",
     parameter_size: "8.0B",
@@ -114,6 +123,34 @@ describe("ModelSettingsSheet", () => {
         keep_alive: null,
         device: "cpu",
       }),
+    );
+  });
+
+  it("shows the resolved context it inherits when no per-model value is set", async () => {
+    mockModelSettings.mockResolvedValue({ context_window: null, keep_alive: null, device: null });
+    mockLlmPrefs.mockResolvedValue({ global_context_window: 8000 });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    // The field is blank (inherit) but the read-out spells out the effective number + its source,
+    // and the field's placeholder echoes it — no more guessing what's actually in play (#328).
+    const ctx = (await screen.findByLabelText(
+      "Per-model context window tokens",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(ctx).toHaveAttribute("placeholder", "8000"));
+    expect(ctx.value).toBe("");
+    expect(await screen.findByText(/tokens from the global default/i)).toHaveTextContent(
+      /Inherits 8,000 tokens from the global default/i,
+    );
+  });
+
+  it("reads out the per-model value once one is set", async () => {
+    mockModelSettings.mockResolvedValue({ context_window: 8192, keep_alive: null, device: null });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    expect(await screen.findByText(/this model will use/i)).toHaveTextContent(
+      /This model will use 8,192 tokens/i,
     );
   });
 

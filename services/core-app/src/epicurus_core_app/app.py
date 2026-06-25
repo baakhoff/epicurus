@@ -45,7 +45,8 @@ from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
-from epicurus_core_app.memory.extraction import FactExtractor
+from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
+from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
@@ -124,7 +125,11 @@ def create_app() -> FastAPI:
     # the agent's `remember` tool and by background extraction — not a dump of raw messages.
     facts = UserFactStore(qdrant, embed)
     memory = Memory(ConversationStore(engine), facts)
-    extractor = FactExtractor(gateway, facts)
+    # Deferred fact extraction (ADR-0051): finished exchanges queue here, and a nightly runner
+    # distils them off-hours so extraction never competes with a live turn for the GPU. The
+    # extractor may target a small dedicated model to keep the nightly pass cheap.
+    extraction_queue = ExtractionQueue(engine)
+    extractor = FactExtractor(gateway, facts, model=settings.memory_extraction_model or None)
     attachment_store = AttachmentStore(engine)
     attachment_sink = (
         AttachmentSink(settings.attachment_sink_url)
@@ -188,9 +193,25 @@ def create_app() -> FastAPI:
         default_tenant=settings.default_tenant_id,
         attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
         extractor=extractor,
+        # Deferred extraction (ADR-0051): in "nightly" mode the agent enqueues each exchange here
+        # instead of distilling it inline; "immediate" mode still fires the extractor per turn.
+        queue=extraction_queue,
+        defer_extraction=settings.defer_extraction,
+        # Time-box the one inline memory step so a cold embedder can't stall the first token.
+        recall_timeout_s=settings.memory_recall_timeout_s,
         # Resolve the loop bound per turn from the stored pref (else the env default), so the
         # operator's UI choice takes effect without a restart (#297).
         prefs=prefs,
+    )
+    # Nightly fact-extraction runner (ADR-0051): drains the queue once a day, in the operator's
+    # timezone, serially — so extraction happens off-hours, never against a live turn.
+    extraction_runner = ExtractionRunner(
+        extraction_queue,
+        extractor,
+        power,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        hour=settings.memory_extraction_hour,
+        batch_limit=settings.memory_extraction_batch_limit,
     )
     oauth = OAuthService(
         secrets,
@@ -231,16 +252,26 @@ def create_app() -> FastAPI:
             await memory.init()
         except Exception as exc:  # core stays up; cross-chat memory just degrades
             log.error("memory init failed; cross-chat memory disabled", error=str(exc))
+        try:
+            await extraction_queue.init()
+        except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
+            log.error("extraction queue init failed; nightly extraction off", error=str(exc))
         # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
         # startup never blocks on the network; the task self-heals on transient failures.
         catalog_task = asyncio.create_task(catalog.run_periodic())
+        # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
+        # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
+        extraction_task = asyncio.create_task(extraction_runner.run_periodic())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
         finally:
             catalog_task.cancel()
+            extraction_task.cancel()
             with suppress(asyncio.CancelledError):
                 await catalog_task
+            with suppress(asyncio.CancelledError):
+                await extraction_task
             await bus.close()
             await engine.dispose()
             await qdrant.close()

@@ -1,11 +1,16 @@
 """Background fact extraction — distil durable user facts from a finished exchange.
 
-The *background path* of the memory design (ADR-0045). After a turn completes, the agent
-hands the latest user message and the assistant's reply here; a single LLM call decides what,
-if anything, is worth remembering about the user long-term and writes it to the
-:class:`~epicurus_core_app.memory.facts.UserFactStore`. It runs off the response path (the
-agent schedules it as a background task) so it never adds latency to the reply, mirroring how
-ChatGPT folds details from chats into memory and how Mem0/LangMem run an extraction pass.
+The *background path* of the memory design (ADR-0045). A finished exchange (the latest user
+message + the assistant's reply) becomes a single LLM call that decides what, if anything, is
+worth remembering about the user long-term and writes it to the
+:class:`~epicurus_core_app.memory.facts.UserFactStore` — mirroring how ChatGPT folds details
+from chats into memory and how Mem0/LangMem run an extraction pass.
+
+:class:`FactExtractor` is that unit of work. *When* it runs is the operator's choice (ADR-0051):
+either immediately after the turn (the agent fires it as a background task) or — the default —
+*deferred* to a nightly window, where :class:`ExtractionRunner` drains the durable
+:class:`~epicurus_core_app.memory.extraction_queue.ExtractionQueue` serially so extraction never
+competes with a live turn for the one local GPU.
 
 Everything here is best-effort: a paused gateway, a model that returns junk, or any error
 yields zero facts rather than disturbing the chat.
@@ -13,15 +18,23 @@ yields zero facts rather than disturbing the chat.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from epicurus_core import get_logger
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.power import GatewayPausedError
+from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import SOURCE_AUTO, UserFact, UserFactStore
 
 log = get_logger("epicurus_core_app.memory.extraction")
+
+# IANA timezone provider — the runner schedules its nightly window in the operator's tz (#271).
+TimezoneProvider = Callable[[], Awaitable[str]]
 
 # Bound what we feed the extractor and what we accept back, so one turn can't blow up the
 # prompt or flood memory.
@@ -143,3 +156,106 @@ def _parse_facts(content: str) -> list[str]:
         if len(facts) >= _MAX_FACTS:
             break
     return facts
+
+
+class _Power(Protocol):
+    """The slice of the power controller the runner needs (eases faking in tests)."""
+
+    @property
+    def paused(self) -> bool: ...
+
+
+def _seconds_until_next_run(now: datetime, hour: int) -> float:
+    """Seconds from ``now`` until the next ``hour``:00 in ``now``'s own timezone.
+
+    ``now`` must be timezone-aware. When it is already at or past ``hour``:00 today, the next
+    run is ``hour``:00 tomorrow, so the result is always strictly positive — the loop can never
+    busy-spin on a zero-length sleep.
+    """
+    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+class ExtractionRunner:
+    """Drains the extraction queue on a nightly schedule — serially, and only when available.
+
+    The deferred half of ADR-0051. The agent enqueues finished exchanges all day; this runner
+    waits for a quiet hour (the operator's local night) and distils them then, one at a time, so
+    fact extraction never competes with a live turn for the GPU. Fire-and-forget from the app
+    lifespan; cancelled on shutdown.
+    """
+
+    def __init__(
+        self,
+        queue: ExtractionQueue,
+        extractor: FactExtractor,
+        power: _Power,
+        *,
+        timezone: TimezoneProvider,
+        hour: int = 3,
+        batch_limit: int = 200,
+    ) -> None:
+        self._queue = queue
+        self._extractor = extractor
+        self._power = power
+        self._timezone = timezone
+        self._hour = hour % 24
+        self._batch_limit = batch_limit
+
+    async def drain_once(self, *, batch_limit: int | None = None) -> int:
+        """Extract facts from every pending exchange, oldest first; returns how many ran.
+
+        Serial by design — one extraction at a time keeps the batch gentle on a single local
+        GPU. Skips entirely while the gateway is paused (the model is asleep), and stops
+        mid-batch if it is paused under us, leaving the rest queued for the next window. A
+        processed exchange is removed whether or not it yielded a fact: the extractor is
+        best-effort, so a row that distils to nothing — or one bad row — must not wedge the
+        queue forever.
+        """
+        if self._power.paused:
+            log.info("nightly extraction skipped; gateway paused")
+            return 0
+        limit = batch_limit if batch_limit is not None else self._batch_limit
+        items = await self._queue.pending(limit=limit)
+        processed = 0
+        for item in items:
+            if self._power.paused:  # paused under us — leave the remainder for the next window
+                log.info("nightly extraction paused mid-drain", remaining=len(items) - processed)
+                break
+            try:
+                await self._extractor.extract(
+                    tenant=item.tenant,
+                    user_text=item.user_text,
+                    assistant_text=item.assistant_text,
+                )
+            except Exception as exc:  # the extractor swallows its own errors; this is a backstop
+                log.warning("queued extraction failed", task_id=item.id, error=str(exc))
+            await self._queue.delete([item.id])
+            processed += 1
+        if processed:
+            log.info("nightly extraction drained the queue", count=processed)
+        return processed
+
+    async def _sleep_until_next_run(self) -> None:
+        """Sleep until the next nightly window, in the operator's timezone (UTC if unknown)."""
+        tz: tzinfo
+        try:
+            tz = ZoneInfo((await self._timezone()).strip() or "UTC")
+        except Exception:  # unknown / blank / bad tz — fall back to UTC rather than skip a run
+            tz = UTC
+        await asyncio.sleep(_seconds_until_next_run(datetime.now(tz), self._hour))
+
+    async def run_periodic(self) -> None:
+        """Loop forever: wait for the nightly window, drain the queue, repeat.
+
+        Each iteration is self-contained — a failed drain logs and waits for the next window
+        rather than killing the loop.
+        """
+        while True:
+            await self._sleep_until_next_run()
+            try:
+                await self.drain_once()
+            except Exception as exc:  # never let the scheduler die on a transient error
+                log.warning("nightly extraction run failed", error=str(exc))

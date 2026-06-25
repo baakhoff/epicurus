@@ -82,6 +82,26 @@ class CoreAppSettings(CoreSettings):
     qdrant_url: str = "http://localhost:6333"
     # Ollama embedding model used to vectorize conversation text for recall.
     memory_embed_model: str = "nomic-embed-text"
+    # ── Background fact extraction (ADR-0045 / ADR-0051) ─────────────────────────
+    # When the agent distils durable user facts from a finished exchange:
+    #   "nightly"   — (default) defer each exchange to a durable queue, drained once a day at
+    #                 memory_extraction_hour, so extraction never competes with a live turn for
+    #                 the local GPU (the fix for memory work blocking chat);
+    #   "immediate" — run it as a background task right after the turn (original ADR-0045).
+    memory_extraction_mode: str = "nightly"
+    # Local hour (0-23) of the nightly drain, in the operator's configured timezone (the Settings
+    # timezone, else default_timezone). 3 = 3 AM.
+    memory_extraction_hour: int = 3
+    # Optional dedicated model for the extraction LLM call (e.g. "llama3.2:3b"). A small, fast
+    # model keeps the nightly pass cheap and leaves the chat model untouched. Blank = the
+    # operator's default chat model.
+    memory_extraction_model: str = ""
+    # Max exchanges distilled per nightly drain (a safety bound on one run's cost).
+    memory_extraction_batch_limit: int = 200
+    # Seconds recall (a single embedding round-trip) may take before a turn proceeds without it.
+    # Recall is the one memory step still on the response path; bounding it keeps a cold embedder
+    # from stalling the first token (ADR-0051).
+    memory_recall_timeout_s: float = 2.0
     # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
     # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
     # deployment sets its own in the Settings screen (persisted) or via this env.
@@ -112,6 +132,11 @@ class CoreAppSettings(CoreSettings):
     def fallback_models(self) -> list[str]:
         """The fallback chain parsed from ``llm_fallbacks``."""
         return [m.strip() for m in self.llm_fallbacks.split(",") if m.strip()]
+
+    @property
+    def defer_extraction(self) -> bool:
+        """Whether fact extraction is deferred to the nightly runner (vs. run immediately)."""
+        return self.memory_extraction_mode.strip().lower() != "immediate"
 
     @property
     def module_base_urls(self) -> list[str]:

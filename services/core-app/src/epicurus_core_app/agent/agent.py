@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
@@ -31,6 +31,7 @@ from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.extraction import FactExtractor
+from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.readiness import Readiness
 
@@ -40,6 +41,11 @@ log = get_logger("epicurus_core_app.agent")
 # keep a tool step's argument detail short (it's a glanceable hint, not the full payload).
 _THINKING_CAP = 20_000
 _TOOL_DETAIL_CAP = 500
+
+# How long recall (a single embedding round-trip) may take before the turn proceeds without it.
+# Recall is the one memory step still on the response path; a cold or busy embedder must never
+# delay the first token (ADR-0051). The best-effort assemble already degrades to no recall.
+_DEFAULT_RECALL_TIMEOUT_S = 2.0
 
 
 def _tool_detail(arguments: dict[str, Any]) -> str | None:
@@ -160,6 +166,9 @@ class Agent:
         default_tenant: str = "local",
         attachments: AttachmentExpander | None = None,
         extractor: FactExtractor | None = None,
+        queue: ExtractionQueue | None = None,
+        defer_extraction: bool = True,
+        recall_timeout_s: float = _DEFAULT_RECALL_TIMEOUT_S,
         prefs: LlmPrefsStore | None = None,
     ) -> None:
         self._gateway = gateway
@@ -168,9 +177,15 @@ class Agent:
         self._max_steps = max_steps
         self._default_tenant = default_tenant
         self._attachments = attachments
-        # Background fact extraction (ADR-0045): after a turn, distil durable user facts off
-        # the response path. None disables it. Tasks are tracked so they aren't GC'd mid-flight.
+        # Fact extraction (ADR-0045/0051): after a turn, distil durable user facts. By default
+        # the exchange is *deferred* to ``queue`` and a nightly runner distils it off-hours, so
+        # extraction never competes with the next turn for the GPU. ``defer_extraction=False``
+        # restores the immediate path — fire ``extractor`` as a background task. Tasks are
+        # tracked so they aren't GC'd mid-flight.
         self._extractor = extractor
+        self._queue = queue
+        self._defer_extraction = defer_extraction
+        self._recall_timeout_s = recall_timeout_s
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._prefs = prefs
 
@@ -306,22 +321,32 @@ class Agent:
     def _schedule_extraction(
         self, *, tenant: str, messages: list[ChatMessage], answer: str
     ) -> None:
-        """Distil durable user facts from this exchange in the background (ADR-0045).
+        """Persist this exchange for fact extraction, off the response path (ADR-0045/0051).
 
-        Fire-and-forget so it never delays the reply; the task is tracked until it finishes
-        so it isn't garbage-collected mid-flight. Skips when extraction is disabled or the
-        turn has no user text / answer to learn from.
+        Default (deferred): enqueue the exchange for the nightly runner — a quick, durable
+        insert, so extraction won't compete with the next turn for the GPU. Immediate mode
+        (``defer_extraction=False``): fire the extractor now as a background task (the legacy
+        ADR-0045 path). Either way it is fire-and-forget so it never delays the reply, and the
+        task is tracked until it finishes so it isn't garbage-collected mid-flight. Skips when
+        there is nothing to learn from (no user text / no answer) or no sink is configured.
         """
-        if self._extractor is None or not answer:
+        if not answer:
             return
         user_text = next(
             (m.content for m in reversed(messages) if m.role == "user" and m.content), None
         )
         if not user_text:
             return
-        task = asyncio.create_task(
-            self._extractor.extract(tenant=tenant, user_text=user_text, assistant_text=answer)
-        )
+        coro: Coroutine[Any, Any, object]
+        if self._defer_extraction and self._queue is not None:
+            coro = self._queue.enqueue(tenant=tenant, user_text=user_text, assistant_text=answer)
+        elif self._extractor is not None:
+            coro = self._extractor.extract(
+                tenant=tenant, user_text=user_text, assistant_text=answer
+            )
+        else:
+            return
+        task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
@@ -367,6 +392,24 @@ class Agent:
         preamble = ChatMessage(role="system", content=f"Attached context:\n{context}")
         return [preamble, *messages]
 
+    async def _recall_within_budget(self, *, tenant: str, query: str) -> list[str]:
+        """Recall the facts relevant to ``query``, bounded by ``recall_timeout_s`` (ADR-0051).
+
+        Recall embeds the query — the one memory step still on the response path. A cold or busy
+        embedder must not delay the first token, so it is time-boxed; on timeout or any error the
+        turn proceeds with no recalled facts (the same best-effort degrade as the rest of
+        assemble), rather than blocking until our interaction with the model itself stalls.
+        """
+        if self._memory is None:
+            return []
+        try:
+            return await asyncio.wait_for(
+                self._memory.recall(tenant=tenant, query=query), self._recall_timeout_s
+            )
+        except Exception as exc:  # timeout or backend trouble — degrade to no recall, never block
+            log.warning("recall skipped (slow or failed)", error=str(exc))
+            return []
+
     async def _assemble(
         self,
         messages: list[ChatMessage],
@@ -396,7 +439,7 @@ class Agent:
                 (m.content for m in reversed(history) if m.role == "user" and m.content), None
             )
             if last_user:
-                recalled = await self._memory.recall(tenant=tenant, query=last_user)
+                recalled = await self._recall_within_budget(tenant=tenant, query=last_user)
                 if recalled:
                     joined = "\n".join(f"- {fact}" for fact in recalled)
                     convo.append(

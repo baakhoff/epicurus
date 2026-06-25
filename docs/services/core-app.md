@@ -79,8 +79,8 @@ per-tool disable filter as module tools.
   "remember…" or it learns a stable detail/preference. The fact is written to the user-fact
   store (`source=tool`) for the **calling tenant** — built-in handlers receive the tenant
   precisely so `remember` can scope its write. A near-duplicate of an existing fact is a
-  no-op. The *implicit* path is background extraction (below); together they are the corpus
-  that recall pulls into later chats.
+  no-op. The *implicit* path is background extraction — deferred to a nightly drain by default
+  (ADR-0051; see **Data model**); together they are the corpus that recall pulls into later chats.
 
 ### LLM gateway (ADR-0010)
 
@@ -240,6 +240,11 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
+| `MEMORY_EXTRACTION_MODE` | `nightly` | When fact extraction runs: `nightly` (deferred to a queue drained off-hours, ADR-0051) or `immediate` (a background task after each turn, ADR-0045). |
+| `MEMORY_EXTRACTION_HOUR` | `3` | Local hour (0-23) of the nightly drain, in the operator's timezone. |
+| `MEMORY_EXTRACTION_MODEL` | — | Optional small dedicated model for the extraction call (e.g. `llama3.2:3b`); blank = the default chat model. |
+| `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
+| `MEMORY_RECALL_TIMEOUT_S` | `2.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 
 Provider keys are **not** configured here — they go through the UI into OpenBao.
@@ -281,10 +286,21 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   searches / forgets it. Raw conversation turns are **not** indexed — the verbatim transcript
   lives only in `agent_messages`. (The pre-ADR-0045 recall collection `<tenant>__memory` is no
   longer written; any existing vectors are simply unused.)
+- **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
+  extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`. In the
+  default **nightly** mode the agent enqueues each exchange here instead of distilling it inline;
+  the `ExtractionRunner` drains it once a day (at `MEMORY_EXTRACTION_HOUR` in the operator's
+  timezone), serially, so extraction never competes with a live turn for the GPU. Drained rows
+  are deleted; because the queue is durable, a restart never loses a pending exchange.
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
-answers — just without memory — and never blocks core startup. Background fact extraction is
-likewise best-effort and runs *off* the response path, so it never adds latency to a reply.
+answers — just without memory — and never blocks core startup. Recall (the one memory step left
+on the response path) is **time-boxed** (`MEMORY_RECALL_TIMEOUT_S`) so a cold or busy embedder
+can't stall the first token. Fact extraction never runs on the response path: by default it is
+**deferred** to a nightly drain (ADR-0051) so it can't compete with a live turn for the GPU —
+set `MEMORY_EXTRACTION_MODE=immediate` to distil as a background task right after each turn
+instead (the original ADR-0045 behaviour). A dedicated small `MEMORY_EXTRACTION_MODEL` keeps the
+distillation cheap and off the chat model.
 
 ## Dependencies
 

@@ -81,6 +81,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_catalog_refresh_seconds` | `LLM_CATALOG_REFRESH_SECONDS` | `int` | `21600` (6h) | How often the background loop re-parses the catalog source. Floored to 60s. |
 | `llm_catalog_max_models` | `LLM_CATALOG_MAX_MODELS` | `int` | `0` | Cap on model families kept (the most-popular survive); `0` = unlimited. |
 | `llm_catalog_enabled` | `LLM_CATALOG_ENABLED` | `bool` | `true` | When false, no outbound fetch — the built-in seed is served as-is (the endpoint still works). |
+| `llm_registry_url` | `LLM_REGISTRY_URL` | `str` | `https://registry.ollama.ai` | OCI registry the catalog queries on demand to enumerate a model's quant variants (#330). Point at a mirror for an air-gapped deployment. |
 | `module_urls` | `MODULE_URLS` | `str` | `http://echo:8080` | Comma-separated module base URLs; each serves MCP at `<base>/mcp` and its manifest at `<base>/manifest`. |
 | `agent_max_steps` | `AGENT_MAX_STEPS` | `int` | `4` | **Default** max tool-calling rounds per agent turn; the operator can override it at runtime (`llm_prefs.agent_max_steps`, set via the Models/Settings UI — #297) without a restart. |
 | `attachment_sink_url` | `ATTACHMENT_SINK_URL` | `str` | `http://storage:8080` | Base URL of the module that durably keeps chat uploads (ADR-0025); the upload route best-effort POSTs bytes to `<url>/ingest`. Empty disables the sink (uploads stay core-side only); a failed push never breaks the upload. |

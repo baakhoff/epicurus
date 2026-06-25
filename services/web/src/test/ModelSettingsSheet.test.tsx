@@ -10,6 +10,7 @@ const mockModelDetails = vi.fn();
 const mockSetModelSettings = vi.fn();
 const mockLlmPrefs = vi.fn();
 const mockSystemInfo = vi.fn();
+const mockModelVariants = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -19,6 +20,8 @@ vi.mock("@/lib/api", () => ({
     // The form resolves the effective context from these two (per-model → global → suggested).
     llmPrefs: () => mockLlmPrefs(),
     systemInfo: () => mockSystemInfo(),
+    // The quant-variant pick-list (#330).
+    modelVariants: (m: string) => mockModelVariants(m),
   },
 }));
 
@@ -36,6 +39,7 @@ beforeEach(() => {
   mockSetModelSettings.mockResolvedValue({ status: "ok" });
   mockLlmPrefs.mockResolvedValue({ global_context_window: null });
   mockSystemInfo.mockResolvedValue({ suggested_context: { min: 2048, suggested: 16384, max: 24000 } });
+  mockModelVariants.mockResolvedValue({ model: "llama3.2:latest", variants: [] });
   mockModelDetails.mockResolvedValue({
     quantization: "Q4_K_M",
     parameter_size: "8.0B",
@@ -152,6 +156,19 @@ describe("ModelSettingsSheet", () => {
     expect(await screen.findByText(/this model will use/i)).toHaveTextContent(
       /This model will use 8,192 tokens/i,
     );
+  });
+
+  it("lists the model's available quant variants from the registry (#330)", async () => {
+    mockModelVariants.mockResolvedValue({
+      model: "llama3.2:latest",
+      variants: [{ tag: "llama3.2:3b-instruct-q8_0", quant: "q8_0" }],
+    });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    expect(await screen.findByText("q8_0")).toBeInTheDocument();
+    // The tag line also carries the size estimate, so match it loosely.
+    expect(screen.getByText(/llama3\.2:3b-instruct-q8_0/)).toBeInTheDocument();
   });
 
   it("renders nothing when no model is selected", () => {

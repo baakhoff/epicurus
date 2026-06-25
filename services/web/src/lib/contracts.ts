@@ -42,6 +42,21 @@ export const ModelDetails = z.object({
 });
 export type ModelDetails = z.infer<typeof ModelDetails>;
 
+/** One pullable quantization of a model size, from the registry lookup (#330). */
+export const ModelVariant = z.object({
+  tag: z.string(),
+  // Parsed quant label ("q8_0" / "fp16"); "" for the default build (no quant token in the tag).
+  quant: z.string().default(""),
+});
+export type ModelVariant = z.infer<typeof ModelVariant>;
+
+/** The quant variants available for a model. Empty when the lookup found none / is unwired. */
+export const ModelVariants = z.object({
+  model: z.string(),
+  variants: z.array(ModelVariant).default([]),
+});
+export type ModelVariants = z.infer<typeof ModelVariants>;
+
 export const LlmPrefs = z.object({
   global_default: z.string().nullable(),
   global_embed_default: z.string().nullable(),

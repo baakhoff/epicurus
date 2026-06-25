@@ -38,7 +38,16 @@ collapsed row is the touch target** (name, `loaded`/`default`/`hidden` badges, a
 status icon (#327), capability icons, size, a chevron); tapping it opens a panel that holds **every**
 control: **Set as default / Hide / Delete** as full buttons, plus the per-model **context
 window**, **keep-alive**, and **run-on** (GPU / CPU / Auto), and the read-only
-**quantization** with a *pull-variant* shortcut. One panel is open at a time.
+**quantization** with a **variant pick-list** + manual *pull-variant* shortcut. One panel is
+open at a time.
+
+The quant pick-list (#330) is the on-demand registry lookup
+(`GET /platform/v1/llm/catalog/variants`): the library catalog lists *sizes*, not quants, so
+this enumerates the model's available quantizations as a tappable list — each with its quant
+label, an estimated size, a **recommended** mark (the best quality that fits VRAM, from
+`src/lib/quantVariants.ts`), and an `installed`/`current` badge — and pulling one reuses the
+normal download flow. A manual tag box remains for non-library or HF models the lookup can't
+enumerate.
 
 The **context window is per-model and live**. The panel seeds from the model's own stored
 value and reads out the tokens it will *actually* use, resolved the way the gateway resolves

@@ -94,6 +94,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) from `/api/show` — opt-in (one call per model), so the Models page can badge them while the chat picker stays light. |
 | `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported). Backs the model-settings sheet and the chat "can't use tools" hint. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
+| `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the OCI registry (the library page lists *sizes*, not quants). Returns `{model, variants:[{tag, quant}]}`; best-effort — an empty list (offline, or a non-library model) makes the UI fall back to a manual tag box. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
@@ -124,6 +125,15 @@ empty. The catalog is **global, not tenant-scoped** — it mirrors a public regi
 no tenant data, and is identical for every tenant (like the provider registry). The web
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
+
+A **quant-variant lookup** (`llm/variants.py`, #330) complements the catalog: the library
+page lists a model's parameter *sizes* but not its *quantizations*, so to pull a different
+quant the operator used to have to type the exact tag. `VariantLookup` queries the OCI
+registry on demand (`LLM_REGISTRY_URL`, Ollama's public registry by default) —
+`/v2/library/<family>/tags/list` — and parses the tags for the requested size into a small
+`{tag, quant}` list the Models page renders as a pick-list. It is deliberately best-effort
+(any failure → empty list, UI falls back to the manual box) and, like the catalog, global
+rather than tenant-scoped.
 
 #### Per-model settings (ADR-0044)
 

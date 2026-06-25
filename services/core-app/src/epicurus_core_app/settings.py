@@ -51,6 +51,10 @@ class CoreAppSettings(CoreSettings):
     # When false, no outbound fetch happens and the built-in seed is served as-is
     # (air-gapped builds). The endpoint and seed still work; only the refresh is skipped.
     llm_catalog_enabled: bool = True
+    # The OCI registry the catalog queries on demand to enumerate a model's quant variants
+    # (#330) — the library page lists sizes, not quants. Defaults to Ollama's public registry;
+    # point it at a mirror for an air-gapped deployment.
+    llm_registry_url: str = "https://registry.ollama.ai"
     # Comma-separated module base URLs. Each module serves its MCP tools at
     # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
     # (the registry + web shell read these).

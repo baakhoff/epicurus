@@ -195,6 +195,21 @@ deliberately conservative character-based **estimate** (no tokenizer dependency,
 local models). Hosted providers — large contexts, server-side overflow handling — are left
 untouched, as are calls with no known window. The common case (a short chat) is a no-op.
 
+### Streamed tool calls
+
+The streaming gateway (`stream_chat`) reassembles tool calls from the provider's chunks
+before the agent loop runs them. Two provider shapes have to coexist: OpenAI streams one
+call as partial fragments that share an `index` (the name first, then the JSON arguments in
+pieces — these coalesce into one call), while Ollama streams each *complete* call with a name
+but **no** `index`. Keying purely on the index collapsed every un-indexed Ollama call into one
+slot and concatenated their argument strings into invalid JSON (`{…}{…}`); the corrupted
+string then crashed the **next** turn when LiteLLM replayed the assistant message and ran
+`json.loads` over it (`JSONDecodeError: Extra data`). So an un-indexed fragment that names a
+tool now starts a fresh slot. As a backstop, every assembled call's `arguments` is normalized
+to exactly one valid JSON string before it is stored or replayed — a dict is serialized, a
+leading JSON value is salvaged from any trailing junk, and anything unparseable degrades to
+`{}` — so a malformed stream can never poison a later turn.
+
 ### Power (ADR-0005)
 
 | Method · Path | Purpose |

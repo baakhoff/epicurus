@@ -136,6 +136,18 @@ registry on demand (`LLM_REGISTRY_URL`, Ollama's public registry by default) —
 (any failure → empty list, UI falls back to the manual box) and, like the catalog, global
 rather than tenant-scoped.
 
+#### Re-embedding (#332, ADR-0054)
+
+Changing the embedding model doesn't re-embed existing data on its own — vectors built with the
+old model don't match queries embedded with the new one. `POST /platform/v1/modules/reembed`
+(the Models page's "Re-embed everything") **fans out** to every healthy, enabled module whose
+manifest declares `reindexable` and calls its `POST /reindex`, which **drops the module's
+Qdrant collection and rebuilds it** with the current embedding model in the background. The
+fan-out is best-effort and returns a per-module `started`/`error` status; progress shows on
+each module's `/status`. Only embedding-backed modules opt in (knowledge — covering its vault
+**and** the shared module-docs collection — and notes); storage holds no embeddings. Single-
+tenant in v1: each module re-embeds its own tenant's corpus, which matches the core's.
+
 #### Per-model settings (ADR-0044)
 
 The global context-window pref is one knob for every model; a per-`(tenant, model)`
@@ -191,6 +203,7 @@ untouched, as are calls with no known window. The common case (a short chat) is 
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. |
+| `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, ADR-0028): stop + remove the module's container via the Docker socket, then tombstone it. Refuses core-app / web / data-plane, scoped to the core's own Compose project. **403** protected · **503** no Docker access · **404** unknown. |

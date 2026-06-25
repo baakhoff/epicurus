@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-knowledge"
-version = "0.15.0"
+version = "0.16.0"
 description = "Knowledge module — multi-project Obsidian vault index + RAG via Qdrant."
 requires-python = ">=3.11"
 dependencies = [

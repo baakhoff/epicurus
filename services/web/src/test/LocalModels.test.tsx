@@ -25,6 +25,7 @@ const mockSetModelHidden = vi.fn();
 const mockDeleteModel = vi.fn();
 const mockSetModelSettings = vi.fn();
 const mockModelVariants = vi.fn();
+const mockUnloadModel = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -38,6 +39,7 @@ vi.mock("@/lib/api", () => ({
     setModelHidden: (m: string, h: boolean) => mockSetModelHidden(m, h),
     deleteModel: (m: string) => mockDeleteModel(m),
     setModelSettings: (m: string, s: unknown) => mockSetModelSettings(m, s),
+    unloadModel: (m: string | null) => mockUnloadModel(m),
   },
 }));
 
@@ -69,6 +71,7 @@ beforeEach(() => {
   mockDeleteModel.mockResolvedValue({ status: "ok" });
   mockSetModelSettings.mockResolvedValue({ status: "ok" });
   mockModelVariants.mockResolvedValue({ model: "x", variants: [] });
+  mockUnloadModel.mockResolvedValue({ status: "ok", model: "x" });
 });
 
 describe("LocalModels", () => {
@@ -153,6 +156,35 @@ describe("LocalModels", () => {
     fireEvent.click(pullButtons[0]);
     // Pulling reuses the download flow with the chosen tag (q4 sorts first).
     expect(mockPull).toHaveBeenCalledWith("llama3.2:3b-instruct-q4_K_M", expect.any(Function));
+  });
+
+  it("unloads a loaded model from memory from its panel (#331)", async () => {
+    render(<LocalModels />, { wrapper });
+
+    // llama3.2:latest is loaded, so its panel offers Unload (a full, touch-friendly button).
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Show settings for llama3.2:latest" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /^unload$/i }));
+    await waitFor(() => expect(mockUnloadModel).toHaveBeenCalledWith("llama3.2:latest"));
+  });
+
+  it("offers Unload all when any model is loaded", async () => {
+    render(<LocalModels />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: /unload all/i }));
+    await waitFor(() => expect(mockUnloadModel).toHaveBeenCalledWith(null));
+  });
+
+  it("does not offer Unload for a model that isn't loaded", async () => {
+    render(<LocalModels />, { wrapper });
+
+    // nomic-embed-text:latest is not loaded → its panel has no Unload button.
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Show settings for nomic-embed-text:latest" }),
+    );
+    await screen.findByText("Context window");
+    expect(screen.queryByRole("button", { name: /^unload$/i })).not.toBeInTheDocument();
   });
 
   it("deletes a model after the confirm dialog", async () => {

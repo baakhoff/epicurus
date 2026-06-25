@@ -19,13 +19,20 @@ from epicurus_core_app.llm.variants import VariantLookup
 class _StubGateway:
     """Only needs to exist — most tests inspect routes, not call behavior.
 
-    ``show`` backs the /models/details route; it returns canned details.
+    ``show`` backs the /models/details route; ``unload`` records its calls so the unload
+    route can be asserted.
     """
+
+    def __init__(self) -> None:
+        self.unloaded: list[str | None] = []
 
     async def show(self, model: str) -> ModelDetails:
         return ModelDetails(
             quantization="Q4_K_M", parameter_size="8.0B", context_length=131072, family="llama"
         )
+
+    async def unload(self, model: str | None = None) -> None:
+        self.unloaded.append(model)
 
 
 async def _fresh_prefs() -> LlmPrefsStore:
@@ -56,11 +63,12 @@ def _app(
     variants: VariantLookup | None = None,
     model_settings: ModelSettingsStore | None = None,
     ollama_runtime: OllamaRuntime | None = None,
+    gateway: _StubGateway | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
         create_llm_router(
-            _StubGateway(),  # type: ignore[arg-type]
+            gateway or _StubGateway(),  # type: ignore[arg-type]
             prefs=prefs,
             default_tenant="local",
             catalog=catalog,
@@ -83,6 +91,7 @@ def test_management_routes_remain() -> None:
     assert "/platform/v1/llm/providers" in paths
     assert "/platform/v1/llm/pull" in paths
     assert "/platform/v1/llm/catalog" in paths
+    assert "/platform/v1/llm/unload" in paths
 
 
 async def test_catalog_route_without_catalog_returns_empty_stale() -> None:
@@ -110,6 +119,20 @@ async def test_catalog_route_serves_the_snapshot() -> None:
     assert body["source"] == "http://example/library"
     assert [e["id"] for e in body["entries"]] == ["llama3.2:3b"]
     assert body["entries"][0]["tags"] == ["general"]
+
+
+async def test_unload_route_calls_gateway_without_power_change() -> None:
+    gateway = _StubGateway()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gateway=gateway)), base_url="http://test"
+    ) as client:
+        all_resp = await client.post("/platform/v1/llm/unload", json={})
+        one_resp = await client.post("/platform/v1/llm/unload", json={"model": "llama3.1:8b"})
+    assert all_resp.status_code == 200
+    assert all_resp.json()["model"] == "all"
+    assert one_resp.json()["model"] == "llama3.1:8b"
+    # The route delegates to gateway.unload(model) — None (all) then the named one.
+    assert gateway.unloaded == [None, "llama3.1:8b"]
 
 
 async def test_variants_route_without_lookup_returns_empty() -> None:

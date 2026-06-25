@@ -11,6 +11,7 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  MemoryStick,
   Search,
   Sparkles,
   SlidersHorizontal,
@@ -295,7 +296,14 @@ export function LocalModels() {
   const queryClient = useQueryClient();
   // Ask for capabilities here so each model can be badged with what it does (tools/vision/…).
   // Keyed under ["models", …] so the mutations' `["models"]` invalidation still refreshes it.
-  const models = useQuery({ queryKey: ["models", "capabilities"], queryFn: () => api.models(true) });
+  const models = useQuery({
+    queryKey: ["models", "capabilities"],
+    queryFn: () => api.models(true),
+    // Keep the loaded badge live on the PWA (#331): poll while the page is visible and refetch
+    // when the tab regains focus, so unloading on another device shows up here without a reload.
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+  });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -325,9 +333,30 @@ export function LocalModels() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
   });
 
+  // Unload from memory now (keep_alive=0), without touching power state (#331). `null` = all.
+  const unload = useMutation({
+    mutationFn: (model: string | null) => api.unloadModel(model),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["models"] }),
+  });
+
+  const anyLoaded = (models.data ?? []).some((m) => m.loaded);
+
   return (
     <Card>
-      <h3 className="mb-2 font-serif text-base text-ink">Local models</h3>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h3 className="font-serif text-base text-ink">Local models</h3>
+        {anyLoaded && (
+          <Button
+            variant="ghost"
+            onClick={() => unload.mutate(null)}
+            disabled={unload.isPending}
+            aria-label="Unload all models from memory"
+          >
+            <MemoryStick size={14} />
+            Unload all
+          </Button>
+        )}
+      </div>
       {models.isLoading && <Spinner />}
       {models.isError && (
         <p className="text-sm text-warn">
@@ -408,6 +437,16 @@ export function LocalModels() {
                       <Star size={14} fill={isDefault ? "currentColor" : "none"} />
                       {isDefault ? "Default model" : "Set as default"}
                     </Button>
+                    {model.loaded && (
+                      <Button
+                        variant="outline"
+                        onClick={() => unload.mutate(model.name)}
+                        disabled={unload.isPending}
+                      >
+                        <MemoryStick size={14} />
+                        Unload
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       onClick={() => toggleHidden.mutate({ name: model.name, hidden: !model.hidden })}

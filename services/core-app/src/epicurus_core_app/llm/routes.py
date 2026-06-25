@@ -29,6 +29,12 @@ class PullRequest(BaseModel):
     model: str
 
 
+class UnloadRequest(BaseModel):
+    # None = unload every loaded model; a name = just that one. Frees VRAM/RAM now without
+    # touching power state (#331).
+    model: str | None = None
+
+
 class ProviderKeyRequest(BaseModel):
     api_key: str
     # OpenAI-compatible endpoint URL — required by the "custom" provider only.
@@ -165,6 +171,14 @@ def create_llm_router(
         context length) from the runtime's ``/api/show``, for the model-settings sheet.
         ``model`` is a query param for the same name-mangling reason as ``delete``."""
         return await gateway.show(model)
+
+    @router.post("/unload")
+    async def unload_models(request: UnloadRequest) -> dict[str, str]:
+        """Drop model(s) from memory now (``keep_alive=0``) **without** changing power state
+        (#331) — the standalone unload the Models page calls. ``model`` omitted unloads every
+        loaded model; the ``loaded`` badge refreshes on success / the next poll."""
+        await gateway.unload(request.model)
+        return {"status": "ok", "model": request.model or "all"}
 
     @router.get("/providers", response_model=list[ProviderInfo])
     async def list_providers() -> list[ProviderInfo]:

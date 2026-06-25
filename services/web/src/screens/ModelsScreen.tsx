@@ -5,6 +5,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Check,
   ChevronRight,
   Cpu,
   Eye,
@@ -15,6 +16,8 @@ import {
   SlidersHorizontal,
   Star,
   Trash2,
+  TriangleAlert,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -38,11 +41,26 @@ import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit } from "@/lib/modelFit";
 import { useDownloads } from "@/stores/downloads";
 
-// ── "Good for your system?" badge ───────────────────────────────────────────────
+// ── "Good for your system?" status icon ─────────────────────────────────────────
 
-/** A suitability chip (hover for the reason). `sizeMb` is a known size; pass null + the
- *  params label to estimate (download catalog). Renders nothing when there's no verdict. */
-function FitBadge({
+/** A fit verdict's tone → its compact status icon. `dim` (the `unknown` rating) maps to
+ *  nothing, so a model with no verdict stays clean. */
+const FIT_ICON = { ok: Check, warn: TriangleAlert, danger: X, dim: null } as const;
+const FIT_ICON_TONE = {
+  ok: "text-ok",
+  warn: "text-warn",
+  danger: "text-danger",
+  dim: "text-ink-faint",
+} as const;
+
+/**
+ * A suitability **status icon** — check (fits), warning triangle (tight / offloads / heavy),
+ * or X (too big) — with the full label + reason on hover/tap via native `title` (so it works
+ * on touch). Replaces the old text chip, which ate horizontal space and crowded the row on a
+ * phone (#327). `sizeMb` is a known size; pass null + the `params` label to estimate (catalog).
+ * Renders nothing when there's no verdict.
+ */
+export function FitBadge({
   system,
   sizeMb,
   params,
@@ -52,10 +70,16 @@ function FitBadge({
   params?: string | null;
 }) {
   const fit = assessFit(system, sizeMb, params);
-  if (!fit.label) return null;
+  const Icon = FIT_ICON[fit.tone];
+  if (!fit.label || !Icon) return null;
   return (
-    <span title={fit.reason} className="cursor-help">
-      <Badge tone={fit.tone}>{fit.label}</Badge>
+    <span
+      title={`${fit.label} — ${fit.reason}`}
+      role="img"
+      aria-label={`Suitability: ${fit.label}`}
+      className={cn("inline-flex cursor-help items-center", FIT_ICON_TONE[fit.tone])}
+    >
+      <Icon size={15} className="shrink-0" aria-hidden="true" />
     </span>
   );
 }

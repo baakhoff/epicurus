@@ -8,7 +8,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core_app.agent.agent import Agent, AgentEvent
+from epicurus_core_app.agent.agent import (
+    _ANSWER_NUDGE,
+    _EMPTY_ANSWER_FALLBACK,
+    Agent,
+    AgentEvent,
+)
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
 
@@ -193,6 +198,37 @@ async def test_stream_max_steps_forces_final_answer() -> None:
     assert events[-1].turn is not None
     assert events[-1].turn.stopped == "max_steps"
     assert events[-1].turn.content == "final"
+
+
+async def test_stream_blank_step_is_nudged_into_an_answer() -> None:
+    # A reasoning model streams thinking but no answer/tool; the loop nudges it once and it
+    # answers on the retry, rather than ending the turn empty (the silent "stop").
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="")),
+            (["the ", "answer"], ChatResult(model="m", content="the answer")),
+        ]
+    )
+    events = await _collect(Agent(gateway=gw, mcp=_FakeMcp()), "go")  # type: ignore[arg-type]
+    assert events[-1].type == "done"
+    assert events[-1].turn is not None and events[-1].turn.content == "the answer"
+    assert any(m.role == "user" and m.content == _ANSWER_NUDGE for m in gw.calls[1])
+
+
+async def test_stream_empty_turn_falls_back_to_a_message() -> None:
+    # The model says nothing even after the nudge: the stream emits the fallback as a delta and
+    # the persisted turn carries it — never an empty bubble.
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="")),
+            ([], ChatResult(model="m", content="")),
+        ]
+    )
+    events = await _collect(Agent(gateway=gw, mcp=_FakeMcp()), "go")  # type: ignore[arg-type]
+    assert events[-1].type == "done"
+    assert events[-1].turn is not None
+    assert events[-1].turn.content == _EMPTY_ANSWER_FALLBACK
+    assert any(e.type == "delta" and e.text == _EMPTY_ANSWER_FALLBACK for e in events)
 
 
 async def test_stream_timeline_preserves_think_tool_think_order() -> None:

@@ -149,10 +149,15 @@ async def test_variants_route_without_lookup_returns_empty() -> None:
 
 
 async def test_variants_route_serves_the_lookup() -> None:
-    async def fetch(url: str) -> dict[str, object]:
-        return {"tags": ["latest", "8b", "8b-instruct-q8_0", "70b"]}
+    async def fetch(url: str) -> str:
+        return (
+            '<a href="/library/llama3.1:latest"></a>'
+            '<a href="/library/llama3.1:8b"></a>'
+            '<a href="/library/llama3.1:8b-instruct-q8_0"></a>'
+            '<a href="/library/llama3.1:70b"></a>'
+        )
 
-    lookup = VariantLookup(registry_url="http://registry.example", fetch=fetch)
+    lookup = VariantLookup(library_url="http://lib.example/library", fetch=fetch)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(variants=lookup)), base_url="http://test"
     ) as client:

@@ -96,11 +96,14 @@ export function Shell() {
   const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");
 
   return (
-    // `overflow-hidden` pins the fixed-height shell so the page body never scrolls —
-    // every region below owns its own scroll. Without it, any child taller than the
-    // viewport (notably the rail) leaks its overflow to <body>, and scrolling while
-    // hovering that child drags the whole interface.
-    <div className="flex h-dvh flex-col overflow-hidden sm:flex-row">
+    // `h-full` fills the fixed #root, which index.css pins to the dynamic viewport.
+    // Not `h-dvh`: re-measuring the viewport here disagrees with the root on a phone
+    // while the address bar shows (right after a refresh) and clips the bottom tab bar
+    // out of view. `overflow-hidden` pins the fixed-height shell so the page body never
+    // scrolls — every region below owns its own scroll. Without it, any child taller
+    // than the viewport (notably the rail) leaks its overflow to <body>, and scrolling
+    // while hovering that child drags the whole interface.
+    <div className="flex h-full flex-col overflow-hidden sm:flex-row">
       {/* side rail (wide screens) — scrolls itself once the links outgrow the viewport */}
       <nav
         aria-label="Primary"

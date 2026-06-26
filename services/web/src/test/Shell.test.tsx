@@ -39,14 +39,18 @@ function renderShell() {
 }
 
 // Regression guard: scrolling while hovering the side rail used to scroll the whole
-// interface. The fixed-height (`h-dvh`) shell let overflow escape to <body>, and the
-// rail had no scroll region of its own — so the wheel event chained to the body. The
-// shell must clip itself and the rail must scroll its own links.
+// interface. The fixed-height shell let overflow escape to <body>, and the rail had no
+// scroll region of its own — so the wheel event chained to the body. The shell must clip
+// itself (`overflow-hidden`) and the rail must scroll its own links.
+//
+// The shell fills the fixed #root with `h-full` rather than re-measuring the viewport
+// with `h-dvh`: on a phone the latter disagreed with the root while the address bar was
+// showing and clipped the bottom tab bar out of view after a refresh.
 describe("Shell scroll containment", () => {
   it("clips the fixed-height shell so the body never scrolls", () => {
     const { container } = renderShell();
     const root = container.firstChild as HTMLElement;
-    expect(root.className).toContain("h-dvh");
+    expect(root.className).toContain("h-full");
     expect(root.className).toContain("overflow-hidden");
   });
 

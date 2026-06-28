@@ -55,6 +55,12 @@ capable) and, for a tool-less local model, calls without tools so the turn falls
 plain text answer instead of the runtime erroring. The web shell surfaces the same fact as a
 "can't use tools" hint in the composer.
 
+A turn **never ends silently empty.** A reasoning model sometimes emits its `<think>` block and
+then stops — no answer text, no tool call — which would persist as an empty turn and render as a
+silent "stop". The loop nudges such a step once to commit to an answer, then (if it still says
+nothing, even on the forced final round) substitutes a clear fallback message and logs `turn
+produced no answer; using fallback` with whether the model reasoned and whether it was nudged.
+
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
 ### Built-in agent tools (ADR-0039)
@@ -103,7 +109,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) from `/api/show` — opt-in (one call per model), so the Models page can badge them while the chat picker stays light. |
 | `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported). Backs the model-settings sheet and the chat "can't use tools" hint. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
-| `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the OCI registry (the library page lists *sizes*, not quants). Returns `{model, variants:[{tag, quant}]}`; best-effort — an empty list (offline, or a non-library model) makes the UI fall back to a manual tag box. `model` is a query param. See **Model catalog** below. |
+| `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant}]}`; best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `POST /platform/v1/llm/unload` | Drop model(s) from memory now (`keep_alive=0`) **without** changing power state (#331). Body `{model: str\|null}` — `null`/omitted unloads every loaded model, a name unloads just that one. Returns `{status, model}` (`"all"` when none given). The standalone unload the Models page calls; the `loaded` flag refreshes on the next poll. |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
@@ -136,14 +142,16 @@ no tenant data, and is identical for every tenant (like the provider registry). 
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
 
-A **quant-variant lookup** (`llm/variants.py`, #330) complements the catalog: the library
-page lists a model's parameter *sizes* but not its *quantizations*, so to pull a different
-quant the operator used to have to type the exact tag. `VariantLookup` queries the OCI
-registry on demand (`LLM_REGISTRY_URL`, Ollama's public registry by default) —
-`/v2/library/<family>/tags/list` — and parses the tags for the requested size into a small
-`{tag, quant}` list the Models page renders as a pick-list. It is deliberately best-effort
-(any failure → empty list, UI falls back to the manual box) and, like the catalog, global
-rather than tenant-scoped.
+A **quant-variant lookup** (`llm/variants.py`, #330) complements the catalog: the catalog
+index lists a model's parameter *sizes* but not its *quantizations*, so to pull a different
+quant the operator used to have to type the exact tag. `VariantLookup` fetches the model's
+public **tags page** on demand (`<LLM_CATALOG_URL>/<family>/tags`, the same host the catalog
+parses) and pulls the `/library/<family>:<tag>` links for the requested size into a small
+`{tag, quant}` list the Models page renders as a pick-list. (The OCI registry's `tags/list`
+JSON endpoint is *not* used — `registry.ollama.ai` returns 404 for it; only the tags page
+enumerates a model's quants.) It is deliberately best-effort (any failure → empty list, UI
+falls back to the manual box; a model not in the public library logs at debug, not warning)
+and, like the catalog, global rather than tenant-scoped.
 
 #### Re-embedding (#332, ADR-0054)
 
@@ -293,7 +301,7 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `MEMORY_EXTRACTION_HOUR` | `3` | Local hour (0-23) of the nightly drain, in the operator's timezone. |
 | `MEMORY_EXTRACTION_MODEL` | — | Optional small dedicated model for the extraction call (e.g. `llama3.2:3b`); blank = the default chat model. |
 | `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
-| `MEMORY_RECALL_TIMEOUT_S` | `2.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). |
+| `MEMORY_RECALL_TIMEOUT_S` | `4.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). 4s (was 2s) fits a single-GPU embed-model swap. |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 
 Provider keys are **not** configured here — they go through the UI into OpenBao.
@@ -347,8 +355,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
 answers — just without memory — and never blocks core startup. Recall (the one memory step left
-on the response path) is **time-boxed** (`MEMORY_RECALL_TIMEOUT_S`) so a cold or busy embedder
-can't stall the first token. Fact extraction never runs on the response path: by default it is
+on the response path) is **time-boxed** (`MEMORY_RECALL_TIMEOUT_S`, 4s — long enough for a
+single-GPU embed-model swap) so a cold or busy embedder can't stall the first token; a timed-out
+recall logs `recall skipped: embed timed out` and a backend failure `recall skipped: backend
+error`, so the two are told apart at a glance. Fact extraction never runs on the response path: by default it is
 **deferred** to a nightly drain (ADR-0051) so it can't compete with a live turn for the GPU —
 set `MEMORY_EXTRACTION_MODE=immediate` to distil as a background task right after each turn
 instead (the original ADR-0045 behaviour). A dedicated small `MEMORY_EXTRACTION_MODEL` keeps the

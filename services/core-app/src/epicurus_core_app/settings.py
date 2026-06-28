@@ -41,7 +41,8 @@ class CoreAppSettings(CoreSettings):
     # ── Model catalog (#269) ────────────────────────────────────────────────────
     # The core parses the browsable model list from this source on a schedule, so the
     # Models screen never ships a hand-maintained list. Defaults to the public Ollama
-    # library; point it at a mirror for an air-gapped deployment.
+    # library; point it at a mirror for an air-gapped deployment. The on-demand quant-variant
+    # lookup (#330) reads each model's tags page (``<base>/<family>/tags``) under the same base.
     llm_catalog_url: str = "https://ollama.com/library"
     # How often the background loop re-parses the source (seconds). The library changes
     # rarely, so this is hours, not minutes. Floored to 60s by the catalog.
@@ -51,10 +52,6 @@ class CoreAppSettings(CoreSettings):
     # When false, no outbound fetch happens and the built-in seed is served as-is
     # (air-gapped builds). The endpoint and seed still work; only the refresh is skipped.
     llm_catalog_enabled: bool = True
-    # The OCI registry the catalog queries on demand to enumerate a model's quant variants
-    # (#330) — the library page lists sizes, not quants. Defaults to Ollama's public registry;
-    # point it at a mirror for an air-gapped deployment.
-    llm_registry_url: str = "https://registry.ollama.ai"
     # Comma-separated module base URLs. Each module serves its MCP tools at
     # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
     # (the registry + web shell read these).
@@ -110,8 +107,10 @@ class CoreAppSettings(CoreSettings):
     memory_extraction_batch_limit: int = 200
     # Seconds recall (a single embedding round-trip) may take before a turn proceeds without it.
     # Recall is the one memory step still on the response path; bounding it keeps a cold embedder
-    # from stalling the first token (ADR-0051).
-    memory_recall_timeout_s: float = 2.0
+    # from stalling the first token (ADR-0051). 4s (was 2s) so a single-GPU embed-model swap can
+    # finish — at 2s recall timed out on nearly every turn. Raise on slow hardware; lower if the
+    # embed model is kept warm.
+    memory_recall_timeout_s: float = 4.0
     # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
     # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
     # deployment sets its own in the Settings screen (persisted) or via this env.

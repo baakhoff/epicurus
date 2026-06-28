@@ -7,9 +7,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
+from structlog.testing import capture_logs
 
 from epicurus_core import Attachment, EntityRef, tool_envelope
-from epicurus_core_app.agent.agent import Agent
+from epicurus_core_app.agent.agent import _ANSWER_NUDGE, _EMPTY_ANSWER_FALLBACK, Agent
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 
@@ -437,12 +438,15 @@ async def test_agent_schedules_fact_extraction_after_a_turn() -> None:
 
 
 async def test_agent_skips_extraction_without_an_answer() -> None:
-    gw = _FakeGateway([ChatResult(model="m", content="")])
+    # The model produces no answer (blank, even after the nudge) → the turn falls back to a
+    # canned message, and extraction is skipped: there's nothing to learn from a non-answer.
+    gw = _FakeGateway([ChatResult(model="m", content=""), ChatResult(model="m", content="")])
     extractor = _FakeExtractor()
-    await Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor).run(
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor).run(
         [ChatMessage(role="user", content="hi")]
     )
     await _drain(extractor)
+    assert turn.content == _EMPTY_ANSWER_FALLBACK
     assert extractor.calls == []
 
 
@@ -511,3 +515,83 @@ async def test_agent_recall_timeout_degrades_to_no_recall() -> None:
     assert all("should not appear" not in (m.content or "") for m in gw.calls[0])
     # … but history assembly and persistence still happened (the turn isn't lost)
     assert ("user", "hi") in memory.remembered
+
+
+class _RecallErrorMemory(_FakeMemory):
+    """Recall raises a backend error (not a timeout); history and persistence still work."""
+
+    async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
+        raise RuntimeError("qdrant unreachable")
+
+
+async def test_agent_recall_timeout_logs_a_named_timeout() -> None:
+    # A slow embedder trips the budget: the turn proceeds, and the log says *timed out* (naming
+    # the budget) rather than the old blank `error=` that `str(TimeoutError())` produced.
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    agent = Agent(
+        gateway=gw, mcp=_FakeMcp(), memory=_SlowMemory(recalled=["x"]), recall_timeout_s=0.01
+    )
+    with capture_logs() as logs:
+        await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
+    timeout_logs = [e for e in logs if e["event"] == "recall skipped: embed timed out"]
+    assert timeout_logs and timeout_logs[0]["timeout_s"] == 0.01
+
+
+async def test_agent_recall_backend_error_is_logged_distinctly() -> None:
+    # A backend failure (not a timeout) degrades the same way but logs the exception type, so the
+    # operator can tell a broken embedder/Qdrant from a too-tight budget.
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=_RecallErrorMemory(), recall_timeout_s=5)
+    with capture_logs() as logs:
+        turn = await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
+    assert turn.content == "answer"  # still degrades to no recall, never blocks
+    error_logs = [e for e in logs if e["event"] == "recall skipped: backend error"]
+    assert error_logs and error_logs[0]["error_type"] == "RuntimeError"
+
+
+async def test_agent_blank_step_is_nudged_into_an_answer() -> None:
+    # A reasoning model thinks but returns no answer/tool the first time; the loop nudges it once
+    # and it answers on the retry — instead of ending the turn empty (the silent "stop").
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", reasoning="I should write a roadmap…"),
+            ChatResult(model="m", content="here is the roadmap"),
+        ]
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(
+        [ChatMessage(role="user", content="make a roadmap")]
+    )
+    assert turn.content == "here is the roadmap"
+    assert turn.stopped == "completed"
+    assert any(m.role == "user" and m.content == _ANSWER_NUDGE for m in gw.calls[1])
+
+
+async def test_agent_never_returns_an_empty_turn() -> None:
+    # The model says nothing, even after the nudge: the turn carries a clear fallback message,
+    # never empty content (which would render as a silent stop).
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", reasoning="hmm"),
+            ChatResult(model="m", content="   "),
+        ]
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    assert turn.content == _EMPTY_ANSWER_FALLBACK
+    assert turn.stopped == "completed"
+
+
+async def test_agent_blank_final_answer_at_max_steps_falls_back() -> None:
+    # Tools every round, then the forced final (no-tools) answer is also blank → fallback, still
+    # flagged stopped="max_steps".
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content=""),
+        ]
+    )
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=1).run(
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == "max_steps"
+    assert turn.content == _EMPTY_ANSWER_FALLBACK

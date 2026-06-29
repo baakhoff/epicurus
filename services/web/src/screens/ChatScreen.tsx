@@ -563,6 +563,28 @@ export function ChatScreen() {
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [chat.segments, chat.pendingUser, history.data]);
 
+  // Re-attach to an in-flight turn after a reload / reconnect / app-resume (#376): the turn
+  // keeps running server-side, so recover it instead of leaving a stale spinner or showing a
+  // network error. Fires on mount, when the tab becomes visible again, and when the network
+  // returns; `resumeIfActive` is a no-op when a stream is already live.
+  const resumeIfActive = chat.resumeIfActive;
+  useEffect(() => {
+    const onDone = async () => {
+      await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    };
+    const resume = () => {
+      if (document.visibilityState === "visible") void resumeIfActive(onDone);
+    };
+    resume();
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("online", resume);
+    return () => {
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("online", resume);
+    };
+  }, [resumeIfActive, chat.sessionId, queryClient]);
+
   const send = () => {
     const text = chat.draft.trim();
     if (!text || chat.streaming) return;

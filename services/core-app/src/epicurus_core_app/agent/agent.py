@@ -421,7 +421,11 @@ class Agent:
             entity_refs=refs.refs,
             activity=activity_from_timeline(timeline, thinking_cap=_THINKING_CAP),
         )
-        await self._persist_answer(turn, tenant=tenant, session_id=session_id)
+        # Shield only the answer write: the model already produced the reply, so a cancellation
+        # arriving now (server shutdown — the turn runs in a detached task, see live_runs.py)
+        # must still flush it. The model call above stays promptly cancellable; losing the
+        # finished answer here would be the very bug this decoupling fixes (#376).
+        await asyncio.shield(self._persist_answer(turn, tenant=tenant, session_id=session_id))
         self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
         yield AgentEvent(type="done", turn=turn)
 

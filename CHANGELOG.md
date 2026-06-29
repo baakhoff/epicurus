@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **Chat survives a hard refresh and PWA backgrounding** (#376, ADR-0055) — an agent turn used to
+  run *inline* in the SSE request, so a dropped connection (a phone backgrounding the PWA, a hard
+  refresh, a network blip) aborted it before the answer was persisted: the reply was lost and the
+  client stuck on a "network error" that never ended. Turns now run **decoupled from the request**
+  in a `LiveRunRegistry` — a detached task buffers the turn and always persists the answer, so a
+  disconnect only drops the *listener*. The web persists its `sessionId` (the transcript rehydrates
+  on reload) and **re-attaches** to a still-running turn on a dropped stream / reload / tab-resume
+  (`visibilitychange`/`online`); if it finished while away, the now-durable transcript shows it.
+  New: `GET /platform/v1/agent/runs/{id}/stream` (re-attach, with `after_seq`/`Last-Event-ID`),
+  `GET`+`DELETE /platform/v1/agent/sessions/{id}/active-run` (rediscover / Stop), an `id:` seq on
+  each chat SSE frame, and `LIVE_RUN_GRACE_SECONDS`. core-app 0.43.0→0.44.0, web 0.55.1→0.56.0.
 - **One Suggestions inbox for every module's agent-proposed changes** — agent edits are staged
   for review (knowledge's vault, notes' notebook, and any module that adopts the `review`
   archetype), but each module surfaced its own queue as a separate left-nav page (knowledge's

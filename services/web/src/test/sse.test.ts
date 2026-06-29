@@ -22,4 +22,12 @@ describe("parseFrame", () => {
     expect(parseFrame(": ping")).toBeNull();
     expect(parseFrame("event: delta")).toBeNull();
   });
+
+  it("reads the id (live-run seq) line for re-attach (#376)", () => {
+    expect(parseFrame('id: 7\nevent: delta\ndata: {"text":"hi"}')).toEqual({
+      event: "delta",
+      data: '{"text":"hi"}',
+      id: "7",
+    });
+  });
 });

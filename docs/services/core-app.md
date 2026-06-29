@@ -38,13 +38,16 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `awaiting_input` (the turn paused on `ask_user` — carries `{run_id, question}`, ADR-0053) · `done` (final turn) · `error`. The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `awaiting_input` (the turn paused on `ask_user` — carries `{run_id, question}`, ADR-0053) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
+| `GET /platform/v1/agent/sessions/{id}/active-run` | The session's in-flight run to re-attach to — `{run_id, last_seq}` or `null` if none is live (ADR-0055). How a client rediscovers a turn after a reload/reconnect. |
+| `DELETE /platform/v1/agent/sessions/{id}/active-run` | Cancel the session's in-flight turn — the explicit **Stop** (a decoupled turn outlives the connection, so Stop must say so). Returns `{cancelled}` (ADR-0055). |
 | `DELETE /platform/v1/agent/sessions/{id}` | Forget a conversation — its history rows. Facts the user is remembered by are kept (ADR-0045). |
 | `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message, then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace the last user message with `{content}` (and `{model?}`) and re-answer it in place — edits the message, truncates the tail, then streams. An `error` event on empty content or no user turn (#302). |
 | `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
+| `GET /platform/v1/agent/runs/{run_id}/stream?after_seq=N` | **Re-attach** to an in-flight turn (ADR-0055), replaying buffered events after `N` (or `Last-Event-ID`) then tailing live — same SSE protocol as `/chat/stream`, no readiness prelude. A `gone` event if the run is unknown / finished-and-reaped (the client then falls back to the durable transcript). Note: this `run_id` is a **live-run** id (in-memory, for re-attach), distinct from the suspended-run id used by `/resume`. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
@@ -62,6 +65,21 @@ nothing, even on the forced final round) substitutes a clear fallback message an
 produced no answer; using fallback` with whether the model reasoned and whether it was nudged.
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
+
+**Durable, re-attachable turns (ADR-0055).** A streamed turn runs in a **detached task** (the
+`LiveRunRegistry` in `agent/live_runs.py`), not inline in the request — so a client disconnect
+(a mobile PWA backgrounded, a hard refresh, a network blip) ends only the HTTP *subscriber*,
+never the turn. The task drives `run_stream` into a seq-tagged in-memory buffer and persists the
+answer to `agent_messages` regardless of who is listening (the answer write is `asyncio.shield`-ed
+so even a shutdown flushes a finished answer). A subscriber replays that buffer then tails live
+events; a reconnecting client rediscovers its run via `…/active-run` and re-attaches via
+`…/runs/{id}/stream` (replay from its last seq), or — if the turn finished while it was away —
+reads the now-durable transcript. The buffer is **disposable cache**, not authoritative state
+(constraint #2): on any miss (unknown/reaped run, server restart, a different instance) the
+client falls back to history. Finished runs are reaped after `LIVE_RUN_GRACE_SECONDS`. At most
+one *running* run exists per `(tenant, session)` — a second start gets `409` (+ `X-Run-Id`).
+Multi-instance re-attach (a shared event log over Valkey/NATS, or sticky routing) is a named
+follow-up; v1 is single-instance.
 
 ### Built-in agent tools (ADR-0039)
 
@@ -294,6 +312,7 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `MODULE_URLS` | `http://echo:8080,…` | Module base URLs the host discovers tools from. |
 | `AGENT_MAX_STEPS` | `4` | Max tool-calling rounds per turn. |
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
+| `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
@@ -338,6 +357,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `agent_suspended_runs`** — a turn paused by `ask_user` (ADR-0053): `id` (run_id),
   `tenant`, `session_id`, `model`, `pending_call_id`, `question`, `conversation` (JSON),
   `created_at`. Written on suspend, **consumed** on resume, reaped after `ASK_USER_TTL_HOURS`.
+- **In-memory live runs** (`LiveRunRegistry`, ADR-0055) — *not* persisted: each in-flight turn's
+  detached task + its seq-tagged event buffer, keyed by `run_id` and indexed by `(tenant,
+  session_id)`. Disposable cache for re-attach; the authoritative answer lands in `agent_messages`.
+  Lost on restart (recover an interrupted turn via regenerate); reaped after `LIVE_RUN_GRACE_SECONDS`.
 - **Qdrant `<tenant>__facts`** — durable **facts about the user** for cross-chat recall
   (cosine), one collection per tenant (ADR-0045). Each point is a short standalone fact
   under an opaque UUID id, payload `{text, source, created_at}` (`source` = `tool` | `auto`).

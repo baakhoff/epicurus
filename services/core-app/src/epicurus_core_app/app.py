@@ -43,6 +43,7 @@ from epicurus_core_app.agent.builtins import (
     make_now_handler,
     make_remember_handler,
 )
+from epicurus_core_app.agent.live_runs import LiveRunRegistry
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
@@ -156,6 +157,10 @@ def create_app() -> FastAPI:
     # Durable state behind ask_user pause/resume (ADR-0053): a paused turn lives here until
     # the operator answers (or it expires).
     suspended_runs = SuspendedRunStore(engine, ttl_hours=settings.ask_user_ttl_hours)
+    # In-flight turns, decoupled from the request that started them (#376): a turn runs in a
+    # detached task that buffers its events, so a client disconnect (PWA backgrounded, refresh)
+    # no longer aborts it — the answer still persists and a reconnecting client re-attaches.
+    live_runs = LiveRunRegistry(grace_seconds=settings.live_run_grace_seconds)
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
     # restart-only path for Ollama's KV-cache apply (#307). None when the socket isn't mounted —
@@ -306,16 +311,23 @@ def create_app() -> FastAPI:
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
+        # Evict finished in-flight runs past their grace window (#376), even with no new traffic.
+        live_run_reaper = asyncio.create_task(live_runs.reap_periodically())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
         finally:
             catalog_task.cancel()
             extraction_task.cancel()
+            live_run_reaper.cancel()
             with suppress(asyncio.CancelledError):
                 await catalog_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
+            with suppress(asyncio.CancelledError):
+                await live_run_reaper
+            # Let in-flight turns finish (and persist) before the engine closes under them (#376).
+            await live_runs.drain()
             await bus.close()
             await engine.dispose()
             await qdrant.close()
@@ -355,6 +367,7 @@ def create_app() -> FastAPI:
             sink=attachment_sink,
             probe=readiness,
             suspended=suspended_runs,
+            live_runs=live_runs,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

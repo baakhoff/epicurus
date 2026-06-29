@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import {
   AccountsView,
+  ActiveRun,
   AttachmentUploaded,
   CatalogResponse,
   type CollectionPrefs,
@@ -191,6 +192,20 @@ export const api = {
   sessions: () => request(z.array(SessionSummary), "/platform/v1/agent/sessions"),
   sessionMessages: (id: string) =>
     request(z.array(MessageRecord), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`),
+  // The session's in-flight turn to re-attach to after a reload/reconnect, or null (#376).
+  activeRun: (id: string) =>
+    request(
+      ActiveRun.nullable(),
+      `/platform/v1/agent/sessions/${encodeURIComponent(id)}/active-run`,
+    ),
+  // Cancel the session's in-flight turn — the explicit Stop (the turn now outlives the
+  // connection, so Stop must say so server-side, #376).
+  cancelActiveRun: (id: string) =>
+    request(
+      z.object({ cancelled: z.boolean() }),
+      `/platform/v1/agent/sessions/${encodeURIComponent(id)}/active-run`,
+      { method: "DELETE" },
+    ),
   deleteSession: (id: string) =>
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",

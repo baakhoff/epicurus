@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core_app.agent.agent import (
@@ -406,6 +408,49 @@ async def test_ask_user_without_store_degrades_and_answers() -> None:
         m.role == "tool" and m.name == "ask_user" and (m.content or "").startswith("error:")
         for m in gw.calls[1]
     )
+
+
+async def test_persist_answer_is_shielded_from_cancellation() -> None:
+    # The model already produced the answer; a cancellation arriving during the persist (server
+    # shutdown — the turn runs in a detached task, #376) must still flush it. That's the
+    # asyncio.shield around _persist_answer: cancel mid-write, the answer still lands.
+    persisting = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Mem:
+        def __init__(self) -> None:
+            self.remembered: list[tuple[str, str]] = []
+
+        async def history(self, *, tenant: str, session_id: str) -> list[ChatMessage]:
+            return []
+
+        async def recall(self, *, tenant: str, query: str, limit: int = 8) -> list[str]:
+            return []
+
+        async def remember(
+            self, *, tenant: str, session_id: str, role: str, content: str, **_kw: Any
+        ) -> None:
+            if role == "assistant":
+                persisting.set()
+                await release.wait()  # hold the assistant write open across the cancellation
+            self.remembered.append((role, content))
+
+    mem = _Mem()
+    gw = _FakeStreamGateway([(["done"], ChatResult(model="m", content="done"))])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=mem)  # type: ignore[arg-type]
+
+    async def consume() -> None:
+        async for _ in agent.run_stream([ChatMessage(role="user", content="hi")], session_id="s1"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await persisting.wait()  # run_stream is now inside the shielded _persist_answer
+    task.cancel()  # as if shutting down
+    release.set()  # let the shielded write proceed
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.01)  # let the shielded coroutine finish recording
+    assert ("assistant", "done") in mem.remembered  # persisted despite the cancellation
 
 
 async def test_ask_user_runs_sibling_tools_before_suspending() -> None:

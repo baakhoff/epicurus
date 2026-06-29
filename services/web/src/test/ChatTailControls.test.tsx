@@ -17,6 +17,8 @@ vi.mock("@/lib/api", () => ({
       { role: "assistant", content: "an answer", created_at: new Date(), entity_refs: [], attachments: [] },
     ]),
     deleteSession: vi.fn().mockResolvedValue({ deleted: 0 }),
+    activeRun: vi.fn().mockResolvedValue(null), // no in-flight run to recover (#376)
+    cancelActiveRun: vi.fn().mockResolvedValue({ cancelled: false }),
     llmPrefs: vi.fn().mockResolvedValue({
       global_default: null,
       global_embed_default: null,

@@ -10,7 +10,7 @@
  */
 import { useMemo, useState } from "react";
 
-import { Button, Label, Switch, TextArea, TextInput } from "@/components/ui";
+import { Button, Label, Select, Switch, TextArea, TextInput } from "@/components/ui";
 
 interface PropertySchema {
   type?: string;
@@ -122,11 +122,11 @@ function FieldFor({
     return (
       <div>
         <Label hint={prop.description}>{title}</Label>
-        <select
+        <Select
           aria-label={title}
           value={String(value ?? "")}
           onChange={(e) => onChange(e.target.value)}
-          className="box-border w-full min-w-0 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+          className="w-full"
         >
           <option value="" disabled>
             choose…
@@ -136,7 +136,7 @@ function FieldFor({
               {labels?.[i] ?? String(option)}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
     );
   }

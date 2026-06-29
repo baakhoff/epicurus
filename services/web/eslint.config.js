@@ -23,6 +23,27 @@ export default tseslint.config(
       // rules-of-hooks + exhaustive-deps.
       ...reactHooks.configs.recommended.rules,
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+      // Keep every form control on the one themed field style (#394): no bare <input>/
+      // <select> that would fall back to the browser-default (white-bordered) control.
+      // Non-text inputs (range/file/checkbox/radio) opt out with an eslint-disable + reason.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXOpeningElement[name.name='select']",
+          message:
+            "Use the shared <Select> from @/components/ui instead of a raw <select> (#394).",
+        },
+        {
+          selector: "JSXOpeningElement[name.name='input']",
+          message:
+            "Use <TextInput>/<NumberInput> from @/components/ui instead of a raw <input> (#394). For a non-text input (range/file/checkbox/radio) add an eslint-disable with a reason.",
+        },
+      ],
     },
+  },
+  {
+    // The primitives in ui.tsx are the one sanctioned home for the raw <input>/<select>.
+    files: ["src/components/ui.tsx"],
+    rules: { "no-restricted-syntax": "off" },
   },
 );

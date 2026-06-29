@@ -95,6 +95,7 @@ function DiffReview({
         ) : (
           <div key={`h${seg.id}`} className="border-y border-edge first:border-t-0 last:border-b-0">
             <label className="flex cursor-pointer items-center gap-2 bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
+              {/* eslint-disable-next-line no-restricted-syntax -- native checkbox, not a text field/select */}
               <input
                 type="checkbox"
                 checked={accepted.has(seg.id!)}

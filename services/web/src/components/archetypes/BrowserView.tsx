@@ -370,7 +370,7 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
               </button>
               {renaming ? (
                 <form onSubmit={submitRename} className="flex items-center gap-2">
-                  <input
+                  <TextInput
                     autoFocus
                     value={renameValue}
                     onChange={(e) => setRenameValue(e.target.value)}

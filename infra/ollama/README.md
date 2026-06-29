@@ -35,6 +35,13 @@ the Ollama container through its tightly-scoped Docker access (restart-only, all
 `ollama`). The Ollama entrypoint sources that file on every (re)start, so the choice takes
 effect on restart and persists across reconciles.
 
+That shared volume (`ollama-runtime`, mounted here at `/etc/epicurus`) holds the env file. The
+core writes it as uid 10001, but a **fresh named volume is created root-owned** — so a one-shot
+**`ollama-init`** chowns the volume root to uid 10001 before Ollama starts (Ollama mounts it
+read-only and so can't fix the ownership itself). Without it the env-file write fails with
+`PermissionError` and the KV-cache choice saves but never applies (#392). It is ordering-only —
+the write is lazy, triggered by an operator change long after boot — so it never races startup.
+
 If the core can't reach Docker (no socket mounted) it still saves the choice, and the UI falls
 back to the manual path — set the env and bounce Ollama yourself:
 

@@ -287,7 +287,7 @@ def build_module(
 
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.5.1",
+        version="0.6.0",
         description=(
             "File-tree index (list, search, read) over the shared file space, plus "
             "app-managed object storage via MinIO, durable chat-upload ingest, and "

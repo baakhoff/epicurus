@@ -16,8 +16,9 @@
  *
  * Layout mirrors the browser archetype: list + detail side-by-side on wide screens; on
  * phones the list fills the view and opening a document slides to the editor with a
- * back affordance. Edit shows the markdown source; Preview renders it with the shell's
- * prose styler. Saving persists through the core, which (for knowledge/notes) re-indexes.
+ * back affordance. Edit shows the raw markdown source; Preview is an editable rich-text
+ * (WYSIWYG) surface (#377) that writes back to the same markdown buffer. Saving persists
+ * through the core, which (for knowledge/notes) re-indexes.
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -37,7 +38,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -56,6 +57,10 @@ import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
 import type { EditorDoc, EditorScope, EditorVersionContent } from "@/lib/contracts";
 import { relativeTime } from "@/lib/format";
+
+// The editable WYSIWYG Preview (#377) — lazy-loaded so Milkdown/ProseMirror never enters the
+// main bundle (it loads only when a document is opened in the editor archetype).
+const WysiwygEditor = lazy(() => import("./WysiwygEditor"));
 
 /** Idle delay before an unsaved edit is flushed (ADR-0042). Saving re-embeds, so we do NOT
  *  save on every keystroke — only once the doc has been still this long (plus on leaving the
@@ -1394,9 +1399,29 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
                   className="h-full min-h-full overscroll-contain rounded-none border-0 bg-transparent font-mono text-[13px] leading-relaxed focus:border-0"
                   aria-label={`Edit ${selectedPath}`}
                 />
-              ) : (
+              ) : data.read_only ? (
+                // A reference / watched (Obsidian) vault is read-only — render it, don't edit.
                 <div className="mx-auto max-w-2xl px-5 py-4">
                   <Markdown>{draft}</Markdown>
+                </div>
+              ) : (
+                // Preview is an editable WYSIWYG surface (#377): edits flow back to `draft`
+                // (markdown) and the existing idle/leave auto-save (ADR-0042). Keyed on the
+                // document so switching docs reseeds the editor; lazy so it stays out of bundle.
+                <div className="mx-auto w-full max-w-2xl px-5 py-4">
+                  <Suspense
+                    fallback={
+                      <div className="flex justify-center py-8">
+                        <Spinner />
+                      </div>
+                    }
+                  >
+                    <WysiwygEditor
+                      key={`${scope}:${selectedPath}`}
+                      value={draft}
+                      onChange={setDraft}
+                    />
+                  </Suspense>
                 </div>
               )}
             </div>

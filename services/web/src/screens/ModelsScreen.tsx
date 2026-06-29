@@ -20,8 +20,9 @@ import {
   Trash2,
   TriangleAlert,
   X,
+  type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import {
   Badge,
@@ -33,6 +34,7 @@ import {
   Sheet,
   Spinner,
   TextInput,
+  Tooltip,
   cn,
 } from "@/components/ui";
 import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag } from "@/data/catalog";
@@ -40,7 +42,7 @@ import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
 import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
 import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
-import { assessFit } from "@/lib/modelFit";
+import { assessFit, fitFilterOf, type FitFilter } from "@/lib/modelFit";
 import { recommendKvCache } from "@/lib/kvCacheFit";
 import {
   estimateVariantSizeMb,
@@ -89,6 +91,40 @@ export function FitBadge({
       className={cn("inline-flex cursor-help items-center", FIT_ICON_TONE[fit.tone])}
     >
       <Icon size={15} className="shrink-0" aria-hidden="true" />
+    </span>
+  );
+}
+
+// ── Capability icons ────────────────────────────────────────────────────────────
+
+/**
+ * A model's capabilities (tools / vision / thinking / embedding) as **icon-only** glyphs, each
+ * with a hover/focus tooltip carrying its label. Dropping the text keeps a row of them compact on
+ * a phone (#384) — mirroring the suitability status-icon (#327) and the chat activity-badge
+ * (#334), both icon-with-tooltip. Renders nothing when the model reports no badge-worthy
+ * capability. Shared by the local-model rows and the quant-variant settings panel (#385).
+ */
+export function CapabilityIcons({
+  capabilities,
+  size = 13,
+}: {
+  capabilities: string[];
+  size?: number;
+}) {
+  const shown = shownCapabilities(capabilities);
+  if (shown.length === 0) return null;
+  return (
+    <span className="inline-flex items-center gap-1">
+      {shown.map((cap) => {
+        const Icon = CAPABILITY_META[cap].icon;
+        return (
+          <Tooltip key={cap} label={CAPABILITY_META[cap].label}>
+            <span role="img" aria-label={CAPABILITY_META[cap].label} className="inline-flex text-ink-faint">
+              <Icon size={size} className="shrink-0" aria-hidden="true" />
+            </span>
+          </Tooltip>
+        );
+      })}
     </span>
   );
 }
@@ -152,12 +188,60 @@ function DownloadTray() {
 
 // ── Catalog browser ───────────────────────────────────────────────────────────
 
+/** Return a new set with `value` toggled — add if absent, remove if present. Immutable so React
+ *  sees a fresh reference and the chips re-render. */
+function toggled<T>(set: ReadonlySet<T>, value: T): Set<T> {
+  const next = new Set(set);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+
+/** The catalog's fit-filter chips (#388), worst-fit last. Each `key` is a `FitFilter` bucket; the
+ *  glyph mirrors the row's suitability status-icon (check / warning / cross). */
+const FIT_FILTERS: { key: FitFilter; label: string; icon: LucideIcon }[] = [
+  { key: "ok", label: "Fits", icon: Check },
+  { key: "warn", label: "Tight", icon: TriangleAlert },
+  { key: "danger", label: "Too big", icon: X },
+];
+
+/** A pill toggle shared by the tag and fit catalog filters. */
+function FilterChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs transition-colors",
+        active
+          ? "border-accent bg-accent-dim text-accent-strong"
+          : "border-edge text-ink-dim hover:border-edge-strong hover:text-ink",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function CatalogBrowser({ installed }: { installed: Set<string> }) {
   const queryClient = useQueryClient();
   const pull = useDownloads((s) => s.pull);
   const active = useDownloads((s) => s.active);
   const [query, setQuery] = useState("");
-  const [activeTag, setActiveTag] = useState<CatalogTag | null>(null);
+  // Multi-select filters: a model must carry *all* checked tags (#389). Fit filters (#388) are
+  // OR'd among themselves (a model has exactly one fit) and AND'd with the tag set. An empty set
+  // means "no filter" for that dimension.
+  const [activeTags, setActiveTags] = useState<ReadonlySet<CatalogTag>>(new Set());
+  const [activeFits, setActiveFits] = useState<ReadonlySet<FitFilter>>(new Set());
 
   // The live list comes from the core, which parses it from upstream on a schedule (#269).
   // Fall back to the bundled seed when that endpoint is unreachable (e.g. an older core),
@@ -165,7 +249,18 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
   const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
   const system = useQuery({ queryKey: ["systemInfo"], queryFn: api.systemInfo });
   const source = catalog.data;
-  const entries = filterCatalog(source?.entries ?? CATALOG, query, activeTag);
+
+  // Tags + search first (pure), then the fit filter — fit is computed client-side from the
+  // detected system (it's not a catalog tag), so it lives here rather than in `filterCatalog`.
+  const tagged = filterCatalog(source?.entries ?? CATALOG, query, activeTags);
+  const entries =
+    activeFits.size === 0
+      ? tagged
+      : tagged.filter((e) => {
+          const sizeMb = e.size_gb != null ? Math.round(e.size_gb * 1024) : null;
+          const bucket = fitFilterOf(assessFit(system.data, sizeMb, e.params));
+          return bucket !== null && activeFits.has(bucket);
+        });
 
   const startPull = (id: string) => {
     void pull(id, () => queryClient.invalidateQueries({ queryKey: ["models"] }));
@@ -198,33 +293,38 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
         />
       </div>
 
-      {/* Tag filters */}
-      <div className="mb-4 flex flex-wrap gap-1.5">
-        <button
-          onClick={() => setActiveTag(null)}
-          className={cn(
-            "rounded-full border px-3 py-1 text-xs transition-colors",
-            activeTag === null
-              ? "border-accent bg-accent-dim text-accent-strong"
-              : "border-edge text-ink-dim hover:border-edge-strong hover:text-ink",
-          )}
-        >
-          All
-        </button>
-        {ALL_TAGS.map((tag) => (
-          <button
-            key={tag}
-            onClick={() => setActiveTag(activeTag === tag ? null : tag)}
-            className={cn(
-              "rounded-full border px-3 py-1 text-xs transition-colors",
-              activeTag === tag
-                ? "border-accent bg-accent-dim text-accent-strong"
-                : "border-edge text-ink-dim hover:border-edge-strong hover:text-ink",
-            )}
-          >
-            {TAG_LABELS[tag]}
-          </button>
-        ))}
+      {/* Filters — a row of multi-select tag chips ("All" clears them), then, once the system is
+          known, a row of fit chips (#388/#389). */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex flex-wrap gap-1.5">
+          <FilterChip active={activeTags.size === 0} onClick={() => setActiveTags(new Set())}>
+            All
+          </FilterChip>
+          {ALL_TAGS.map((tag) => (
+            <FilterChip
+              key={tag}
+              active={activeTags.has(tag)}
+              onClick={() => setActiveTags((prev) => toggled(prev, tag))}
+            >
+              {TAG_LABELS[tag]}
+            </FilterChip>
+          ))}
+        </div>
+        {system.data && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-0.5 text-[11px] uppercase tracking-wide text-ink-faint">Fit</span>
+            {FIT_FILTERS.map(({ key, label, icon: Icon }) => (
+              <FilterChip
+                key={key}
+                active={activeFits.has(key)}
+                onClick={() => setActiveFits((prev) => toggled(prev, key))}
+              >
+                <Icon size={12} className="shrink-0" aria-hidden="true" />
+                {label}
+              </FilterChip>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Entries — capped to roughly five rows tall with its own scroll so the full
@@ -408,19 +508,8 @@ export function LocalModels() {
                     system={system.data}
                     sizeMb={model.size ? Math.round(model.size / (1024 * 1024)) : null}
                   />
-                  {shownCapabilities(model.capabilities).map((cap) => {
-                    const Icon = CAPABILITY_META[cap].icon;
-                    return (
-                      <span
-                        key={cap}
-                        title={`Supports ${CAPABILITY_META[cap].label.toLowerCase()}`}
-                        className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-ink-faint"
-                      >
-                        <Icon size={11} className="shrink-0" />
-                        {CAPABILITY_META[cap].label}
-                      </span>
-                    );
-                  })}
+                  <CapabilityIcons capabilities={model.capabilities} />
+
                 </div>
                 <span className="shrink-0 text-xs text-ink-faint">{formatBytes(model.size)}</span>
               </button>
@@ -783,8 +872,10 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
 
   return (
     <div className="flex flex-col gap-5">
-      {/* read-only facts from the runtime */}
-      <div className="flex flex-wrap gap-1.5">
+      {/* read-only facts from the runtime — quant + size + trained ctx, plus what the model can do.
+          Capabilities are a model-level fact (they don't vary by quant), so they sit here once
+          rather than repeating on every variant row below (#385). */}
+      <div className="flex flex-wrap items-center gap-1.5">
         {details.isLoading ? (
           <Spinner />
         ) : (
@@ -796,6 +887,7 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
             {trainedMax != null && (
               <Badge tone="dim">trained {trainedMax.toLocaleString()} ctx</Badge>
             )}
+            <CapabilityIcons capabilities={details.data?.capabilities ?? []} />
           </>
         )}
       </div>
@@ -932,6 +1024,10 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="font-mono text-xs text-ink">{v.quant || "default"}</span>
+                      {/* Per-variant fit (#385): each quant's estimated size judged against the
+                          detected hardware — so a smaller quant can read "Fits" where the default
+                          build is "Tight". Renders nothing when the size can't be estimated. */}
+                      <FitBadge system={system.data} sizeMb={sizeMb} />
                       {recommended && (
                         <Badge tone="accent">
                           <Sparkles size={10} className="shrink-0" /> recommended

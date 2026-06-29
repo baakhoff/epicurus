@@ -904,3 +904,38 @@ export const LogEntry = z.object({
 });
 export type LogEntry = z.infer<typeof LogEntry>;
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;
+
+/** A registered maintenance job advertised to the UI (#383). */
+export const MaintenanceJob = z.object({
+  key: z.string(),
+  label: z.string(),
+  /** Whether the scheduled nightly batch runs it (heavy jobs are manual-only). */
+  nightly: z.boolean(),
+});
+export type MaintenanceJob = z.infer<typeof MaintenanceJob>;
+
+/** One job's outcome in a maintenance run. */
+export const MaintenanceJobResult = z.object({
+  key: z.string(),
+  label: z.string(),
+  status: z.enum(["ok", "skipped", "error"]),
+  detail: z.string(),
+});
+export type MaintenanceJobResult = z.infer<typeof MaintenanceJobResult>;
+
+/** The aggregate result of one maintenance batch (#383). */
+export const MaintenanceRun = z.object({
+  ran_at: z.string(),
+  scope: z.string(),
+  jobs: z.array(MaintenanceJobResult).default([]),
+});
+export type MaintenanceRun = z.infer<typeof MaintenanceRun>;
+
+/** The maintenance surface: the schedule, the registered jobs, and the last run (#383). */
+export const MaintenanceStatus = z.object({
+  schedule_enabled: z.boolean(),
+  schedule_hour: z.number(),
+  jobs: z.array(MaintenanceJob).default([]),
+  last_run: MaintenanceRun.nullish(),
+});
+export type MaintenanceStatus = z.infer<typeof MaintenanceStatus>;

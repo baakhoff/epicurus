@@ -189,6 +189,16 @@ qi_rc="$(docker inspect -f '{{.State.ExitCode}}' "$qi_cid" 2>/dev/null || echo 1
 wait_state qdrant
 ok "qdrant-init completed and qdrant is healthy via the /proc HTTP-listener check (#229)"
 
+# ollama-runtime ownership guard (#392): the one-shot must complete cleanly so the
+# root-owned fresh volume is chowned to uid 10001 — otherwise the core (uid 10001) can't
+# write /etc/epicurus/ollama.env to apply a KV-cache change. ollama depends on it, so a
+# stack boot runs it; compose-validate can't see the chown, only a live boot can.
+oi_cid="$($DC ps -aq ollama-init 2>/dev/null || true)"
+[ -n "$oi_cid" ] || die "ollama-init container not found — the volume-ownership chown is not wired"
+oi_rc="$(docker inspect -f '{{.State.ExitCode}}' "$oi_cid" 2>/dev/null || echo 1)"
+[ "$oi_rc" = "0" ] || die "ollama-init exited $oi_rc (volume-ownership chown failed)"
+ok "ollama-init completed and chowned the ollama-runtime volume to uid 10001 (#392)"
+
 ws="$(http -X POST "http://core-app:8080/platform/v1/modules/websearch/tools/web_search" \
   -H 'Content-Type: application/json' -d '{"arguments":{"query":"epicurus"}}' || true)"
 printf '%s' "$ws" | grep -q '"result"' || die "web_search tool did not round-trip: $ws"

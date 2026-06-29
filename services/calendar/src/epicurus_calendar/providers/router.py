@@ -90,14 +90,18 @@ class CollectionRouter(CalendarProvider):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue  # an unknown / disconnected account is skipped, not fatal
+            token = encode_collection_token(ref)
             try:
-                events.extend(
-                    await provider.list_events(
-                        tenant_id=tenant_id,
-                        time_range=time_range,
-                        calendar_id=ref.collection or None,
-                    )
-                )
+                for event in await provider.list_events(
+                    tenant_id=tenant_id,
+                    time_range=time_range,
+                    calendar_id=ref.collection or None,
+                ):
+                    # Tag every event with the calendar it came from (#378) — the same
+                    # account[:collection] token the New-event picker uses — so the shell can
+                    # group events by calendar and toggle each calendar's visibility.
+                    event.calendar_id = token
+                    events.append(event)
             except Exception as exc:
                 log.warning(
                     "calendar read failed; skipping this source (#209)",

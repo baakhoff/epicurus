@@ -1,7 +1,7 @@
 {
   "name": "epicurus-web",
   "private": true,
-  "version": "0.57.0",
+  "version": "0.62.0",
   "type": "module",
   "description": "The epicurus web shell: chat, model manager, power toggle, and manifest-driven module UI.",
   "scripts": {
@@ -16,6 +16,7 @@
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@fontsource-variable/literata": "^5.2.8",
+    "@milkdown/crepe": "^7.21.2",
     "@tanstack/react-query": "^5.101.1",
     "lucide-react": "^1.21.0",
     "react": "^19.2.0",

@@ -237,3 +237,21 @@ async def test_cancel_stops_a_running_run() -> None:
     assert [event.type async for _, event in run.subscribe(0)] == ["error"]
     assert run.status == "error"
     assert registry.active_for_session(tenant="local", session_id="s1") is None
+
+
+async def test_active_sessions_lists_live_sessioned_runs_for_tenant() -> None:
+    """The conversations-list running indicator (#396): which sessions are generating now."""
+    registry = LiveRunRegistry()
+    gate = asyncio.Event()
+    r1 = await registry.start(_held(gate), tenant="local", session_id="s1")
+    r2 = await registry.start(_held(gate), tenant="local", session_id="s2")
+    rother = await registry.start(_held(gate), tenant="other", session_id="s3")
+    ranon = await registry.start(_held(gate), tenant="local", session_id=None)
+
+    # This tenant's sessioned, non-terminal runs only — not the foreign tenant (#1), not anon.
+    assert sorted(registry.active_sessions(tenant="local")) == ["s1", "s2"]
+    assert registry.active_sessions(tenant="other") == ["s3"]
+
+    gate.set()
+    await asyncio.gather(*(_drain_to_terminal(r) for r in (r1, r2, rother, ranon)))
+    assert registry.active_sessions(tenant="local") == []  # terminal runs drop out

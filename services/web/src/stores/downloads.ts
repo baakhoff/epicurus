@@ -4,6 +4,7 @@
  */
 import { create } from "zustand";
 
+import { api } from "@/lib/api";
 import { PullProgress } from "@/lib/contracts";
 import { sse } from "@/lib/sse";
 
@@ -54,6 +55,12 @@ export const useDownloads = create<Downloads>()((set, get) => ({
         } else if (message.event === "done") {
           update({ status: "ready", done: true });
           onFinished();
+          // Give the freshly pulled model its own sensible context window instead of the global
+          // default (#386). Every pull — catalog, variant, or manual tag — funnels through here,
+          // so this is the one place that needs it. Best-effort: the core computes + persists the
+          // per-model suggestion; any failure (hosted model, no local size, offline) just leaves
+          // it on the inherited default and must not disturb the completed download.
+          void api.suggestModelContext(model).catch(() => {});
         }
       }
     } catch (err) {

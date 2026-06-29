@@ -362,7 +362,13 @@ function ToolRow({ module, tool, disabled }: { module: string; tool: string; dis
   );
 }
 
-function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
+function ModuleCard({
+  snapshot,
+  onDeferredRemoval,
+}: {
+  snapshot: ModuleSnapshot;
+  onDeferredRemoval: (name: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
   const { manifest, status, enabled, disabled_tools } = snapshot;
@@ -376,11 +382,18 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
   });
 
-  // Confirmed container removal (#127) — privileged and destructive, gated by a dialog.
+  // Confirmed removal (#127, #382) — privileged and destructive, gated by a dialog. Removal
+  // is decoupled from the live Docker socket: the module is tombstoned (so it vanishes from
+  // this list at once), and when the core has no Docker access its container teardown is
+  // deferred to the next restart — we lift that fact to a screen-level notice, since the card
+  // itself disappears on success.
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const removeModule = useMutation({
     mutationFn: () => api.removeModule(manifest.name),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["modules"] }),
+    onSuccess: (res) => {
+      if (res.container_teardown_deferred) onDeferredRemoval(res.removed);
+      queryClient.invalidateQueries({ queryKey: ["modules"] });
+    },
   });
 
   return (
@@ -512,8 +525,10 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
               <Trash2 size={14} /> Remove module
             </Button>
             <p className="mt-1.5 text-xs text-ink-faint">
-              Stops and deletes this module's container. Core, the web shell, and the data
-              plane can never be removed; the module stays gone until you redeploy it.
+              Removes this module and stops + deletes its container. Without Docker access the
+              core still removes the module immediately; its container keeps running until the
+              next restart. Core, the web shell, and the data plane can never be removed; the
+              module stays gone until you redeploy it.
             </p>
             {removeModule.isError && (
               <p className="mt-2 text-sm text-danger">{(removeModule.error as Error).message}</p>
@@ -524,7 +539,7 @@ function ModuleCard({ snapshot }: { snapshot: ModuleSnapshot }) {
       <Confirm
         open={confirmingRemove}
         danger
-        message={`Remove the “${manifest.name}” module? This stops and deletes its container, and it stays removed until you redeploy it.`}
+        message={`Remove the “${manifest.name}” module? This stops and deletes its container, and it stays removed until you redeploy it. If the core has no Docker access the module is removed anyway, but its container keeps running until the next restart.`}
         confirmLabel="Remove module"
         onCancel={() => setConfirmingRemove(false)}
         onConfirm={() => {
@@ -550,6 +565,10 @@ export function ModulesScreen() {
     refetchInterval: 30_000,
   });
   const [query, setQuery] = useState("");
+  // Modules removed while the core had no Docker socket (#382): the module is gone from the
+  // list, but its container is still running until the next restart — surfaced as an
+  // informational (not error) notice the operator can dismiss.
+  const [deferred, setDeferred] = useState<string[]>([]);
 
   const q = query.trim().toLowerCase();
   const all = modules.data ?? [];
@@ -575,6 +594,29 @@ export function ModulesScreen() {
             aria-label="Search modules"
           />
         )}
+        {deferred.length > 0 && (
+          <Card className="border-accent/40 bg-accent-dim text-sm text-ink-dim">
+            {deferred.length === 1 ? (
+              <p>
+                <span className="text-ink">“{deferred[0]}” removed.</span> Its container is
+                still running because the core has no Docker access; it will be cleared on the
+                next restart.
+              </p>
+            ) : (
+              <p>
+                <span className="text-ink">{deferred.length} modules removed.</span> Their
+                containers are still running because the core has no Docker access; they will be
+                cleared on the next restart.
+              </p>
+            )}
+            <button
+              className="mt-2 text-xs text-accent-strong"
+              onClick={() => setDeferred([])}
+            >
+              Dismiss
+            </button>
+          </Card>
+        )}
         {modules.isLoading && <Spinner />}
         {modules.isError && (
           <Card className="border-warn/40 text-sm text-warn">
@@ -582,7 +624,13 @@ export function ModulesScreen() {
           </Card>
         )}
         {filtered.map((snapshot) => (
-          <ModuleCard key={snapshot.manifest.name} snapshot={snapshot} />
+          <ModuleCard
+            key={snapshot.manifest.name}
+            snapshot={snapshot}
+            onDeferredRemoval={(name) =>
+              setDeferred((prev) => (prev.includes(name) ? prev : [...prev, name]))
+            }
+          />
         ))}
         {!modules.isLoading && q !== "" && filtered.length === 0 && (
           <p className="text-sm text-ink-dim">No modules match “{query}”.</p>

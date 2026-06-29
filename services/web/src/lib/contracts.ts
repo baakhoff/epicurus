@@ -325,6 +325,11 @@ export const ActiveRun = z.object({
 });
 export type ActiveRun = z.infer<typeof ActiveRun>;
 
+/** Session ids with an in-flight turn, from GET /agent/active-runs — the conversations-list
+ *  running indicator (#396). */
+export const ActiveSessions = z.object({ session_ids: z.array(z.string()).default([]) });
+export type ActiveSessions = z.infer<typeof ActiveSessions>;
+
 export const PullProgress = z.object({
   status: z.string().default(""),
   total: z.number().nullish(),
@@ -642,6 +647,9 @@ export const CalendarEvent = z
     location: z.string().nullish(),
     description: z.string().nullish(),
     provider: z.string().nullish(),
+    // The calendar this event belongs to, as an `account[:collection]` token (#378) — lets the
+    // shell group events by calendar and toggle each calendar's visibility. Null on a bare event.
+    calendar_id: z.string().nullish(),
     // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
     // invokes the named MCP tool through the core's tool proxy and refetches on success.
     actions: z.array(BoardAction).default([]),

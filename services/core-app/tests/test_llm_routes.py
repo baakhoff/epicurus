@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -481,3 +482,93 @@ async def test_model_settings_device_round_trips() -> None:
         )
         got = await client.get("/platform/v1/llm/model-settings", params={"model": "llama3.2"})
     assert got.json()["device"] == "cpu"
+
+
+# ── per-model context suggestion on download (#386) ──────────────────────────
+
+
+def test_suggest_context_route_present() -> None:
+    assert "/platform/v1/llm/model-settings/suggest-context" in _app().openapi()["paths"]
+
+
+async def test_suggest_context_route_without_store_is_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(model_settings=None)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/llm/model-settings/suggest-context", json={"model": "llama3.2:3b"}
+        )
+    assert resp.status_code == 503
+
+
+async def test_suggest_context_route_persists_a_fresh_suggestion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The heuristic itself is unit-tested in test_system_info; here we stub it to a fixed value
+    # so the route's persist + response wiring is deterministic (no hardware dependence).
+    import epicurus_core_app.llm.routes as routes_mod
+
+    async def fake_suggest(_gw: object, _model: str, *, tenant_id: str | None = None) -> int:
+        return 8192
+
+    monkeypatch.setattr(routes_mod, "suggest_context_for_model", fake_suggest)
+    ms = await _fresh_model_settings()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(model_settings=ms)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/llm/model-settings/suggest-context", json={"model": "llama3.2:3b"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"model": "llama3.2:3b", "context_window": 8192, "applied": True}
+        # …and it's persisted as the model's per-model context.
+        got = await client.get("/platform/v1/llm/model-settings", params={"model": "llama3.2:3b"})
+    assert got.json()["context_window"] == 8192
+
+
+async def test_suggest_context_route_does_not_clobber_an_existing_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import epicurus_core_app.llm.routes as routes_mod
+
+    async def _boom(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("suggest_context_for_model must not run when an override exists")
+
+    monkeypatch.setattr(routes_mod, "suggest_context_for_model", _boom)
+    ms = await _fresh_model_settings()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(model_settings=ms)), base_url="http://test"
+    ) as client:
+        # The operator already tuned this model — the suggestion must defer to their choice.
+        await client.put(
+            "/platform/v1/llm/model-settings",
+            json={"model": "llama3.2:3b", "context_window": 4096},
+        )
+        resp = await client.post(
+            "/platform/v1/llm/model-settings/suggest-context", json={"model": "llama3.2:3b"}
+        )
+        assert resp.json() == {"model": "llama3.2:3b", "context_window": 4096, "applied": False}
+        got = await client.get("/platform/v1/llm/model-settings", params={"model": "llama3.2:3b"})
+    assert got.json()["context_window"] == 4096
+
+
+async def test_suggest_context_route_null_when_nothing_to_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import epicurus_core_app.llm.routes as routes_mod
+
+    async def fake_suggest(_gw: object, _model: str, *, tenant_id: str | None = None) -> None:
+        return None  # a hosted model / no local size → nothing to suggest
+
+    monkeypatch.setattr(routes_mod, "suggest_context_for_model", fake_suggest)
+    ms = await _fresh_model_settings()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(model_settings=ms)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/llm/model-settings/suggest-context", json={"model": "claude/sonnet"}
+        )
+        assert resp.json() == {"model": "claude/sonnet", "context_window": None, "applied": False}
+        got = await client.get("/platform/v1/llm/model-settings", params={"model": "claude/sonnet"})
+    # Nothing was persisted — the model still inherits the global/env default.
+    assert got.json()["context_window"] is None

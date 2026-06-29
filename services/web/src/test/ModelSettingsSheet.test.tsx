@@ -171,6 +171,38 @@ describe("ModelSettingsSheet", () => {
     expect(screen.getByText(/llama3\.2:3b-instruct-q8_0/)).toBeInTheDocument();
   });
 
+  it("badges the read-only facts with the model's capabilities (#385)", async () => {
+    mockModelDetails.mockResolvedValue({
+      quantization: "Q4_K_M",
+      parameter_size: "8.0B",
+      context_length: 131072,
+      family: "llama",
+      capabilities: ["tools", "vision"],
+    });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    // Capabilities are model-level, shown once on the facts row as labelled icons (not per variant).
+    expect(await screen.findByRole("img", { name: "Tools" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Vision" })).toBeInTheDocument();
+  });
+
+  it("marks each quant variant with a fit badge for its estimated size (#385)", async () => {
+    mockSystemInfo.mockResolvedValue({
+      gpu: { vendor: "nvidia", name: "Test GPU", vram_total_mb: 8 * 1024 },
+      ram_total_mb: 16 * 1024,
+    });
+    mockModelVariants.mockResolvedValue({
+      model: "llama3.2:latest",
+      variants: [{ tag: "llama3.2:3b-instruct-q4_K_M", quant: "q4_K_M" }],
+    });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    // 8B @ q4 ≈ 4.5 GB fits an 8 GB GPU → the variant row carries a suitability status icon.
+    expect(await screen.findByRole("img", { name: /Suitability:/i })).toBeInTheDocument();
+  });
+
   it("renders nothing when no model is selected", () => {
     mockModelSettings.mockResolvedValue({ context_window: null, keep_alive: null });
     const { container } = render(<ModelSettingsSheet model={null} onClose={() => {}} />, {

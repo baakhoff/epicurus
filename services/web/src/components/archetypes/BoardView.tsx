@@ -9,6 +9,10 @@
  * SchemaForm first; a `confirm` action gates a one-tap call behind a dialog. After
  * any successful call the page data is refetched, so the board reflects the change.
  *
+ * Drag-and-drop (#380): a card can be **dragged between columns** to move the task, reusing
+ * the *existing* move action (no new contract) — see the drag-and-drop note below. The
+ * action/form path stays as the accessible, pointer-free fallback.
+ *
  * View controls (ADR-0049) are module-declared selectors — e.g. group-by and filters —
  * rendered in the toolbar. Changing one updates a query-param map and re-fetches the page,
  * so regrouping/filtering happens module-side (the board carries no task fields here). The
@@ -17,14 +21,41 @@
  *
  * Columns scroll horizontally (kanban-style) on every width.
  */
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { Badge, EmptyState, Spinner, cn } from "@/components/ui";
-import { api } from "@/lib/api";
-import { BoardData, type BoardCard, type BoardControl } from "@/lib/contracts";
+import { ApiError, api } from "@/lib/api";
+import {
+  BoardData,
+  type BoardAction,
+  type BoardCard,
+  type BoardColumn,
+  type BoardControl,
+} from "@/lib/contracts";
 
 import { ActionControl } from "./ActionControl";
+
+/* ── drag-and-drop move (#380) ───────────────────────────────────────────────
+ * Dropping a card on another column moves the task by reusing the *existing* move action
+ * (`tasks_update` with `to_list_id`, #257) — no new backend contract. A card's move action is
+ * the one whose `field_choices.to_list_id` lists the writable lists as `{value: list_id, label:
+ * list_title}`. A list-grouped column's title *is* the list title, so the drop target is the
+ * choice whose label matches the column's title. Columns that aren't lists (grouped by due /
+ * status / priority) match nothing, so a drop there is a no-op — the move action can only change
+ * the list, not those dimensions.
+ */
+
+/** The card's move action — the one carrying a `to_list_id` list picker — or undefined. */
+function moveActionOf(card: BoardCard): BoardAction | undefined {
+  return card.actions.find((a) => (a.field_choices?.to_list_id?.length ?? 0) > 0);
+}
+
+/** The `to_list_id` value for dropping a card on the column titled *columnTitle*, or undefined
+ *  when that column isn't one of the move action's target lists. */
+function moveTargetFor(action: BoardAction, columnTitle: string): string | undefined {
+  return action.field_choices?.to_list_id?.find((c) => c.label === columnTitle)?.value;
+}
 
 /** One module-declared view control (ADR-0049), rendered as a labeled selector. */
 function ControlSelect({
@@ -58,13 +89,37 @@ function BoardCardView({
   module,
   pageId,
   card,
+  draggable,
+  dragging,
+  onDragStart,
+  onDragEnd,
 }: {
   module: string;
   pageId: string;
   card: BoardCard;
+  /** Whether this card can be dragged to another list (it has a move action). */
+  draggable: boolean;
+  /** This card is the one currently being dragged (dim it). */
+  dragging: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
 }) {
   return (
-    <div className="rounded-(--radius-card) border border-edge bg-surface p-3">
+    <div
+      draggable={draggable}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        // Some browsers require data to be set for a drag to start.
+        e.dataTransfer.setData("text/plain", card.id);
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+      className={cn(
+        "rounded-(--radius-card) border border-edge bg-surface p-3",
+        draggable && "cursor-grab active:cursor-grabbing",
+        dragging && "opacity-40",
+      )}
+    >
       <p className={cn("text-sm leading-snug text-ink", card.done && "text-ink-faint line-through")}>
         {card.title}
       </p>
@@ -96,14 +151,28 @@ function BoardCardView({
 }
 
 export function BoardView({ module, pageId }: { module: string; pageId: string }) {
+  const qc = useQueryClient();
   // Selected control values, forwarded as query params (ADR-0049). Empty until the operator
   // changes a control — the module's declared defaults drive the first fetch.
   const [params, setParams] = useState<Record<string, string>>({});
+  // Drag-and-drop state (#380): the card under the pointer + its source column, and the column
+  // currently hovered (for the drop highlight).
+  const [drag, setDrag] = useState<{ card: BoardCard; from: string } | null>(null);
+  const [dropCol, setDropCol] = useState<string | null>(null);
 
   const query = useQuery({
     queryKey: ["module-page", module, pageId, params],
     queryFn: () => api.modulePage(module, pageId, params),
     placeholderData: keepPreviousData,
+  });
+
+  // Move a task by drag-and-drop via the existing move tool — the page refetches on success
+  // so the board reflects the move (#380).
+  const move = useMutation({
+    mutationFn: ({ action, toListId }: { action: BoardAction; toListId: string }) =>
+      api.invokeModuleTool(module, action.tool, { ...action.args, to_list_id: toListId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["module-page", module, pageId] }),
+    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not move the task."),
   });
 
   if (query.isLoading && !query.data) {
@@ -127,6 +196,26 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
   const hasCards = data.columns.some((column) => column.cards.length > 0);
   const hasToolbar = data.controls.length > 0 || data.actions.length > 0;
 
+  // The dragged card's move action (if any) and whether it can land on a given column.
+  const dragMoveAction = drag ? moveActionOf(drag.card) : undefined;
+  const canDropOn = (column: BoardColumn): boolean =>
+    drag !== null &&
+    dragMoveAction !== undefined &&
+    column.id !== drag.from &&
+    moveTargetFor(dragMoveAction, column.title) !== undefined;
+
+  const handleDrop = (column: BoardColumn) => {
+    const dragged = drag;
+    setDrag(null);
+    setDropCol(null);
+    if (!dragged) return;
+    const action = moveActionOf(dragged.card);
+    if (!action || column.id === dragged.from) return;
+    const toListId = moveTargetFor(action, column.title);
+    if (!toListId) return;
+    move.mutate({ action, toListId });
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {hasToolbar && (
@@ -142,7 +231,7 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
               onChange={(value) => setParams((prev) => ({ ...prev, [control.id]: value }))}
             />
           ))}
-          {query.isFetching && <Spinner className="size-3.5 text-ink-faint" />}
+          {(query.isFetching || move.isPending) && <Spinner className="size-3.5 text-ink-faint" />}
           {data.actions.length > 0 && (
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
               {data.actions.map((action) => (
@@ -165,16 +254,51 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
       ) : (
         <div className="flex min-h-0 flex-1 gap-4 overflow-x-auto p-4">
           {data.columns.map((column) => (
-            <section key={column.id} className="flex w-72 shrink-0 flex-col">
+            <section
+              key={column.id}
+              onDragOver={(e) => {
+                if (!canDropOn(column)) return;
+                e.preventDefault(); // allow the drop
+                if (dropCol !== column.id) setDropCol(column.id);
+              }}
+              onDragLeave={(e) => {
+                // Only clear when the pointer truly leaves the column, not when it crosses a child.
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                  setDropCol((c) => (c === column.id ? null : c));
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                handleDrop(column);
+              }}
+              className="flex w-72 shrink-0 flex-col"
+            >
               <header className="mb-2 flex items-center gap-2 px-1">
                 <h2 className="text-xs font-medium uppercase tracking-wide text-ink-faint">
                   {column.title}
                 </h2>
                 <span className="text-xs text-ink-faint">{column.cards.length}</span>
               </header>
-              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+              <div
+                className={cn(
+                  "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded-(--radius-card) p-1 transition-colors",
+                  dropCol === column.id && "bg-accent-dim ring-1 ring-accent/40",
+                )}
+              >
                 {column.cards.map((card) => (
-                  <BoardCardView key={card.id} module={module} pageId={pageId} card={card} />
+                  <BoardCardView
+                    key={card.id}
+                    module={module}
+                    pageId={pageId}
+                    card={card}
+                    draggable={moveActionOf(card) !== undefined}
+                    dragging={drag?.card.id === card.id}
+                    onDragStart={() => setDrag({ card, from: column.id })}
+                    onDragEnd={() => {
+                      setDrag(null);
+                      setDropCol(null);
+                    }}
+                  />
                 ))}
               </div>
             </section>

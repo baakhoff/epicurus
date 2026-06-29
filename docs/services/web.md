@@ -107,7 +107,11 @@ tasks module's **Tasks** page is the first board; complete/edit/add all flow thr
 one path, so no module ever ships its own buttons or forms. A board may also declare **view
 controls** (ADR-0049) — labeled selectors (e.g. group-by, filters) the shell renders in the
 toolbar; changing one re-fetches the page with a `?<id>=<value>` query param, so grouping and
-filtering stay module-side while the shell stays a bounded renderer.
+filtering stay module-side while the shell stays a bounded renderer. Cards can also be
+**dragged between columns** to move a task (#380): the drop reuses the card's *existing* move
+action (its `to_list_id` picker), matched to the drop column by title, so the contract is
+unchanged — it takes effect only where a column maps to a list (a drop on a due/status/priority
+column is a no-op), with the action/form path as the pointer-free fallback.
 
 The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
 shows immediately, and an Edit/Preview toggle drops to the raw source when you want to

@@ -13,3 +13,9 @@ class MessagingSettings(CoreSettings):
     # bridges (``telegram``, ``discord``, …) fan out after the foundation (#365+) and read
     # their per-tenant bot token from OpenBao.
     messaging_provider: str = "loopback"
+
+    # Telegram bridge knobs (used when ``messaging_provider == "telegram"``). The bot token
+    # itself is never here — it is read per-tenant from OpenBao (``messaging/telegram``).
+    # ``telegram_api_base`` is overridable so tests can point at a local mock.
+    telegram_api_base: str = "https://api.telegram.org"
+    telegram_poll_timeout: int = 30  # getUpdates long-poll seconds (server holds the request)

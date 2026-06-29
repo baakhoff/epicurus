@@ -18,13 +18,14 @@ from epicurus_messaging.loopback_provider import LoopbackProvider
 from epicurus_messaging.providers import BridgeProvider, bridge_token
 from epicurus_messaging.service import build_module, build_provider
 from epicurus_messaging.settings import MessagingSettings
+from epicurus_messaging.telegram_provider import TelegramProvider
 
 
 # ── manifest ────────────────────────────────────────────────────────────────────────────
 async def test_module_manifest_declares_events_and_no_tools() -> None:
     manifest = await build_module(LoopbackProvider()).manifest()
     assert manifest.name == "messaging"
-    assert manifest.version == "0.1.0"
+    assert manifest.version == "0.2.0"
     # It is a transport bridge, not an agent capability — it exposes no MCP tools.
     assert manifest.tools == []
     emitted = {e.subject for e in manifest.events_emitted}
@@ -39,6 +40,13 @@ async def test_manifest_secrets_follow_the_active_provider() -> None:
     # Loopback needs no credential, so the manifest declares no secrets.
     manifest = await build_module(LoopbackProvider()).manifest()
     assert manifest.secrets == []
+
+
+async def test_manifest_secrets_follow_telegram_provider() -> None:
+    # A real bridge's secret_names() flow into the manifest secrets[] for the operator to fill.
+    provider = TelegramProvider(_FakeSecrets(), tenant="local")  # type: ignore[arg-type]
+    manifest = await build_module(provider).manifest()
+    assert manifest.secrets == ["messaging/telegram"]
 
 
 # ── provider selection ──────────────────────────────────────────────────────────────────
@@ -66,11 +74,21 @@ def test_build_provider_defaults_to_loopback() -> None:
     assert isinstance(provider, LoopbackProvider)
     assert provider.provider_name() == "loopback"
     assert isinstance(provider, BridgeProvider)  # satisfies the seam (runtime_checkable)
+    assert provider.connected() is True  # in-process echo — always live
+
+
+def test_build_provider_selects_telegram() -> None:
+    provider = build_provider(_settings("telegram"), _FakeSecrets())  # type: ignore[arg-type]
+    assert isinstance(provider, TelegramProvider)
+    assert provider.provider_name() == "telegram"
+    assert provider.secret_names() == ["messaging/telegram"]
+    assert isinstance(provider, BridgeProvider)  # satisfies the seam (runtime_checkable)
+    assert provider.connected() is False  # not connected until start() loads a token
 
 
 def test_build_provider_unknown_raises() -> None:
     with pytest.raises(ValueError, match="unknown messaging provider"):
-        build_provider(_settings("telegram"), _FakeSecrets())  # type: ignore[arg-type]
+        build_provider(_settings("signal"), _FakeSecrets())  # type: ignore[arg-type]
 
 
 # ── loopback provider ───────────────────────────────────────────────────────────────────

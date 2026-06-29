@@ -20,6 +20,11 @@ services:
       OPENBAO_TOKEN: ${OPENBAO_TOKEN}
       # Active bridge provider (loopback default; telegram/discord/… fan out after #364).
       MESSAGING_PROVIDER: ${MESSAGING_PROVIDER:-loopback}
+      # Telegram bridge knobs (only used when MESSAGING_PROVIDER=telegram). The bot token
+      # itself lives in OpenBao (messaging/telegram), never here. Override the API base to
+      # point at a proxy/mock; the poll timeout is the getUpdates long-poll window.
+      TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
+      TELEGRAM_POLL_TIMEOUT: ${TELEGRAM_POLL_TIMEOUT:-30}
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     # Host port is overridable via MESSAGING_PORT and registered in

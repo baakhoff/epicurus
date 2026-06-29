@@ -23,6 +23,7 @@ from epicurus_core import (
 from epicurus_messaging.loopback_provider import LoopbackProvider
 from epicurus_messaging.providers import BridgeProvider
 from epicurus_messaging.settings import MessagingSettings
+from epicurus_messaging.telegram_provider import TELEGRAM_BRIDGE, TelegramProvider
 
 MODULE_NAME = "messaging"
 
@@ -37,9 +38,16 @@ def build_provider(settings: MessagingSettings, secrets: SecretStore) -> BridgeP
     name = settings.messaging_provider.strip().lower()
     if name in ("", "loopback"):
         return LoopbackProvider()
+    if name == TELEGRAM_BRIDGE:
+        return TelegramProvider(
+            secrets,
+            tenant=settings.default_tenant_id,
+            api_base=settings.telegram_api_base,
+            poll_timeout=settings.telegram_poll_timeout,
+        )
     raise ValueError(
-        f"unknown messaging provider {name!r}; only 'loopback' ships in the foundation "
-        "(Telegram/Discord/Slack/WhatsApp bridges fan out after #364)"
+        f"unknown messaging provider {name!r}; known bridges: 'loopback', 'telegram' "
+        "(Discord/Slack/WhatsApp fan out next, #366-#368)"
     )
 
 
@@ -47,7 +55,7 @@ def build_module(provider: BridgeProvider) -> EpicurusModule:
     """Build the messaging module — declares its events and the active bridge, no tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.1.0",
+        version="0.2.0",
         description=(
             "Chat bridges: connect external messaging channels (Telegram, Discord, …) to the "
             "assistant — inbound messages drive an agent turn and replies route back out."

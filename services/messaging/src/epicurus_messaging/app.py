@@ -104,8 +104,8 @@ def create_app() -> FastAPI:
         """Live status the shell renders (proxied by the core at /modules/messaging/status)."""
         body: dict[str, Any] = {
             "provider": provider.provider_name(),
-            # The loopback bridge is always in-process; real bridges reflect their token/connection.
-            "connected": isinstance(provider, LoopbackProvider),
+            # Loopback is always live; a real bridge reports whether its token loaded + it polls.
+            "connected": provider.connected(),
             "inbound_subject": MESSAGING_INBOUND,
             "outbound_subject": MESSAGING_OUTBOUND,
         }

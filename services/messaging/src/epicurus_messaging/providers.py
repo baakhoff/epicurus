@@ -40,6 +40,14 @@ class BridgeProvider(Protocol):
         """
         ...
 
+    def connected(self) -> bool:
+        """Whether the bridge is live — has its credential and is receiving.
+
+        Surfaced as ``connected`` on ``GET /status`` so the shell shows a real bridge that is
+        missing its token as *not connected*. The in-process loopback bridge is always live.
+        """
+        ...
+
     async def start(self, on_inbound: InboundHandler) -> None:
         """Begin receiving from the external service; call ``on_inbound`` per message."""
         ...

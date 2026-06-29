@@ -42,11 +42,33 @@ no tools) plus:
 ### The provider seam (ADR-0016)
 
 [`BridgeProvider`](../reference/index.md) is a `Protocol` with `provider_name()`,
-`secret_names()`, `start(on_inbound)`, `send(message)`, and `stop()`. Adding a bridge is one
-new class — the NATS wiring is unchanged. A provider declares the OpenBao secrets it needs via
-`secret_names()` (they flow into the manifest `secrets[]`) and reads its per-tenant bot token
-with the shipped helper `bridge_token(secrets, bridge, tenant=...)` (reads
-`messaging/<bridge>` → `token`). The built-in `LoopbackProvider` needs no secret.
+`secret_names()`, `connected()`, `start(on_inbound)`, `send(message)`, and `stop()`. Adding a
+bridge is one new class — the NATS wiring is unchanged. A provider declares the OpenBao secrets
+it needs via `secret_names()` (they flow into the manifest `secrets[]`) and reads its per-tenant
+bot token with the shipped helper `bridge_token(secrets, bridge, tenant=...)` (reads
+`messaging/<bridge>` → `token`); `connected()` backs the `connected` field on `/status`. The
+built-in `LoopbackProvider` needs no secret and is always `connected`.
+
+### The Telegram bridge (ADR-0061)
+
+The first real bridge (#365). Select it with `MESSAGING_PROVIDER=telegram` and store the bot
+token in OpenBao at `messaging/telegram` → `token` (per-tenant); the service reads it on startup
+and begins long-polling. With **no token stored the bridge is idle** — it logs and does not poll
+— so set the token and restart to bring it up (`/status` reports `connected: false` until then).
+
+- **Inbound** — a long poll over `getUpdates` maps each message onto an `InboundMessage`: chat
+  id → `channel_id`, a forum topic → `thread_id`, `from` → `sender_id` / `sender_name`,
+  `message_id` → `provider_msg_id`. v1 handles **text** messages (a media caption counts as
+  text); stickers, edits, and service messages have no usable text and are skipped.
+- **Outbound** — `sendMessage` delivers the reply to the same chat/thread, splitting on
+  Telegram's 4096-character limit and quoting the user's message on the first chunk when
+  `reply_to_msg_id` is set.
+- **Replies are plain text** (no `parse_mode`): an agent answer is arbitrary Markdown that is
+  not valid Telegram MarkdownV2 without escaping, and one bad entity makes the API reject the
+  whole message — so plain text guarantees delivery. Rich formatting is a follow-up.
+- **Long polling, not a webhook** — a webhook needs a public HTTPS ingress, which the
+  local-first default does not expose (constraint #7); long polling reaches Telegram
+  outbound-only. Single-tenant for v1, mirroring the foundation's outbound consumer.
 
 ## Configuration
 
@@ -54,8 +76,10 @@ Extends the shared [`CoreSettings`](../reference/config.md) with:
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `MESSAGING_PROVIDER` | `loopback` | The active bridge. `loopback` is the in-process echo bridge (no external service, no secret). |
+| `MESSAGING_PROVIDER` | `loopback` | The active bridge. `loopback` is the in-process echo bridge (no external service, no secret); `telegram` is the first real bridge. |
 | `OPENBAO_URL` / `OPENBAO_TOKEN` | `http://openbao:8200` / — | Where a real bridge's per-tenant bot token is read from (unused by loopback). |
+| `TELEGRAM_API_BASE` | `https://api.telegram.org` | Bot API base URL (telegram bridge only); override to point at a proxy or mock. |
+| `TELEGRAM_POLL_TIMEOUT` | `30` | `getUpdates` long-poll window in seconds (telegram bridge only). |
 
 Plus the shared `NATS_URL`, `DEFAULT_TENANT_ID`, `LOG_LEVEL`.
 
@@ -83,9 +107,10 @@ curl -s localhost:8093/loopback/inject -H 'content-type: application/json' \
 # → messaging.inbound → core turn → messaging.outbound → delivered (see GET /status)
 ```
 
-To add a real bridge (the #365+ pattern): implement `BridgeProvider` in a new
-`<name>_provider.py` (its `start()` polls/receives and calls `on_inbound`; its `send()` posts
-the reply), read the token with `bridge_token`, return its secret path from `secret_names()`,
-and add a branch to `build_provider` in `service.py`. The OpenBao wiring and the NATS contract
-are already in place. Package `epicurus_messaging`: `service.py` (module + provider factory),
-`providers.py` (the seam + `bridge_token`), `loopback_provider.py`, `settings.py`, `app.py`.
+To add a real bridge (the #365+ pattern, with `telegram_provider.py` as the worked example):
+implement `BridgeProvider` in a new `<name>_provider.py` (its `start()` polls/receives and calls
+`on_inbound`; its `send()` posts the reply), read the token with `bridge_token`, return its
+secret path from `secret_names()`, and add a branch to `build_provider` in `service.py`. The
+OpenBao wiring and the NATS contract are already in place. Package `epicurus_messaging`:
+`service.py` (module + provider factory), `providers.py` (the seam + `bridge_token`),
+`loopback_provider.py`, `telegram_provider.py`, `settings.py`, `app.py`.

@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-storage"
-version = "0.5.1"
+version = "0.6.0"
 description = "Storage module — file-tree index, agent file tools, MinIO object store, upload ingest, and inline text read."
 requires-python = ">=3.11"
 dependencies = [
@@ -10,6 +10,9 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.50",
     "asyncpg>=0.29",
     "aioboto3>=13.0",
+    # Files-tree watcher for live rescan on external change (#390). Already present
+    # transitively via uvicorn[standard]; declared directly because we import it.
+    "watchfiles>=0.21",
 ]
 
 [build-system]

@@ -14,6 +14,14 @@ images to GHCR.
 
 ### Added
 
+- **Chat: the assistant can ask a clarifying question mid-turn, answered inline** (#360, ADR-0053)
+  — the core `ask_user` tool (backend #345/#361) pauses a turn and ends the stream with an
+  `awaiting_input` event carrying the question; until now the web just stopped the spinner. The chat
+  now **renders that question with an inline answer input** in the live turn (beneath the partial
+  answer), and submitting posts to `POST /platform/v1/agent/runs/{run_id}/resume` so the turn
+  **continues streaming** to completion. The pending question is **persisted**, so a hard refresh
+  mid-question keeps the prompt (the suspended run stays durable server-side for 24h); the main
+  composer remains an escape hatch that abandons the question. `web` 0.56.0→0.57.0.
 - **Chat: the Conversations list shows which chats are still generating** (#396) — turns now run
   server-side regardless of the client (#400/#376), so a conversation you've navigated away from can
   still be answering, but the list gave no sign of it. Each session row now shows a subtle **pulsing

@@ -70,7 +70,12 @@ from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
-from epicurus_core_app.messaging import InboundConsumer
+from epicurus_core_app.messaging import (
+    BridgeAdmin,
+    InboundConsumer,
+    RegistryBridgeClient,
+    create_messaging_router,
+)
 from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import (
     ModuleRegistry,
@@ -428,6 +433,18 @@ def create_app() -> FastAPI:
     app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
     app.include_router(create_suggestions_router(registry))
+    # Chat-bridge admin (#369, ADR-0062): connect/manage the messaging module's bridges. The core
+    # writes per-tenant bot tokens to OpenBao and reloads the module so a bridge connects at
+    # runtime; the browser never holds a token (constraint #6).
+    app.include_router(
+        create_messaging_router(
+            BridgeAdmin(
+                secrets,
+                RegistryBridgeClient(registry),
+                tenant=settings.default_tenant_id,
+            )
+        )
+    )
     app.include_router(
         create_oauth_router(
             oauth,

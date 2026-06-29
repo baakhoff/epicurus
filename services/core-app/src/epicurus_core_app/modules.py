@@ -191,6 +191,16 @@ class ModuleRegistry:
                 return base, snapshot.manifest
         raise HTTPException(status_code=404, detail=f"no reachable module named {name!r}")
 
+    async def module_base(self, name: str) -> str:
+        """The internal base URL of a healthy module ``name`` (404 if absent/unreachable).
+
+        Public accessor for callers that proxy a module endpoint the registry has no dedicated
+        method for — e.g. the messaging bridge-admin posting to the module's reload control
+        path (ADR-0062). The browser never sees these URLs; the core stays the sole gateway.
+        """
+        base, _ = await self._resolve(name)
+        return base
+
     async def enabled_mcp_urls(self) -> list[str]:
         """The ``/mcp`` URLs of healthy, **enabled** modules — the agent's tool surface.
 

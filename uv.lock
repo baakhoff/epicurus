@@ -973,7 +973,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-storage"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "services/storage" }
 dependencies = [
     { name = "aioboto3" },
@@ -982,6 +982,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "watchfiles" },
 ]
 
 [package.metadata]
@@ -992,6 +993,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+    { name = "watchfiles", specifier = ">=0.21" },
 ]
 
 [[package]]

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
@@ -31,6 +32,7 @@ from epicurus_storage.service import (
     load_text_file,
 )
 from epicurus_storage.settings import READ_MAX_BYTES, StorageSettings
+from epicurus_storage.watcher import FilesWatcher
 
 
 def _attachment_disposition(name: str) -> str:
@@ -77,6 +79,28 @@ def create_app() -> FastAPI:
     )
     mcp_app = module.http_app()
 
+    # Serialise the startup scan and every watch-triggered rescan (#390): scanner.scan holds
+    # no internal lock, so two concurrent walks would race on the shared upsert/purge. The
+    # watcher drives this same helper, so a burst that fires mid-startup simply waits out the
+    # in-flight scan instead of double-walking the tree.
+    scan_lock = asyncio.Lock()
+
+    async def _rescan() -> int:
+        async with scan_lock:
+            return await scan(served_root, index, tenant=settings.default_tenant_id)
+
+    # Live files-tree sync (#390): when enabled, watch the served tree and rescan
+    # incrementally on change so files landed after startup show up in Files / search.
+    watcher = (
+        FilesWatcher(
+            served_root,
+            _rescan,
+            debounce_ms=settings.storage_watch_debounce_ms,
+        )
+        if settings.storage_watch
+        else None
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
@@ -86,14 +110,22 @@ def create_app() -> FastAPI:
                 "storage service ready",
                 root=str(served_root),
                 tenant=settings.default_tenant_id,
+                watch=settings.storage_watch,
             )
             try:
-                await scan(served_root, index, tenant=settings.default_tenant_id)
+                await _rescan()
             except Exception as exc:
                 log.warning("initial scan failed", error=str(exc))
+            # Serve immediately; watch in the background (mirrors knowledge, ADR-0035).
+            watch_task = asyncio.create_task(watcher.run()) if watcher is not None else None
             try:
                 yield
             finally:
+                if watcher is not None and watch_task is not None:
+                    watcher.stop()
+                    watch_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await watch_task
                 await bus.close()
                 await engine.dispose()
 

@@ -1,6 +1,6 @@
 # storage — file-tree index + object store
 
-**`epicurus-storage`** v0.5.1 is a sidecar module that gives the agent access to a file
+**`epicurus-storage`** v0.6.0 is a sidecar module that gives the agent access to a file
 tree on disk — a **read-only index** it can list, search, and read — plus **app-managed
 object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
@@ -44,6 +44,16 @@ downloadable — exactly like a chat upload. Previously the bytes landed in MinI
 row existed, so the browser (which lists the index, not the bucket) never showed them. `/read`,
 `/download`, and `storage_read` now resolve **any** catalogued object by its `source`, no longer
 only those under the `uploads/` prefix.
+
+v0.6.0 adds a **live files-tree watcher** (#390, ADR-0057): the index used to scan the served
+tree **only once at startup**, so any file another module dropped, an external write, or a sync
+landed afterwards went unindexed until a restart or a manual `storage_rescan` — the Files page
+and name search showed a stale tree. The watcher now watches the served root and triggers an
+**incremental rescan** on create / modify / delete after a debounced quiet window, so
+post-startup changes show up within a bounded delay. It is **on by default** (`STORAGE_WATCH`,
+debounce `STORAGE_WATCH_DEBOUNCE_MS`), coalesces a burst of changes into a single pass, is
+tenant-scoped (it watches the served `/data/<tenant>` subtree), and serialises against the
+startup scan behind a lock. See [the watcher](#the-files-tree-watcher-adr-0057) below.
 
 ## The contract it exposes
 
@@ -128,6 +138,39 @@ end: the bytes land in the `{tenant}-storage` bucket and the catalogue rows are
 tenant-scoped. The core treats persistence as **best-effort** — a down or absent storage
 module never fails a chat upload.
 
+### The files-tree watcher (ADR-0057)
+
+The startup scan (`scanner.scan`) only runs **once**, at boot. Anything that changes the
+served tree afterwards — another module dropping a file under `/data/<tenant>` (a knowledge
+doc, a notes `.md` mirror), an external write, or a folder kept current by a sync — would stay
+invisible to the Files page and to name search (`storage_search`) until a restart or a manual
+`storage_rescan` (#390). The **`FilesWatcher`** (`watcher.py`) closes that gap, mirroring the
+knowledge vault-watcher (ADR-0035):
+
+- **Debounced incremental rescan.** A `watchfiles.awatch` loop over the served root coalesces
+  a burst of create / modify / delete events over `STORAGE_WATCH_DEBOUNCE_MS` (default 1500 ms)
+  into a single pass, then runs `scanner.scan`. Because a full scan **upserts every entry it
+  sees and purges the unseen `source="fs"` rows**, one walk is an idempotent sync — new and
+  changed files are upserted, vanished files are pruned, and uploaded / agent-written objects
+  (`source="object"`) survive untouched. The walk is pure DB I/O (no embeddings), so it is cheap.
+- **Filters with `DefaultFilter`.** Storage indexes **all** files (not just `.md`), so the
+  watcher uses watchfiles' `DefaultFilter` directly — which already drops `.git`, `__pycache__`,
+  and editor swap files, avoiding rescan storms — with no extension gate.
+- **Serialised against the startup scan.** `scanner.scan` holds no internal lock, so the
+  lifespan wraps both the startup scan and every watch-triggered rescan behind one
+  `asyncio.Lock`; a burst that fires mid-startup simply waits out the in-flight scan instead of
+  double-walking the tree.
+- **Tenant-scoped & read-only.** It watches the served `/data/<tenant>` subtree only
+  (constraint #1) and never writes the tree.
+- **Resilient.** A missing root → the watcher logs once and stays idle (it never crashes the
+  service if `STORAGE_WATCH` is set before the mount exists); a failed rescan (a DB blip) is
+  logged and swallowed so the next change retries. On shutdown the lifespan signals `stop()` and
+  cancels the background task.
+
+On by default (`STORAGE_WATCH=true`); set `STORAGE_WATCH=false` to keep the old startup-only
+behaviour (e.g. a very large tree where a periodic restart suffices). It adds **no MCP tool** —
+`storage_rescan` remains the manual escape hatch.
+
 ## Configuration
 
 `StorageSettings` extends [`CoreSettings`](../reference/config.md):
@@ -136,6 +179,8 @@ module never fails a chat upload.
 | --- | --- | --- |
 | `STORAGE_ROOT` | `/data` | In-container **base** of the shared-file-space mount. Storage serves and indexes the tenant subtree `STORAGE_ROOT/<tenant>` read-only (tenant-scoped, constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`). |
 | `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | Comma-separated top-level subtrees hidden from the **agent's** file tools (#KB-refactor). The agent's `storage_list`/`storage_search`/`storage_read` never see them; the operator-facing Files page / `/read` / `/download` are unaffected. `notes/` holds private note bodies. Set empty to hide nothing. |
+| `STORAGE_WATCH` | `true` | Watch the served tree and **incrementally rescan on change** (#390, ADR-0057), so files landed after startup show up in the Files page / search without a restart or a manual `storage_rescan`. On by default — it fixes a real stale-index bug. Set `false` to keep startup-only scanning. |
+| `STORAGE_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of file changes before a rescan fires; a module dropping many files at once is grouped into one incremental pass. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | The file index. |
 | `MINIO_URL` | `http://minio:9000` | Object-store endpoint. |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `epicurus` / `epicurus-dev` | Object-store creds (dev; OpenBao later). |
@@ -168,7 +213,8 @@ tenant subtree. `EPICURUS_FILES_ROOT` **replaces** the old per-module `STORAGE_H
 ## Dependencies
 
 Postgres (the file index) · MinIO (objects) · NATS (the scan event) · the read-only
-mounted directory tree. It uses **no AI** — pure filesystem + object I/O.
+mounted directory tree · `watchfiles` (the files-tree watcher, ADR-0057; already transitive via
+`uvicorn[standard]`). It uses **no AI** — pure filesystem + object I/O.
 
 ## Run & extend
 
@@ -176,10 +222,17 @@ mounted directory tree. It uses **no AI** — pure filesystem + object I/O.
 EPICURUS_FILES_ROOT=/path/to/your/files docker compose up -d storage
 ```
 
-Package `epicurus_storage`: `scanner.py` (walk + incremental upsert), `db.py`
+To exercise the watcher locally, leave `STORAGE_WATCH=true` (the default) and write a file
+under the served tree (`/data/<tenant>/…`); within `STORAGE_WATCH_DEBOUNCE_MS` it appears in
+the Files page and `storage_search`. Disable it with `STORAGE_WATCH=false`.
+
+Package `epicurus_storage`: `scanner.py` (walk + incremental upsert + `purge_stale`), `db.py`
 (`storage_files` + queries + `source` column), `object_store.py` (MinIO via aioboto3 —
-text **and** binary `put_bytes`/`get_object`), `service.py` (the MCP tools + the
-`hidden_prefixes` filter that keeps private subtrees out of the agent's file tools + manifest
-UI + `build_page_data` + `ingest_object`/`put_object`/`load_object_download` + `load_text_file`
-for the inline reader; `put_object` is the catalogue-on-write the `storage_object_put` tool wraps), `app.py` (lifespan + `/ingest` + `/download` + `/read` + `/pages/files`; parses
+text **and** binary `put_bytes`/`get_object`), `watcher.py` (`FilesWatcher` — the debounced
+`watchfiles` loop that drives a rescan callable on change, ADR-0057), `service.py` (the MCP
+tools + the `hidden_prefixes` filter that keeps private subtrees out of the agent's file tools +
+manifest UI + `build_page_data` + `ingest_object`/`put_object`/`load_object_download` +
+`load_text_file` for the inline reader; `put_object` is the catalogue-on-write the
+`storage_object_put` tool wraps), `app.py` (lifespan — startup scan + watcher wired behind one
+`scan_lock` — + `/ingest` + `/download` + `/read` + `/pages/files`; parses
 `STORAGE_AGENT_HIDDEN_PREFIXES` into the module's `hidden_prefixes`).

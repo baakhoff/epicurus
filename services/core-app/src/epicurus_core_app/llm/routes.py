@@ -17,6 +17,7 @@ from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.variants import ModelVariantsResponse, VariantLookup
+from epicurus_core_app.system_info import suggest_context_for_model
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -108,6 +109,12 @@ class SetModelSettingsRequest(BaseModel):
     keep_alive: str | None = None
     # "gpu" | "cpu" | null (auto). Mapped to Ollama num_gpu; local models only.
     device: str | None = None
+
+
+class SuggestModelContextRequest(BaseModel):
+    """Body for POST /llm/model-settings/suggest-context — the model that was just pulled."""
+
+    model: str
 
 
 def create_llm_router(
@@ -347,6 +354,39 @@ def create_llm_router(
             ),
         )
         return {"status": "ok", "model": request.model}
+
+    @router.post("/model-settings/suggest-context")
+    async def suggest_model_context(
+        request: SuggestModelContextRequest,
+    ) -> dict[str, object]:
+        """Compute and persist a recommended per-model context window for a freshly pulled model
+        (#386), so it opens with a window sized to itself instead of the global default. The core
+        owns the heuristic (VRAM + model size + KV cache); the web calls this when a pull finishes.
+
+        Non-destructive: an existing per-model context override is left untouched. Returns the
+        resolved per-model context and whether this call applied a new suggestion — ``applied`` is
+        false when one was already set, or none could be computed (e.g. a hosted model with no
+        local size)."""
+        if model_settings is None:
+            raise HTTPException(status_code=503, detail="model-settings store not available")
+        existing = await model_settings.get(default_tenant, request.model)
+        if existing.context_window is not None:
+            return {
+                "model": request.model,
+                "context_window": existing.context_window,
+                "applied": False,
+            }
+        suggested = await suggest_context_for_model(
+            gateway, request.model, tenant_id=default_tenant
+        )
+        if suggested is None:
+            return {"model": request.model, "context_window": None, "applied": False}
+        await model_settings.set(
+            default_tenant,
+            request.model,
+            existing.model_copy(update={"context_window": suggested}),
+        )
+        return {"model": request.model, "context_window": suggested, "applied": True}
 
     return router
 

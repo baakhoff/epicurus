@@ -17,6 +17,7 @@ from epicurus_core_app.system_info import (
     detect_gpu,
     read_ram_total_mb,
     suggest_context,
+    suggest_context_for_model,
 )
 
 # ── suggest_context (pure) ────────────────────────────────────────────────────────
@@ -340,6 +341,67 @@ async def test_collect_cpu_path_keeps_its_hard_cap_despite_a_long_context_model(
     assert info.gpu is None
     assert info.suggested_context is not None
     assert info.suggested_context.max <= 8192
+
+
+# ── suggest_context_for_model (per-model, on download) ──────────────────────────────
+
+
+async def test_suggest_for_model_sizes_a_named_local_model() -> None:
+    # The named model — not the active default — is what gets sized.
+    gateway = _FakeGateway(
+        default="some-other-model",
+        models=[ModelInfo(name="llama3.1:8b", size=4_700_000_000)],
+        details={"llama3.1:8b": ModelDetails(context_length=131072)},
+    )
+    ctx = await suggest_context_for_model(
+        gateway,
+        "llama3.1:8b",
+        detect=lambda: GpuInfo(vendor="nvidia", name="RTX 4090", vram_total_mb=24564),
+        ram=lambda: 32000,
+    )
+    assert ctx is not None
+    assert ctx >= 2048
+    assert (ctx & (ctx - 1)) == 0  # a clean power-of-two size, like the global suggestion
+
+
+async def test_suggest_for_model_uses_ram_with_no_gpu_and_keeps_the_cpu_cap() -> None:
+    gateway = _FakeGateway(default="x", models=[ModelInfo(name="llama3.2:3b", size=2_000_000_000)])
+    ctx = await suggest_context_for_model(
+        gateway, "llama3.2:3b", detect=lambda: None, ram=lambda: 16000
+    )
+    assert ctx is not None
+    assert ctx <= 8192  # CPU-inference cap
+
+
+async def test_suggest_for_model_none_when_model_not_installed() -> None:
+    gateway = _FakeGateway(default="x", models=[ModelInfo(name="llama3.2:3b", size=2_000_000_000)])
+    ctx = await suggest_context_for_model(
+        gateway,
+        "mistral:7b",  # not in the local list → nothing to size against
+        detect=lambda: GpuInfo(vendor="nvidia", name="RTX", vram_total_mb=24564),
+        ram=lambda: 32000,
+    )
+    assert ctx is None
+
+
+async def test_suggest_for_model_none_when_size_unknown() -> None:
+    # Present locally but the runtime reported no size (e.g. a hosted-style entry).
+    gateway = _FakeGateway(default="x", models=[ModelInfo(name="llama3.2:3b")])
+    ctx = await suggest_context_for_model(
+        gateway,
+        "llama3.2:3b",
+        detect=lambda: GpuInfo(vendor="nvidia", name="RTX", vram_total_mb=24564),
+        ram=lambda: 32000,
+    )
+    assert ctx is None
+
+
+async def test_suggest_for_model_none_without_any_memory() -> None:
+    gateway = _FakeGateway(default="x", models=[ModelInfo(name="llama3.2:3b", size=2_000_000_000)])
+    ctx = await suggest_context_for_model(
+        gateway, "llama3.2:3b", detect=lambda: None, ram=lambda: None
+    )
+    assert ctx is None
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────────

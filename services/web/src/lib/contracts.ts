@@ -642,6 +642,9 @@ export const CalendarEvent = z
     location: z.string().nullish(),
     description: z.string().nullish(),
     provider: z.string().nullish(),
+    // The calendar this event belongs to, as an `account[:collection]` token (#378) — lets the
+    // shell group events by calendar and toggle each calendar's visibility. Null on a bare event.
+    calendar_id: z.string().nullish(),
     // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
     // invokes the named MCP tool through the core's tool proxy and refetches on success.
     actions: z.array(BoardAction).default([]),

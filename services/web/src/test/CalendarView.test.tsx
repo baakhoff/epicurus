@@ -6,8 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CalendarView } from "@/components/archetypes/CalendarView";
 
 const mockModulePage = vi.fn();
+const mockCollections = vi.fn();
 vi.mock("@/lib/api", () => ({
-  api: { modulePage: (...args: unknown[]) => mockModulePage(...args) },
+  api: {
+    modulePage: (...args: unknown[]) => mockModulePage(...args),
+    getModuleCollections: (...args: unknown[]) => mockCollections(...args),
+  },
 }));
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -39,6 +43,22 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-06-15T12:00:00Z"));
   mockModulePage.mockReset();
+  mockCollections.mockReset().mockResolvedValue({
+    noun: "calendar",
+    multi: true,
+    accounts: [
+      {
+        account: "google",
+        provider: "google",
+        label: "Google",
+        connected: true,
+        collections: [
+          { account: "google", collection: "primary", title: "Work Calendar", writable: true },
+        ],
+      },
+    ],
+  });
+  localStorage.clear(); // the per-month cache (#379) persists here — isolate each test
 });
 afterEach(() => vi.useRealTimers());
 
@@ -108,5 +128,57 @@ describe("CalendarView", () => {
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
     fireEvent.click(await screen.findByText("Holiday"));
     expect(await screen.findByText(/All day/i)).toBeInTheDocument();
+  });
+
+  it("toggles a calendar's visibility from the Calendars menu (#378)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00",
+          end: "2026-06-15T09:30:00",
+          provider: "local",
+          calendar_id: "local",
+        },
+        {
+          id: "e2",
+          title: "Sync",
+          start: "2026-06-16T10:00:00",
+          end: "2026-06-16T10:30:00",
+          provider: "google",
+          calendar_id: "google:primary",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    expect(await screen.findByText("Standup")).toBeInTheDocument();
+    expect(screen.getByText("Sync")).toBeInTheDocument();
+
+    // Open the Calendars menu and hide the Google calendar (named from the collections view).
+    fireEvent.click(screen.getByLabelText("Choose visible calendars"));
+    fireEvent.click(await screen.findByText("Work Calendar"));
+
+    // Its events disappear; the other calendar's events stay. The choice is persisted.
+    await waitFor(() => expect(screen.queryByText("Sync")).toBeNull());
+    expect(screen.getByText("Standup")).toBeInTheDocument();
+    expect(localStorage.getItem("epicurus-cal-hidden:calendar:calendar")).toContain(
+      "google:primary",
+    );
+  });
+
+  it("paints the cached window instantly on reopen, then revalidates (#379)", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    const { unmount } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup"); // fetched and cached to localStorage
+    unmount();
+
+    // Reopen while the network hangs — the cached month must paint with no await.
+    mockModulePage.mockReset();
+    mockModulePage.mockReturnValue(new Promise(() => {}));
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    expect(screen.getByText("Standup")).toBeInTheDocument(); // straight from the persisted cache
+    expect(mockModulePage).toHaveBeenCalled(); // …and it still revalidates in the background
   });
 });

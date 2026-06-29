@@ -5,7 +5,7 @@ description = "Tasks module — provider-neutral task management (Google Tasks +
 requires-python = ">=3.11"
 dependencies = [
     "epicurus-core",
-    "fastapi>=0.115",
+    "fastapi>=0.138.2",
     "uvicorn[standard]>=0.30",
     "sqlalchemy[asyncio]>=2.0.50",
     "asyncpg>=0.29",

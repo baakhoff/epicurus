@@ -5,7 +5,7 @@ description = "Web-search module — self-hosted SearXNG + web_search MCP tool."
 requires-python = ">=3.11"
 dependencies = [
     "epicurus-core",
-    "fastapi>=0.115",
+    "fastapi>=0.138.2",
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",
 ]

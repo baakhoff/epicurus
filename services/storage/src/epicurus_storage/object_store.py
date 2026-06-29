@@ -97,6 +97,28 @@ class ObjectStore:
                     return None
                 raise
 
+    async def copy(self, *, tenant: str, src_key: str, dst_key: str) -> None:
+        """Server-side copy of an object from *src_key* to *dst_key* (S3 has no rename).
+
+        The byte half of a move: the index re-key is the source of truth, so callers copy
+        to the new key first, re-path the index, then drop the original.
+        """
+        bucket = self._bucket(tenant)
+        async with self._session.client("s3", endpoint_url=self._url) as s3:
+            await s3.copy_object(
+                Bucket=bucket, Key=dst_key, CopySource={"Bucket": bucket, "Key": src_key}
+            )
+
+    async def delete(self, *, tenant: str, key: str) -> None:
+        """Delete the object at *key* (a no-op if it is already gone)."""
+        bucket = self._bucket(tenant)
+        async with self._session.client("s3", endpoint_url=self._url) as s3:
+            try:
+                await s3.delete_object(Bucket=bucket, Key=key)
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] not in _KEY_MISSING | _BUCKET_MISSING:
+                    raise
+
     # ── Text surface (storage_object_* tools) ────────────────────────────────
 
     async def put(self, *, tenant: str, key: str, content: str) -> None:

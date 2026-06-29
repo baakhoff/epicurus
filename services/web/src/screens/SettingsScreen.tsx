@@ -1,12 +1,12 @@
 /** Settings — platform info, theme, connected accounts, and what this thing is. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, KeyRound, Link, Moon, Sun, Unlink, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, Link, Moon, RefreshCw, Sun, Unlink, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
-import { Button, Card, Dot, Spinner, cn } from "@/components/ui";
+import { Button, Card, Dot, NumberInput, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { ModuleSnapshot } from "@/lib/contracts";
 import { usePrefs } from "@/stores/prefs";
@@ -52,13 +52,12 @@ function OAuthCredentialsForm({
     >
       <div>
         <label className="mb-1 block text-xs text-ink-dim">Client ID</label>
-        <input
+        <TextInput
           type="text"
           autoComplete="off"
           value={clientId}
           onChange={(e) => setClientId(e.target.value)}
           placeholder="paste the client ID"
-          className="w-full rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
         />
       </div>
       <div>
@@ -66,13 +65,12 @@ function OAuthCredentialsForm({
           Client Secret
           <span className="ml-1 text-ink-faint">(write-only — never shown again)</span>
         </label>
-        <input
+        <TextInput
           type="password"
           autoComplete="off"
           value={clientSecret}
           onChange={(e) => setClientSecret(e.target.value)}
           placeholder="paste the client secret"
-          className="w-full rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
         />
       </div>
       {save.isError && (
@@ -90,7 +88,8 @@ function OAuthCredentialsForm({
   );
 }
 
-function OAuthProviderRow({ providerId }: { providerId: string }) {
+/** One connected-account row: status + credential/connect/disconnect actions. Exported for tests. */
+export function OAuthProviderRow({ providerId }: { providerId: string }) {
   const queryClient = useQueryClient();
   const [showCredForm, setShowCredForm] = useState(false);
 
@@ -146,24 +145,30 @@ function OAuthProviderRow({ providerId }: { providerId: string }) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            onClick={() => setShowCredForm((v) => !v)}
-            className="gap-1.5 text-xs"
-            title={credentialsConfigured ? "Client credentials configured — click to update" : "Add client credentials"}
-          >
-            <KeyRound size={13} />
-            {credentialsConfigured ? "Update credentials" : "Add credentials"}
-          </Button>
-          {connected ? (
+          {/* Icon-only so the row never overflows a phone (#393); the label moves to a
+              tooltip + aria-label, matching the model-row treatment (#327/#384). */}
+          <Tooltip label={credentialsConfigured ? "Update credentials" : "Add credentials"}>
             <Button
-              variant="danger"
-              onClick={() => disconnect.mutate()}
-              disabled={disconnect.isPending}
+              variant="ghost"
+              onClick={() => setShowCredForm((v) => !v)}
+              className="px-2.5"
+              aria-label={credentialsConfigured ? "Update credentials" : "Add credentials"}
             >
-              <Unlink size={13} />
-              Disconnect
+              <KeyRound size={15} />
             </Button>
+          </Tooltip>
+          {connected ? (
+            <Tooltip label="Disconnect">
+              <Button
+                variant="danger"
+                onClick={() => disconnect.mutate()}
+                disabled={disconnect.isPending}
+                className="px-2.5"
+                aria-label="Disconnect"
+              >
+                <Unlink size={15} />
+              </Button>
+            </Tooltip>
           ) : (
             <Button
               variant="outline"
@@ -265,7 +270,7 @@ export function TimezoneCard() {
         <Spinner />
       ) : (
         <div className="flex flex-col gap-2">
-          <input
+          <TextInput
             type="text"
             list="tz-options"
             key={current}
@@ -275,7 +280,6 @@ export function TimezoneCard() {
               const v = e.currentTarget.value.trim();
               if (v && v !== current) save.mutate(v);
             }}
-            className="w-full rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <datalist id="tz-options">
             {COMMON_TIMEZONES.map((z) => (
@@ -325,8 +329,7 @@ export function AgentCard() {
         <Spinner />
       ) : (
         <div className="flex items-center gap-2">
-          <input
-            type="number"
+          <NumberInput
             min={1}
             max={12}
             step={1}
@@ -334,12 +337,12 @@ export function AgentCard() {
             defaultValue={current ?? ""}
             placeholder="4"
             aria-label="Agent cycles"
+            className="w-24"
             onBlur={(e) => {
               const raw = e.currentTarget.value.trim();
               const next = raw === "" ? null : Number(raw);
               if (next !== current) save.mutate(next);
             }}
-            className="w-24 rounded-(--radius-field) border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {current !== null && (
             <Button variant="ghost" onClick={() => save.mutate(null)}>
@@ -348,6 +351,62 @@ export function AgentCard() {
           )}
           {save.isError && <p className="text-xs text-danger">{(save.error as Error).message}</p>}
           {save.isSuccess && <p className="text-xs text-ok">Saved.</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** Maintenance — run the core's background jobs as one coordinated batch (#383, ADR-0060). */
+export function MaintenanceCard() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ["maintenance"], queryFn: api.maintenanceStatus });
+  const run = useMutation({
+    mutationFn: () => api.runMaintenance(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["maintenance"] }),
+  });
+  // Prefer the run we just triggered; otherwise show the cached last run from status.
+  const result = run.data ?? status.data?.last_run ?? null;
+  const tone = (s: string): "ok" | "dim" | "danger" =>
+    s === "ok" ? "ok" : s === "skipped" ? "dim" : "danger";
+
+  return (
+    <Card>
+      <h3 className="mb-2 font-serif text-base text-ink">Maintenance</h3>
+      <p className="mb-3 text-sm text-ink-dim">
+        Run the background jobs — distil pending memories into facts and re-index modules — as one
+        batch. Re-indexing rebuilds embeddings and can take a while; it runs in the background.
+      </p>
+      {status.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" busy={run.isPending} onClick={() => run.mutate()}>
+              <RefreshCw size={14} />
+              Run maintenance now
+            </Button>
+            <span className="text-xs text-ink-faint">
+              {status.data?.schedule_enabled
+                ? `Scheduled nightly at ${String(status.data.schedule_hour).padStart(2, "0")}:00`
+                : "Manual only — nightly schedule off"}
+            </span>
+          </div>
+          {run.isError && <p className="text-sm text-danger">{(run.error as Error).message}</p>}
+          {result && (
+            <div className="text-[11px] text-ink-dim">
+              Last run{result.scope === "nightly" ? " (nightly)" : ""}:
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {result.jobs.map((j) => (
+                  <li key={j.key} className="flex items-center gap-1.5">
+                    <Dot tone={tone(j.status)} />
+                    <span className="text-ink">{j.label}</span>
+                    <span>· {j.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </Card>
@@ -443,6 +502,8 @@ export function SettingsScreen() {
         <TimezoneCard />
 
         <AgentCard />
+
+        <MaintenanceCard />
 
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Platform</h3>

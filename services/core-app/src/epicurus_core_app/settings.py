@@ -130,6 +130,16 @@ class CoreAppSettings(CoreSettings):
     # deployment sets its own in the Settings screen (persisted) or via this env.
     default_timezone: str = "UTC"
 
+    # ── Maintenance orchestrator (ADR-0060) ─────────────────────────────────────
+    # The "run all background maintenance" trigger (memory extraction, module re-index) is always
+    # available manually. Its nightly *schedule* is opt-in: the per-runner schedules already cover
+    # the unattended case, so this defaults off to avoid redundant nightly work — turn it on to run
+    # one coordinated light batch (consolidating the per-runner schedules onto it is the follow-up).
+    maintenance_schedule_enabled: bool = False
+    # Local hour (0-23) of the scheduled nightly batch, in the operator's timezone. 4 = 4 AM, an
+    # hour after the extraction drain's default so the two never overlap when both are on.
+    maintenance_hour: int = 4
+
     # ── File space (ADR-0052) ───────────────────────────────────────────────────
     # The core owns the per-tenant user file space behind a swappable backend (constraint #3).
     # "local" serves the shared volume at FILES_ROOT/<tenant>; "s3" serves a per-tenant

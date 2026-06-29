@@ -8,7 +8,7 @@
 import { Check, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { Badge, Button, Spinner, TextInput, cn } from "@/components/ui";
+import { Badge, Button, Select, Spinner, TextInput, cn } from "@/components/ui";
 import { api, logStream } from "@/lib/api";
 import type { LogEntry, Readiness, ReadinessComponent } from "@/lib/contracts";
 
@@ -269,10 +269,10 @@ export function ObservabilityScreen() {
 
         {/* filters */}
         <div className="flex flex-wrap items-center gap-2">
-          <select
+          <Select
+            size="sm"
             value={levelFilter}
             onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
-            className="rounded-(--radius-field) border border-edge bg-surface-2 px-2.5 py-1.5 text-xs text-ink focus:border-accent focus:outline-none"
             aria-label="Minimum log level"
           >
             {LEVEL_OPTIONS.map(({ value, label }) => (
@@ -280,7 +280,7 @@ export function ObservabilityScreen() {
                 {label}
               </option>
             ))}
-          </select>
+          </Select>
 
           <TextInput
             value={serviceFilter}

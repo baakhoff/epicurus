@@ -147,6 +147,66 @@ async def test_read_text_binary_raises(store: LocalFileStore) -> None:
         await store.read_text(tenant=TENANT, path="blob.bin")
 
 
+# ── move / rename ─────────────────────────────────────────────────────────────
+
+
+async def test_move_renames_a_file_in_place(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="notes/draft.md", content="hi")
+    entry = await store.move(tenant=TENANT, src="notes/draft.md", dst="notes/final.md")
+    assert entry.path == "notes/final.md" and entry.kind == "file"
+    assert await store.read_text(tenant=TENANT, path="notes/final.md") == "hi"
+    assert await store.stat(tenant=TENANT, path="notes/draft.md") is None
+
+
+async def test_move_into_another_dir_creates_parents(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="a.txt", content="x")
+    entry = await store.move(tenant=TENANT, src="a.txt", dst="deep/nest/a.txt")
+    assert entry.path == "deep/nest/a.txt"
+    assert await store.read_text(tenant=TENANT, path="deep/nest/a.txt") == "x"
+
+
+async def test_move_directory_tree(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="src/a.txt", content="a")
+    await store.write_text(tenant=TENANT, path="src/sub/b.txt", content="b")
+    entry = await store.move(tenant=TENANT, src="src", dst="dst")
+    assert entry.path == "dst" and entry.kind == "dir"
+    assert await store.read_text(tenant=TENANT, path="dst/a.txt") == "a"
+    assert await store.read_text(tenant=TENANT, path="dst/sub/b.txt") == "b"
+    assert await store.stat(tenant=TENANT, path="src") is None
+
+
+async def test_move_missing_source_raises(store: LocalFileStore) -> None:
+    with pytest.raises(FileNotFoundError):
+        await store.move(tenant=TENANT, src="ghost.txt", dst="x.txt")
+
+
+async def test_move_onto_existing_destination_raises(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="a.txt", content="a")
+    await store.write_text(tenant=TENANT, path="b.txt", content="b")
+    with pytest.raises(FileExistsError):
+        await store.move(tenant=TENANT, src="a.txt", dst="b.txt")
+
+
+async def test_move_root_rejected(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="a.txt", content="a")
+    with pytest.raises(ValueError):
+        await store.move(tenant=TENANT, src="", dst="a.txt")
+    with pytest.raises(ValueError):
+        await store.move(tenant=TENANT, src="a.txt", dst="")
+
+
+async def test_move_dir_into_itself_rejected(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="d/a.txt", content="a")
+    with pytest.raises(ValueError):
+        await store.move(tenant=TENANT, src="d", dst="d/child")
+
+
+async def test_move_rejects_traversal(store: LocalFileStore) -> None:
+    await store.write_text(tenant=TENANT, path="a.txt", content="a")
+    with pytest.raises(ValueError):
+        await store.move(tenant=TENANT, src="a.txt", dst="../escape.txt")
+
+
 # ── build_file_store ──────────────────────────────────────────────────────────
 
 
@@ -188,5 +248,13 @@ async def test_s3_round_trip() -> None:
         stat = await store.stat(tenant=TENANT, path="docs/a.md")
         assert stat is not None and stat.kind == "file"
 
-        assert await store.delete(tenant=TENANT, path="docs") is True
+        # Rename within a prefix, then move the whole prefix; both copy+delete server-side.
+        await store.move(tenant=TENANT, src="docs/a.md", dst="docs/b.md")
+        assert await store.read_text(tenant=TENANT, path="docs/b.md") == "hello"
+        with pytest.raises(FileNotFoundError):
+            await store.read_text(tenant=TENANT, path="docs/a.md")
+        await store.move(tenant=TENANT, src="docs", dst="archive")
+        assert await store.read_text(tenant=TENANT, path="archive/b.md") == "hello"
+
+        assert await store.delete(tenant=TENANT, path="archive") is True
         assert await store.list_dir(tenant=TENANT, path="") == []

@@ -8,6 +8,7 @@ import { usePanel } from "@/stores/panel";
 
 const mockModulePage = vi.fn();
 const mockReadText = vi.fn();
+const mockMove = vi.fn();
 vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {
     constructor(
@@ -20,6 +21,7 @@ vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
     readModuleText: (...args: unknown[]) => mockReadText(...args),
+    moveModuleItem: (...args: unknown[]) => mockMove(...args),
   },
 }));
 
@@ -31,6 +33,7 @@ function wrapper({ children }: { children: ReactNode }) {
 beforeEach(() => {
   mockModulePage.mockReset();
   mockReadText.mockReset();
+  mockMove.mockReset();
   usePanel.getState().close();
 });
 
@@ -104,5 +107,59 @@ describe("BrowserView", () => {
     fireEvent.click(await screen.findByText("img.png"));
     expect(await screen.findByText("Download")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /open/i })).toBeNull();
+  });
+
+  it("renames a movable file in place (#381)", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Files",
+      items: [
+        { id: "notes/draft.md", title: "draft.md", href: "/dl?path=notes/draft.md", movable: true },
+      ],
+    });
+    mockMove.mockResolvedValue({ path: "notes/final.md" });
+    render(<BrowserView module="storage" pageId="files" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("draft.md"));
+    fireEvent.click(await screen.findByRole("button", { name: /rename/i }));
+    fireEvent.change(screen.getByLabelText("New name"), { target: { value: "final.md" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() =>
+      expect(mockMove).toHaveBeenCalledWith("storage", "files", "notes/draft.md", "notes/final.md"),
+    );
+  });
+
+  it("offers no rename on a read-only (non-movable) entry", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Files",
+      items: [{ id: "docs/readme.txt", title: "readme.txt", href: "/dl?path=docs/readme.txt" }],
+    });
+    render(<BrowserView module="storage" pageId="files" />, { wrapper });
+    fireEvent.click(await screen.findByText("readme.txt"));
+    expect(await screen.findByText("Download")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /rename/i })).toBeNull();
+  });
+
+  it("moves a file by dragging it onto a folder (#391)", async () => {
+    mockModulePage.mockResolvedValue({
+      title: "Files",
+      items: [
+        { id: "a.md", title: "a.md", href: "/dl?path=a.md", movable: true },
+        { id: "docs", title: "docs", nav_path: "docs" },
+      ],
+    });
+    mockMove.mockResolvedValue({ path: "docs/a.md" });
+    render(<BrowserView module="storage" pageId="files" />, { wrapper });
+
+    const file = (await screen.findByText("a.md")).closest("button")!;
+    const folder = screen.getByText("docs").closest("button")!;
+    const dataTransfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "" };
+    fireEvent.dragStart(file, { dataTransfer });
+    fireEvent.dragOver(folder, { dataTransfer });
+    fireEvent.drop(folder, { dataTransfer });
+
+    await waitFor(() =>
+      expect(mockMove).toHaveBeenCalledWith("storage", "files", "a.md", "docs/a.md"),
+    );
   });
 });

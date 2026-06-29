@@ -31,6 +31,7 @@ import {
   Confirm,
   Dot,
   Label,
+  Select,
   Sheet,
   Spinner,
   TextInput,
@@ -745,6 +746,7 @@ export function ContextWindow() {
               </Button>
             )}
           </div>
+          {/* eslint-disable-next-line no-restricted-syntax -- range slider, not a styled text field */}
           <input
             type="range"
             min={CTX_FLOOR}
@@ -909,6 +911,7 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
             className="w-32"
             onChange={(e) => setCtx(e.target.value)}
           />
+          {/* eslint-disable-next-line no-restricted-syntax -- range slider, not a styled text field */}
           <input
             type="range"
             min={CTX_FLOOR}
@@ -1132,8 +1135,8 @@ export function KvCache() {
       ) : (
         <label className="block">
           <span className="sr-only">KV-cache type</span>
-          <select
-            className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+          <Select
+            className="w-full"
             value={current}
             disabled={save.isPending}
             onChange={(e) => save.mutate(e.target.value || null)}
@@ -1144,7 +1147,7 @@ export function KvCache() {
                 {rec && rec.value === opt.value ? " · suggested" : ""}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
       )}
 
@@ -1225,8 +1228,8 @@ export function EmbedDefault() {
         <div className="flex items-center gap-2">
           <label className="block flex-1">
             <span className="sr-only">Global embedding model</span>
-            <select
-              className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+            <Select
+              className="w-full"
               value={current}
               disabled={setEmbedDefault.isPending}
               onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
@@ -1237,7 +1240,7 @@ export function EmbedDefault() {
                   {m.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           {current && (
             <Button

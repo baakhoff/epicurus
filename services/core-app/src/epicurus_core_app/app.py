@@ -59,6 +59,12 @@ from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.llm.variants import VariantLookup
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
+from epicurus_core_app.maintenance import (
+    MaintenanceOrchestrator,
+    extraction_drain_job,
+    module_reindex_job,
+)
+from epicurus_core_app.maintenance_routes import create_maintenance_router
 from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
@@ -273,6 +279,22 @@ def create_app() -> FastAPI:
         s3_access_key=settings.files_s3_access_key,
         s3_secret_key=settings.files_s3_secret_key,
     )
+    # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
+    # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out
+    # (heavy, manual-only). The manual "run everything" trigger is always available; the nightly
+    # schedule is opt-in (MAINTENANCE_SCHEDULE_ENABLED) to avoid redundant work with the per-runner
+    # schedules. New job types register by being added to this list.
+    maintenance = MaintenanceOrchestrator(
+        [
+            extraction_drain_job(extraction_runner.drain_once),
+            module_reindex_job(registry.reembed),
+        ],
+        bus=bus,
+        default_tenant=settings.default_tenant_id,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        hour=settings.maintenance_hour,
+        schedule_enabled=settings.maintenance_schedule_enabled,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -332,6 +354,9 @@ def create_app() -> FastAPI:
                 await inbound_messaging.start()
             except Exception as exc:
                 log.error("inbound messaging consumer failed to start", error=str(exc))
+        # Coordinated maintenance batch on an opt-in nightly schedule (ADR-0060) — a no-op task when
+        # the schedule is disabled; the manual trigger stays available either way.
+        maintenance_task = asyncio.create_task(maintenance.run_periodic())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
@@ -341,12 +366,15 @@ def create_app() -> FastAPI:
             catalog_task.cancel()
             extraction_task.cancel()
             live_run_reaper.cancel()
+            maintenance_task.cancel()
             with suppress(asyncio.CancelledError):
                 await catalog_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
             with suppress(asyncio.CancelledError):
                 await live_run_reaper
+            with suppress(asyncio.CancelledError):
+                await maintenance_task
             # Let in-flight turns finish (and persist) before the engine closes under them (#376).
             await live_runs.drain()
             await bus.close()
@@ -364,6 +392,9 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(create_files_router(file_store, default_tenant=settings.default_tenant_id))
+    app.include_router(
+        create_maintenance_router(maintenance, default_tenant=settings.default_tenant_id)
+    )
     app.include_router(
         create_llm_router(
             gateway,

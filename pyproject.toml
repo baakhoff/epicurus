@@ -28,6 +28,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
     "aiosqlite>=0.20",
     "httpx>=0.27",
     "testcontainers[minio]>=4.14.2",
@@ -72,6 +73,15 @@ testpaths = ["libs", "services", "tests"]
 # importlib mode: modules across services can share a test filename (e.g. several
 # test_service.py) without colliding — no tests/__init__.py needed or wanted.
 addopts = "-q --import-mode=importlib"
+# Per-test deadline: a deadlocked async test (e.g. an await inside `except
+# CancelledError`, or a task cancelled before its first step — see AGENTS.md)
+# fails with a dumped stack instead of hanging the gate. Healthy tests run in
+# well under a second, so 60s only ever trips a genuine hang. `thread` is the
+# only portable method (signal/SIGALRM is POSIX-only; dev runs on Windows).
+# Integration tests boot testcontainers — a cold image pull can exceed this — so
+# conftest.py lifts their budget (they carry no per-test `@timeout` of their own).
+timeout = 60
+timeout_method = "thread"
 markers = [
     "integration: requires Docker (spins ephemeral containers via testcontainers)",
 ]

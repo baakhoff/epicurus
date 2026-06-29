@@ -325,6 +325,11 @@ export const ActiveRun = z.object({
 });
 export type ActiveRun = z.infer<typeof ActiveRun>;
 
+/** Session ids with an in-flight turn, from GET /agent/active-runs — the conversations-list
+ *  running indicator (#396). */
+export const ActiveSessions = z.object({ session_ids: z.array(z.string()).default([]) });
+export type ActiveSessions = z.infer<typeof ActiveSessions>;
+
 export const PullProgress = z.object({
   status: z.string().default(""),
   total: z.number().nullish(),

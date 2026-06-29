@@ -221,6 +221,23 @@ class LiveRunRegistry:
         run = self._runs.get(run_id)
         return run if run is not None and not run.terminal else None
 
+    def active_sessions(self, *, tenant: str) -> list[str]:
+        """Session ids with a live (non-terminal) run right now, for the conversations-list
+        running indicator (#396).
+
+        Tenant-scoped (constraint #1) and limited to *sessioned* runs (anonymous turns have no
+        row to surface). Pure dict reads — safe without awaiting the lock (no interleave on one
+        event loop). Point-in-time and best-effort: the buffer is a disposable cache
+        (constraint #2), so a multi-instance deployment only sees this instance's runs.
+        """
+        return [
+            session_id
+            for (run_tenant, session_id), run_id in self._by_session.items()
+            if run_tenant == tenant
+            and (run := self._runs.get(run_id)) is not None
+            and not run.terminal
+        ]
+
     async def cancel(self, run: LiveRun) -> None:
         """Cancel a run's driver task — for an explicit user ``stop`` (#376).
 

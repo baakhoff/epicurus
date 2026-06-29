@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   AccountsView,
   ActiveRun,
+  ActiveSessions,
   AttachmentUploaded,
   CatalogResponse,
   type CollectionPrefs,
@@ -206,6 +207,9 @@ export const api = {
       `/platform/v1/agent/sessions/${encodeURIComponent(id)}/active-run`,
       { method: "DELETE" },
     ),
+  // Which sessions have an in-flight turn right now — the conversations-list running indicator
+  // (#396). One request for the whole list rather than polling each row's active-run.
+  activeRuns: () => request(ActiveSessions, "/platform/v1/agent/active-runs"),
   deleteSession: (id: string) =>
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",

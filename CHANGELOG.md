@@ -14,6 +14,13 @@ images to GHCR.
 
 ### Added
 
+- **Tasks: drag a card between columns to move it** (#380) — the board could only move a task
+  via the move picker / Edit form. Cards are now **draggable**: dropping one on another column
+  moves the task, reusing the card's **existing** move action (`tasks_update` with `to_list_id`,
+  #257), so the backend contract is unchanged. It applies where a column maps to a list (grouped
+  by **list**) — the dragged card's move choices are matched to the drop column by title; dropping
+  on a due/status/priority column is a no-op (the move can't change those dimensions). The
+  action/Edit path stays as the accessible, pointer-free fallback. `web` 0.56.0→0.57.0.
 - **Calendar: choose which calendars are shown, and the month paints instantly** (#378, #379) —
   the calendar view gave no way to hide a busy calendar, and reopening it refetched before
   showing anything. Each event the module returns is now **tagged with its calendar**

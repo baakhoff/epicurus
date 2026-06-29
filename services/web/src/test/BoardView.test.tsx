@@ -226,4 +226,84 @@ describe("BoardView", () => {
     );
     expect(group.value).toBe("status"); // optimistically reflected while refetching
   });
+
+  // ── drag-and-drop move (#380) ──────────────────────────────────────────────
+
+  // A list-grouped board: two list columns, the card's Edit action carries the `to_list_id`
+  // picker (the move action), so dragging a card to another column moves it to that list.
+  const LIST_BOARD = {
+    title: "Tasks",
+    columns: [
+      {
+        id: "work",
+        title: "Work",
+        cards: [
+          {
+            id: "t1",
+            title: "Buy milk",
+            actions: [
+              { tool: "tasks_complete", label: "Complete", args: { task_id: "t1", list_id: "L-work" } },
+              {
+                tool: "tasks_update",
+                label: "Edit",
+                form: true,
+                fields: ["title", "to_list_id"],
+                args: { task_id: "t1", list_id: "L-work" },
+                form_values: { title: "Buy milk" },
+                field_choices: {
+                  to_list_id: [
+                    { value: "L-work", label: "Work" },
+                    { value: "L-personal", label: "Personal" },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+      { id: "personal", title: "Personal", cards: [] },
+    ],
+    actions: [],
+  };
+
+  const dataTransfer = () => ({ setData: vi.fn(), getData: vi.fn(), effectAllowed: "", dropEffect: "" });
+
+  it("moves a task to another list by drag-and-drop, reusing the move action (#380)", async () => {
+    mockModulePage.mockResolvedValue(LIST_BOARD);
+    mockInvoke.mockResolvedValue({ result: "{}" });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const cardEl = (await screen.findByText("Buy milk")).closest('[draggable="true"]');
+    expect(cardEl).not.toBeNull();
+    const personalCol = screen.getByText("Personal").closest("section")!;
+
+    const dt = dataTransfer();
+    fireEvent.dragStart(cardEl as Element, { dataTransfer: dt });
+    fireEvent.dragOver(personalCol, { dataTransfer: dt });
+    fireEvent.drop(personalCol, { dataTransfer: dt });
+
+    // The drop reuses the existing move tool with the target list's id — no new contract.
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("tasks", "tasks_update", {
+        task_id: "t1",
+        list_id: "L-work",
+        to_list_id: "L-personal",
+      }),
+    );
+  });
+
+  it("does nothing when a card is dropped back on its own column (#380)", async () => {
+    mockModulePage.mockResolvedValue(LIST_BOARD);
+    mockInvoke.mockResolvedValue({ result: "{}" });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const cardEl = (await screen.findByText("Buy milk")).closest('[draggable="true"]')!;
+    const workCol = screen.getByText("Work").closest("section")!;
+
+    const dt = dataTransfer();
+    fireEvent.dragStart(cardEl, { dataTransfer: dt });
+    fireEvent.drop(workCol, { dataTransfer: dt });
+
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
 });

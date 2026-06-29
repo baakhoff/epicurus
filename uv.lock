@@ -809,7 +809,7 @@ requires-dist = [
     { name = "epicurus-core", editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.138.2" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
@@ -879,7 +879,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.50" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "tzdata", specifier = ">=2024.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
@@ -923,7 +923,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.138.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "watchfiles", specifier = ">=0.21" },
 ]
@@ -985,7 +985,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.138.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
@@ -1009,7 +1009,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "epicurus-core", editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.138.2" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "watchfiles", specifier = ">=0.21" },
 ]
@@ -1033,7 +1033,7 @@ requires-dist = [
     { name = "epicurus-core", editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.138.2" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 

@@ -30,6 +30,20 @@ vi.mock("@/components/Markdown", () => ({
   Markdown: ({ children }: { children: string }) => <div data-testid="preview">{children}</div>,
 }));
 
+// The editable Preview (#377) is the heavy Milkdown WYSIWYG — stub it so this stays a focused
+// unit test (no ProseMirror in jsdom). The stub mirrors the contract: it shows `value` and
+// reports edits via `onChange`, so the buffer/save wiring can be exercised.
+vi.mock("@/components/archetypes/WysiwygEditor", () => ({
+  default: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
+    <textarea
+      data-testid="wysiwyg"
+      aria-label="wysiwyg editor"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  ),
+}));
+
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return (
@@ -60,8 +74,8 @@ describe("EditorView", () => {
 
     fireEvent.click(await screen.findByText("a"));
 
-    // A document opens rendered (ADR-0042) — the preview shows, the raw source does not.
-    expect(await screen.findByTestId("preview")).toHaveTextContent("# Hello");
+    // A document opens rendered & editable (ADR-0042, #377) — the WYSIWYG shows, raw does not.
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Hello");
     expect(screen.queryByLabelText("Edit a.md")).toBeNull();
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
 
@@ -69,6 +83,25 @@ describe("EditorView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const textarea = (await screen.findByLabelText("Edit a.md")) as HTMLTextAreaElement;
     expect(textarea.value).toBe("# Hello");
+  });
+
+  it("edits the WYSIWYG preview and saves the markdown through the core (#377)", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "# Hello" });
+    mockSave.mockResolvedValue({ path: "a.md", indexed: true, chunk_count: 1 });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    // Opens editable in the WYSIWYG — not the read-only renderer.
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# Hello");
+    // Unchanged → Save disabled; editing in the WYSIWYG marks dirty and saves the markdown.
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.change(wys, { target: { value: "# Hello world" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("notes", "notes", "a.md", "# Hello world"),
+    );
   });
 
   it("saves edited content through the core proxy", async () => {
@@ -190,15 +223,15 @@ describe("EditorView", () => {
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
 
     fireEvent.click(await screen.findByText("a"));
-    // Default is the rendered preview.
-    expect(await screen.findByTestId("preview")).toHaveTextContent("# Hi");
+    // Default is the editable rendered preview (WYSIWYG, #377).
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Hi");
 
     // Edit → raw source; type; Preview reflects the new draft.
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const textarea = await screen.findByLabelText("Edit a.md");
     fireEvent.change(textarea, { target: { value: "# Bye" } });
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByTestId("preview")).toHaveTextContent("# Bye");
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Bye");
   });
 
   it("shows an empty-vault hint when there are no documents", async () => {
@@ -275,7 +308,7 @@ describe("EditorView", () => {
       </QueryClientProvider>,
     );
     // Opens the document rendered, with no click — the deep link selected it.
-    expect(await screen.findByTestId("preview")).toHaveTextContent("# Deep");
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Deep");
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
   });
 
@@ -321,7 +354,7 @@ describe("EditorView", () => {
     mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "x" });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     fireEvent.click(await screen.findByText("a"));
-    await screen.findByTestId("preview");
+    await screen.findByTestId("wysiwyg");
     expect(screen.queryByRole("button", { name: "Version history" })).toBeNull();
   });
 });

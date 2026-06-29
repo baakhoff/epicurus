@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Notes & knowledge: the rendered Preview is now editable (WYSIWYG)** (#377) — the `editor`
+  archetype opens render-first, but its Preview was read-only, so editing meant toggling to the
+  raw markdown source. Preview is now a **WYSIWYG surface** (Milkdown's Crepe — ProseMirror +
+  remark) you type into directly, with **markdown kept authoritative**: edits serialize back to
+  the same buffer, so the existing idle/leave auto-save and version history (ADR-0042 / ADR-0046)
+  work unchanged. The Edit toggle still drops to the raw source; a **read-only** vault (a watched
+  Obsidian mount or the bundled reference docs) still renders without editing. The editor is
+  **lazy-loaded** so it never enters the main bundle. Adds the `@milkdown/crepe` dependency.
+  `web` 0.56.0→0.57.0.
+
 - **Chat survives a hard refresh and PWA backgrounding** (#376, ADR-0055) — an agent turn used to
   run *inline* in the SSE request, so a dropped connection (a phone backgrounding the PWA, a hard
   refresh, a network blip) aborted it before the answer was persisted: the reply was lost and the

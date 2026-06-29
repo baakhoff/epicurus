@@ -109,9 +109,11 @@ controls** (ADR-0049) — labeled selectors (e.g. group-by, filters) the shell r
 toolbar; changing one re-fetches the page with a `?<id>=<value>` query param, so grouping and
 filtering stay module-side while the shell stays a bounded renderer.
 
-The `editor` archetype (knowledge, notes) opens a document **rendered** — its markdown
-shows immediately, and an Edit/Preview toggle drops to the raw source when you want to
-write (ADR-0042). Because notes/knowledge **re-embed on every save**, the editor does not
+The `editor` archetype (knowledge, notes) opens a document **rendered and editable** — its
+markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —
+ProseMirror + remark — lazy-loaded so it never enters the main bundle, #377), and an Edit/Preview
+toggle drops to the **raw markdown source** when you prefer it (ADR-0042). Both views write back
+to the same markdown buffer, so the save/version flow below is unchanged. Because notes/knowledge **re-embed on every save**, the editor does not
 save on each keystroke: a save fires only when you **leave** (switch document, go back, or
 the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
 or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →

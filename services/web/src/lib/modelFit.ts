@@ -18,6 +18,20 @@ export interface ModelFit {
   tone: "ok" | "warn" | "danger" | "dim";
 }
 
+/**
+ * The three coarse buckets the catalog's fit filter offers (#388): "ok" (fits), "warn" (tight /
+ * offloads / heavy for CPU), and "danger" (too big). These are exactly a verdict's `tone` minus
+ * the `dim` (unknown) case, so the filter reuses the rating already computed for the badge rather
+ * than introducing a second mapping that could drift.
+ */
+export type FitFilter = "ok" | "warn" | "danger";
+
+/** A verdict's fit bucket, or `null` when it can't be judged (`dim`) — an unjudgeable model
+ *  matches no fit filter. */
+export function fitFilterOf(fit: ModelFit): FitFilter | null {
+  return fit.tone === "dim" ? null : fit.tone;
+}
+
 const GB = 1024; // MB per GB
 
 /**

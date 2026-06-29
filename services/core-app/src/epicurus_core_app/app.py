@@ -128,8 +128,8 @@ def create_app() -> FastAPI:
         max_models=settings.llm_catalog_max_models,
         enabled=settings.llm_catalog_enabled,
     )
-    # On-demand quant-variant lookup against the OCI registry (#330).
-    variant_lookup = VariantLookup(registry_url=settings.llm_registry_url)
+    # On-demand quant-variant lookup from each model's public library tags page (#330).
+    variant_lookup = VariantLookup(library_url=settings.llm_catalog_url)
 
     async def embed(texts: list[str]) -> list[list[float]]:
         # No explicit model → the gateway resolves the operator's Embedding-model pref

@@ -109,10 +109,23 @@ body,
    otherwise inflates the root's own scrollable height in Chromium, and a wheel
    over the static side rail then drags the entire interface to the top. Plain
    overflow:hidden does NOT collapse that phantom height; removing the root from
-   flow does (#273 recurred — the shell's own overflow-hidden sat below the leak). */
+   flow does (#273 recurred — the shell's own overflow-hidden sat below the leak).
+
+   Height is the *dynamic* viewport (100dvh), top-anchored — deliberately not
+   `inset: 0`. `inset: 0` sizes the fixed root to the *large* (address-bar-hidden)
+   viewport, while the shell sizes its regions to the live viewport; on a phone the
+   two disagree while the address bar is showing — i.e. right after a refresh — and
+   the bottom tab bar, anchored to the bottom of this overflow-hidden box, gets
+   clipped out of view until you scroll and the bar retracts. Anchoring at top:0 with
+   a dvh height keeps the root exactly the visible viewport, so nothing below the fold
+   is ever hidden. (100vh is the fallback for the rare engine without dvh.) */
 #root {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 

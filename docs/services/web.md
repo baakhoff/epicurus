@@ -30,6 +30,24 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 The **power orb** in the header (every screen) pauses/resumes and visually cools the whole
 UI when paused (ADR-0005).
 
+### App shell & viewport (mobile chrome)
+
+The shell (`src/App.tsx`) is a **fixed-viewport** layout: `#root` is taken out of flow
+(`position: fixed`, `overflow: hidden`) so the document body never scrolls — every region
+owns its own scroll, and a wheel over the static side rail can't drag the whole interface
+(#273). On **wide screens** a left **side rail** carries the nav and the power orb; on a
+**phone** that collapses to a **top bar** (wordmark + power orb) and a **bottom tab bar**
+(the primary nav). The main column stacks header · routed screen · bottom tab bar, alongside
+the right panel and the download tray.
+
+`#root` is sized to the **dynamic viewport** (`height: 100dvh`, anchored at `top: 0`) and the
+shell fills it with `h-full` — one viewport measurement, shared. This is deliberate: pinning
+the fixed root to the *large* viewport (`inset: 0`) while the shell independently measured the
+*dynamic* viewport (`h-dvh`) let the two disagree on a phone while the address bar is showing —
+i.e. right after a **refresh** — so the bottom tab bar, anchored to the bottom of the
+`overflow-hidden` shell, was clipped out of view until you scrolled and the bar retracted.
+Notch / home-indicator insets are handled with `pt-safe` / `pb-safe` (`env(safe-area-inset-*)`).
+
 ### Models — per-model rows (#328)
 
 Each local model is an **inline disclosure**, not a row of hover-only icons behind a

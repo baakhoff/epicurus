@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Coroutine
 from typing import Any, Protocol
 
@@ -47,7 +48,20 @@ _TOOL_DETAIL_CAP = 500
 # How long recall (a single embedding round-trip) may take before the turn proceeds without it.
 # Recall is the one memory step still on the response path; a cold or busy embedder must never
 # delay the first token (ADR-0051). The best-effort assemble already degrades to no recall.
-_DEFAULT_RECALL_TIMEOUT_S = 2.0
+# 4s (was 2s): on a single GPU the recall embed often forces an Ollama model swap (chat model
+# out, embed model in) that 2s could not outlast, so recall was skipped on nearly every turn.
+# Operators who keep the embed model warm can lower this; slower hardware can raise it.
+_DEFAULT_RECALL_TIMEOUT_S = 4.0
+
+# A reasoning model (qwen3, deepseek-r1, …) sometimes emits its <think> block and then stops —
+# no answer text and no tool call. The loop would end the turn with empty content, which renders
+# as a silent "stop" (an activity trace with no answer bubble). Nudge it once to commit to an
+# answer, then continue the loop (bounded by max_steps); if it still says nothing, fall back to a
+# clear message rather than persisting an empty turn.
+_ANSWER_NUDGE = "Please continue and give your final answer to my last message."
+_EMPTY_ANSWER_FALLBACK = (
+    "I wasn't able to produce an answer that time — please try again or rephrase your request."
+)
 
 
 def _tool_detail(arguments: dict[str, Any]) -> str | None:
@@ -271,6 +285,8 @@ class Agent:
         tools_used: list[str] = []
         refs = _RefCollector()
         stopped = "completed"
+        reasoned = False  # the model emitted <think> reasoning at least once this turn
+        nudged = False  # we already nudged a blank step to commit to an answer (do it once)
         try:
             specs, route = await self._mcp.discover()
             # Offer tools only to a model that can use them; otherwise the runtime errors and
@@ -279,6 +295,7 @@ class Agent:
             offer = specs if can_use_tools else None
             for _ in range(max_steps):
                 result: ChatResult | None = None
+                answer_before = len(parts)
                 async for event in self._gateway.stream_chat(
                     convo, model=model, tools=offer, tenant_id=tenant_id
                 ):
@@ -286,12 +303,23 @@ class Agent:
                         parts.append(event.delta)
                         yield AgentEvent(type="delta", text=event.delta)
                     if event.reasoning:
+                        reasoned = True
                         append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
                     if event.result is not None:
                         result = event.result
                 if result is None or not result.tool_calls:
-                    break
+                    # The model answered (text streamed) or it produced nothing. If nothing — a
+                    # reasoning model that thought but never answered — nudge it once and retry,
+                    # rather than ending the turn empty (which renders as the silent "stop").
+                    if len(parts) > answer_before or nudged:
+                        break
+                    nudged = True
+                    convo.append(
+                        ChatMessage(role="assistant", content=result.content if result else "")
+                    )
+                    convo.append(ChatMessage(role="user", content=_ANSWER_NUDGE))
+                    continue
                 convo.append(
                     ChatMessage(
                         role="assistant", content=result.content, tool_calls=result.tool_calls
@@ -365,14 +393,29 @@ class Agent:
                         parts.append(event.delta)
                         yield AgentEvent(type="delta", text=event.delta)
                     if event.reasoning:
+                        reasoned = True
                         append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
         except Exception as exc:  # the response already started — finish with an error event
             log.warning("streaming turn failed", error=str(exc))
             yield AgentEvent(type="error", detail=str(exc))
             return
+        content = "".join(parts)
+        if not content.strip():
+            # No tool calls and no answer text, even after a nudge — never persist or stream an
+            # empty turn (it renders as a silent stop). Surface a clear fallback, and log why so
+            # the operator can see it was e.g. a reasoning model that thought but never answered.
+            log.warning(
+                "turn produced no answer; using fallback",
+                model=model,
+                stopped=stopped,
+                reasoned=reasoned,
+                nudged=nudged,
+            )
+            content = _EMPTY_ANSWER_FALLBACK
+            yield AgentEvent(type="delta", text=content)
         turn = AgentTurn(
-            content="".join(parts),
+            content=content,
             tools_used=tools_used,
             stopped=stopped,
             entity_refs=refs.refs,
@@ -396,9 +439,10 @@ class Agent:
         (``defer_extraction=False``): fire the extractor now as a background task (the legacy
         ADR-0045 path). Either way it is fire-and-forget so it never delays the reply, and the
         task is tracked until it finishes so it isn't garbage-collected mid-flight. Skips when
-        there is nothing to learn from (no user text / no answer) or no sink is configured.
+        there is nothing to learn from — no user text, no answer, or only the empty-answer
+        fallback (a canned non-answer) — or when no sink is configured.
         """
-        if not answer:
+        if not answer or answer == _EMPTY_ANSWER_FALLBACK:
             return
         user_text = next(
             (m.content for m in reversed(messages) if m.role == "user" and m.content), None
@@ -500,12 +544,28 @@ class Agent:
         """
         if self._memory is None:
             return []
+        start = time.monotonic()
         try:
             return await asyncio.wait_for(
                 self._memory.recall(tenant=tenant, query=query), self._recall_timeout_s
             )
-        except Exception as exc:  # timeout or backend trouble — degrade to no recall, never block
-            log.warning("recall skipped (slow or failed)", error=str(exc))
+        except TimeoutError:
+            # The embed didn't finish in the budget — usually a cold or busy embedder (on a
+            # single GPU, an Ollama model swap). Degrade to no recall; name the budget so the
+            # operator can see it timed out (vs. failed) and tune MEMORY_RECALL_TIMEOUT_S.
+            log.warning(
+                "recall skipped: embed timed out",
+                timeout_s=self._recall_timeout_s,
+                elapsed_s=round(time.monotonic() - start, 2),
+            )
+            return []
+        except Exception as exc:  # embedder/Qdrant trouble — degrade to no recall, never block
+            log.warning(
+                "recall skipped: backend error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                elapsed_s=round(time.monotonic() - start, 2),
+            )
             return []
 
     async def _assemble(
@@ -588,18 +648,26 @@ class Agent:
         def activity() -> MessageActivity:
             return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
 
+        reasoned = False  # the model emitted <think> reasoning at least once this turn
+        nudged = False  # we already nudged a blank step to commit to an answer (do it once)
+        content = ""
+        stopped = "completed"
         for _ in range(max_steps):
             result = await self._gateway.chat(convo, model=model, tools=offer, tenant_id=tenant_id)
             if result.reasoning:
+                reasoned = True
                 append_thinking(timeline, result.reasoning)
             if not result.tool_calls:
-                return AgentTurn(
-                    content=result.content,
-                    tools_used=tools_used,
-                    stopped="completed",
-                    entity_refs=refs.refs,
-                    activity=activity(),
-                )
+                # The model answered, or (a reasoning model) thought but produced nothing. If it
+                # said nothing, nudge it once to commit to an answer rather than ending empty —
+                # the same silent "stop" the streamed path guards against.
+                if result.content.strip() or nudged:
+                    content = result.content
+                    break
+                nudged = True
+                convo.append(ChatMessage(role="assistant", content=result.content))
+                convo.append(ChatMessage(role="user", content=_ANSWER_NUDGE))
+                continue
             convo.append(
                 ChatMessage(role="assistant", content=result.content, tool_calls=result.tool_calls)
             )
@@ -614,13 +682,26 @@ class Agent:
                 convo.append(
                     ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                 )
-        final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
-        if final.reasoning:
-            append_thinking(timeline, final.reasoning)
+        else:
+            final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
+            if final.reasoning:
+                reasoned = True
+                append_thinking(timeline, final.reasoning)
+            content = final.content
+            stopped = "max_steps"
+        if not content.strip():
+            log.warning(
+                "turn produced no answer; using fallback",
+                model=model,
+                stopped=stopped,
+                reasoned=reasoned,
+                nudged=nudged,
+            )
+            content = _EMPTY_ANSWER_FALLBACK
         return AgentTurn(
-            content=final.content,
+            content=content,
             tools_used=tools_used,
-            stopped="max_steps",
+            stopped=stopped,
             entity_refs=refs.refs,
             activity=activity(),
         )

@@ -24,7 +24,7 @@ images to GHCR.
   (`visibilitychange`/`online`); if it finished while away, the now-durable transcript shows it.
   New: `GET /platform/v1/agent/runs/{id}/stream` (re-attach, with `after_seq`/`Last-Event-ID`),
   `GET`+`DELETE /platform/v1/agent/sessions/{id}/active-run` (rediscover / Stop), an `id:` seq on
-  each chat SSE frame, and `LIVE_RUN_GRACE_SECONDS`. core-app 0.42.0→0.43.0, web 0.55.0→0.56.0.
+  each chat SSE frame, and `LIVE_RUN_GRACE_SECONDS`. core-app 0.43.0→0.44.0, web 0.55.1→0.56.0.
 - **One Suggestions inbox for every module's agent-proposed changes** — agent edits are staged
   for review (knowledge's vault, notes' notebook, and any module that adopts the `review`
   archetype), but each module surfaced its own queue as a separate left-nav page (knowledge's

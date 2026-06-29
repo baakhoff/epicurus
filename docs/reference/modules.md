@@ -307,6 +307,12 @@ Proxied at:
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `POST /platform/v1/modules/{name}/pages/{id}/move`
 
+> **`…/move` is the one shared mutation.** It accepts an `editor` **or** a `browser` page — the
+> storage Files browser renames/relocates its writable entries through this exact
+> `{from_path, to_path}` → `{path}` contract (#391, ADR-0059). Every other endpoint above is
+> editor-only. The receiving module enforces what is actually movable (storage allows only its
+> writable object entries, returning **400** for a read-only scanned file).
+
 Scope (knowledge-base) management — gated on `can_create_scope` — adds
 `POST /pages/{id}/project?name=<name>` (create a top-level scope → `{id, title, kind}`) and
 `DELETE /pages/{id}/project?name=<name>` (delete the scope's folder **and de-index its

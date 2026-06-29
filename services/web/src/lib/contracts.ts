@@ -504,6 +504,12 @@ export const BrowserItem = z.object({
   nav_path: z.string().nullish(),
   /** Absolute download URL proxied through the core (files only). */
   href: z.string().nullish(),
+  /**
+   * When true the shell offers rename/move on this entry (#391). Storage sets it for its
+   * writable object entries; the read-only scanned tree leaves it false/absent. The move
+   * itself goes through the shared `/pages/{pageId}/move` contract.
+   */
+  movable: z.boolean().nullish(),
 });
 export type BrowserItem = z.infer<typeof BrowserItem>;
 

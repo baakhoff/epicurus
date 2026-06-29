@@ -24,7 +24,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { Badge, EmptyState, Spinner, cn } from "@/components/ui";
+import { Badge, EmptyState, Select, Spinner, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import {
   BoardData,
@@ -70,17 +70,18 @@ function ControlSelect({
   return (
     <label className="flex items-center gap-1.5 text-xs text-ink-faint">
       <span className="whitespace-nowrap">{control.label}</span>
-      <select
+      <Select
+        size="sm"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-(--radius-field) border border-edge bg-surface px-2 py-1 text-xs text-ink outline-none transition-colors hover:border-edge-strong focus:border-accent"
+        className="transition-colors hover:border-edge-strong"
       >
         {control.options.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }

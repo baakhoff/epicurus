@@ -285,3 +285,18 @@ class PlatformClient:
             resp = await http.post("/platform/v1/files/dir", params=self._files_params(path))
             resp.raise_for_status()
             return FileEntry.model_validate(resp.json())
+
+    async def files_move(self, src: str, dst: str) -> FileEntry:
+        """Move or rename *src* to *dst* in the tenant file space; returns the moved entry.
+
+        Renaming is the same-parent case of moving. Raises ``httpx.HTTPStatusError``: 404
+        (source missing), 409 (destination occupied), 400 (tenant-root or into-itself).
+        """
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.post(
+                "/platform/v1/files/move",
+                params={"tenant_id": self._tenant_id},
+                json={"src": src, "dst": dst},
+            )
+            resp.raise_for_status()
+            return FileEntry.model_validate(resp.json())

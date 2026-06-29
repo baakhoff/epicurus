@@ -10,6 +10,7 @@ from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import (
@@ -30,6 +31,7 @@ from epicurus_storage.service import (
     ingest_object,
     load_object_download,
     load_text_file,
+    move_item,
 )
 from epicurus_storage.settings import READ_MAX_BYTES, StorageSettings
 from epicurus_storage.watcher import FilesWatcher
@@ -46,6 +48,13 @@ def _service_version() -> str:
         return pkg_version("epicurus-storage")
     except PackageNotFoundError:
         return "0.0.0"
+
+
+class MoveBody(BaseModel):
+    """Request body for ``POST /pages/{page_id}/move`` (shared move contract, #391)."""
+
+    from_path: str
+    to_path: str
 
 
 def create_app() -> FastAPI:
@@ -259,6 +268,24 @@ def create_app() -> FastAPI:
             entries = await index.browse(tenant=_tenant, path=path)
 
         return build_page_data(entries, path=path, query=q.strip(), download_base=_download_base)
+
+    @app.post("/pages/{page_id}/move")
+    async def move_page(page_id: str, body: MoveBody) -> dict[str, str]:
+        """Move/rename a writable Files entry (#381 / #391); the core proxies this.
+
+        Mirrors the knowledge/notes editor move contract (``{from_path, to_path}`` →
+        ``{path}``) so the shell drives all three the same way. Only object-store entries are
+        movable — a read-only scanned file returns 400.
+        """
+        if page_id != STORAGE_PAGE_ID:
+            raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+        return await move_item(
+            index=index,
+            objects=objects,
+            tenant=_tenant,
+            from_path=body.from_path,
+            to_path=body.to_path,
+        )
 
     return app
 

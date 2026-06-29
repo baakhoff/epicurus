@@ -46,6 +46,13 @@ class FileDeleteResponse(BaseModel):
     deleted: bool
 
 
+class FileMoveBody(BaseModel):
+    """Request body for ``POST /platform/v1/files/move`` — rename is a same-parent move."""
+
+    src: str
+    dst: str
+
+
 def create_files_router(store: FileStore, *, default_tenant: str = "local") -> APIRouter:
     """Build the ``/platform/v1/files`` router over a :class:`FileStore`."""
     router = APIRouter(prefix="/platform/v1/files", tags=["files"])
@@ -137,5 +144,22 @@ def create_files_router(store: FileStore, *, default_tenant: str = "local") -> A
         tenant = _tenant(tenant_id)
         _safe(path)
         return await store.ensure_dir(tenant=tenant, path=path)
+
+    @router.post("/move", response_model=FileEntry)
+    async def move_file(
+        body: FileMoveBody,
+        tenant_id: str | None = Query(default=None),
+    ) -> FileEntry:
+        tenant = _tenant(tenant_id)
+        _safe(body.src)
+        _safe(body.dst)
+        try:
+            return await store.move(tenant=tenant, src=body.src, dst=body.dst)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="source not found") from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail="destination already exists") from exc
+        except ValueError as exc:  # tenant root, or a move into the path itself
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

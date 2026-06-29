@@ -21,6 +21,7 @@ def test_app_exposes_ops_mcp_and_download_routes() -> None:
     assert "/ingest" in paths
     assert "/download" in paths
     assert "/pages/{page_id}" in paths
+    assert "/pages/{page_id}/move" in paths  # rename/move (#381 / #391)
     assert any(p.startswith("/mcp") for p in paths)
 
 

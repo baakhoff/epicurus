@@ -9,7 +9,7 @@ import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
 import { Fragment, createElement, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
-import { Badge, Button, Card, Confirm, Dot, Spinner, Switch, TextInput, cn } from "@/components/ui";
+import { Badge, Button, Card, Confirm, Dot, Select, Spinner, Switch, TextInput, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import type {
@@ -176,8 +176,8 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
             {slot.description && (
               <span className="block text-xs text-ink-dim">{slot.description}</span>
             )}
-            <select
-              className="mt-1 w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+            <Select
+              className="mt-1 w-full"
               value={current[slot.key] ?? ""}
               disabled={save.isPending || selections.isLoading}
               onChange={(e) => save.mutate({ ...current, [slot.key]: e.target.value })}
@@ -188,7 +188,7 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
                   {m.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
         ))}
       </div>

@@ -10,6 +10,7 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
   type Ref,
+  type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
 import { Loader2, X } from "lucide-react";
@@ -121,8 +122,57 @@ const fieldBase =
   "box-border w-full min-w-0 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink " +
   "placeholder:text-ink-faint focus:border-accent focus:outline-none";
 
-export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...props} className={cn(fieldBase, props.className)} />;
+export function TextInput({
+  ref,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
+  return <input ref={ref} {...props} className={cn(fieldBase, props.className)} />;
+}
+
+/** A numeric `TextInput` — the same themed field with `type="number"` and a numeric keypad
+ *  on mobile. Callers may still pass `min`/`max`/`step` and a width override (e.g. `w-24`). */
+export function NumberInput({
+  ref,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
+  return <TextInput ref={ref} inputMode="numeric" {...props} type="number" />;
+}
+
+const selectBase =
+  // No padding / font-size here — `size` supplies them, so a caller override never has to
+  // fight two competing padding utilities under our plain `cn` (no tailwind-merge). `min-w-0`
+  // mirrors the text field so a select can shrink inside a narrow mobile sheet (#335); width
+  // is opt-in (`className="w-full"`) since some selects sit inline next to a label.
+  "box-border min-w-0 rounded-(--radius-field) border border-edge bg-surface-2 text-ink " +
+  "focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60";
+
+/** The one styled `<select>` — every dropdown routes through this so none falls back to the
+ *  browser-default (white-bordered) control. `size="sm"` is the compact inline variant used
+ *  for view-controls and filters; `md` (default) matches `TextInput`'s height for forms. */
+export function Select({
+  size = "md",
+  className,
+  children,
+  ref,
+  ...rest
+}: // `size` shadows the native numeric `<select size>` (visible-row count) we never use.
+Omit<SelectHTMLAttributes<HTMLSelectElement>, "size"> & {
+  size?: "sm" | "md";
+  ref?: Ref<HTMLSelectElement>;
+}) {
+  return (
+    <select
+      ref={ref}
+      {...rest}
+      className={cn(
+        selectBase,
+        size === "sm" ? "px-2.5 py-1.5 text-xs" : "px-3 py-2 text-sm",
+        className,
+      )}
+    >
+      {children}
+    </select>
+  );
 }
 
 export function TextArea({

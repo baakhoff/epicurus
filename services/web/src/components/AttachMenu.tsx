@@ -60,6 +60,7 @@ function FileSection({ onAttach }: { onAttach: (a: Attachment) => void }) {
   return (
     <section>
       <SectionTitle>File</SectionTitle>
+      {/* eslint-disable-next-line no-restricted-syntax -- hidden native file picker, opened by the button below; not a styled field */}
       <input
         ref={inputRef}
         type="file"

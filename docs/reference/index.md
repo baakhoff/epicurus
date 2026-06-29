@@ -40,6 +40,7 @@ log.info("service starting", service=settings.service_name)
 | [`logging`](logging.md) | `configure_logging`, `get_logger` |
 | [`tenancy`](tenancy.md) | tenant validation, `scope_*` helpers, current-tenant context |
 | [`events`](events.md) | `EventBus`, `Event` (+ `Payload`, `EventHandler`, `Replier`) |
+| [`messaging`](messaging.md) | `InboundMessage`, `OutboundMessage`, `MessageAttachment`, `MESSAGING_INBOUND/OUTBOUND`, `session_id_for` — the chat-bridge inbox contract (ADR-0058) |
 | [`modules`](modules.md) | `EpicurusModule`, `ModuleManifest`, `ToolSpec`, `EventSpec`, `CONTRACT_VERSION` |
 | [`observability`](observability.md) | `add_ops_routes`, `create_ops_router`, `HealthResponse` |
 | [`secrets`](secrets.md) | `SecretStore`, `SecretError` |

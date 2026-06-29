@@ -63,10 +63,19 @@ class CoreAppSettings(CoreSettings):
         "http://calendar:8080,"
         "http://mail:8080,"
         "http://tasks:8080,"
-        "http://notes:8080"
+        "http://notes:8080,"
+        "http://messaging:8080"
     )
     # Max tool-calling rounds in one agent turn before it must answer.
     agent_max_steps: int = 4
+    # ── Inbound messaging / chat bridges (ADR-0058) ─────────────────────────────
+    # The core's inbound consumer subscribes ``<tenant>.messaging.inbound``, runs a headless
+    # turn per bridge message, and publishes the reply to ``messaging.outbound`` (the
+    # ``messaging`` module delivers it). Disable to run a build with no bridge path.
+    messaging_inbound_enabled: bool = True
+    # Optional dedicated model for bridge turns (e.g. a smaller/faster model for chat apps).
+    # Blank → the gateway resolves the operator's default chat model, same as the web.
+    messaging_model: str = ""
     # How long a turn paused by `ask_user` (ADR-0053) waits for an answer before its suspended
     # run is reaped (hours). If it expires the model can simply ask again on the next turn.
     ask_user_ttl_hours: int = 24

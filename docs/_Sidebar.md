@@ -19,6 +19,7 @@
 - [mail](services/mail.md)
 - [tasks](services/tasks.md)
 - [notes](services/notes.md)
+- [messaging](services/messaging.md)
 - [echo](services/echo.md)
 
 **API Reference**
@@ -28,6 +29,7 @@
 - [logging](reference/logging.md)
 - [tenancy](reference/tenancy.md)
 - [events](reference/events.md)
+- [messaging (inbox contract)](reference/messaging.md)
 - [secrets](reference/secrets.md)
 - [observability & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)

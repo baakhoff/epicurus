@@ -38,6 +38,7 @@ epicurus
 │  ├─ calendar    provider-neutral calendar (local + Google)
 │  ├─ mail        Gmail-backed mail (search · read · send)
 │  ├─ tasks       task management (Google Tasks + local store)
+│  ├─ messaging   chat bridges (external channels drive a turn; reply routes back)
 │  └─ echo        the contract-proof reference module
 ├─ data plane     Postgres · Valkey · NATS · Qdrant · OpenBao · MinIO
 └─ edge & ops     Traefik gateway · Grafana / Loki / Prometheus / Tempo · Ollama

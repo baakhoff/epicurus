@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Messaging foundation: chat bridges, inbound → turn → outbound** (#364) — the gating
+  foundation for Phase 4. A new **normalized inbox contract** in `epicurus-core`
+  (`InboundMessage` / `OutboundMessage` + the `messaging.inbound` / `messaging.outbound`
+  subjects + `session_id_for`), the **first inbound NATS consumer in core** — it runs a
+  **headless** agent turn per bridge message (keyed `session_id = "<bridge>:<channel>[:<thread>]"`,
+  reusing `Agent.run`, persisted like any turn) and routes the reply back out — and a new
+  provider-pluggable **`messaging` module** (host port 8093) that carries both ends via a
+  `BridgeProvider` seam (`start()` / `send()`), with a built-in **loopback** bridge so the path
+  works with no external account and per-tenant bot tokens read from OpenBao
+  (`messaging/<bridge>`). Memory/facts stay tenant-scoped → one brain across the web UI and
+  every bridge. Power-aware (paused → skip). The individual bridges (Telegram #365, Discord
+  #366, …) fan out after this as new providers. ADR-0058. `epicurus-core` 0.15.0→0.16.0,
+  `core-app` 0.46.0→0.47.0, new `messaging` 0.1.0.
 - **Tasks: drag a card between columns to move it** (#380) — the board could only move a task
   via the move picker / Edit form. Cards are now **draggable**: dropping one on another column
   moves the task, reusing the card's **existing** move action (`tasks_update` with `to_list_id`,

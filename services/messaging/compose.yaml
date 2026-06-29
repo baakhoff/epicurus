@@ -1,0 +1,49 @@
+# Messaging module — a per-module compose fragment (ADR-0006).
+# `task new-module` already wired this in (root compose `include:` + the core's
+# `module_urls` + a unique host port from docs/reference/ports.md). The CI
+# runtime-smoke gate boots the stack and fails if the module isn't discoverable.
+services:
+  messaging:
+    build:
+      context: ../..
+      dockerfile: services/messaging/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-messaging:${EPICURUS_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Per-tenant bridge bot tokens live in OpenBao (ADR-0058): a real bridge reads
+      # messaging/<bridge> via SecretStore. The loopback default uses no secret, so the
+      # module boots fine even with no token set.
+      OPENBAO_URL: http://openbao:8200
+      OPENBAO_TOKEN: ${OPENBAO_TOKEN}
+      # Active bridge provider (loopback default; telegram/discord/… fan out after #364).
+      MESSAGING_PROVIDER: ${MESSAGING_PROVIDER:-loopback}
+    # Loopback-bound by default; the gateway is the intended front door. Set
+    # BIND_ADDRESS to expose directly (the module<->core contract stays local).
+    # Host port is overridable via MESSAGING_PORT and registered in
+    # docs/reference/ports.md so two modules never collide.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MESSAGING_PORT:-8093}:8080"
+    depends_on:
+      nats:
+        condition: service_started
+      # SecretStore reads bridge tokens from OpenBao; wait for it to be unsealed + healthy.
+      openbao:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      # Routed by the edge gateway (ADR-0008). No effect if no gateway is running.
+      - traefik.enable=true
+      - traefik.http.routers.messaging.rule=Host(`messaging.localhost`)
+      - traefik.http.routers.messaging.entrypoints=web
+      - traefik.http.services.messaging.loadbalancer.server.port=8080
+      # Scraped by Prometheus via Docker service discovery.
+      - epicurus.metrics.port=8080
+    networks: [epicurus]

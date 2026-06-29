@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { Button, EmptyState, Spinner, Tooltip, cn } from "@/components/ui";
+import { Button, EmptyState, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
@@ -269,12 +269,12 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
             <form onSubmit={submitSearch} className="flex items-center gap-1 ml-auto">
               <div className="relative flex items-center">
                 <Search size={13} className="pointer-events-none absolute left-2 text-ink-faint" />
-                <input
+                <TextInput
                   ref={searchRef}
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   placeholder="Search…"
-                  className="h-7 rounded-(--radius-field) border border-edge bg-surface-1 pl-6 pr-7 text-xs text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="h-7 w-44 pl-6 pr-7 text-xs"
                 />
                 {(searchInput || activeQuery) && (
                   <button

@@ -42,6 +42,7 @@ import {
   Sheet,
   Spinner,
   TextArea,
+  TextInput,
   cn,
 } from "@/components/ui";
 import { activityTimeline } from "@/lib/activity";
@@ -387,11 +388,10 @@ function ModelPicker() {
                   setOpen(false);
                 }}
               >
-                <input
+                <TextInput
                   value={custom}
                   onChange={(e) => setCustom(e.target.value)}
                   placeholder={PROVIDER_MODEL_HINTS[hosted[0]?.alias] ?? "provider/model-id"}
-                  className="w-full rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
                 />
                 <Button type="submit" variant="outline">
                   Use

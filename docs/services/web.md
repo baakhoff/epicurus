@@ -23,7 +23,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | **Suggestions** | **One inbox** for every module's agent-proposed changes (`GET /platform/v1/suggestions`), grouped by module — each group carries that module's review on/off toggle and its pending changes, each opening the shared review window. Replaces the per-module `review`-archetype nav entries (see **Reviewing suggested changes** below). |
 | **Models** | **Catalog browser** — search and filter the model catalog by **multi-select** tags (General, Code, Multilingual, **Vision**, **Tools**, Embedding, Small — combined with **AND**, so a model must carry every checked tag; "All" clears them; #389), plus, once the system is known, a **fit-rating filter** (Fits / Tight / Too big — each model's estimated size judged against your hardware; #388); pull with live progress (a freshly pulled model is given a **recommended per-model context window** sized to itself, not the global default; #386). The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list: each row is a **tap-to-expand disclosure** ([per-model rows](#models--per-model-rows-328)) — collapsed it shows name + `loaded`/`default`/`hidden` badges + a **suitability status icon** (✓ fits / ⚠ tight / ✕ too big, full reason on hover; #327) + **icon-only capability badges** (tools/vision/…, label on hover; #384) + size; expanded it reveals the model's settings inline. **Global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence — with a **Re-embed everything** action (#332) that rebuilds every embedding-backed module's vectors after a model change (changing the model alone doesn't re-embed existing data); a server-wide **KV-cache type** with a **hardware-aware suggested** pick (q8_0 / q4_0 on tight VRAM, f16 when ample; #329); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
-| **Settings** | Theme (dark/light/system), default model. |
+| **Settings** | Theme (dark/light/system), **connected accounts** (OAuth client credentials + connect/disconnect), **timezone**, **agent cycles**, platform info, and memory. The connected-account row keeps its credential/disconnect actions **icon-only** (label via the shared `Tooltip` + `aria-label`) so it never overflows a phone (#393); every field uses the one themed field style (#394). |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
 | **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`, `doc-reader`) programmatically (ADR-0018). |
 
@@ -297,11 +297,19 @@ screens add an entry, not a restructure. Installable PWA; `/platform` is exclude
 service worker so streams always hit the network.
 
 The shared primitive kit is one file — `src/components/ui.tsx` (`Button`, `Badge`, `Card`,
-the text fields, `Switch`, `Sheet`, `Confirm`, `Tooltip`). `Tooltip` (#334) is a dependency-free
-hover/focus label for **icon-only** controls — the icon keeps its `aria-label` and the wordy
-label moves into the tip; used by the turn-activity summary, the board's compact "+" Add, and
-the Files up-nav. Text inputs carry `min-w-0` so native date/`datetime-local` pickers can't
-overflow a narrow mobile sheet (#335). `Switch` is the single on/off control used
+the text fields `TextInput` / `NumberInput` / `TextArea`, the styled `Select`, `Switch`,
+`Sheet`, `Confirm`, `Tooltip`). **Every form control routes through these**, so none falls
+back to the browser-default (white-bordered) control: `TextInput` / `NumberInput` / `Select`
+all carry the one themed look — an `--color-edge` border on `--color-surface-2`, with `min-w-0`
+so a native date/`datetime-local` picker or a select can't overflow a narrow mobile sheet
+(#335). An eslint `no-restricted-syntax` guard rejects a **bare `<input>` / `<select>`** outside
+`ui.tsx` (#394); a non-text input (range / file / checkbox) opts out with an `eslint-disable`
++ reason. `Select` takes `size="sm"` for compact inline filters / view-controls and `md`
+(default, matching the text-field height) for forms; its width is opt-in (`className="w-full"`).
+`Tooltip` (#334) is a dependency-free hover/focus label for **icon-only** controls — the icon
+keeps its `aria-label` and the wordy label moves into the tip; used by the turn-activity
+summary, the board's compact "+" Add, the Files up-nav, and the connected-account row's
+credential / disconnect actions (#393). `Switch` is the single on/off control used
 everywhere (per-tool toggles, module enable/disable, boolean schema fields). Its **track
 colour carries the state** — accent when on, muted when off — while the thumb stays a
 constant, bright, evenly-inset circle that simply slides between ends. Keep that convention

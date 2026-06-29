@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { Switch, Tooltip } from "@/components/ui";
+import { NumberInput, Select, Switch, TextInput, Tooltip } from "@/components/ui";
 
 function thumb(sw: HTMLElement): HTMLElement {
   const span = sw.querySelector("span");
@@ -89,5 +89,93 @@ describe("Tooltip", () => {
       </Tooltip>,
     );
     expect(screen.getByRole("tooltip").className).toContain("pointer-events-none");
+  });
+});
+
+// The shared field primitives (#394): every text input / select routes through these so
+// none falls back to the browser-default (white-bordered) control. The themed look is the
+// `--color-edge` border on `--color-surface-2` — NOT the undefined `border-line`/`bg-surface`
+// tokens the off-style Settings fields used before.
+describe("TextInput", () => {
+  it("applies the themed field base (edge border on surface-2), not a bare control", () => {
+    render(<TextInput aria-label="Name" />);
+    const input = screen.getByRole("textbox", { name: "Name" });
+    expect(input.className).toContain("border-edge");
+    expect(input.className).toContain("bg-surface-2");
+    expect(input.className).not.toContain("border-line"); // the old undefined token
+  });
+
+  it("merges a caller className over the base (e.g. a width override)", () => {
+    render(<TextInput aria-label="Narrow" className="w-24" />);
+    expect(screen.getByRole("textbox", { name: "Narrow" }).className).toContain("w-24");
+  });
+
+  it("forwards a ref to the underlying input", () => {
+    let el: HTMLInputElement | null = null;
+    render(
+      <TextInput
+        aria-label="Ref"
+        ref={(n) => {
+          el = n;
+        }}
+      />,
+    );
+    expect(el).toBeInstanceOf(HTMLInputElement);
+  });
+});
+
+describe("NumberInput", () => {
+  it("renders a themed number field (spinbutton)", () => {
+    render(<NumberInput aria-label="Cycles" />);
+    const input = screen.getByRole("spinbutton", { name: "Cycles" });
+    expect(input).toHaveAttribute("type", "number");
+    expect(input.className).toContain("border-edge");
+    expect(input.className).toContain("bg-surface-2");
+  });
+});
+
+describe("Select", () => {
+  function options() {
+    return (
+      <>
+        <option value="a">Apple</option>
+        <option value="b">Pear</option>
+      </>
+    );
+  }
+
+  it("renders a themed select and fires onChange with the chosen value", () => {
+    const onChange = vi.fn();
+    render(
+      <Select aria-label="Fruit" value="a" onChange={onChange}>
+        {options()}
+      </Select>,
+    );
+    const select = screen.getByRole("combobox", { name: "Fruit" });
+    expect(select.className).toContain("border-edge");
+    expect(select.className).toContain("bg-surface-2");
+    expect(select.className).toContain("min-w-0"); // can shrink in a narrow sheet (#335)
+    fireEvent.change(select, { target: { value: "b" } });
+    expect(onChange).toHaveBeenCalled();
+  });
+
+  it("uses the comfortable size by default and a compact one for size='sm'", () => {
+    const { rerender } = render(<Select aria-label="S">{options()}</Select>);
+    expect(screen.getByRole("combobox", { name: "S" }).className).toContain("text-sm");
+    rerender(
+      <Select aria-label="S" size="sm">
+        {options()}
+      </Select>,
+    );
+    expect(screen.getByRole("combobox", { name: "S" }).className).toContain("text-xs");
+  });
+
+  it("forwards a caller className (e.g. w-full) onto the control", () => {
+    render(
+      <Select aria-label="Wide" className="w-full">
+        {options()}
+      </Select>,
+    );
+    expect(screen.getByRole("combobox", { name: "Wide" }).className).toContain("w-full");
   });
 });

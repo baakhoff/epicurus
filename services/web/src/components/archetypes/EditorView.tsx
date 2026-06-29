@@ -1116,12 +1116,12 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           <div className="border-b border-edge p-2">
             <div className="relative flex items-center">
               <Search size={13} className="pointer-events-none absolute left-2 text-ink-faint" />
-              <input
+              <TextInput
                 value={treeFilter}
                 onChange={(e) => setTreeFilter(e.target.value)}
                 placeholder="Search documents…"
                 aria-label="Search documents"
-                className="h-8 w-full rounded-(--radius-field) border border-edge bg-surface-2 pl-7 pr-7 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+                className="h-8 w-full pl-7 pr-7"
               />
               {treeFilter && (
                 <button

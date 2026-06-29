@@ -18,6 +18,9 @@ vi.mock("@/lib/api", () => ({
     sessions: vi.fn().mockResolvedValue([]),
     sessionMessages: vi.fn().mockResolvedValue([]),
     deleteSession: vi.fn().mockResolvedValue({ deleted: 0 }),
+    // No in-flight run to recover (#376) — the mount re-attach effect is a clean no-op.
+    activeRun: vi.fn().mockResolvedValue(null),
+    cancelActiveRun: vi.fn().mockResolvedValue({ cancelled: false }),
     llmPrefs: vi.fn().mockResolvedValue({
       global_default: null,
       global_embed_default: null,
@@ -28,10 +31,10 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("@/lib/sse", () => ({
-  // Yield a single `done` frame so chat.send() resolves cleanly instead of streaming.
-  // eslint-disable-next-line require-yield
+  // Yield a real `done` frame so chat.send() reaches a terminal and resolves cleanly (a stream
+  // that ends with *no* terminal frame is now treated as a dropped connection, #376).
   async *sse() {
-    return { event: "done", data: JSON.stringify({ type: "done" }) };
+    yield { event: "done", data: JSON.stringify({ type: "done" }) };
   },
 }));
 

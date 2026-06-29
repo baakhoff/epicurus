@@ -293,7 +293,18 @@ export type Readiness = z.infer<typeof Readiness>;
 /** One SSE event of a streaming agent turn (event name == `type`). */
 export const AgentEvent = z.object({
   // `thinking` carries a chain-of-thought token, shown in the activity timeline (ADR-0041).
-  type: z.enum(["delta", "tool", "done", "error", "readiness", "thinking"]),
+  // `awaiting_input` ends the stream when the model asks a question (ADR-0053); `gone` is the
+  // re-attach endpoint's sentinel for a run that has finished and been reaped (#376).
+  type: z.enum([
+    "delta",
+    "tool",
+    "done",
+    "error",
+    "readiness",
+    "thinking",
+    "awaiting_input",
+    "gone",
+  ]),
   text: z.string().nullish(),
   tool: z.string().nullish(),
   status: z.enum(["running", "ok", "error"]).nullish(),
@@ -301,8 +312,18 @@ export const AgentEvent = z.object({
   detail: z.string().nullish(),
   // Present on `readiness` events that lead a streaming turn (ADR-0027).
   readiness: Readiness.nullish(),
+  // Present on `awaiting_input` — the suspended run to resume + the question (ADR-0053).
+  run_id: z.string().nullish(),
+  question: z.string().nullish(),
 });
 export type AgentEvent = z.infer<typeof AgentEvent>;
+
+/** An in-flight turn to re-attach to, from GET /agent/sessions/{id}/active-run (#376). */
+export const ActiveRun = z.object({
+  run_id: z.string(),
+  last_seq: z.number(),
+});
+export type ActiveRun = z.infer<typeof ActiveRun>;
 
 export const PullProgress = z.object({
   status: z.string().default(""),

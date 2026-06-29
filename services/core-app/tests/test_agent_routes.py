@@ -13,10 +13,13 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core_app.agent import routes as agent_routes
 from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
+from epicurus_core_app.agent.live_runs import LiveRun, LiveRunRegistry
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
 from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
@@ -301,3 +304,243 @@ async def test_edit_with_blank_content_errors_and_changes_nothing() -> None:
         resp = await client.post("/platform/v1/agent/sessions/s1/edit", json={"content": "   "})
     assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
     assert memory.revised == [] and memory.truncated_after == []
+
+
+# ── durable, re-attachable turns (live runs, #376) ───────────────────────────
+
+
+class _ScriptAgent:
+    """Streams a fixed event list, optionally holding open on ``gate`` partway through.
+
+    ``events`` stream first; if ``gate`` is set, it then waits (the run stays *running* for
+    re-attach / conflict tests) before streaming ``after_gate``. Accepts any run_stream kwargs
+    (model / session_id / persist_input / resume_convo) so it stands in everywhere the router
+    drives the agent."""
+
+    def __init__(
+        self,
+        events: list[AgentEvent],
+        *,
+        gate: asyncio.Event | None = None,
+        after_gate: list[AgentEvent] | None = None,
+    ) -> None:
+        self._events = list(events)
+        self._gate = gate
+        self._after_gate = list(after_gate or [])
+
+    async def run_stream(
+        self, messages: object = None, **_kwargs: object
+    ) -> AsyncIterator[AgentEvent]:
+        for event in self._events:
+            yield event
+        if self._gate is not None:
+            await self._gate.wait()
+        for event in self._after_gate:
+            yield event
+
+
+def _runs_app(
+    agent: object,
+    *,
+    registry: LiveRunRegistry,
+    probe: object | None = None,
+    suspended: object | None = None,
+) -> FastAPI:
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            agent,  # type: ignore[arg-type]
+            object(),  # memory — unused by the live-run routes  # type: ignore[arg-type]
+            "local",
+            object(),  # attachment store — unused  # type: ignore[arg-type]
+            probe=probe,  # type: ignore[arg-type]
+            suspended=suspended,  # type: ignore[arg-type]
+            live_runs=registry,
+        )
+    )
+    return app
+
+
+def _parse_sse_ids(text: str) -> list[tuple[str | None, str]]:
+    """(id, event) per frame — ``id`` is ``None`` when the frame carried no ``id:`` line."""
+    frames: list[tuple[str | None, str]] = []
+    for block in text.split("\n\n"):
+        event = "message"
+        data = ""
+        sse_id: str | None = None
+        for line in block.splitlines():
+            if line.startswith("id:"):
+                sse_id = line[len("id:") :].strip()
+            elif line.startswith("event:"):
+                event = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                data = line[len("data:") :].strip()
+        if data:
+            frames.append((sse_id, event))
+    return frames
+
+
+async def _settle(run: LiveRun) -> None:
+    """Drive a run to terminal (and drain its driver) by consuming one subscriber."""
+    async for _seq, _event in run.subscribe(0):
+        pass
+
+
+async def test_chat_stream_frames_carry_id_seq_but_readiness_does_not() -> None:
+    registry = LiveRunRegistry()
+    app = _runs_app(_FakeAgent(), registry=registry, probe=_FakeProbe())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/chat/stream",
+            json={"messages": [{"role": "user", "content": "hi"}], "session_id": "s1"},
+        )
+    frames = _parse_sse_ids(resp.text)
+    # Readiness leads with no id (per-connection, never replayed); the turn carries seq ids.
+    assert [sse_id for sse_id, ev in frames if ev == "readiness"] == [None, None]
+    assert [(sse_id, ev) for sse_id, ev in frames if ev in ("delta", "done")] == [
+        ("1", "delta"),
+        ("2", "done"),
+    ]
+
+
+async def test_active_run_reports_inflight_then_null() -> None:
+    registry = LiveRunRegistry()
+    gate = asyncio.Event()
+    held = _ScriptAgent([], gate=gate, after_gate=[AgentEvent(type="done", turn=None)])
+    run = await registry.start(
+        lambda: held.run_stream(session_id="s1"), tenant="local", session_id="s1"
+    )
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        live = await client.get("/platform/v1/agent/sessions/s1/active-run")
+        assert live.status_code == 200
+        assert live.json()["run_id"] == run.run_id
+        gate.set()
+        await _settle(run)
+        gone = await client.get("/platform/v1/agent/sessions/s1/active-run")
+    assert gone.json() is None  # terminal → nothing to re-attach to
+
+
+async def test_reattach_replays_buffer_after_seq() -> None:
+    registry = LiveRunRegistry()
+    agent = _ScriptAgent(
+        [
+            AgentEvent(type="delta", text="a"),
+            AgentEvent(type="delta", text="b"),
+            AgentEvent(type="done", turn=None),
+        ]
+    )
+    run = await registry.start(lambda: agent.run_stream(), tenant="local", session_id="s1")
+    await _settle(run)
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(f"/platform/v1/agent/runs/{run.run_id}/stream?after_seq=1")
+    assert _parse_sse_ids(resp.text) == [("2", "delta"), ("3", "done")]
+
+
+async def test_reattach_unknown_run_emits_gone() -> None:
+    registry = LiveRunRegistry()
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/runs/deadbeef/stream")
+    assert [event for event, _ in _parse_sse(resp.text)] == ["gone"]
+
+
+async def test_reattach_omits_the_readiness_prelude() -> None:
+    registry = LiveRunRegistry()
+    agent = _ScriptAgent([AgentEvent(type="delta", text="a"), AgentEvent(type="done", turn=None)])
+    run = await registry.start(lambda: agent.run_stream(), tenant="local", session_id="s1")
+    await _settle(run)
+    app = _runs_app(_FakeAgent(), registry=registry, probe=_FakeProbe())  # probe wired…
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(f"/platform/v1/agent/runs/{run.run_id}/stream")
+    assert [event for event, _ in _parse_sse(resp.text)] == ["delta", "done"]  # …but not replayed
+
+
+async def test_chat_stream_conflicts_when_a_run_is_active() -> None:
+    registry = LiveRunRegistry()
+    gate = asyncio.Event()
+    held = _ScriptAgent([], gate=gate, after_gate=[AgentEvent(type="done", turn=None)])
+    run = await registry.start(
+        lambda: held.run_stream(session_id="s1"), tenant="local", session_id="s1"
+    )
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/chat/stream",
+            json={"messages": [{"role": "user", "content": "hi"}], "session_id": "s1"},
+        )
+    assert resp.status_code == 409
+    assert resp.headers["X-Run-Id"] == run.run_id
+    gate.set()
+    await registry.drain(timeout=0.5)  # clean up the held run's task
+
+
+async def test_cancel_active_run_endpoint() -> None:
+    registry = LiveRunRegistry()
+    app = _runs_app(_FakeAgent(), registry=registry)
+    gate = asyncio.Event()
+    held = _ScriptAgent([], gate=gate, after_gate=[AgentEvent(type="done", turn=None)])
+    run = await registry.start(
+        lambda: held.run_stream(session_id="s1"), tenant="local", session_id="s1"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # No run for an untouched session.
+        empty = await client.delete("/platform/v1/agent/sessions/s-empty/active-run")
+        assert empty.json() == {"cancelled": False}
+        # The session's in-flight run is cancelled (the explicit Stop).
+        hit = await client.delete(f"/platform/v1/agent/sessions/{run.session_id}/active-run")
+        assert hit.json() == {"cancelled": True}
+    await registry.drain(timeout=0.5)
+    assert registry.active_for_session(tenant="local", session_id="s1") is None
+
+
+async def test_resume_starts_a_durable_run_and_consumes_the_suspension() -> None:
+    store = SuspendedRunStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await store.save(
+        tenant="local",
+        session_id="s1",
+        model="m",
+        pending_call_id="c1",
+        question="which file?",
+        conversation=[{"role": "user", "content": "open it"}],
+    )
+    registry = LiveRunRegistry()
+    agent = _ScriptAgent([AgentEvent(type="delta", text="ok"), AgentEvent(type="done", turn=None)])
+    app = _runs_app(agent, registry=registry, suspended=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/resume", json={"answer": "report.md"}
+        )
+    frames = _parse_sse_ids(resp.text)
+    assert [event for _, event in frames] == ["delta", "done"]
+    assert [sse_id for sse_id, _ in frames] == ["1", "2"]  # a durable run → id lines
+    assert await store.take(tenant="local", run_id=run_id) is None  # the suspension was consumed
+
+
+async def test_resume_unknown_run_emits_error() -> None:
+    store = SuspendedRunStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    app = _runs_app(_FakeAgent(), registry=LiveRunRegistry(), suspended=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/runs/nope/resume", json={"answer": "x"})
+    assert [event for event, _ in _parse_sse(resp.text)] == ["error"]

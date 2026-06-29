@@ -17,6 +17,8 @@ vi.mock("@/lib/api", () => ({
     sessions: vi.fn().mockResolvedValue([]),
     sessionMessages: vi.fn().mockResolvedValue([]),
     deleteSession: vi.fn().mockResolvedValue({ deleted: 0 }),
+    activeRun: vi.fn().mockResolvedValue(null), // no in-flight run to recover (#376)
+    cancelActiveRun: vi.fn().mockResolvedValue({ cancelled: false }),
     llmPrefs: vi.fn().mockResolvedValue({
       global_default: null,
       global_embed_default: null,

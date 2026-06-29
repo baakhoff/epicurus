@@ -73,6 +73,11 @@ class CoreAppSettings(CoreSettings):
     # How long a turn paused by `ask_user` (ADR-0053) waits for an answer before its suspended
     # run is reaped (hours). If it expires the model can simply ask again on the next turn.
     ask_user_ttl_hours: int = 24
+    # How long a *finished* in-flight run (#376) stays re-attachable in memory before it is
+    # reaped (seconds). A reconnecting client within this window replays the buffered turn;
+    # after it, the client falls back to the durable transcript. Pure cache — the answer is
+    # already persisted, so this only bounds how long a late re-attach can tail the live buffer.
+    live_run_grace_seconds: float = 300.0
     # Base URL of the module that durably keeps chat uploads (ADR-0025). The attachment
     # upload route best-effort POSTs each uploaded file's bytes to <url>/ingest so it
     # becomes browsable in the Files page. Empty disables the sink (e.g. an OSS build

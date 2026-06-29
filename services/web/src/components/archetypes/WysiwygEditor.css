@@ -1,0 +1,35 @@
+/* WYSIWYG editor theming (#377) — map Milkdown Crepe's design variables onto the epicurus
+   tokens so the editable Preview reads as part of the app, and cools to moonlight when the
+   house sleeps (the --ep-* tokens already follow data-theme / data-power). Crepe sets its
+   defaults on `.milkdown`; `.ep-wysiwyg .milkdown` (higher specificity) overrides them. */
+.ep-wysiwyg .milkdown {
+  --crepe-color-background: transparent;
+  --crepe-color-on-background: var(--ep-text);
+  --crepe-color-surface: var(--ep-surface);
+  --crepe-color-surface-low: var(--ep-surface-2);
+  --crepe-color-on-surface: var(--ep-text);
+  --crepe-color-on-surface-variant: var(--ep-text-dim);
+  --crepe-color-outline: var(--ep-border);
+  --crepe-color-primary: var(--ep-accent);
+  --crepe-color-secondary: var(--ep-accent-dim);
+  --crepe-color-on-secondary: var(--ep-text);
+  --crepe-color-inverse: var(--ep-text);
+  --crepe-color-on-inverse: var(--ep-surface);
+  --crepe-color-inline-code: var(--ep-accent-strong);
+  --crepe-color-inline-area: var(--ep-surface-2);
+  --crepe-color-hover: var(--ep-surface-2);
+  --crepe-color-selected: var(--ep-accent-dim);
+  --crepe-color-error: var(--ep-danger);
+  --crepe-font-default: "Inter Variable", system-ui, sans-serif;
+  --crepe-font-title: "Literata Variable", Georgia, serif;
+  --crepe-font-code: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  background: transparent;
+  color: var(--ep-text);
+}
+
+/* The wrapper owns the reading column + padding (matching the read-only preview), so let the
+   editor surface fill it flush rather than adding Crepe's own page padding. */
+.ep-wysiwyg .milkdown .ProseMirror {
+  padding: 0;
+}

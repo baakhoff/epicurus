@@ -14,6 +14,15 @@ images to GHCR.
 
 ### Added
 
+- **Notes & knowledge: the rendered Preview is now editable (WYSIWYG)** (#377) — the `editor`
+  archetype opens render-first, but its Preview was read-only, so editing meant toggling to the
+  raw markdown source. Preview is now a **WYSIWYG surface** (Milkdown's Crepe — ProseMirror +
+  remark) you type into directly, with **markdown kept authoritative**: edits serialize back to
+  the same buffer, so the existing idle/leave auto-save and version history (ADR-0042 / ADR-0046)
+  work unchanged. The Edit toggle still drops to the raw source; a **read-only** vault (a watched
+  Obsidian mount or the bundled reference docs) still renders without editing. The editor is
+  **lazy-loaded** so it never enters the main bundle. Adds the `@milkdown/crepe` dependency.
+  `web` 0.56.0→0.57.0.
 - **Chat: the assistant can ask a clarifying question mid-turn, answered inline** (#360, ADR-0053)
   — the core `ask_user` tool (backend #345/#361) pauses a turn and ends the stream with an
   `awaiting_input` event carrying the question; until now the web just stopped the spinner. The chat

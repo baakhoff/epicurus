@@ -389,7 +389,7 @@ platform services read these docs if needed.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `VAULT_PATH` | `/data/knowledge` | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge` (`<tenant>` = `DEFAULT_TENANT_ID`). Each top-level folder under it is a project (knowledge base). Lives under the same `/data` tree the storage module indexes read-only (#KB-refactor). |
+| `VAULT_PATH` | `/data/knowledge` | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge` (`<tenant>` = `DEFAULT_TENANT_ID`). Each top-level folder under it is a project (knowledge base). Lives under the same `/data` tree the core mounts and indexes for the unified Files view (#KB-refactor, ADR-0063). |
 | `DOCS_PATH` | `/docs` | In-container path of the platform docs (bundled in image). |
 | `PLATFORM_URL` | `http://core-app:8080` | The core's base URL (for embeddings via the platform API). |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |

@@ -29,8 +29,8 @@ Notes are private. The boundary is enforced in two places (#KB-refactor):
 - **Hidden from the file tools.** The `.md` mirror lives under `notes/` in the shared file
   space. The storage module hides that subtree from the **agent's** file tools, so the agent
   cannot read a note body via `storage_read`/`storage_list`/`storage_search` either (see
-  [storage](storage.md)). The **operator-facing** Files page, `/read`, and `/download` are
-  unaffected — you still browse and read your notes there.
+  [storage](storage.md)). The **operator-facing**, core-owned Files surface (browse / read /
+  download — ADR-0063) is unaffected — you still browse and read your notes there.
 - **Content reaches the agent only via attach** (unchanged): the user explicitly attaches a
   note to a turn, and the core injects its body into that turn's context.
 

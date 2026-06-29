@@ -30,9 +30,26 @@ import {
 import { useRef, useState } from "react";
 
 import { Button, EmptyState, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
-import { ApiError, api } from "@/lib/api";
+import { ApiError } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
+
+/**
+ * A data adapter the `browser` archetype renders against (ADR-0063). It decouples the
+ * view from where its data lives: a module page (the core page proxy) or a core-owned
+ * surface (e.g. the Files screen). The view appends `[currentPath, activeQuery]` to
+ * `queryKey` for caching and invalidates `queryKey` after a move.
+ */
+export interface BrowserSource {
+  /** Base react-query key; the view appends `[currentPath, activeQuery]`. */
+  queryKey: unknown[];
+  /** Fetch a directory/search listing — returns BrowserData-shaped json. */
+  fetchPage: (path: string, q: string) => Promise<unknown>;
+  /** Read a text file's contents for the split-screen reader. */
+  readText: (path: string) => Promise<{ path: string; name: string; content: string }>;
+  /** Move or rename an item (`from` → `to`). */
+  move: (from: string, to: string) => Promise<unknown>;
+}
 
 /** File extensions the Files browser can open inline in the split-screen reader (req 6). */
 const TEXT_EXT =
@@ -76,7 +93,7 @@ function ItemIcon({ item }: { item: BrowserItem }) {
   return null;
 }
 
-export function BrowserView({ module, pageId }: { module: string; pageId: string }) {
+export function BrowserView({ source }: { source: BrowserSource }) {
   const [currentPath, setCurrentPath] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
@@ -92,7 +109,7 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
   // Open a text file in the right-panel split-screen reader (#KB-refactor, req 6).
   const panelOpen = usePanel((s) => s.open);
   const openInPanel = useMutation({
-    mutationFn: (path: string) => api.readModuleText(module, path),
+    mutationFn: (path: string) => source.readText(path),
     onSuccess: (file) => panelOpen("doc-reader", file, file.name),
     onError: (err) =>
       window.alert(
@@ -102,10 +119,9 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
 
   // Rename / move through the shared move contract; refetch the listing on success (#391).
   const move = useMutation({
-    mutationFn: ({ from, to }: { from: string; to: string }) =>
-      api.moveModuleItem(module, pageId, from, to),
+    mutationFn: ({ from, to }: { from: string; to: string }) => source.move(from, to),
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      void qc.invalidateQueries({ queryKey: source.queryKey });
       setSelectedId(null);
       setRenaming(false);
     },
@@ -125,13 +141,9 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
     setRenaming(false);
   }
 
-  const params: Record<string, string> = {};
-  if (activeQuery) params.q = activeQuery;
-  else if (currentPath) params.path = currentPath;
-
   const query = useQuery({
-    queryKey: ["module-page", module, pageId, currentPath, activeQuery],
-    queryFn: () => api.modulePage(module, pageId, Object.keys(params).length ? params : undefined),
+    queryKey: [...source.queryKey, currentPath, activeQuery],
+    queryFn: () => source.fetchPage(currentPath, activeQuery),
   });
 
   if (query.isLoading) {

@@ -146,8 +146,9 @@ entity-reference click (ADR-0019). It is a **resizable right column** on wide sc
 **bottom sheet** on phones, with a back-stack (`back()`) and `close()`. Views are a
 **bounded, core-defined vocabulary** — `entity-detail` (the hover-card envelope in full
 form), `email-reader` (read-only, used by the 3.8 mail reader), and `doc-reader` (a text/`.md`
-file rendered as markdown, opened from the Files browser via `GET /platform/v1/modules/storage/read`
-— the split-screen reader, #KB-refactor). The panel never runs module markup.
+file rendered as markdown, opened from the core-owned Files browser via
+`GET /platform/v1/files/read` — the split-screen reader, #KB-refactor / ADR-0063). The panel
+never runs module markup.
 
 A hover-card's optional `href` is rendered by the shared `CardLink` (`src/components/CardLink.tsx`):
 an **in-app path** (`/m/…`) becomes a same-tab router navigation — e.g. a cited knowledge

@@ -166,6 +166,13 @@ for m in $EXPECT_MODULES; do
 done
 ok "every module reachable through core (live status where declared)"
 
+# Messaging foundation (ADR-0058): the module's status must report the active bridge, proving
+# the provider seam is wired at runtime. The inbound->turn->outbound path itself needs a model,
+# so it is proven in pytest (real NATS, faked turn), not here — the smoke stack runs no LLM.
+ms="$(http "http://core-app:8080/platform/v1/modules/messaging/status" || true)"
+printf '%s' "$ms" | grep -q 'loopback' || die "messaging status did not report the loopback bridge: $ms"
+ok "messaging module reports the loopback bridge (ADR-0058)"
+
 rdy="$(http "http://core-app:8080/platform/v1/readiness" || true)"
 printf '%s' "$rdy" | grep -q '"components"' || die "readiness endpoint returned no snapshot: $rdy"
 printf '%s' "$rdy" | grep -q '"power"' || die "readiness snapshot missing power state: $rdy"

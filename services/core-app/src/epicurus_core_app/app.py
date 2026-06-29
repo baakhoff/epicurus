@@ -70,6 +70,7 @@ from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
+from epicurus_core_app.messaging import InboundConsumer
 from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import (
     ModuleRegistry,
@@ -237,6 +238,17 @@ def create_app() -> FastAPI:
         prefs=prefs,
         suspended=suspended_runs,
     )
+    # Inbound messaging consumer (ADR-0058) — the first inbound NATS subscriber in core. It
+    # turns a bridge message (``messaging.inbound``) into a headless agent turn and routes the
+    # reply back out (``messaging.outbound``); the ``messaging`` module carries both ends. Wired
+    # here, subscribed in the lifespan once the bus is up (gated by MESSAGING_INBOUND_ENABLED).
+    inbound_messaging = InboundConsumer(
+        bus=bus,
+        agent=agent,
+        power=power,
+        default_tenant=settings.default_tenant_id,
+        model=settings.messaging_model or None,
+    )
     # Nightly fact-extraction runner (ADR-0051): drains the queue once a day, in the operator's
     # timezone, serially — so extraction happens off-hours, never against a live turn.
     extraction_runner = ExtractionRunner(
@@ -335,6 +347,13 @@ def create_app() -> FastAPI:
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
         # Evict finished in-flight runs past their grace window (#376), even with no new traffic.
         live_run_reaper = asyncio.create_task(live_runs.reap_periodically())
+        # Start consuming inbound bridge messages (ADR-0058). Best-effort: a NATS hiccup here
+        # must not block startup — the rest of the core (web chat) stays up regardless.
+        if settings.messaging_inbound_enabled:
+            try:
+                await inbound_messaging.start()
+            except Exception as exc:
+                log.error("inbound messaging consumer failed to start", error=str(exc))
         # Coordinated maintenance batch on an opt-in nightly schedule (ADR-0060) — a no-op task when
         # the schedule is disabled; the manual trigger stays available either way.
         maintenance_task = asyncio.create_task(maintenance.run_periodic())
@@ -342,6 +361,8 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            # Stop accepting new inbound messages first, so no turn starts mid-teardown.
+            await inbound_messaging.stop()
             catalog_task.cancel()
             extraction_task.cancel()
             live_run_reaper.cancel()

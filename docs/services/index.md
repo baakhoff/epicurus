@@ -17,6 +17,7 @@ contract. This is the map of every running block — each row links its full ref
 | **mail** | module | provider-agnostic mail — search, read, and send via Gmail (v0.1) | `8090` | [mail](mail.md) |
 | **tasks** | module | task management — Google Tasks plus a local store (ADR-0016) | `8091` | [tasks](tasks.md) |
 | **notes** | module | author Obsidian-style notes into a private collection — the agent can list titles and propose changes (reviewed) but never reads a body | `8092` | [notes](notes.md) |
+| **messaging** | module | chat bridges — external channels (Telegram, Discord, …) drive a turn and replies route back out; provider-pluggable, loopback built in (ADR-0058) | `8093` | [messaging](messaging.md) |
 | **echo** | module | the reference module — proves the MCP tool + NATS event contract end to end | `8080` | [echo](echo.md) |
 
 Ports are loopback-bound by default; the [edge gateway](../infrastructure/index.md#edge-gateway)

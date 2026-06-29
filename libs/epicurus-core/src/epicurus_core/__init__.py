@@ -53,6 +53,14 @@ from epicurus_core.manifest import (
     UiAction,
     UiSection,
 )
+from epicurus_core.messaging import (
+    MESSAGING_INBOUND,
+    MESSAGING_OUTBOUND,
+    InboundMessage,
+    MessageAttachment,
+    OutboundMessage,
+    session_id_for,
+)
 from epicurus_core.module import EpicurusModule, add_manifest_route
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
 from epicurus_core.platform_client import PlatformClient
@@ -74,6 +82,8 @@ from epicurus_core.tenancy import (
 __all__ = [
     "CONTRACT_VERSION",
     "LOCAL_ACCOUNT",
+    "MESSAGING_INBOUND",
+    "MESSAGING_OUTBOUND",
     "Account",
     "AccountsView",
     "Attachment",
@@ -99,11 +109,14 @@ __all__ = [
     "HoverCard",
     "HoverCardDetail",
     "HoverCardLink",
+    "InboundMessage",
     "LocalFileStore",
     "LogLevel",
+    "MessageAttachment",
     "ModelRole",
     "ModelSlot",
     "ModuleManifest",
+    "OutboundMessage",
     "PageArchetype",
     "PageSpec",
     "Payload",
@@ -135,6 +148,7 @@ __all__ = [
     "scope_collection",
     "scope_secret_path",
     "scope_subject",
+    "session_id_for",
     "set_current_tenant",
     "tool_envelope",
     "validate_tenant_id",

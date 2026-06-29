@@ -321,6 +321,16 @@ orchestrator is the named follow-up. Every run publishes a tenant-scoped `mainte
 Emits **`<tenant>.llm.usage`** after every inference call — model, token counts, latency.
 No prompt/response content, no keys. Feeds observability now and SaaS metering later.
 
+**Inbound messaging consumer (ADR-0058)** — the first *inbound* NATS subscriber in core (the
+foundation for Phase 4 chat bridges). It **consumes `<tenant>.messaging.inbound`**
+([`InboundMessage`](../reference/messaging.md#inboundmessage)), maps the channel to a session
+id (`<bridge>:<channel>[:<thread>]`), runs a **headless** agent turn (the same `Agent.run` the
+web uses — no SSE; the answer is collected and persisted like any turn), and **emits
+`<tenant>.messaging.outbound`** ([`OutboundMessage`](../reference/messaging.md#outboundmessage))
+for the [messaging](messaging.md) module to deliver. It respects power state (paused → skip,
+the user resends once resumed) and contains every failure (a bad payload or failed turn is
+logged and dropped). v1 subscribes under the default tenant; multi-tenant fan-out (a wildcard
+or per-tenant subscriptions) is the named follow-up. Gated by `MESSAGING_INBOUND_ENABLED`.
 Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-0060) — the run's
 `{ran_at, scope, jobs:[{key, status, detail}]}` summary, for downstream consumers.
 
@@ -340,6 +350,8 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `LLM_NUM_CTX` | — | Ollama context window (`num_ctx`); local models only. |
 | `MODULE_URLS` | `http://echo:8080,…` | Module base URLs the host discovers tools from. |
 | `AGENT_MAX_STEPS` | `4` | Max tool-calling rounds per turn. |
+| `MESSAGING_INBOUND_ENABLED` | `true` | Run the inbound-messaging consumer (chat bridges, ADR-0058). |
+| `MESSAGING_MODEL` | — | Optional dedicated model for bridge turns; blank = the default chat model. |
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
 | `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |

@@ -22,3 +22,4 @@ include:
   - services/tasks/compose.yaml
   - services/web/compose.yaml
   - services/notes/compose.yaml
+  - services/messaging/compose.yaml

@@ -496,27 +496,40 @@ available. The module keeps running and other tools are unaffected.
 - **Re-enabling** removes the tool from `disabled_tools` and it reappears immediately in
   the next `discover` call (no restart needed).
 
-## Removing a module — confirmed container delete (#127, ADR-0028)
+## Removing a module — tombstone now, tear the container down out-of-band (#127, #382, ADR-0028)
 
-Beyond disabling, the operator can **delete** a module's container from the Modules screen
-("Danger zone → Remove module"), gated by a confirm dialog. This is a **privileged** action:
-the core stops and removes the container through the Docker socket.
+Beyond disabling, the operator can **remove** a module from the Modules screen ("Danger zone →
+Remove module"), gated by a confirm dialog. Removal **tombstones** the module (a `removed` flag on
+`module_prefs`) — which hides it from every surface and stops routing its tools *immediately* — and
+tears its container down. The teardown is the **privileged** part: stopping + removing the container
+needs the Docker socket.
 
-- **Endpoint** — `DELETE /platform/v1/modules/{name}` stops + removes the module's container
-  and **tombstones** the module (a `removed` flag on `module_prefs`). **404** unknown module ·
-  **403** protected service · **503** when the core has no Docker access.
-- **Tightly scoped (security).** The core reaches Docker only through one `DockerController`,
-  which removes **only a configured module's own container** — matched by both its
-  `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
-  stack is never touched — and **never** core-app, web, or a data-plane / infra service (a
-  hard denylist on top of the configured-module guard). The read-write socket is mounted on
-  `core-app` only; drop that mount to disable removal entirely (the endpoint then 503s).
-- **It stays gone.** A removed module is dropped from the module list, agent tool discovery,
-  and the nav. Because a `compose up` / Watchtower pull could recreate the container, the core
-  **re-removes** any tombstoned module whose container reappears, on every startup. Bringing a
-  module back means redeploying it and clearing its tombstone.
+- **Decoupled from the live socket (#382).** The tombstone is the source of truth, so removal does
+  **not** require Docker: with a socket present the container is stopped + removed inline; with no
+  socket the teardown is **deferred** to the next startup reconcile (`reconcile_tombstones`, which
+  already re-removes any tombstoned module whose container is still up). Either way the module is
+  gone for the operator at once.
+- **Endpoint** — `DELETE /platform/v1/modules/{name}` tombstones the module and (when a socket is
+  available) stops + removes its container. Returns
+  `{removed, containers, container_teardown_deferred}` — `container_teardown_deferred` is **true**
+  when no socket was available (the container is still running until the next restart), so the shell
+  shows an **informational** notice rather than an error. **404** unknown module · **403** protected
+  service (enforced *before* the tombstone is written, regardless of the socket). It soft-removes
+  with **200** even without Docker — there is no longer a 503 path.
+- **Tightly scoped (security).** When the teardown does run, the core reaches Docker only through one
+  `DockerController`, which removes **only a configured module's own container** — matched by both
+  its `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
+  stack is never touched — and **never** core-app, web, or a data-plane / infra service (a hard
+  denylist on top of the configured-module guard, also enforced in the registry before tombstoning).
+  The read-write socket is mounted on `core-app` only; dropping that mount no longer disables
+  removal — it only defers the container teardown to the next restart.
+- **It stays gone.** A removed module is dropped from the module list, agent tool discovery, and the
+  nav. Because a `compose up` / Watchtower pull could recreate the container — and because a
+  socket-less removal leaves the container up — the core **re-removes** any tombstoned module whose
+  container is still present, on every startup. Bringing a module back means redeploying it and
+  clearing its tombstone.
 
-See ADR-0028 for the full rationale and security posture.
+See ADR-0028 (and its #382 amendment) for the full rationale and security posture.
 
 ## Per-module model selection (#128, ADR-0029)
 

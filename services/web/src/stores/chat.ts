@@ -6,7 +6,8 @@
  * Durability (#376): the turn runs server-side decoupled from the connection, so the store
  * persists its `sessionId` (the transcript rehydrates on reload) and, on a dropped stream /
  * reload / app-resume, **re-attaches** to the still-running turn instead of losing it. Live
- * state (segments/streaming/abort) is deliberately *not* persisted — only `sessionId`+`draft`.
+ * state (segments/streaming/abort) is deliberately *not* persisted — only `sessionId`, `draft`,
+ * and any pending `ask_user` question (`awaiting`), whose suspended run is durable server-side.
  */
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
@@ -65,6 +66,11 @@ interface ChatState {
   /** The last live-run seq seen this turn — the re-attach offset (#376). Not persisted: a
    *  reload starts at 0 so the whole in-flight turn replays and rebuilds the segments. */
   lastSeq: number;
+  /** A clarifying question the turn paused on (`ask_user`, ADR-0053): the suspended `runId`
+   *  to resume + the `question` to put to the user. Null when nothing is pending. Persisted
+   *  (unlike the rest of the live turn) so a refresh mid-question keeps the prompt — the
+   *  suspended run stays durable server-side (24h). */
+  awaiting: { runId: string; question: string } | null;
 
   setDraft: (text: string) => void;
   newSession: () => void;
@@ -89,6 +95,9 @@ interface ChatState {
   /** Re-attach to this session's in-flight turn if one exists (#376). Called on mount,
    *  `visibilitychange`→visible, and `online`; a no-op when a stream is already live. */
   resumeIfActive: (onDone: () => Promise<void>) => Promise<void>;
+  /** Answer the pending `ask_user` question (ADR-0053): POST the answer to resume the
+   *  suspended run, then stream the continuation like any turn. A no-op if nothing is pending. */
+  resume: (answer: string, onDone: () => Promise<void>) => Promise<void>;
   stop: () => void;
   clearError: () => void;
 }
@@ -167,8 +176,14 @@ export const useChat = create<ChatState>()(
               set({ error: detail, paused: /paused/i.test(detail) });
               return "error";
             } else if (event.type === "gone") return "gone";
-            else if (event.type === "awaiting_input") return "awaiting_input";
-            else if (event.type === "done") return "done";
+            else if (event.type === "awaiting_input") {
+              // The turn paused on a clarifying question (ask_user, ADR-0053): capture the
+              // question + the suspended run to resume, so the UI can prompt; the answer drives
+              // `resume`. A blank question still pauses — the prompt shows a generic fallback.
+              if (event.run_id)
+                set({ awaiting: { runId: event.run_id, question: event.question ?? "" } });
+              return "awaiting_input";
+            } else if (event.type === "done") return "done";
           }
           return "dropped"; // ended without a terminal frame → the connection was lost
         } catch (err) {
@@ -198,10 +213,18 @@ export const useChat = create<ChatState>()(
             lastSeq: 0,
           });
         } else if (status === "awaiting_input") {
-          // The turn paused for a clarifying question (ADR-0053). Stop the spinner and let the
-          // refetched history show it; the full resume UI is #360.
+          // Paused for a clarifying question (ask_user, ADR-0053): keep the partial turn (any
+          // preamble + the ask_user step) visible and stop the spinner. The pending question
+          // now lives in `awaiting`; the resume UI answers it and continues the turn. The user
+          // message is already in history, so drop the optimistic echo — but keep `segments`.
           await onDone();
-          set({ streaming: false, abort: null, readiness: null });
+          set({
+            streaming: false,
+            abort: null,
+            pendingUser: null,
+            pendingAttachments: [],
+            readiness: null,
+          });
         } else {
           // "error" (detail already set) or "aborted" (user stop): keep the partial answer.
           set({ streaming: false, abort: null });
@@ -288,6 +311,7 @@ export const useChat = create<ChatState>()(
         const abort = new AbortController();
         set({
           segments: [],
+          awaiting: null,
           streaming: true,
           readiness: null,
           error: null,
@@ -333,6 +357,7 @@ export const useChat = create<ChatState>()(
         paused: false,
         abort: null,
         lastSeq: 0,
+        awaiting: null,
 
         setDraft: (text) => set({ draft: text }),
 
@@ -340,6 +365,7 @@ export const useChat = create<ChatState>()(
           get().abort?.abort();
           set({
             sessionId: freshId(),
+            awaiting: null,
             pendingUser: null,
             pendingAttachments: [],
             segments: [],
@@ -356,6 +382,7 @@ export const useChat = create<ChatState>()(
           get().abort?.abort();
           set({
             sessionId: id,
+            awaiting: null,
             pendingUser: null,
             pendingAttachments: [],
             segments: [],
@@ -412,6 +439,20 @@ export const useChat = create<ChatState>()(
           );
         },
 
+        resume: async (answer, onDone) => {
+          const awaiting = get().awaiting;
+          if (awaiting === null || get().streaming) return;
+          set({ awaiting: null });
+          // Continue the suspended turn: POST the answer (the core appends it as the ask_user
+          // tool result) and stream the continuation over the same SSE protocol — so reuse
+          // runTurn. On `done` the now-complete turn refetches into history (ADR-0053).
+          await runTurn(
+            `/platform/v1/agent/runs/${encodeURIComponent(awaiting.runId)}/resume`,
+            { answer },
+            onDone,
+          );
+        },
+
         resumeIfActive: async (onDone) => {
           const abort = get().abort;
           // A live stream is already running (a fresh send) — don't open a competing one.
@@ -431,8 +472,14 @@ export const useChat = create<ChatState>()(
     },
     {
       name: "epicurus-chat",
-      // Only identity + draft survive a reload; live turn state is reconstructed by re-attach.
-      partialize: (state) => ({ sessionId: state.sessionId, draft: state.draft }),
+      // Identity + draft + any pending clarifying question survive a reload; the rest of the
+      // live turn is reconstructed by re-attach. The suspended run behind `awaiting` stays
+      // durable server-side (24h), so a refresh mid-question can still answer it (ADR-0053).
+      partialize: (state) => ({
+        sessionId: state.sessionId,
+        draft: state.draft,
+        awaiting: state.awaiting,
+      }),
     },
   ),
 );

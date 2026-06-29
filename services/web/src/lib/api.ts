@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   AccountsView,
   ActiveRun,
+  ActiveSessions,
   AttachmentUploaded,
   CatalogResponse,
   type CollectionPrefs,
@@ -157,6 +158,20 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model, ...settings }),
     }),
+  // A freshly pulled model should open with a context window sized to itself, not the global
+  // default (#386). The core owns the heuristic (VRAM + model size + KV cache) and persists the
+  // result as this model's per-model context. Best-effort and non-destructive: an existing
+  // per-model override is left untouched (`applied` false), as is a model with no local size.
+  suggestModelContext: (model: string) =>
+    request(
+      z.object({
+        model: z.string(),
+        context_window: z.number().nullable(),
+        applied: z.boolean(),
+      }),
+      "/platform/v1/llm/model-settings/suggest-context",
+      { method: "POST", body: JSON.stringify({ model }) },
+    ),
   // Read-only facts (quantization, parameter size, trained context length) for the sheet.
   modelDetails: (model: string) =>
     request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),
@@ -206,6 +221,9 @@ export const api = {
       `/platform/v1/agent/sessions/${encodeURIComponent(id)}/active-run`,
       { method: "DELETE" },
     ),
+  // Which sessions have an in-flight turn right now — the conversations-list running indicator
+  // (#396). One request for the whole list rather than polling each row's active-run.
+  activeRuns: () => request(ActiveSessions, "/platform/v1/agent/active-runs"),
   deleteSession: (id: string) =>
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -241,10 +259,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
-  // Confirmed module removal (#127): stop + remove the module's container, then tombstone it.
+  // Confirmed module removal (#127, #382): tombstone the module (hidden + unrouted at once),
+  // tearing its container down out-of-band. `container_teardown_deferred` is true when the core
+  // had no Docker socket — the module is gone but its container runs until the next restart.
   removeModule: (name: string) =>
     request(
-      z.object({ removed: z.string(), containers: z.number() }),
+      z.object({
+        removed: z.string(),
+        containers: z.number(),
+        container_teardown_deferred: z.boolean().optional(),
+      }),
       `/platform/v1/modules/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),

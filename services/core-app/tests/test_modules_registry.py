@@ -163,6 +163,12 @@ def _attachable_manifest() -> ModuleManifest:
     return ModuleManifest(name="notes", version="0.1.0", attachable=True)
 
 
+def _protected_named_manifest() -> ModuleManifest:
+    """A (contrived) module whose name collides with a protected service — to exercise the
+    registry's defensive PROTECTED denylist in :meth:`ModuleRegistry.remove` (#382)."""
+    return ModuleManifest(name="postgres", version="0.1.0")
+
+
 class _StubRegistry(ModuleRegistry):
     """Registry with the network probe replaced by a canned snapshot."""
 
@@ -621,7 +627,8 @@ async def test_remove_tombstones_and_hides_module() -> None:
     docker = _FakeDocker(count=1)
     registry, _, _ = _registry(docker=docker)
     result = await registry.remove("echo")
-    assert result == {"removed": "echo", "containers": 1}
+    # With a socket present the container is torn down now, so teardown is not deferred.
+    assert result == {"removed": "echo", "containers": 1, "container_teardown_deferred": False}
     assert docker.calls == ["echo"]
     # Tombstoned: still 1:1 with bases (flagged), excluded from discovery, dropped by list.
     snaps = await registry.snapshot()
@@ -636,14 +643,35 @@ async def test_remove_unknown_module_is_404() -> None:
     assert err.value.status_code == 404
 
 
-async def test_remove_without_docker_is_503() -> None:
+async def test_remove_without_docker_soft_removes() -> None:
+    # No socket: removal is decoupled from Docker (#382). It must NOT raise — the module is
+    # tombstoned now (hidden everywhere, dropped from routing) and the container teardown is
+    # deferred to the next startup reconcile.
     registry, _, _ = _registry(docker=None)
+    result = await registry.remove("echo")
+    assert result == {"removed": "echo", "containers": 0, "container_teardown_deferred": True}
+    # Tombstone set → dropped from discovery and flagged on the snapshot.
+    assert "echo" in await registry._prefs.removed_modules("local")
+    snaps = await registry.snapshot()
+    assert snaps[0].removed is True
+    assert await registry.enabled_mcp_urls() == []
+
+
+async def test_remove_protected_without_docker_is_403() -> None:
+    # A protected name is rejected before tombstoning, even with no socket (#382): we must
+    # never persist a removal for a core/data-plane service. (Configure the module as a
+    # protected name to exercise the defensive denylist directly.)
+    registry, _, _ = _registry(manifest=_protected_named_manifest(), docker=None)
     with pytest.raises(HTTPException) as err:
-        await registry.remove("echo")
-    assert err.value.status_code == 503
+        await registry.remove("postgres")
+    assert err.value.status_code == 403
+    # Nothing was tombstoned.
+    assert await registry._prefs.removed_modules("local") == set()
 
 
 async def test_remove_protected_propagates_as_403() -> None:
+    # ``echo`` is not in PROTECTED, so the denylist check is skipped and the Docker layer's
+    # own DockerError (the real protected guard) surfaces as a 403.
     docker = _FakeDocker(error=DockerError("'echo' is protected and cannot be removed"))
     registry, _, _ = _registry(docker=docker)
     with pytest.raises(HTTPException) as err:

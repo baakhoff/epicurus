@@ -14,6 +14,14 @@ images to GHCR.
 
 ### Added
 
+- **Chat: the Conversations list shows which chats are still generating** (#396) — turns now run
+  server-side regardless of the client (#400/#376), so a conversation you've navigated away from can
+  still be answering, but the list gave no sign of it. Each session row now shows a subtle **pulsing
+  accent dot** while it has an in-flight turn: the current chat reflects its own live state instantly,
+  and other sessions are polled (while the list is open) from a new
+  `GET /platform/v1/agent/active-runs` — the session ids generating right now (tenant-scoped,
+  best-effort: the live-run buffer is a disposable cache). `core-app` 0.44.0→0.45.0, `web` 0.56.0→0.57.0.
+
 - **Chat survives a hard refresh and PWA backgrounding** (#376, ADR-0055) — an agent turn used to
   run *inline* in the SSE request, so a dropped connection (a phone backgrounding the PWA, a hard
   refresh, a network blip) aborted it before the answer was persisted: the reply was lost and the

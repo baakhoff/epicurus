@@ -425,6 +425,31 @@ async def test_active_run_reports_inflight_then_null() -> None:
     assert gone.json() is None  # terminal → nothing to re-attach to
 
 
+async def test_active_runs_lists_sessions_with_a_live_turn() -> None:
+    """The conversations-list running indicator (#396): one request → which sessions generate."""
+    registry = LiveRunRegistry()
+    gate = asyncio.Event()
+    held = _ScriptAgent([], gate=gate, after_gate=[AgentEvent(type="done", turn=None)])
+    r1 = await registry.start(
+        lambda: held.run_stream(session_id="s1"), tenant="local", session_id="s1"
+    )
+    r2 = await registry.start(
+        lambda: held.run_stream(session_id="s2"), tenant="local", session_id="s2"
+    )
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        live = await client.get("/platform/v1/agent/active-runs")
+        assert live.status_code == 200
+        assert sorted(live.json()["session_ids"]) == ["s1", "s2"]
+        gate.set()
+        await _settle(r1)
+        await _settle(r2)
+        done = await client.get("/platform/v1/agent/active-runs")
+    assert done.json()["session_ids"] == []  # terminal runs drop out
+
+
 async def test_reattach_replays_buffer_after_seq() -> None:
     registry = LiveRunRegistry()
     agent = _ScriptAgent(

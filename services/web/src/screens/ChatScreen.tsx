@@ -228,7 +228,19 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   const queryClient = useQueryClient();
   const openSession = useChat((s) => s.openSession);
   const current = useChat((s) => s.sessionId);
+  const streaming = useChat((s) => s.streaming);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, enabled: open });
+  // Which conversations are generating right now (#396): poll while the list is open so a turn
+  // finishing in another session updates here too. The current session also reflects its own
+  // live `streaming` immediately (union below), without waiting for the next poll.
+  const activeRuns = useQuery({
+    queryKey: ["active-runs"],
+    queryFn: api.activeRuns,
+    enabled: open,
+    refetchInterval: open ? 3000 : false,
+  });
+  const running = new Set(activeRuns.data?.session_ids ?? []);
+  if (streaming) running.add(current);
   const remove = useMutation({
     mutationFn: api.deleteSession,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
@@ -256,8 +268,15 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
                 onClose();
               }}
             >
-              <p className="truncate font-serif text-sm text-ink">
-                {session.title || "untitled"}
+              <p className="flex items-center gap-1.5 font-serif text-sm text-ink">
+                {running.has(session.id) && (
+                  <span
+                    title="Generating…"
+                    aria-label="Generating"
+                    className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
+                  />
+                )}
+                <span className="min-w-0 truncate">{session.title || "untitled"}</span>
               </p>
               <p className="text-xs text-ink-faint">
                 {relativeTime(session.last_at)} · {session.message_count} messages

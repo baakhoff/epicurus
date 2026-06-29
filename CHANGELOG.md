@@ -22,6 +22,13 @@ images to GHCR.
   **continues streaming** to completion. The pending question is **persisted**, so a hard refresh
   mid-question keeps the prompt (the suspended run stays durable server-side for 24h); the main
   composer remains an escape hatch that abandons the question. `web` 0.56.0→0.57.0.
+- **Chat: the Conversations list shows which chats are still generating** (#396) — turns now run
+  server-side regardless of the client (#400/#376), so a conversation you've navigated away from can
+  still be answering, but the list gave no sign of it. Each session row now shows a subtle **pulsing
+  accent dot** while it has an in-flight turn: the current chat reflects its own live state instantly,
+  and other sessions are polled (while the list is open) from a new
+  `GET /platform/v1/agent/active-runs` — the session ids generating right now (tenant-scoped,
+  best-effort: the live-run buffer is a disposable cache). `core-app` 0.44.0→0.45.0, `web` 0.56.0→0.57.0.
 
 - **Chat survives a hard refresh and PWA backgrounding** (#376, ADR-0055) — an agent turn used to
   run *inline* in the SSE request, so a dropped connection (a phone backgrounding the PWA, a hard
@@ -357,6 +364,28 @@ images to GHCR.
 
 ### Fixed
 
+- **Uninstalling a module no longer hard-fails when the core can't reach Docker** (#382, amends
+  ADR-0028) — "Remove module" returned a **503** ("the core has no Docker access") whenever the
+  Docker socket wasn't mounted, leaving no way to remove a module. Removal is now **decoupled from
+  the live socket**: the core writes the module's `removed` tombstone first — which hides it from
+  every surface and stops routing its tools *immediately*, with or without Docker — and the
+  container teardown is **deferred** to the next startup reconcile (which already re-removes any
+  tombstoned module whose container is still up). The `DELETE /platform/v1/modules/{name}` response
+  gains `container_teardown_deferred`; when it's true the Modules screen shows a clear
+  **informational** notice ("its container is still running because the core has no Docker access;
+  it will be cleared on the next restart") instead of a red error. Protected services are still
+  rejected (**403**) — now before the tombstone is written, regardless of the socket — and an
+  unknown module is still **404**. core-app 0.44.0→0.45.0, web 0.56.0→0.57.0.
+- **The Ollama KV-cache choice now actually applies on a fresh install** — core-app runs as
+  uid 10001 and writes `/etc/epicurus/ollama.env` to apply the operator's KV-cache type (#307),
+  but the shared `ollama-runtime` named volume is created **root-owned**, so on a fresh stack
+  that write failed with `PermissionError`: the choice saved but never took effect, and the
+  Ollama container mounts the same volume read-only so it couldn't fix the ownership either. A
+  one-shot **`ollama-init`** (in `infra/ollama/compose.yaml`) now `chown`s the volume root to uid
+  10001 before Ollama starts (`depends_on: service_completed_successfully`, mirroring
+  `qdrant-init` / `files-init`). Ordering-only — the env write is lazy (an operator change long
+  after boot), so it never races startup. The runtime-smoke gate asserts `ollama-init` ran and
+  exited 0 (#392). Infra-only; no component version change (stack tag set at release).
 - **A just-attached file now shows its pill immediately, not only after a reload** — when you
   attached a file and sent it, the message echoed back without the attachment pill; the pill
   only appeared once the page was reloaded (the server *had* persisted it). The optimistic

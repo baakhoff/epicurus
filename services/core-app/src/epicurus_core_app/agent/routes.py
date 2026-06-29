@@ -113,6 +113,13 @@ class ActiveRunInfo(BaseModel):
     last_seq: int
 
 
+class ActiveSessions(BaseModel):
+    """Session ids with an in-flight turn — drives the conversations-list running indicator
+    (#396). Point-in-time and best-effort (the live-run buffer is a disposable cache)."""
+
+    session_ids: list[str]
+
+
 def _sse(event: AgentEvent, *, seq: int | None = None) -> str:
     """Frame one event as SSE. ``seq`` (a live-run sequence) becomes the ``id:`` line so a
     client can re-attach with ``Last-Event-ID`` / ``after_seq`` (#376); readiness frames,
@@ -271,6 +278,18 @@ def create_agent_router(
             return {"cancelled": False}
         await runs.cancel(run)
         return {"cancelled": True}
+
+    @router.get("/active-runs", response_model=ActiveSessions)
+    async def active_runs() -> ActiveSessions:
+        """Session ids with an in-flight turn right now — the conversations-list running
+        indicator (#396).
+
+        A sibling of ``/sessions/{id}/active-run`` that answers "which sessions are generating"
+        in one request, so the conversations list needn't poll each row. Best-effort and
+        point-in-time: the live-run buffer is a disposable cache (constraint #2), so a turn may
+        finish just after the snapshot and a multi-instance deployment sees only this instance's
+        runs (the registry is the seam where a shared event log slots in)."""
+        return ActiveSessions(session_ids=runs.active_sessions(tenant=tenant))
 
     @router.post("/sessions/{session_id}/regenerate")
     async def regenerate(session_id: str, request: RegenerateRequest) -> StreamingResponse:

@@ -3,7 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CatalogBrowser } from "@/screens/ModelsScreen";
-import { CATALOG, filterCatalog } from "@/data/catalog";
+import { CATALOG, filterCatalog, type CatalogTag } from "@/data/catalog";
 import { api } from "@/lib/api";
 import type { CatalogResponse } from "@/lib/contracts";
 
@@ -20,9 +20,10 @@ vi.mock("@/stores/downloads", () => ({
 
 // ── mock the catalog fetch — CatalogBrowser now reads it from the core (#269) ──
 
-vi.mock("@/lib/api", () => ({ api: { catalog: vi.fn() } }));
+vi.mock("@/lib/api", () => ({ api: { catalog: vi.fn(), systemInfo: vi.fn() } }));
 
 const mockCatalog = vi.mocked(api.catalog);
+const mockSystemInfo = vi.mocked(api.systemInfo);
 
 function snapshot(over: Partial<CatalogResponse> = {}): CatalogResponse {
   return {
@@ -42,12 +43,15 @@ function wrapper({ children }: { children: React.ReactNode }) {
 // ── filterCatalog (pure function) ─────────────────────────────────────────────
 
 describe("filterCatalog", () => {
-  it("returns all entries with no query and no tag", () => {
-    expect(filterCatalog(CATALOG, "", null)).toHaveLength(CATALOG.length);
+  const tags = (...t: CatalogTag[]) => new Set<CatalogTag>(t);
+  const NONE = tags();
+
+  it("returns all entries with no query and no tags", () => {
+    expect(filterCatalog(CATALOG, "", NONE)).toHaveLength(CATALOG.length);
   });
 
   it("filters by model id (case-insensitive)", () => {
-    const results = filterCatalog(CATALOG, "LLAMA3.2", null);
+    const results = filterCatalog(CATALOG, "LLAMA3.2", NONE);
     expect(results.length).toBeGreaterThan(0);
     results.forEach((e) => {
       expect(e.id.toLowerCase()).toContain("llama3.2");
@@ -55,7 +59,7 @@ describe("filterCatalog", () => {
   });
 
   it("filters by family name", () => {
-    const results = filterCatalog(CATALOG, "gemma", null);
+    const results = filterCatalog(CATALOG, "gemma", NONE);
     expect(results.length).toBeGreaterThan(0);
     results.forEach((e) => {
       expect(e.family.toLowerCase()).toContain("gemma");
@@ -63,23 +67,39 @@ describe("filterCatalog", () => {
   });
 
   it("filters by description word", () => {
-    const results = filterCatalog(CATALOG, "RAG", null);
+    const results = filterCatalog(CATALOG, "RAG", NONE);
     expect(results.length).toBeGreaterThan(0);
     results.forEach((e) => {
       expect(e.description.toLowerCase()).toContain("rag");
     });
   });
 
-  it("filters by tag", () => {
-    const results = filterCatalog(CATALOG, "", "embedding");
+  it("filters by a single tag", () => {
+    const results = filterCatalog(CATALOG, "", tags("embedding"));
     expect(results.length).toBeGreaterThan(0);
     results.forEach((e) => {
       expect(e.tags).toContain("embedding");
     });
   });
 
-  it("combines query and tag (AND logic)", () => {
-    const codeResults = filterCatalog(CATALOG, "qwen", "code");
+  it("ANDs across multiple checked tags — an entry must carry all of them (#389)", () => {
+    const both = filterCatalog(CATALOG, "", tags("vision", "multilingual"));
+    expect(both.length).toBeGreaterThan(0);
+    both.forEach((e) => {
+      expect(e.tags).toContain("vision");
+      expect(e.tags).toContain("multilingual");
+    });
+    // The AND result is never larger than either single-tag result.
+    expect(both.length).toBeLessThanOrEqual(filterCatalog(CATALOG, "", tags("vision")).length);
+  });
+
+  it("returns empty when the combined tags exclude every entry", () => {
+    // No catalog model is both an embedding model and a code model.
+    expect(filterCatalog(CATALOG, "", tags("embedding", "code"))).toHaveLength(0);
+  });
+
+  it("combines query and tags (AND logic)", () => {
+    const codeResults = filterCatalog(CATALOG, "qwen", tags("code"));
     expect(codeResults.length).toBeGreaterThan(0);
     codeResults.forEach((e) => {
       expect(e.tags).toContain("code");
@@ -92,12 +112,11 @@ describe("filterCatalog", () => {
   });
 
   it("returns empty list when no match", () => {
-    expect(filterCatalog(CATALOG, "zzznomatch", null)).toHaveLength(0);
+    expect(filterCatalog(CATALOG, "zzznomatch", NONE)).toHaveLength(0);
   });
 
-  it("returns empty list when tag excludes all matches", () => {
-    const results = filterCatalog(CATALOG, "llama", "embedding");
-    expect(results).toHaveLength(0);
+  it("returns empty list when a tag excludes all matches", () => {
+    expect(filterCatalog(CATALOG, "llama", tags("embedding"))).toHaveLength(0);
   });
 });
 
@@ -108,6 +127,13 @@ beforeEach(() => {
   mockPull.mockClear();
   mockCatalog.mockReset();
   mockCatalog.mockResolvedValue(snapshot());
+  mockSystemInfo.mockReset();
+  // A modest 8 GB GPU / 16 GB RAM box gives the catalog a clear mix of fit ratings — small
+  // models "Fit", the 70B is "Too big" — so the fit-filter chips have something to bite on (#388).
+  mockSystemInfo.mockResolvedValue({
+    gpu: { vendor: "nvidia", name: "Test GPU", vram_total_mb: 8 * 1024 },
+    ram_total_mb: 16 * 1024,
+  });
 });
 
 describe("CatalogBrowser", () => {
@@ -216,5 +242,37 @@ describe("CatalogBrowser", () => {
     expect(screen.queryByText("gemma3:1b")).not.toBeInTheDocument();
     fireEvent.click(chip);
     expect(screen.getByText("gemma3:1b")).toBeInTheDocument();
+  });
+
+  it("ANDs two tag chips — narrows to models carrying both (#389)", () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    fireEvent.click(screen.getByRole("button", { name: /^vision$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^multilingual$/i }));
+    // gemma4 carries both vision + multilingual; a vision-only model (llava) drops out.
+    expect(screen.getByText("gemma4:e4b")).toBeInTheDocument();
+    expect(screen.queryByText("llava:7b")).not.toBeInTheDocument();
+  });
+
+  it("the All chip clears every selected tag", () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    fireEvent.click(screen.getByRole("button", { name: /^code$/i }));
+    expect(screen.queryByText("gemma3:1b")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    expect(screen.getByText("gemma3:1b")).toBeInTheDocument();
+  });
+
+  it("shows fit-rating filter chips once the system is known (#388)", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    expect(await screen.findByRole("button", { name: /too big/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^fits$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^tight$/i })).toBeInTheDocument();
+  });
+
+  it("filters the catalog by fit rating (#388)", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    // "Too big" keeps the 70B (43 GB) model on the 8 GB GPU and drops a tiny one that fits.
+    fireEvent.click(await screen.findByRole("button", { name: /too big/i }));
+    expect(screen.getByText("llama3.3:70b")).toBeInTheDocument();
+    expect(screen.queryByText("smollm2:135m")).not.toBeInTheDocument();
   });
 });

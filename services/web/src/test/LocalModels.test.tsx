@@ -187,6 +187,15 @@ describe("LocalModels", () => {
     expect(screen.queryByRole("button", { name: /^unload$/i })).not.toBeInTheDocument();
   });
 
+  it("badges capabilities as icon-only glyphs with a tooltip label (#384)", async () => {
+    render(<LocalModels />, { wrapper });
+
+    // llama3.2 reports the "tools" capability. It now shows as a labelled icon (role=img with the
+    // capability name) rather than an icon-plus-text chip, so the collapsed row stays compact.
+    const cap = await screen.findByRole("img", { name: "Tools" });
+    expect(cap).toBeInTheDocument();
+  });
+
   it("deletes a model after the confirm dialog", async () => {
     render(<LocalModels />, { wrapper });
 

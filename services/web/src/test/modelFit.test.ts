@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SystemInfo } from "@/lib/contracts";
-import { assessFit, estimateSizeMb } from "@/lib/modelFit";
+import { assessFit, estimateSizeMb, fitFilterOf, type ModelFit } from "@/lib/modelFit";
 
 const GB = 1024;
 const gpu = (vramGb: number, ramGb = 32): SystemInfo => ({
@@ -64,5 +64,30 @@ describe("assessFit", () => {
   it("estimates size from params for a catalog entry without a size", () => {
     const fit = assessFit(gpu(24), null, "7b");
     expect(fit.rating).toBe("good");
+  });
+});
+
+describe("fitFilterOf", () => {
+  const fit = (tone: ModelFit["tone"]): ModelFit => ({
+    rating: "good",
+    label: "x",
+    reason: "",
+    tone,
+  });
+
+  it("maps each judged tone to its filter bucket", () => {
+    expect(fitFilterOf(fit("ok"))).toBe("ok");
+    expect(fitFilterOf(fit("warn"))).toBe("warn");
+    expect(fitFilterOf(fit("danger"))).toBe("danger");
+  });
+
+  it("returns null for an unjudgeable (dim) verdict — it matches no fit filter", () => {
+    expect(fitFilterOf(fit("dim"))).toBeNull();
+  });
+
+  it("buckets real assessFit verdicts", () => {
+    expect(fitFilterOf(assessFit(gpu(24), 4.3 * GB))).toBe("ok"); // small model, big GPU
+    expect(fitFilterOf(assessFit(gpu(8, 16), 43 * GB))).toBe("danger"); // 70B won't fit
+    expect(fitFilterOf(assessFit(undefined, 4000))).toBeNull(); // no system to judge
   });
 });

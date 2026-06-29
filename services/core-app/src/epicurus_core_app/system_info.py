@@ -454,22 +454,25 @@ def _safe(fn: Callable[[], _T | None], label: str) -> _T | None:
         return None
 
 
-async def _effective_model_size(gateway: _ModelSource, tenant_id: str | None) -> ModelSize | None:
-    """The active chat model and its on-disk size (MB), from the gateway's model list."""
-    try:
-        active = await gateway.effective_default(tenant_id)
-    except Exception:
-        log.warning("could not resolve the effective model", exc_info=True)
-        return None
+async def _named_model_size(
+    gateway: _ModelSource, model: str, tenant_id: str | None
+) -> ModelSize | None:
+    """The on-disk size (MB) + trained facts for a *named* local model.
+
+    Returns ``None`` when ``model`` isn't a local model (a hosted provider, or simply not pulled)
+    — the caller decides what that means. When the runtime can't be listed at all the name is
+    still useful, so a bare ``ModelSize(name=model)`` (size unknown) is returned instead of
+    ``None``. Loose matching (full name / bare family) mirrors the gateway's own resolution.
+    """
     try:
         models = await gateway.models(tenant_id)
     except Exception:  # runtime unreachable — name without a size is still useful
         log.warning("could not list local models for sizing", exc_info=True)
-        return ModelSize(name=active)
+        return ModelSize(name=model)
 
-    bare = active.split("/", 1)[-1]  # hosted ids carry a provider prefix; locals don't
+    bare = model.split("/", 1)[-1]  # hosted ids carry a provider prefix; locals don't
     for info in models:
-        if info.name in (active, bare) or info.name.split(":", 1)[0] == bare:
+        if info.name in (model, bare) or info.name.split(":", 1)[0] == bare:
             size_mb = info.size // (1024 * 1024) if info.size else None
             # /api/show gives the trained context length (the suggestion's real ceiling) and
             # the weight quantization. Best-effort — it degrades to None on any failure.
@@ -480,8 +483,19 @@ async def _effective_model_size(gateway: _ModelSource, tenant_id: str | None) ->
                 context_length=details.context_length,
                 quantization=details.quantization,
             )
-    # The active model isn't a local one (e.g. a hosted provider): no on-disk size.
-    return ModelSize(name=active)
+    return None  # not a local model
+
+
+async def _effective_model_size(gateway: _ModelSource, tenant_id: str | None) -> ModelSize | None:
+    """The active chat model and its on-disk size (MB), from the gateway's model list."""
+    try:
+        active = await gateway.effective_default(tenant_id)
+    except Exception:
+        log.warning("could not resolve the effective model", exc_info=True)
+        return None
+    found = await _named_model_size(gateway, active, tenant_id)
+    # The active model isn't a local one (e.g. a hosted provider): no on-disk size, name only.
+    return found if found is not None else ModelSize(name=active)
 
 
 async def _safe_show(gateway: _ModelSource, model: str) -> ModelDetails:
@@ -500,6 +514,47 @@ async def _effective_kv_cache_type(gateway: _ModelSource, tenant_id: str | None)
     except Exception:  # prefs store hiccup — the suggestion just assumes the f16 baseline
         log.warning("could not read the KV-cache type", exc_info=True)
         return None
+
+
+async def suggest_context_for_model(
+    gateway: _ModelSource,
+    model: str,
+    *,
+    tenant_id: str | None = None,
+    detect: Callable[[], GpuInfo | None] = detect_gpu,
+    ram: Callable[[], int | None] = read_ram_total_mb,
+) -> int | None:
+    """The recommended context window (Ollama ``num_ctx``) for a *specific* local model (#386).
+
+    Uses the same heuristic as the global suggestion (:func:`suggest_context`) but sized to *this*
+    model — its on-disk size and trained length — against the host's VRAM (or, with no GPU, system
+    RAM) and the operator's KV-cache type. The GPU/RAM branch mirrors :func:`collect_system_info`.
+
+    Returns ``None`` when there's nothing to size against: the model isn't local, its size is
+    unknown, or no memory could be detected. Best-effort and non-probing of hardware beyond the
+    injected ``detect``/``ram`` (which default to the real probes), like the rest of this module.
+    """
+    size = await _named_model_size(gateway, model, tenant_id)
+    if size is None or size.size_mb is None:
+        return None
+    kv_cache_type = await _effective_kv_cache_type(gateway, tenant_id)
+    gpu = _safe(detect, "gpu detection")
+    if gpu is not None:
+        suggested = suggest_context(
+            gpu.vram_total_mb,
+            size.size_mb,
+            kv_cache_type=kv_cache_type,
+            model_max=size.context_length,
+        )
+        return suggested.suggested
+    # No GPU: base it on system RAM with the conservative CPU-inference cap (as the global path).
+    ram_total = _safe(ram, "ram detection")
+    if not ram_total:
+        return None
+    suggested = suggest_context(
+        ram_total, size.size_mb, cap=_NO_GPU_MAX_CONTEXT, kv_cache_type=kv_cache_type
+    )
+    return suggested.suggested
 
 
 def create_system_router(

@@ -157,6 +157,20 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model, ...settings }),
     }),
+  // A freshly pulled model should open with a context window sized to itself, not the global
+  // default (#386). The core owns the heuristic (VRAM + model size + KV cache) and persists the
+  // result as this model's per-model context. Best-effort and non-destructive: an existing
+  // per-model override is left untouched (`applied` false), as is a model with no local size.
+  suggestModelContext: (model: string) =>
+    request(
+      z.object({
+        model: z.string(),
+        context_window: z.number().nullable(),
+        applied: z.boolean(),
+      }),
+      "/platform/v1/llm/model-settings/suggest-context",
+      { method: "POST", body: JSON.stringify({ model }) },
+    ),
   // Read-only facts (quantization, parameter size, trained context length) for the sheet.
   modelDetails: (model: string) =>
     request(ModelDetails, `/platform/v1/llm/models/details?model=${encodeURIComponent(model)}`),

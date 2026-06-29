@@ -281,11 +281,15 @@ export const CATALOG: CatalogEntry[] = [
 export function filterCatalog(
   entries: CatalogEntry[],
   query: string,
-  tag: CatalogTag | null,
+  tags: ReadonlySet<CatalogTag>,
 ): CatalogEntry[] {
   const q = query.toLowerCase().trim();
   return entries.filter((e) => {
-    if (tag !== null && !e.tags.includes(tag)) return false;
+    // AND across every checked tag (#389): an entry must carry all of them to match. An empty
+    // set is "no tag filter" — every entry passes the tag test.
+    for (const tag of tags) {
+      if (!e.tags.includes(tag)) return false;
+    }
     if (!q) return true;
     return (
       e.id.toLowerCase().includes(q) ||

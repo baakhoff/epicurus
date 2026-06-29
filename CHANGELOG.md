@@ -348,6 +348,16 @@ images to GHCR.
 
 ### Fixed
 
+- **The Ollama KV-cache choice now actually applies on a fresh install** — core-app runs as
+  uid 10001 and writes `/etc/epicurus/ollama.env` to apply the operator's KV-cache type (#307),
+  but the shared `ollama-runtime` named volume is created **root-owned**, so on a fresh stack
+  that write failed with `PermissionError`: the choice saved but never took effect, and the
+  Ollama container mounts the same volume read-only so it couldn't fix the ownership either. A
+  one-shot **`ollama-init`** (in `infra/ollama/compose.yaml`) now `chown`s the volume root to uid
+  10001 before Ollama starts (`depends_on: service_completed_successfully`, mirroring
+  `qdrant-init` / `files-init`). Ordering-only — the env write is lazy (an operator change long
+  after boot), so it never races startup. The runtime-smoke gate asserts `ollama-init` ran and
+  exited 0 (#392). Infra-only; no component version change (stack tag set at release).
 - **A just-attached file now shows its pill immediately, not only after a reload** — when you
   attached a file and sent it, the message echoed back without the attachment pill; the pill
   only appeared once the page was reloaded (the server *had* persisted it). The optimistic

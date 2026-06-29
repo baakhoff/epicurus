@@ -7,9 +7,40 @@
 # Internal-only: the core reaches it at http://ollama:11434 on the epicurus network;
 # it is not published to the host (private-by-default — the core is the front door).
 services:
+  # One-shot: makes the shared ollama-runtime volume writable by the core before anything
+  # mounts it. A fresh named volume is created **root-owned**, but core-app runs as uid 10001
+  # (services/core-app/Dockerfile) and is the *writer* — it writes /etc/epicurus/ollama.env to
+  # apply the operator's KV-cache choice (#307). Without this, that write hits a root-owned
+  # volume and fails with PermissionError; the ollama container mounts the same volume :ro and
+  # so cannot chown it either (#392). The env file sits directly at the volume root, so we chown
+  # the root — no subdirs needed. Mirrors files-init / qdrant-init / the OpenBao chown.
+  ollama-init:
+    image: alpine:3.21
+    restart: "no"
+    user: root
+    volumes:
+      - ollama-runtime:/data
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /data
+        chown 10001:10001 /data
+        chmod 755 /data
+        echo "ollama-init: ensured ollama-runtime volume root owned by uid 10001"
+    networks: [epicurus]
+
   ollama:
     image: ollama/ollama:0.30.7
     restart: unless-stopped
+    # Wait for the chown one-shot so the volume the core later writes to is owned by uid 10001
+    # (#392). This is ordering only — nothing here races the core's write, which is lazy: it
+    # happens on an operator KV-cache change, long after boot, never at startup. (Gating ollama
+    # rather than core-app mirrors qdrant→qdrant-init and keeps the fix in this one fragment.)
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
     # Source the core-managed env file (KV-cache type, #307) on every (re)start, then run the
     # server. This is what lets a plain `docker restart` actually apply the choice — env is
     # otherwise fixed at container create. The file (in the shared volume below) is absent until

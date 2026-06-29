@@ -114,6 +114,18 @@ class FileStore(ABC):
     async def ensure_dir(self, *, tenant: str, path: str) -> FileEntry:
         """Create the directory at *path* (and parents) if absent; return its entry."""
 
+    @abstractmethod
+    async def move(self, *, tenant: str, src: str, dst: str) -> FileEntry:
+        """Move or rename the file/dir tree at *src* to *dst*; return the moved entry.
+
+        Both paths are tenant-relative and path-confined; neither may be the tenant root.
+        Renaming is the same-parent case of moving — there is one primitive, not two. Missing
+        parents of *dst* are created. Raises :class:`FileNotFoundError` if *src* is absent,
+        :class:`FileExistsError` if *dst* is already occupied (callers overwrite explicitly by
+        deleting first), and :class:`ValueError` for a tenant-root path or a move of a directory
+        into itself or one of its own descendants.
+        """
+
     # ── Concrete conveniences (in terms of the abstract byte API) ────────────────
 
     async def exists(self, *, tenant: str, path: str) -> bool:
@@ -246,6 +258,29 @@ class LocalFileStore(FileStore):
             return self._entry(tenant, target)
 
         return await asyncio.to_thread(_mkdir)
+
+    async def move(self, *, tenant: str, src: str, dst: str) -> FileEntry:
+        if not normalize_rel(src):
+            raise ValueError("cannot move the tenant root")
+        if not normalize_rel(dst):
+            raise ValueError("cannot move to the tenant root")
+        src_abs = self._abs(tenant, src)
+        dst_abs = self._abs(tenant, dst)
+        # Reject moving a directory into itself or one of its own descendants — os.rename would
+        # fail and shutil.move would nest the tree inside itself.
+        if src_abs == dst_abs or src_abs in dst_abs.parents:
+            raise ValueError(f"cannot move a path into itself: {src!r} -> {dst!r}")
+
+        def _move() -> FileEntry:
+            if not src_abs.exists():
+                raise FileNotFoundError(src)
+            if dst_abs.exists():
+                raise FileExistsError(dst)
+            dst_abs.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src_abs), str(dst_abs))
+            return self._entry(tenant, dst_abs)
+
+        return await asyncio.to_thread(_move)
 
 
 class S3FileStore(FileStore):
@@ -402,6 +437,57 @@ class S3FileStore(FileStore):
         # writing a file under the prefix is what makes it appear in a listing.
         rel = normalize_rel(path)
         return FileEntry(path=rel, name=rel.rsplit("/", 1)[-1] if rel else "", kind="dir")
+
+    async def move(self, *, tenant: str, src: str, dst: str) -> FileEntry:
+        from botocore.exceptions import ClientError
+
+        src_key = normalize_rel(src)
+        dst_key = normalize_rel(dst)
+        if not src_key:
+            raise ValueError("cannot move the tenant root")
+        if not dst_key:
+            raise ValueError("cannot move to the tenant root")
+        # Reject moving a prefix into itself or under one of its own children.
+        if src_key == dst_key or dst_key.startswith(f"{src_key}/"):
+            raise ValueError(f"cannot move a path into itself: {src!r} -> {dst!r}")
+        bucket = self._bucket(tenant)
+        async with self._session.client("s3", endpoint_url=self._url) as s3:
+            await self._ensure_bucket(s3, bucket)
+            # Every key at or under src — the object itself plus a virtual-directory subtree.
+            # ``Prefix`` is a raw string match, so confirm each key is src exactly or a child of
+            # ``src/`` (Prefix "report" would otherwise also catch "reports/…").
+            moves: list[tuple[str, str]] = []
+            paginator = s3.get_paginator("list_objects_v2")
+            async for page in paginator.paginate(Bucket=bucket, Prefix=src_key):
+                for obj in page.get("Contents", []):
+                    old = obj["Key"]
+                    if old == src_key:
+                        moves.append((old, dst_key))
+                    elif old.startswith(f"{src_key}/"):
+                        moves.append((old, f"{dst_key}{old[len(src_key) :]}"))
+            if not moves:
+                raise FileNotFoundError(src)
+            # Refuse to overwrite: no destination key may already exist.
+            for _, new_key in moves:
+                try:
+                    await s3.head_object(Bucket=bucket, Key=new_key)
+                except ClientError as exc:
+                    if exc.response["Error"]["Code"] not in {"NoSuchKey", "404", "NoSuchBucket"}:
+                        raise
+                else:
+                    raise FileExistsError(dst)
+            # Copy server-side then drop the originals (S3 has no native move).
+            for old_key, new_key in moves:
+                await s3.copy_object(
+                    Bucket=bucket, Key=new_key, CopySource={"Bucket": bucket, "Key": old_key}
+                )
+                await s3.delete_object(Bucket=bucket, Key=old_key)
+        single_file = len(moves) == 1 and moves[0][0] == src_key
+        return FileEntry(
+            path=dst_key,
+            name=dst_key.rsplit("/", 1)[-1],
+            kind="file" if single_file else "dir",
+        )
 
 
 def build_file_store(

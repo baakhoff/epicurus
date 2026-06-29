@@ -636,6 +636,22 @@ class ModuleRegistry:
             raise HTTPException(status_code=404, detail=f"page {page_id!r} is not an editor")
         return base
 
+    async def _resolve_movable_page(self, name: str, page_id: str) -> str:
+        """The base URL of *name*, asserting page ``page_id`` supports move/rename (#391).
+
+        Move is the one mutation a ``browser`` page shares with an ``editor`` (the Files
+        browser renames/relocates its writable entries), so it is the only ``/pages`` proxy
+        that accepts both archetypes; everything else stays editor-only. Raises 404 if the
+        module is unreachable, has no such page, or the page is neither editor nor browser.
+        """
+        base, manifest = await self._resolve(name)
+        page = next((p for p in manifest.pages if p.id == page_id), None)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        if page.archetype not in ("editor", "browser"):
+            raise HTTPException(status_code=404, detail=f"page {page_id!r} does not support move")
+        return base
+
     async def get_page_doc(self, name: str, page_id: str, path: str) -> dict[str, Any]:
         """Proxy a single editor document's content to the shell (ADR-0018).
 
@@ -777,9 +793,10 @@ class ModuleRegistry:
         """Proxy ``POST /pages/{page_id}/move`` to the module (#216).
 
         Moves or renames a file or folder from *from_path* to *to_path*. 409
-        if the destination already exists, 404 if the source does not exist.
+        if the destination already exists, 404 if the source does not exist. Accepts
+        ``editor`` (knowledge/notes) and ``browser`` (the storage Files page) archetypes.
         """
-        base = await self._resolve_editor_page(name, page_id)
+        base = await self._resolve_movable_page(name, page_id)
         async with httpx.AsyncClient(base_url=base, timeout=10) as client:
             resp = await client.post(
                 f"/pages/{page_id}/move",

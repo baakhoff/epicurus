@@ -64,6 +64,9 @@ def _entry_to_item(entry: FileEntry, *, download_base: str) -> dict[str, Any]:
         "icon": "folder" if is_dir else "file",
         "nav_path": entry.path if is_dir else None,
         "href": f"{download_base}?path={quote(entry.path)}" if not is_dir else None,
+        # Only object-store entries (uploads, agent-written) are writable; the scanned tree
+        # is read-only, so the Files browser offers rename/move on object entries alone (#391).
+        "movable": entry.source == "object",
     }
 
 
@@ -223,6 +226,78 @@ async def load_object_download(
     return ObjectDownload(name=entry.name, data=stored.data, content_type=stored.content_type)
 
 
+# ── Move / rename (Files browser, #381 / #391) ───────────────────────────────
+
+
+async def move_item(
+    *,
+    index: FileIndex,
+    objects: ObjectStore,
+    tenant: str,
+    from_path: str,
+    to_path: str,
+) -> dict[str, str]:
+    """Move or rename a writable Files-browser entry; the ``/pages/files/move`` route wraps this.
+
+    Only ``source="object"`` entries (chat uploads and agent-written objects) are movable —
+    the scanned filesystem tree is mounted read-only, so a move there is rejected. Renaming is
+    the same-parent case of moving. Raises ``HTTPException``: 400 (read-only entry, file-space
+    root, or a move into the path itself), 404 (source absent), 409 (destination occupied).
+    Returns ``{"path": <new-path>}``.
+
+    Two stores must stay consistent — MinIO holds the bytes, the index is what the Files page and
+    downloads read. So every object is copied to its new key first, the index subtree is then
+    re-pathed in one transaction, and only then are the originals dropped. A crash between steps
+    leaves harmless orphan copies in MinIO, never an index row pointing at missing bytes.
+    """
+    src = _normalize_key(from_path)
+    dst = _normalize_key(to_path)
+    if not src or not dst:
+        raise HTTPException(status_code=400, detail="cannot move the file-space root")
+    if src == dst:
+        return {"path": dst}
+    if dst.startswith(src + "/"):
+        raise HTTPException(status_code=400, detail="cannot move a path into itself")
+
+    if await index.get(tenant=tenant, path=src) is None:
+        raise HTTPException(status_code=404, detail=f"no such file: {src}")
+
+    subtree = await index.subtree(tenant=tenant, path=src)
+    if any(e.source != "object" for e in subtree):
+        raise HTTPException(
+            status_code=400,
+            detail="this entry is read-only — only uploaded or app-written files can be moved",
+        )
+
+    # The destination must be entirely free: nothing at dst and nothing already under dst/.
+    if await index.get(tenant=tenant, path=dst) is not None or await index.subtree(
+        tenant=tenant, path=dst
+    ):
+        raise HTTPException(status_code=409, detail=f"destination already exists: {dst}")
+
+    # Make the destination's parent folders navigable: a move into a brand-new folder must
+    # create its dir rows (mirroring how an upload creates its ancestors), or the moved entry
+    # would be unreachable from the parent listing. Only missing ancestors are added, so an
+    # existing scanned folder keeps its source.
+    parents = dst.split("/")[:-1]
+    for i in range(len(parents)):
+        ancestor = "/".join(parents[: i + 1])
+        if await index.get(tenant=tenant, path=ancestor) is None:
+            await index.upsert_batch(
+                tenant=tenant,
+                source="object",
+                entries=[_index_row(ancestor, parents[i], 0, "dir")],
+            )
+
+    file_moves = [(e.path, dst + e.path[len(src) :]) for e in subtree if e.kind == "file"]
+    for old_key, new_key in file_moves:
+        await objects.copy(tenant=tenant, src_key=old_key, dst_key=new_key)
+    await index.repath(tenant=tenant, src=src, dst=dst)
+    for old_key, _ in file_moves:
+        await objects.delete(tenant=tenant, key=old_key)
+    return {"path": dst}
+
+
 # ── Inline text read (split-screen reader, #KB-refactor req 6) ────────────────
 
 
@@ -287,7 +362,7 @@ def build_module(
 
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.6.0",
+        version="0.7.0",
         description=(
             "File-tree index (list, search, read) over the shared file space, plus "
             "app-managed object storage via MinIO, durable chat-upload ingest, and "

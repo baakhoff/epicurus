@@ -36,6 +36,7 @@ explicitly (constraint #1). Missing paths raise `FileNotFoundError`.
 | `stat(tenant, path) -> FileEntry \| None` | The entry, or `None`. |
 | `delete(tenant, path) -> bool` | Delete a file or directory tree; the tenant root is rejected. |
 | `ensure_dir(tenant, path) -> FileEntry` | Create a directory (and parents). |
+| `move(tenant, src, dst) -> FileEntry` | Move/rename a file or tree (rename = same-parent move); raises `FileNotFoundError` (missing src), `FileExistsError` (dst occupied), `ValueError` (root / into-itself). |
 | `ensure_tenant_root(tenant)` | Provision the tenant root (core-owned provisioning). |
 
 Path-safety is centralized in `normalize_rel()`: it collapses `\`, `//`, and `.`, and **rejects**
@@ -64,12 +65,14 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 | `PUT /platform/v1/files/write?path=&tenant_id=` (body `{content}`) | Write UTF-8 text → `FileEntry`. **400** writing the root. |
 | `DELETE /platform/v1/files?path=&tenant_id=` | `{deleted}` — a file or a whole tree. **400** deleting the root. |
 | `POST /platform/v1/files/dir?path=&tenant_id=` | Create a directory → `FileEntry`. |
+| `POST /platform/v1/files/move?tenant_id=` (body `{src, dst}`) | Move/rename → `FileEntry`. **404** missing src, **409** dst exists, **400** root/traversal/into-itself. |
 
 ### `PlatformClient` methods
 
 `files_list(path="")`, `files_read(path)`, `files_write(path, content)`, `files_stat(path)`,
-`files_delete(path)`, `files_make_dir(path)` — the typed module-side consumer of the endpoints
-above (`files_stat` returns `None` on 404).
+`files_delete(path)`, `files_make_dir(path)`, `files_move(src, dst)` — the typed module-side
+consumer of the endpoints above (`files_stat` returns `None` on 404; `files_move` raises on
+404/409/400).
 
 ## Configuration (core-app)
 

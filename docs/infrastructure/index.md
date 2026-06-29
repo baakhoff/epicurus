@@ -79,6 +79,17 @@ Runs **as a container** (ADR-0011), CPU by default and GPU opt-in via an overlay
 **models are pulled and managed by the core at runtime**, never baked into an image.
 Details: [`infra/ollama/README.md`](../../infra/ollama/README.md).
 
+Ollama and core-app share a small named volume, **`ollama-runtime`**, mounted at
+`/etc/epicurus`: the core writes `ollama.env` there to apply the operator's KV-cache choice
+(#307), and Ollama mounts it **read-only** and sources it on (re)start. A one-shot
+**`ollama-init`** container prepares that volume before Ollama starts (a
+`depends_on: service_completed_successfully`, mirroring `qdrant-init`). A fresh named volume is
+created **root-owned**, but core-app runs as uid 10001 — so without this its env-file write would
+hit `PermissionError` and the choice would save but never apply (#392). `ollama-init` simply
+`chown`s the volume root to uid 10001 (the env file lives directly at the root). It is **ordering
+only**: the core's write is lazy — it happens when the operator changes the KV-cache type, long
+after boot — so there is no startup race regardless.
+
 ## How it's assembled
 
 The root `compose.yaml` `include`s the infra fragment and each module fragment (ADR-0006):

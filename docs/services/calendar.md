@@ -38,6 +38,12 @@ Since **v0.8** (#252, ADR-0037) the module supports **all-day events** end-to-en
 the bug where all-day events rendered one day early — and lets the operator **choose which
 calendar** a new event lands on, from a picker in the create form.
 
+Since **v0.10** (#378) every event the page returns is **tagged with its calendar** —
+`calendar_id`, the same `account:collection` token the create picker uses — so the shell can
+group events by calendar and let the operator **toggle each calendar's visibility**; the shell
+also caches each month to paint instantly on reopen (#379). The router sets `calendar_id` as it
+overlays each enabled calendar, so the tag matches the calendars the operator can pick.
+
 Since **v0.4** the module speaks the **entity-reference contract** (ADR-0019): listed events
 come back as interactive chips, a referenced event resolves to a core **hover-card**, and the
 module is a **chat-attachment source** so an event can be attached to a turn. It supplies data

@@ -14,6 +14,15 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: choose which calendars are shown, and the month paints instantly** (#378, #379) —
+  the calendar view gave no way to hide a busy calendar, and reopening it refetched before
+  showing anything. Each event the module returns is now **tagged with its calendar**
+  (`calendar_id`, an `account:collection` token), so the view offers a **Calendars** menu of
+  per-calendar visibility toggles (each with a colour dot, persisted per page); hiding a calendar
+  drops its events client-side with no refetch. And each month window is **cached** in
+  localStorage: reopening paints the cached month **instantly** and revalidates in the background
+  (stale-while-revalidate, bounded to the last 12 windows). `calendar` 0.9.0→0.10.0,
+  `web` 0.56.0→0.57.0.
 - **Notes & knowledge: the rendered Preview is now editable (WYSIWYG)** (#377) — the `editor`
   archetype opens render-first, but its Preview was read-only, so editing meant toggling to the
   raw markdown source. Preview is now a **WYSIWYG surface** (Milkdown's Crepe — ProseMirror +

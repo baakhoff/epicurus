@@ -28,6 +28,11 @@ class Event(BaseModel):
     description: str | None = None
     location: str | None = None
     provider: str
+    # The calendar this event belongs to, as the router's ``account[:collection]`` token
+    # (e.g. ``local`` or ``google:primary``) — the same token the New-event picker uses, so
+    # the shell can group events by calendar and toggle each on/off (#378). Set by the router
+    # on read; ``None`` for a bare single-provider event (e.g. in unit tests).
+    calendar_id: str | None = None
     # An all-day (date-only) event. When true, ``start``/``end`` are UTC-midnight
     # boundaries of a *floating* date range — ``end`` is **exclusive** (the day after the
     # last day, matching Google's all-day model), and the shell renders them on their

@@ -519,7 +519,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.9.0"
+    assert manifest.version == "0.10.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -617,6 +617,23 @@ async def test_router_overlays_enabled_collections() -> None:
         tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
     )
     assert [e.title for e in events] == ["From Google"]
+
+
+async def test_router_tags_events_with_their_calendar() -> None:
+    """Each event carries the account[:collection] token of the calendar it came from (#378),
+    so the shell can group events by calendar and toggle each on/off."""
+    router, local, google = await _router(
+        CollectionPrefs(enabled=[CollectionRef(account="local"), _google_ref("primary")])
+    )
+    await local.create_event(tenant_id="t1", title="Local", start=_dt(9), end=_dt(10))
+    await google.create_event(tenant_id="t1", title="Goog", start=_dt(11), end=_dt(12))
+    events = await router.list_events(
+        tenant_id="t1", time_range=DateTimeRange(start=_dt(0), end=_dt(23))
+    )
+    assert {e.title: e.calendar_id for e in events} == {
+        "Local": "local",
+        "Goog": "google:primary",
+    }
 
 
 async def test_router_writes_to_active_collection() -> None:

@@ -295,10 +295,34 @@ client error (4xx) passes through as-is (e.g. a missing entity stays a `404`), w
 a timeout, or a connection failure becomes a `502` carrying the operation — so a slow or
 erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
 
+### Maintenance orchestrator (ADR-0060)
+
+One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
+a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
+registers by being added to the list; the run / route / schedule machinery is unchanged. Two ship:
+the **memory fact-extraction drain** (light, nightly-eligible — drains the deferred-extraction
+queue, ADR-0051) and the **module re-index** fan-out (heavy, manual-only — the same `reembed`
+fan-out as above). Jobs run **sequenced** (gentle on a single GPU) and each is contained: one job's
+failure becomes an `error` result, never aborting the rest.
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run}` — the registered jobs, the schedule, and the last run (or `null`). |
+| `POST /platform/v1/maintenance/run` | Run **every** job now (`scope: "all"`) → `MaintenanceRun` `{ran_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `ok`/`skipped`/`error`). |
+
+The **manual** trigger (the web **Settings → Maintenance** card) is always available and runs all
+jobs. The **nightly schedule** (`run_periodic`, at `MAINTENANCE_HOUR`) runs only the `nightly` jobs
+and is **off by default** (`MAINTENANCE_SCHEDULE_ENABLED`) — the per-runner schedules already cover
+the unattended case, so this avoids redundant nightly work; consolidating those schedules onto the
+orchestrator is the named follow-up. Every run publishes a tenant-scoped `maintenance.completed`.
+
 ### Events (NATS)
 
 Emits **`<tenant>.llm.usage`** after every inference call — model, token counts, latency.
 No prompt/response content, no keys. Feeds observability now and SaaS metering later.
+
+Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-0060) — the run's
+`{ran_at, scope, jobs:[{key, status, detail}]}` summary, for downstream consumers.
 
 ## Configuration
 
@@ -327,6 +351,8 @@ No prompt/response content, no keys. Feeds observability now and SaaS metering l
 | `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
 | `MEMORY_RECALL_TIMEOUT_S` | `4.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). 4s (was 2s) fits a single-GPU embed-model swap. |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
+| `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
+| `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
 
 Provider keys are **not** configured here — they go through the UI into OpenBao.
 

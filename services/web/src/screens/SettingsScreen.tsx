@@ -1,6 +1,6 @@
 /** Settings — platform info, theme, connected accounts, and what this thing is. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, KeyRound, Link, Moon, Sun, Unlink, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, Link, Moon, RefreshCw, Sun, Unlink, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -357,6 +357,62 @@ export function AgentCard() {
   );
 }
 
+/** Maintenance — run the core's background jobs as one coordinated batch (#383, ADR-0060). */
+export function MaintenanceCard() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ["maintenance"], queryFn: api.maintenanceStatus });
+  const run = useMutation({
+    mutationFn: () => api.runMaintenance(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["maintenance"] }),
+  });
+  // Prefer the run we just triggered; otherwise show the cached last run from status.
+  const result = run.data ?? status.data?.last_run ?? null;
+  const tone = (s: string): "ok" | "dim" | "danger" =>
+    s === "ok" ? "ok" : s === "skipped" ? "dim" : "danger";
+
+  return (
+    <Card>
+      <h3 className="mb-2 font-serif text-base text-ink">Maintenance</h3>
+      <p className="mb-3 text-sm text-ink-dim">
+        Run the background jobs — distil pending memories into facts and re-index modules — as one
+        batch. Re-indexing rebuilds embeddings and can take a while; it runs in the background.
+      </p>
+      {status.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" busy={run.isPending} onClick={() => run.mutate()}>
+              <RefreshCw size={14} />
+              Run maintenance now
+            </Button>
+            <span className="text-xs text-ink-faint">
+              {status.data?.schedule_enabled
+                ? `Scheduled nightly at ${String(status.data.schedule_hour).padStart(2, "0")}:00`
+                : "Manual only — nightly schedule off"}
+            </span>
+          </div>
+          {run.isError && <p className="text-sm text-danger">{(run.error as Error).message}</p>}
+          {result && (
+            <div className="text-[11px] text-ink-dim">
+              Last run{result.scope === "nightly" ? " (nightly)" : ""}:
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {result.jobs.map((j) => (
+                  <li key={j.key} className="flex items-center gap-1.5">
+                    <Dot tone={tone(j.status)} />
+                    <span className="text-ink">{j.label}</span>
+                    <span>· {j.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function SettingsScreen() {
   const theme = usePrefs((s) => s.theme);
   const setTheme = usePrefs((s) => s.setTheme);
@@ -446,6 +502,8 @@ export function SettingsScreen() {
         <TimezoneCard />
 
         <AgentCard />
+
+        <MaintenanceCard />
 
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Platform</h3>

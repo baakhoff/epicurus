@@ -136,6 +136,20 @@ it as a real IANA zone (**400** otherwise) and persists it; edited in the web Se
 
 ---
 
+## `GET /platform/v1/maintenance` · `POST /platform/v1/maintenance/run`
+
+The maintenance orchestrator (ADR-0060) — one coordinated batch over the core's background jobs
+(memory fact-extraction drain, module re-index fan-out). `GET` returns
+`{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run}` — the registered jobs,
+the opt-in nightly schedule, and the last run (or `null`). `POST /run` runs **every** job now
+(``scope: "all"``) and returns the `MaintenanceRun` `{ran_at, scope, jobs:[{key,label,status,detail}]}`
+— `status` is `ok`/`skipped`/`error` per job (one job's failure never aborts the rest). A
+tenant-scoped `maintenance.completed` NATS event carries the same summary. Driven by the web
+**Settings → Maintenance** card. The nightly schedule runs only `nightly` jobs and is off unless
+`MAINTENANCE_SCHEDULE_ENABLED` is set.
+
+---
+
 ## Knowledge-base / notes / suggestions endpoints (shell-facing)
 
 These are consumed by the web shell, not the `PlatformClient`. The full module-registry

@@ -4,6 +4,7 @@ import { CheckCircle2, KeyRound, Link, Moon, RefreshCw, Sun, Unlink, XCircle } f
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+import { ChatBridgesCard } from "@/components/ChatBridgesCard";
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
 import { Button, Card, Dot, NumberInput, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
@@ -498,6 +499,8 @@ export function SettingsScreen() {
             ))}
           </div>
         </Card>
+
+        <ChatBridgesCard />
 
         <TimezoneCard />
 

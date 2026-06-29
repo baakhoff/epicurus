@@ -9,6 +9,7 @@ import {
   ActiveRun,
   ActiveSessions,
   AttachmentUploaded,
+  BridgeStatus,
   CatalogResponse,
   type CollectionPrefs,
   EditorDocContent,
@@ -518,6 +519,31 @@ export const api = {
     request(z.object({ status: z.string() }), `/platform/v1/oauth/${encodeURIComponent(provider)}`, {
       method: "DELETE",
     }),
+
+  // Chat bridges (#369, ADR-0062): connect/manage the messaging module's bridges. The token is
+  // write-only — the core stores it in OpenBao and reloads the module; the mutations return the
+  // bridge's fresh status, and the UI refetches the list. A 404 here means messaging isn't
+  // installed (the surface hides itself).
+  messagingBridges: () =>
+    request(z.array(BridgeStatus), "/platform/v1/messaging/bridges"),
+  connectBridge: (bridge: string, token: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/messaging/bridges/${encodeURIComponent(bridge)}/token`,
+      { method: "PUT", body: JSON.stringify({ token }) },
+    ),
+  setBridgeEnabled: (bridge: string, enabled: boolean) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/messaging/bridges/${encodeURIComponent(bridge)}/enabled`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+  disconnectBridge: (bridge: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/messaging/bridges/${encodeURIComponent(bridge)}`,
+      { method: "DELETE" },
+    ),
 };
 
 /**

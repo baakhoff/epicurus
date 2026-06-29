@@ -348,6 +348,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Uninstalling a module no longer hard-fails when the core can't reach Docker** (#382, amends
+  ADR-0028) — "Remove module" returned a **503** ("the core has no Docker access") whenever the
+  Docker socket wasn't mounted, leaving no way to remove a module. Removal is now **decoupled from
+  the live socket**: the core writes the module's `removed` tombstone first — which hides it from
+  every surface and stops routing its tools *immediately*, with or without Docker — and the
+  container teardown is **deferred** to the next startup reconcile (which already re-removes any
+  tombstoned module whose container is still up). The `DELETE /platform/v1/modules/{name}` response
+  gains `container_teardown_deferred`; when it's true the Modules screen shows a clear
+  **informational** notice ("its container is still running because the core has no Docker access;
+  it will be cleared on the next restart") instead of a red error. Protected services are still
+  rejected (**403**) — now before the tombstone is written, regardless of the socket — and an
+  unknown module is still **404**. core-app 0.44.0→0.45.0, web 0.56.0→0.57.0.
 - **A just-attached file now shows its pill immediately, not only after a reload** — when you
   attached a file and sent it, the message echoed back without the attachment pill; the pill
   only appeared once the page was reloaded (the server *had* persisted it). The optimistic

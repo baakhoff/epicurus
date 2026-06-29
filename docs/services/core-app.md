@@ -256,7 +256,7 @@ leading JSON value is salvaged from any trailing junk, and anything unparseable 
 | `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
-| `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, ADR-0028): stop + remove the module's container via the Docker socket, then tombstone it. Refuses core-app / web / data-plane, scoped to the core's own Compose project. **403** protected · **503** no Docker access · **404** unknown. |
+| `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, #382, ADR-0028): tombstone the module — which hides it everywhere and stops routing its tools at once — and tear its container down. **Decoupled from the live Docker socket** (#382): soft-removes with **200** even when the core has no Docker access, deferring the container teardown to the next startup reconcile; the response carries `container_teardown_deferred` (true when no socket was available). With a socket present it also stops + removes the container now, scoped to the core's own Compose project and refusing core-app / web / data-plane. **403** protected (enforced regardless of the socket) · **404** unknown. |
 | `GET` · `PUT /platform/v1/modules/{name}/models` | Per-module model-slot selections (#128, ADR-0029): `{slot_key: model_id}`. `PUT` validates each key against the manifest's `required_models` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
 | `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). |
 | `GET /platform/v1/modules/{name}/collections` | The module's connected accounts + collections (ADR-0030), proxied from its `GET /accounts` and **merged** with the operator's stored selection (each collection annotated `enabled`/`active`). **404** if the module declares no `collections`. |
@@ -272,13 +272,16 @@ leading JSON value is salvaged from any trailing junk, and anything unparseable 
 | `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/reject` | Reject a staged suggestion — the module discards it, nothing written (#220). Operator-only. |
 | `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 
-> **Privileged surface (ADR-0028, #307).** Module removal — and applying the Ollama KV-cache
-> type — needs the Docker socket, mounted read-write on `core-app` **only**. The core touches it
-> through a single `DockerController`: it stops/removes **only a configured module's own
-> container**, and separately **restarts only an allowlisted infra container** (`ollama`, which is
-> never removable). Both are scoped to this Compose project and never touch core-app / web / a
-> data-plane service. Drop the socket mount to disable both (removal returns `503`; a KV-cache
-> change then saves without applying).
+> **Privileged surface (ADR-0028, #307, #382).** Tearing down a removed module's container — and
+> applying the Ollama KV-cache type — needs the Docker socket, mounted read-write on `core-app`
+> **only**. The core touches it through a single `DockerController`: it stops/removes **only a
+> configured module's own container**, and separately **restarts only an allowlisted infra
+> container** (`ollama`, which is never removable). Both are scoped to this Compose project and
+> never touch core-app / web / a data-plane service. Module **removal itself no longer needs the
+> socket** (#382): it tombstones the module (hidden + unrouted at once) and **defers** the
+> container teardown to the next startup reconcile when the socket is absent — so dropping the
+> mount leaves removal working (the container lingers until the next restart), while a KV-cache
+> change then saves without applying.
 
 Caller-supplied path segments the registry interpolates into a module request —
 `ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a

@@ -28,7 +28,7 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_core_app.agent.mcp_host import McpHost
-from epicurus_core_app.docker_control import DockerController, DockerError
+from epicurus_core_app.docker_control import PROTECTED, DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
 log = get_logger("epicurus_core_app.modules")
@@ -247,34 +247,59 @@ class ModuleRegistry:
         await self._prefs.set_enabled(self._tenant, name, enabled)
 
     async def remove(self, name: str) -> dict[str, Any]:
-        """Stop + remove a module's container, then tombstone it (#127, ADR-0028).
+        """Tombstone a module now, tearing its container down out-of-band (#127, #382, ADR-0028).
 
-        Privileged and confirmed in the UI. 404 for an unknown module, 403 for a
-        protected/core service (also enforced in the Docker layer), 503 when the Docker
-        socket is unavailable. Idempotent: a module whose container is already gone still
-        tombstones. The tombstone hides the module everywhere and is re-enforced on the
-        next startup, so a ``compose up`` cannot silently resurrect it.
+        Removal is **decoupled from the live Docker socket** (#382). The tombstone — a
+        ``removed`` flag on ``module_prefs`` — is the source of truth: setting it hides the
+        module from every surface and drops it from tool routing *immediately*, with or
+        without Docker. When the socket is present we also stop + remove the container here;
+        when it is absent we defer that teardown to the next startup reconcile
+        (:meth:`reconcile_tombstones`), which already re-removes any tombstoned module whose
+        container is still up. Either way the module is gone for the operator at once.
+
+        404 for an unknown module; 403 for a protected/core service (enforced here regardless
+        of the socket, *and* again in the Docker layer); otherwise 200. Idempotent: a module
+        whose container is already gone still tombstones. The result's
+        ``container_teardown_deferred`` is true when no socket was available, so the UI can say
+        the container keeps running until the next restart.
         """
         live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
         if name not in live:
             raise HTTPException(status_code=404, detail=f"no module named {name!r}")
-        if self._docker is None:
+        # Enforce the protected denylist before tombstoning — never persist a removal for a
+        # core/data-plane service, even if (somehow) one were configured as a module. Protected
+        # names usually aren't in ``live``; this is defence-in-depth, independent of the socket.
+        if name in PROTECTED:
             raise HTTPException(
-                status_code=503, detail="module removal unavailable: the core has no Docker access"
+                status_code=403, detail=f"{name!r} is protected and cannot be removed"
             )
-        try:
-            containers = await asyncio.to_thread(self._docker.remove_module, name)
-        except DockerError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        containers = 0
+        deferred = self._docker is None
+        if not deferred:
+            assert self._docker is not None  # narrowed by ``deferred`` for mypy
+            try:
+                containers = await asyncio.to_thread(self._docker.remove_module, name)
+            except DockerError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+        # Always tombstone — this hides the module everywhere and stops routing now, and is
+        # re-enforced on the next startup so a ``compose up`` cannot silently resurrect it.
         await self._prefs.set_removed(self._tenant, name, True)
-        log.info("module removed", module=name, containers=containers)
-        return {"removed": name, "containers": containers}
+        log.info(
+            "module removed",
+            module=name,
+            containers=containers,
+            container_teardown_deferred=deferred,
+        )
+        return {"removed": name, "containers": containers, "container_teardown_deferred": deferred}
 
     async def reconcile_tombstones(self) -> None:
-        """Re-remove any tombstoned module whose container has reappeared (#127).
+        """Re-remove any tombstoned module whose container is still up (#127, #382).
 
-        Run at startup so a removal survives a ``compose up`` / Watchtower pull. Best-effort
-        — a missing socket or a transient Docker error is logged, never fatal.
+        Run at startup. It serves two cases: a removal surviving a ``compose up`` / Watchtower
+        pull (which would recreate the container), **and** the deferred teardown of a module
+        that was tombstoned while the core had no socket (#382) — both leave a tombstoned module
+        with a live container, which this clears once a socket is available. Best-effort — a
+        missing socket or a transient Docker error is logged, never fatal.
         """
         if self._docker is None:
             return
@@ -984,10 +1009,15 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
 
     @router.delete("/{name}")
     async def remove_module(name: str) -> dict[str, Any]:
-        """Confirmed module removal (#127): stop + remove the container, then tombstone it.
+        """Confirmed module removal (#127, #382): tombstone the module, tear its container down.
 
-        Privileged — gated by a confirm dialog in the shell. 403 for a protected service,
-        503 when the core has no Docker access, 404 for an unknown module.
+        Privileged — gated by a confirm dialog in the shell. **Decoupled from the live Docker
+        socket** (#382): the module is tombstoned (hidden everywhere, dropped from routing)
+        immediately, so this soft-removes with **200** even when the core has no Docker access —
+        the container teardown is then **deferred** to the next startup reconcile. The response
+        carries ``container_teardown_deferred`` (true when no socket was available, so the
+        container is still running until the next restart). Still **403** for a protected
+        service and **404** for an unknown module.
         """
         return await registry.remove(name)
 

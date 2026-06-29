@@ -241,10 +241,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
-  // Confirmed module removal (#127): stop + remove the module's container, then tombstone it.
+  // Confirmed module removal (#127, #382): tombstone the module (hidden + unrouted at once),
+  // tearing its container down out-of-band. `container_teardown_deferred` is true when the core
+  // had no Docker socket — the module is gone but its container runs until the next restart.
   removeModule: (name: string) =>
     request(
-      z.object({ removed: z.string(), containers: z.number() }),
+      z.object({
+        removed: z.string(),
+        containers: z.number(),
+        container_teardown_deferred: z.boolean().optional(),
+      }),
       `/platform/v1/modules/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),

@@ -8,18 +8,22 @@
  *  - `path` → current directory path; breadcrumbs let the user navigate up.
  *  - `nav_path` on an item → clicking drills into that directory (sets path param).
  *  - `href` on an item → a download link is shown in the detail pane.
+ *  - `movable` on an item → the entry can be renamed (detail pane) and dragged onto a
+ *    folder/breadcrumb to move it (#391), through the shared `/pages/{id}/move` contract.
  *
  * Responsive: two panes side-by-side on wide screens; on phones the list fills the
  * view and selecting an item slides to its detail (with a back affordance).
  */
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   BookOpen,
+  Check,
   ChevronLeft,
   ChevronRight,
   Download,
   Folder,
+  Pencil,
   Search,
   X,
 } from "lucide-react";
@@ -57,6 +61,16 @@ function parentPath(path: string): string {
   return parts.join("/");
 }
 
+/** The last segment of a path — the display/file name. */
+function basename(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/** Join a directory and a name into a POSIX path (`""` dir = root). */
+function joinPath(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name;
+}
+
 function ItemIcon({ item }: { item: BrowserItem }) {
   if (item.nav_path) return <Folder size={15} className="shrink-0 text-ink-faint" />;
   return null;
@@ -67,7 +81,13 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
   const [searchInput, setSearchInput] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Inline rename (detail pane) and native drag-to-move (#391).
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const qc = useQueryClient();
 
   // Open a text file in the right-panel split-screen reader (#KB-refactor, req 6).
   const panelOpen = usePanel((s) => s.open);
@@ -80,6 +100,21 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
       ),
   });
 
+  // Rename / move through the shared move contract; refetch the listing on success (#391).
+  const move = useMutation({
+    mutationFn: ({ from, to }: { from: string; to: string }) =>
+      api.moveModuleItem(module, pageId, from, to),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      setSelectedId(null);
+      setRenaming(false);
+    },
+    onError: (err) =>
+      window.alert(
+        err instanceof ApiError ? `Could not move: ${err.detail}` : "Could not move this item.",
+      ),
+  });
+
   // Reset selection when the path or query changes — adjust state during render
   // (the React-blessed alternative to a setState-in-effect, no extra commit).
   const navKey = JSON.stringify([currentPath, activeQuery]);
@@ -87,6 +122,7 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
   if (navKey !== lastNavKey) {
     setLastNavKey(navKey);
     setSelectedId(null);
+    setRenaming(false);
   }
 
   const params: Record<string, string> = {};
@@ -137,6 +173,50 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
     searchRef.current?.focus();
   }
 
+  // Whether `src` may be moved into directory `targetDir` — not into itself/a descendant,
+  // and not a no-op back into its current parent. The backend re-checks authoritatively.
+  function canDropInto(src: string, targetDir: string): boolean {
+    if (src === targetDir || targetDir.startsWith(`${src}/`)) return false;
+    return parentPath(src) !== targetDir;
+  }
+
+  function dropInto(targetDir: string) {
+    const src = dragId;
+    setDragId(null);
+    setDragOverPath(null);
+    if (src && canDropInto(src, targetDir)) {
+      move.mutate({ from: src, to: joinPath(targetDir, basename(src)) });
+    }
+  }
+
+  function submitRename(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selected) return;
+    const name = renameValue.trim();
+    if (!name || name === selected.title) {
+      setRenaming(false);
+      return;
+    }
+    move.mutate({ from: selected.id, to: joinPath(parentPath(selected.id), name) });
+  }
+
+  // Drop-target props shared by folder rows and breadcrumb segments.
+  function dropProps(targetDir: string) {
+    return {
+      onDragOver: (e: React.DragEvent) => {
+        if (!dragId || !canDropInto(dragId, targetDir)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move" as const;
+        setDragOverPath(targetDir);
+      },
+      onDragLeave: () => setDragOverPath((p) => (p === targetDir ? null : p)),
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault();
+        dropInto(targetDir);
+      },
+    };
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* toolbar: breadcrumbs + optional search */}
@@ -157,8 +237,12 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
               </Tooltip>
               <button
                 onClick={() => navigateTo("")}
-                className="hover:text-ink shrink-0"
+                className={cn(
+                  "hover:text-ink shrink-0 rounded-(--radius-field) px-1",
+                  dragOverPath === "" && "bg-accent-dim text-accent-strong",
+                )}
                 aria-label="root"
+                {...dropProps("")}
               >
                 /
               </button>
@@ -167,7 +251,11 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
                   <ChevronRight size={12} className="shrink-0" />
                   <button
                     onClick={() => navigateTo(crumb.path)}
-                    className="max-w-[10rem] truncate hover:text-ink"
+                    className={cn(
+                      "max-w-[10rem] truncate rounded-(--radius-field) px-1 hover:text-ink",
+                      dragOverPath === crumb.path && "bg-accent-dim text-accent-strong",
+                    )}
+                    {...dropProps(crumb.path)}
                   >
                     {crumb.label}
                   </button>
@@ -217,38 +305,55 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
             <EmptyState quote={activeQuery ? "No matches." : "Nothing here yet."} />
           ) : (
             <ul className="flex flex-col p-2">
-              {data.items.map((item) => (
-                <li key={item.id}>
-                  <button
-                    onClick={() => {
-                      if (item.nav_path) {
-                        navigateTo(item.nav_path);
-                      } else {
-                        setSelectedId(item.id);
-                      }
-                    }}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
-                      item.id === selectedId
-                        ? "bg-accent-dim text-accent-strong"
-                        : "text-ink hover:bg-surface-2",
-                    )}
-                  >
-                    <ItemIcon item={item} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm">{item.title}</span>
-                      {item.subtitle && (
-                        <span className="block truncate text-xs text-ink-faint">{item.subtitle}</span>
+              {data.items.map((item) => {
+                const isFolder = !!item.nav_path;
+                const dropTarget = isFolder && !!dragId && dragId !== item.id;
+                return (
+                  <li key={item.id}>
+                    <button
+                      draggable={!!item.movable}
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", item.id);
+                        setDragId(item.id);
+                      }}
+                      onDragEnd={() => {
+                        setDragId(null);
+                        setDragOverPath(null);
+                      }}
+                      {...(isFolder ? dropProps(item.nav_path as string) : {})}
+                      onClick={() => {
+                        if (item.nav_path) {
+                          navigateTo(item.nav_path);
+                        } else {
+                          setSelectedId(item.id);
+                        }
+                      }}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
+                        item.id === selectedId
+                          ? "bg-accent-dim text-accent-strong"
+                          : "text-ink hover:bg-surface-2",
+                        dropTarget &&
+                          dragOverPath === item.nav_path &&
+                          "bg-accent-dim ring-1 ring-accent ring-inset",
+                        item.movable && "cursor-grab active:cursor-grabbing",
                       )}
-                    </span>
-                    {item.nav_path ? (
+                    >
+                      <ItemIcon item={item} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">{item.title}</span>
+                        {item.subtitle && (
+                          <span className="block truncate text-xs text-ink-faint">
+                            {item.subtitle}
+                          </span>
+                        )}
+                      </span>
                       <ChevronRight size={15} className="shrink-0 text-ink-faint" />
-                    ) : (
-                      <ChevronRight size={15} className="shrink-0 text-ink-faint" />
-                    )}
-                  </button>
-                </li>
-              ))}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -263,9 +368,49 @@ export function BrowserView({ module, pageId }: { module: string; pageId: string
               >
                 <ChevronLeft size={15} /> back
               </button>
-              <h2 className="font-serif text-xl text-ink">{selected.title}</h2>
+              {renaming ? (
+                <form onSubmit={submitRename} className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
+                    className="min-w-0 flex-1 rounded-(--radius-field) border border-edge bg-surface-1 px-2 py-1 font-serif text-xl text-ink focus:outline-none focus:ring-1 focus:ring-accent"
+                    aria-label="New name"
+                  />
+                  <Button type="submit" variant="primary" busy={move.isPending}>
+                    <Check size={14} /> Save
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={() => setRenaming(false)}>
+                    Cancel
+                  </Button>
+                </form>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <h2 className="min-w-0 flex-1 font-serif text-xl text-ink">{selected.title}</h2>
+                  {selected.movable && (
+                    <Tooltip label="Rename" side="bottom">
+                      <button
+                        onClick={() => {
+                          setRenameValue(selected.title);
+                          setRenaming(true);
+                        }}
+                        className="shrink-0 rounded-(--radius-field) p-1.5 text-ink-faint hover:bg-surface-2 hover:text-ink"
+                        aria-label="Rename"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                    </Tooltip>
+                  )}
+                </div>
+              )}
               {selected.subtitle && (
                 <p className="mt-0.5 text-sm text-ink-dim">{selected.subtitle}</p>
+              )}
+              {selected.movable && !renaming && (
+                <p className="mt-2 text-xs text-ink-faint">
+                  Drag onto a folder or breadcrumb to move it.
+                </p>
               )}
               {selected.body && (
                 <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">

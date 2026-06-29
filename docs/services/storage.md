@@ -1,6 +1,6 @@
 # storage — file-tree index + object store
 
-**`epicurus-storage`** v0.6.0 is a sidecar module that gives the agent access to a file
+**`epicurus-storage`** v0.7.0 is a sidecar module that gives the agent access to a file
 tree on disk — a **read-only index** it can list, search, and read — plus **app-managed
 object storage** in MinIO for objects the platform itself creates. Host port **8083**.
 
@@ -79,7 +79,8 @@ startup scan behind a lock. See [the watcher](#the-files-tree-watcher-adr-0057) 
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /ingest?filename=…&att_id=…` | **Chat upload sink (ADR-0025).** Body is the raw file bytes; `Content-Type` carries the media type. Stores the bytes in the object store under `uploads/<att_id>-<name>`, catalogues them (browsable + downloadable), and returns `{key, name, size}`. Called by the core's attachment-upload route. |
-| `GET /pages/files?path=…&q=…` | `BrowserData`-shaped payload for the Files left-nav page (ADR-0018). `path` browses a directory (empty = root); `q` runs a search. Proxied by the core at `GET /platform/v1/modules/storage/pages/files`. |
+| `GET /pages/files?path=…&q=…` | `BrowserData`-shaped payload for the Files left-nav page (ADR-0018). `path` browses a directory (empty = root); `q` runs a search. Each item carries `movable` (true for writable `source="object"` entries). Proxied by the core at `GET /platform/v1/modules/storage/pages/files`. |
+| `POST /pages/files/move` (body `{from_path, to_path}`) | **Rename/move a writable entry (#381 / #391).** Object entries (chat upload / agent-written) only — the read-only scanned tree → **400**; **404** missing src, **409** dst occupied. Returns `{path}`. The shared move contract (also knowledge/notes); proxied at `POST /platform/v1/modules/storage/pages/files/move`. |
 | `GET /read?path=…` | **Split-screen reader (#KB-refactor).** Return a UTF-8 text file's contents → `{path, name, content}` — a catalogued object (chat upload or agent-written) decoded from MinIO, or a file from the read-only tree. **400** traversal, **404** missing, **413** larger than 256 KB, **415** binary / non-UTF-8. Proxied by the core at `GET /platform/v1/modules/storage/read`. |
 | `GET /download?path=…` | Stream a file (binary-safe) — a catalogued object (chat upload or agent-written) from MinIO, or a file from the read-only tree. Path-traversal attempts → **HTTP 400**. Proxied by the core at `GET /platform/v1/modules/storage/download`. |
 | `GET /health` · `GET /metrics` · `GET /manifest` | Ops + the module manifest. |
@@ -115,7 +116,29 @@ the storage module is reachable. It renders a two-pane tree/list + detail view:
   through `GET /platform/v1/modules/storage/read?path=…`. A binary or oversized file falls
   back to download. This is how a knowledge-base note or a mirrored note is read in place.
 
+- **Rename / move (#381 / #391)**: a **writable** entry (`movable: true` — a chat upload or an
+  agent-written object) can be **renamed** inline in the detail pane and **dragged** onto a folder
+  row or a breadcrumb to relocate it. Read-only scanned files carry no `movable` flag and show no
+  such affordance.
+
 The module supplies data only; the shell (`BrowserView`) owns all chrome and styling.
+
+### Rename / move (#381 / #391)
+
+The Files page was navigate-and-download only; `POST /pages/files/move` (`service.move_item`) makes
+**writable** entries relocatable through the same `{from_path, to_path}` contract knowledge and
+notes already expose (ADR-0059), so the shell drives all three the same way:
+
+- **Object entries only.** Only a `source="object"` entry (a chat upload or an agent-written file)
+  moves — its bytes live in the writable tenant bucket. The scanned filesystem tree is mounted
+  **read-only**, so a move of an `fs` entry (or any folder with an `fs` descendant) is rejected with
+  **400**. The page stamps each item `movable` so the shell offers the affordance only where it works.
+- **Two stores, kept consistent.** MinIO holds the bytes; the index is what the Files page and
+  `/download` read. So `move_item` **copies** each object to its new key, **re-paths** the index
+  subtree (`db.repath`) in one transaction, then **deletes** the originals. A crash between steps
+  leaves harmless orphan copies in MinIO, never an index row pointing at missing bytes.
+- **Errors.** **404** missing source · **409** destination occupied · **400** read-only / file-space
+  root / a move into the path itself. A move into a brand-new folder creates its navigable dir rows.
 
 ### The chat upload sink (ADR-0025)
 
@@ -170,6 +193,17 @@ knowledge vault-watcher (ADR-0035):
 On by default (`STORAGE_WATCH=true`); set `STORAGE_WATCH=false` to keep the old startup-only
 behaviour (e.g. a very large tree where a periodic restart suffices). It adds **no MCP tool** —
 `storage_rescan` remains the manual escape hatch.
+
+v0.7.0 adds **rename / move in the Files browser** (#381 / #391): the Files page used to be
+navigate-and-download only. It now exposes `POST /pages/files/move` — the same
+`{from_path, to_path}` → `{path}` move contract knowledge and notes already use (ADR-0059) — and
+the shell offers an inline **rename** plus **drag-to-move** onto a folder or breadcrumb. Only
+**writable** entries move: a chat upload or an agent-written object (`source="object"`). The
+scanned filesystem tree is mounted read-only, so a move there is rejected (**400**) and the shell
+hides the affordance (each item carries a `movable` flag). The bytes are copied to the new object
+key first, the index subtree is re-pathed in one transaction, then the originals are dropped — so
+a crash leaves harmless orphan copies, never an index row pointing at missing bytes. See
+[Rename / move](#rename--move-381--391) below.
 
 ## Configuration
 
@@ -227,12 +261,13 @@ under the served tree (`/data/<tenant>/…`); within `STORAGE_WATCH_DEBOUNCE_MS`
 the Files page and `storage_search`. Disable it with `STORAGE_WATCH=false`.
 
 Package `epicurus_storage`: `scanner.py` (walk + incremental upsert + `purge_stale`), `db.py`
-(`storage_files` + queries + `source` column), `object_store.py` (MinIO via aioboto3 —
-text **and** binary `put_bytes`/`get_object`), `watcher.py` (`FilesWatcher` — the debounced
-`watchfiles` loop that drives a rescan callable on change, ADR-0057), `service.py` (the MCP
-tools + the `hidden_prefixes` filter that keeps private subtrees out of the agent's file tools +
-manifest UI + `build_page_data` + `ingest_object`/`put_object`/`load_object_download` +
+(`storage_files` + queries + `source` column + `subtree`/`repath` for the move re-key),
+`object_store.py` (MinIO via aioboto3 — text **and** binary `put_bytes`/`get_object` + `copy`/`delete`
+for the object move), `watcher.py` (`FilesWatcher` — the debounced `watchfiles` loop that drives a
+rescan callable on change, ADR-0057), `service.py` (the MCP tools + the `hidden_prefixes` filter that
+keeps private subtrees out of the agent's file tools + manifest UI + `build_page_data` +
+`ingest_object`/`put_object`/`load_object_download` + `move_item` (rename/move of writable entries) +
 `load_text_file` for the inline reader; `put_object` is the catalogue-on-write the
 `storage_object_put` tool wraps), `app.py` (lifespan — startup scan + watcher wired behind one
-`scan_lock` — + `/ingest` + `/download` + `/read` + `/pages/files`; parses
+`scan_lock` — + `/ingest` + `/download` + `/read` + `/pages/files` + `/pages/files/move`; parses
 `STORAGE_AGENT_HIDDEN_PREFIXES` into the module's `hidden_prefixes`).

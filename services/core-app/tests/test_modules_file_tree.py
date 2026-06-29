@@ -197,10 +197,32 @@ async def test_move_page_item_calls_module_post_with_body() -> None:
     )
 
 
-async def test_move_page_item_404_for_non_editor() -> None:
+async def test_move_page_item_works_for_browser_page() -> None:
+    # Move is the one mutation a browser page shares with an editor — the Files browser
+    # renames/relocates its writable entries through the same contract (#391).
     registry = _registry(_browser_manifest())
+    ctx, mock_client = _mock_client({"path": "b.md"})
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient", return_value=ctx):
+        result = await registry.move_page_item("files", "browse", "a.md", "b.md")
+
+    assert result == {"path": "b.md"}
+    mock_client.post.assert_called_once_with(
+        "/pages/browse/move",
+        json={"from_path": "a.md", "to_path": "b.md"},
+    )
+
+
+async def test_move_page_item_404_for_unsupported_archetype() -> None:
+    # A board (or any non-editor/-browser) page has no movable items — move 404s.
+    manifest = ModuleManifest(
+        name="tasks",
+        version="0.1.0",
+        pages=[PageSpec(id="board", title="Tasks", archetype="board")],
+    )
+    registry = _registry(manifest)
     with pytest.raises(HTTPException) as err:
-        await registry.move_page_item("files", "browse", "a.md", "b.md")
+        await registry.move_page_item("tasks", "board", "a", "b")
     assert err.value.status_code == 404
 
 

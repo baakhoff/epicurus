@@ -248,3 +248,48 @@ class FileIndex:
                 .limit(limit)
             )
             return [_row_to_entry(r) for r in rows]
+
+    async def subtree(self, *, tenant: str, path: str) -> list[FileEntry]:
+        """Return the entry at *path* plus every descendant under ``<path>/``.
+
+        Used by move/rename (#391) to validate a whole subtree is writable and that the
+        destination is free. Empty *path* (the root) returns nothing — the root never moves.
+        """
+        path = path.replace("\\", "/").rstrip("/")
+        if not path:
+            return []
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredFile)
+                .where(
+                    _StoredFile.tenant == tenant,
+                    or_(_StoredFile.path == path, _StoredFile.path.like(path + "/%")),
+                )
+                .order_by(_StoredFile.path)
+            )
+            return [_row_to_entry(r) for r in rows]
+
+    async def repath(self, *, tenant: str, src: str, dst: str) -> None:
+        """Re-key the subtree rooted at *src* to *dst*, in one transaction (#391).
+
+        Rewrites ``path`` for the root row and every descendant; the root row also gets its
+        display ``name`` updated. The caller has already checked the subtree is writable and
+        the destination free, so a single commit moves the tree atomically — a listing never
+        sees it half-moved.
+        """
+        src = src.replace("\\", "/").rstrip("/")
+        dst = dst.replace("\\", "/").rstrip("/")
+        async with self._session() as session:
+            rows = list(
+                await session.scalars(
+                    select(_StoredFile).where(
+                        _StoredFile.tenant == tenant,
+                        or_(_StoredFile.path == src, _StoredFile.path.like(src + "/%")),
+                    )
+                )
+            )
+            for row in rows:
+                row.path = dst + row.path[len(src) :]
+                if row.path == dst:  # the moved root carries a new display name
+                    row.name = dst.rsplit("/", 1)[-1]
+            await session.commit()

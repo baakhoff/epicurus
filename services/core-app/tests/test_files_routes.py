@@ -23,6 +23,7 @@ READ = "/platform/v1/files/read"
 LIST = "/platform/v1/files/list"
 STAT = "/platform/v1/files/stat"
 DIR = "/platform/v1/files/dir"
+MOVE = "/platform/v1/files/move"
 ROOT = "/platform/v1/files"
 
 
@@ -75,6 +76,32 @@ async def test_stat_then_delete(client: AsyncClient) -> None:
 async def test_make_dir(client: AsyncClient) -> None:
     resp = await client.post(DIR, params={"path": "projects"})
     assert resp.status_code == 200 and resp.json()["kind"] == "dir"
+
+
+async def test_move_renames_and_moves(client: AsyncClient) -> None:
+    await client.put(WRITE, params={"path": "notes/draft.md"}, json={"content": "hi"})
+    mv = await client.post(MOVE, json={"src": "notes/draft.md", "dst": "notes/final.md"})
+    assert mv.status_code == 200 and mv.json()["path"] == "notes/final.md"
+    assert (await client.get(READ, params={"path": "notes/final.md"})).json()["content"] == "hi"
+    assert (await client.get(STAT, params={"path": "notes/draft.md"})).status_code == 404
+
+
+async def test_move_missing_source_is_404(client: AsyncClient) -> None:
+    resp = await client.post(MOVE, json={"src": "ghost.txt", "dst": "x.txt"})
+    assert resp.status_code == 404
+
+
+async def test_move_onto_existing_is_409(client: AsyncClient) -> None:
+    await client.put(WRITE, params={"path": "a.txt"}, json={"content": "a"})
+    await client.put(WRITE, params={"path": "b.txt"}, json={"content": "b"})
+    resp = await client.post(MOVE, json={"src": "a.txt", "dst": "b.txt"})
+    assert resp.status_code == 409
+
+
+async def test_move_traversal_and_root_are_400(client: AsyncClient) -> None:
+    await client.put(WRITE, params={"path": "a.txt"}, json={"content": "a"})
+    assert (await client.post(MOVE, json={"src": "a.txt", "dst": "../x"})).status_code == 400
+    assert (await client.post(MOVE, json={"src": "", "dst": "a.txt"})).status_code == 400
 
 
 async def test_read_too_large_is_413(client: AsyncClient) -> None:

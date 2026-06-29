@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
   ChevronDown,
+  CircleHelp,
   CloudMoon,
   History,
   Pencil,
@@ -144,6 +145,80 @@ function LiveTurn() {
     <div className="ep-settle">
       <AssistantBlock text={text} timeline={timeline} streaming={streaming} />
     </div>
+  );
+}
+
+/* ── ask_user clarifying prompt (ADR-0053, #360) ────────────────────────── */
+
+/**
+ * The inline prompt shown when a turn pauses on `ask_user` (ADR-0053): the assistant's
+ * question and an input to answer it, rendered as part of the live turn beneath the partial
+ * answer. Submitting resumes the suspended run (`chat.resume`) and the turn continues
+ * streaming; the main composer stays available as an escape hatch (it abandons the question).
+ */
+function AskUserPrompt({
+  question,
+  onSubmit,
+}: {
+  question: string;
+  onSubmit: (answer: string) => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+  const submit = () => {
+    const text = answer.trim();
+    if (!text) return;
+    setAnswer("");
+    onSubmit(text);
+  };
+  return (
+    <AssistantRow>
+      {/* A plain div, not `Card`: `cn` doesn't tailwind-merge, so a Card's base `border-edge`
+          would win over an accent override — set the accent border directly instead. */}
+      <div className="rounded-(--radius-card) border border-accent/40 bg-surface p-4">
+        <div className="flex items-start gap-2.5">
+          <CircleHelp size={16} className="mt-0.5 shrink-0 text-accent" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm leading-relaxed text-ink">
+              {question || "The assistant needs a little more to go on."}
+            </p>
+            <div className="mt-2.5 flex items-end gap-2">
+              <TextArea
+                ref={inputRef}
+                rows={1}
+                value={answer}
+                onChange={(e) => {
+                  setAnswer(e.target.value);
+                  e.target.style.height = "auto";
+                  e.target.style.height = `${Math.min(e.target.scrollHeight, 144)}px`;
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submit();
+                  }
+                }}
+                placeholder="Your answer…"
+                aria-label="Answer the assistant's question"
+                className="max-h-36 min-h-[42px] text-[15px]"
+              />
+              <Button
+                variant="primary"
+                aria-label="Send answer"
+                onClick={submit}
+                disabled={!answer.trim()}
+                className="h-[42px]"
+              >
+                <SendHorizonal size={16} />
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </AssistantRow>
   );
 }
 
@@ -561,7 +636,7 @@ export function ChatScreen() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [chat.segments, chat.pendingUser, history.data]);
+  }, [chat.segments, chat.pendingUser, chat.awaiting, history.data]);
 
   // Re-attach to an in-flight turn after a reload / reconnect / app-resume (#376): the turn
   // keeps running server-side, so recover it instead of leaving a stale spinner or showing a
@@ -619,7 +694,9 @@ export function ChatScreen() {
   // Regenerate attaches to the last assistant message; Edit to the last user message.
   const lastAssistantIdx = messages.reduce((a, m, i) => (m.role === "assistant" ? i : a), -1);
   const lastUserIdx = messages.reduce((a, m, i) => (m.role === "user" ? i : a), -1);
-  const turnControlsVisible = !chat.streaming && !showPending && editingIdx === null;
+  // While a clarifying question is pending, the answer input is the focus — hide Edit/Regenerate.
+  const turnControlsVisible =
+    !chat.streaming && !showPending && editingIdx === null && chat.awaiting === null;
 
   const onTurnDone = async () => {
     await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
@@ -779,6 +856,17 @@ export function ChatScreen() {
             </div>
           )}
           <LiveTurn />
+          {chat.awaiting && (
+            <div className="ep-settle">
+              <AskUserPrompt
+                question={chat.awaiting.question}
+                onSubmit={(answer) => {
+                  pinnedRef.current = true;
+                  void chat.resume(answer, onTurnDone);
+                }}
+              />
+            </div>
+          )}
           {chat.error && (
             <Card className={cn("text-sm", chat.paused ? "border-accent/40" : "border-danger/40")}>
               {chat.paused ? (

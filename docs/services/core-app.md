@@ -295,6 +295,21 @@ client error (4xx) passes through as-is (e.g. a missing entity stays a `404`), w
 a timeout, or a connection failure becomes a `502` carrying the operation — so a slow or
 erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
 
+### Chat bridges (ADR-0062)
+
+The connect/manage surface behind the web shell's **Settings → Chat bridges** (#369). The core
+owns connecting a bridge because the browser must never hold a token (constraint #6) and a
+module is stateless w.r.t. identity (constraint #4): it writes the per-tenant bot token to
+OpenBao (`messaging/<bridge>` → `{token, enabled}`) and then calls the [messaging](messaging.md)
+module's reload control path so the bridge connects at runtime — no restart.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /platform/v1/messaging/bridges` | List every bridge + its [`BridgeStatus`](../reference/messaging.md#bridgestatus) (proxied from the module's `/status`). |
+| `PUT /platform/v1/messaging/bridges/{bridge}/token` | **Connect**: store the write-only bot token in OpenBao and reload the bridge (`{token}`). **404** unknown/unmanageable bridge, **400** blank token. |
+| `POST /platform/v1/messaging/bridges/{bridge}/enabled` | **On/off** without forgetting the token (`{enabled}`); **400** if no token is stored yet. |
+| `DELETE /platform/v1/messaging/bridges/{bridge}` | **Disconnect**: clear the token from OpenBao and reload (idempotent). |
+
 ### Maintenance orchestrator (ADR-0060)
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are

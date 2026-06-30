@@ -5,7 +5,9 @@ service and module is built on. It's organized by module: each page lists the
 classes and functions, what they do, their parameters, and how they fit together.
 
 Everything below is importable from the top level, e.g.
-`from epicurus_core import CoreSettings, EventBus, EpicurusModule`.
+`from epicurus_core import CoreSettings, EventBus, EpicurusModule` — the one exception is
+[`db`](db.md), which needs SQLAlchemy (the optional `db` extra) and is imported as
+`from epicurus_core.db import ensure_columns`.
 
 ## How the pieces fit together
 
@@ -48,6 +50,7 @@ log.info("service starting", service=settings.service_name)
 | [`secrets`](secrets.md) | `SecretStore`, `SecretError` |
 | [`platform-client`](platform-client.md) | `PlatformClient`, `PlatformMessage` — a module's typed access to core inference |
 | [`files`](files.md) | `FileStore`, `FileEntry`, `build_file_store` — the core-owned, swappable per-tenant file space (ADR-0052) |
+| [`db`](db.md) | `ensure_columns` — additive schema reconcile for stores without migrations (ADR-0067); not top-level, needs the `db` extra |
 
 The module↔core **wire contract** (the HTTP endpoints behind `PlatformClient`) is
 documented in [platform-api](platform-api.md). The running services that consume all of

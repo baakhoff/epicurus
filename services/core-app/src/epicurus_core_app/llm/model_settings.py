@@ -14,10 +14,12 @@ nothing set is deleted rather than kept empty.
 from __future__ import annotations
 
 from pydantic import BaseModel
-from sqlalchemy import Integer, String, inspect, select
+from sqlalchemy import Integer, String, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from epicurus_core.db import ensure_columns
 
 
 class ModelSettings(BaseModel):
@@ -71,22 +73,15 @@ class ModelSettingsStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add columns introduced after the table's first release.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        No migration framework (the store uses ``create_all``); columns added later (e.g.
-        ``device`` for the GPU/CPU choice) are added in place with a per-dialect type so it
-        is portable across Postgres and the tests' SQLite.
+        ``context_window`` / ``keep_alive`` / ``device`` (the last for the GPU/CPU choice)
+        are added in place on a table provisioned before they existed. See
+        :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_ModelSettingsRow.__tablename__)}
-        for name in ("context_window", "keep_alive", "device"):
-            if name not in existing:
-                type_sql = _ModelSettingsRow.__table__.c[name].type.compile(
-                    dialect=sync_conn.dialect
-                )
-                sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {_ModelSettingsRow.__tablename__} ADD COLUMN {name} {type_sql}"
-                )
+        ensure_columns(
+            sync_conn, _ModelSettingsRow.__table__, ("context_window", "keep_alive", "device")
+        )
 
     async def get(self, tenant: str, model: str) -> ModelSettings:
         """The stored settings for one model (all-``None`` when the operator set nothing)."""

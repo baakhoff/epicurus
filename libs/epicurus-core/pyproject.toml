@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core"
-version = "0.19.0"
+version = "0.20.0"
 description = "Shared contract and runtime for epicurus services."
 requires-python = ">=3.11"
 dependencies = [
@@ -27,8 +27,14 @@ dependencies = [
 # The S3 FileStore backend (epicurus_core.files.S3FileStore) needs aioboto3. It is an
 # optional extra so the shared library stays lean: the local-filesystem backend — the
 # self-host default — has no S3 dependency. Install `epicurus-core[s3]` to use the S3 backend.
+#
+# The additive schema reconcile (epicurus_core.db.ensure_columns) needs SQLAlchemy. It is
+# likewise an optional extra so a module without a database carries no ORM dependency; the
+# `db` submodule is deliberately not imported by `epicurus_core/__init__`. Install
+# `epicurus-core[db]` — every store-owning service already depends on SQLAlchemy directly.
 [project.optional-dependencies]
 s3 = ["aioboto3>=13.0"]
+db = ["sqlalchemy>=2.0"]
 
 [build-system]
 requires = ["hatchling"]

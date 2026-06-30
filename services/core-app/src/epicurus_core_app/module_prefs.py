@@ -12,12 +12,13 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from sqlalchemy import Boolean, String, Text, inspect, select
+from sqlalchemy import Boolean, String, Text, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import CollectionPrefs
+from epicurus_core.db import ensure_columns
 
 
 class _ModulePrefBase(DeclarativeBase):
@@ -69,20 +70,19 @@ class ModulePrefsStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add columns introduced after the table's first release.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        No migration framework (the store uses ``create_all``); on a deployment that
-        predates the ``removed`` column (#127) we add it in place, with a per-dialect type
-        so it is portable across Postgres and the tests' SQLite.
+        ``removed`` (#127), per-slot ``models`` (#128), ``disabled_tools`` (#213),
+        ``collections`` (ADR-0030), and ``suggestions_enabled`` (#KB-refactor) all postdate
+        the table's first release. The JSON columns carry a ``server_default`` so the helper
+        backfills them; the booleans (no server default) are added nullable. See
+        :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_ModulePrefRow.__tablename__)}
-        for name in ("removed", "models", "disabled_tools", "collections", "suggestions_enabled"):
-            if name not in existing:
-                type_sql = _ModulePrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-                sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {_ModulePrefRow.__tablename__} ADD COLUMN {name} {type_sql}"
-                )
+        ensure_columns(
+            sync_conn,
+            _ModulePrefRow.__table__,
+            ("removed", "models", "disabled_tools", "collections", "suggestions_enabled"),
+        )
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         """Every stored enabled flag for ``tenant``.

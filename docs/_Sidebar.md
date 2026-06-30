@@ -37,6 +37,7 @@
 - [OAuth 2.0](reference/oauth.md)
 - [platform client](reference/platform-client.md)
 - [file space](reference/files.md)
+- [db (schema reconcile)](reference/db.md)
 - [host-port registry](reference/ports.md)
 
 **Infrastructure**

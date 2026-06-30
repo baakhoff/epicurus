@@ -50,10 +50,6 @@ services:
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${CORE_PORT:-8082}:8080"
     depends_on:
-      # files-init (data plane) creates + chowns /data/<tenant> so the core (uid 10001) can
-      # provision and index the file space on a fresh root-owned volume (ADR-0063).
-      files-init:
-        condition: service_completed_successfully
       nats:
         condition: service_started
       ollama:

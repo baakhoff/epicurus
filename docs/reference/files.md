@@ -20,9 +20,9 @@ changes (debounced incremental rescan, `FILES_WATCH` / `FILES_WATCH_DEBOUNCE_MS`
 > the **knowledge** module routing its writes through this API while its mount drops to
 > read-only (Phase 3, #356/ADR-0064), and the **notes** module routing its `.md`-mirror writes
 > through this API and **dropping its `/data` mount entirely** (Phase 4, #357/ADR-0065 — see the
-> phase plan below). The one-shot **`files-init`** provisioning bootstrap remains (its retirement —
-> the last bit of #357 — is a follow-up that moves a surgical volume-chown into the core image's
-> entrypoint), so the file space is core-owned but the provisioning container still runs.
+> phase plan below). The tenant-root chown now lives in the **core image's entrypoint**
+> (#421/ADR-0068), retiring the old `files-init` one-shot: the file space is fully core-owned with
+> no separate provisioning container.
 
 ## The epicurus-core API
 
@@ -140,10 +140,10 @@ internal network. Uses **no AI**.
   the file API — after storage (Phase 2) and knowledge (Phase 3). Its `.md` mirror (`write` /
   `delete` / startup `backfill`) routes through `PlatformClient.files_*` at core path
   `notes/<rel>`, and notes **drops its `/data` mount entirely** (it reads nothing from disk — the
-  indexer and editor read Postgres — and drops its `files-init` dependency). Postgres stays the
-  source of truth; the mirror is write-only output. **`files-init` is not yet retired** — that last
-  bit of #357 is a separate infra follow-up (move a surgical volume-chown into the core image's
-  entrypoint), so the file space is core-owned but the provisioning bootstrap container remains.
+  indexer and editor read Postgres). Postgres stays the source of truth; the mirror is write-only
+  output. The tenant-root chown the old `files-init` one-shot did is now folded into the **core
+  image's entrypoint** (#421/ADR-0068): the container starts as root, chowns `/data/<tenant>` only,
+  then drops to uid 10001 — so the file space is fully core-owned with no init container.
 
 ## Run & extend
 

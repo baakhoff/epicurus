@@ -45,24 +45,22 @@ file-owning modules each own a subtree:
   logically — the write-only `.md` mirror of authored notes (Postgres stays the source of truth) —
   but **writes through the core file API** (`PlatformClient.files_*`, core path `notes/<rel>`), so
   the **core** performs the on-disk write into `/data/<tenant>/notes`. Notes reads nothing from the
-  volume and drops its `files-init` dependency.
+  volume and needs no file-space provisioning of its own.
 
 `EPICURUS_FILES_ROOT` **replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and
 `STORAGE_HOST_ROOT`; existing deployments move old vault contents into
 `<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`).
 
-A one-shot **`files-init`** container still **provisions the tree** before the volume's writers
-start (a `depends_on: service_completed_successfully`, mirroring `qdrant-init` and the OpenBao
-chown). It **remains** the file-space provisioning bootstrap even though the modules have moved
-off the mount: **storage** (Phase 2) and **notes** (Phase 4, #357/ADR-0065) no longer mount
-`/data` and no longer depend on it; the **core** (which owns the read-write mount and now performs
-both knowledge's and notes' on-disk writes) and read-only **knowledge** are what the chowned
-directories now serve. A fresh named volume is created **root-owned**, but the core and modules
-run as uid 10001 — so without this they would hit `PermissionError` (HTTP 500) creating folders or
-saving documents. `files-init` creates `/data/<tenant>/knowledge` and `/data/<tenant>/notes` and
-chowns **only those** to uid 10001, leaving the rest of a bind-mounted tree (e.g. an operator's
-Obsidian vault) untouched. (Retiring `files-init` — folding a surgical chown into the core image's
-entrypoint — is the remaining follow-up of #357.)
+The **core image's entrypoint** **provisions the tenant root** before the app starts (#421/ADR-0068,
+replacing the old `files-init` one-shot): a fresh named volume is created **root-owned**, but the
+core writes it as uid 10001 — which cannot `chown` a root-owned volume itself — so the container
+starts as root, creates and `chown`s **only** `/data/<tenant>` to uid 10001, then drops to uid 10001
+and `exec`s the app. The chown is **surgical** — the tenant directory only, never recursive — so an
+operator's bind-mounted tree (e.g. an Obsidian vault) is left untouched. The module subtrees
+(`knowledge/`, `notes/`) are created by the core on first write; read-only **knowledge** tolerates a
+not-yet-created `knowledge/` directory (its indexer logs and skips it). The core is now the sole
+writer of `/data` — storage and notes mount nothing, knowledge mounts read-only — so no separate
+init container runs.
 
 ## Edge gateway
 

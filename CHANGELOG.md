@@ -378,6 +378,18 @@ images to GHCR.
 
 ### Changed
 
+- **Retire the `files-init` one-shot — the core image's entrypoint provisions the tenant
+  file-space root** (#421) — after the file-space migration (Phases 2–4) the core is the sole
+  writer of `/data` (storage/notes mount nothing, knowledge mounts read-only), and `files-init`
+  survived only to `chown` the root-owned `epicurus-files` named volume so the core (uid 10001)
+  could write a fresh one. That chown now lives in the **core image's entrypoint** (ADR-0068): a
+  small stdlib-only Python entrypoint starts as root, creates and `chown`s **only** `/data/<tenant>`
+  (never `-R`, so a bind-mounted Obsidian vault's contents are left untouched), then drops to uid
+  10001 and `exec`s the app — which therefore never runs as root. The `files-init` service and the
+  `depends_on` from `core-app`/`knowledge` are removed; the module subtrees (`knowledge/`, `notes/`)
+  are created by the core on first write (the read-only knowledge indexer already tolerates a
+  not-yet-created dir). One fewer data-plane container; completes the #346 file-space arc.
+  `core-app` 0.51.0→0.52.0.
 - **The context-window suggestion now reflects your KV-cache type and the model's real
   limits — and is no longer clipped to 32k** — the Models-page estimate of "how big a context
   can this box hold?" assumed a fixed f16 KV cache and capped at a flat 32,768, ignoring two

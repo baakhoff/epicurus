@@ -35,8 +35,8 @@ services:
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${NOTES_PORT:-8092}:8080"
     depends_on:
-      # No files-init: the .md mirror goes through the core file API (ADR-0065), so notes
-      # never touches /data and needs no data-plane volume provisioning of its own.
+      # The .md mirror goes through the core file API (ADR-0065), so notes never touches /data
+      # and needs no volume mount or file-space provisioning of its own.
       nats:
         condition: service_started
       postgres:

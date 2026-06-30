@@ -14,8 +14,12 @@ FROM python:3.13-slim-bookworm
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 COPY --from=build /app/.venv /app/.venv
-# Run as a non-root user; the service needs no write access at runtime.
+# The container starts as root so the entrypoint can chown the (root-owned, on first boot)
+# epicurus-files volume's tenant root — uid 10001 cannot chown a root-owned volume itself. The
+# entrypoint then drops to this unprivileged user before exec'ing the app, so the app never runs
+# as root. This replaces the files-init one-shot (#421, ADR-0068).
 RUN useradd --create-home --uid 10001 epicurus
-USER epicurus
+COPY services/core-app/docker-entrypoint.py /usr/local/bin/docker-entrypoint.py
 EXPOSE 8080
+ENTRYPOINT ["python", "/usr/local/bin/docker-entrypoint.py"]
 CMD ["python", "-m", "epicurus_core_app"]

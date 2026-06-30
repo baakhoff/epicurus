@@ -424,10 +424,11 @@ the core path `knowledge/<rel>`. (A follow-up migrates the reads/indexer off the
 knowledge can drop it entirely.) The on-disk tree is **tenant-scoped** (constraint #1):
 knowledge inserts a `<tenant>/` segment (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`) —
 the volume mount stays `/data`, only the in-container path carries the segment. Point
-`EPICURUS_FILES_ROOT` at a host directory to expose real files; the one-shot `files-init`
-container creates `/data/<tenant>/knowledge` and chowns it to the container user (uid 10001) so
-the **core's** write of an editor create/save never hits a `PermissionError` on a fresh volume
-(#KB-refactor — see [Infrastructure](../infrastructure/index.md#shared-file-space)).
+`EPICURUS_FILES_ROOT` at a host directory to expose real files; the **core image's entrypoint**
+creates and chowns `/data/<tenant>` to uid 10001 before dropping privileges, so the **core's**
+write of an editor create/save never hits a `PermissionError` on a fresh volume — and knowledge's
+read-only indexer tolerates a `knowledge/` subdir the core has not written yet (#421/ADR-0068 —
+see [Infrastructure](../infrastructure/index.md#shared-file-space)).
 `EPICURUS_FILES_ROOT` **replaces** the old per-module `KNOWLEDGE_HOST_VAULT`; existing
 deployments move their old vault contents into `<files-root>/<tenant>/knowledge/<project>/`.
 The platform docs at `/docs` are always present — bundled at image build time, **not**

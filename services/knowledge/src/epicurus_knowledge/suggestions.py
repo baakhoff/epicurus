@@ -406,17 +406,20 @@ class SuggestionReview:
             result = await self._pages.write_doc(s.path, body)
             indexed = result.indexed
         elif s.operation == "delete":
-            target = safe_relative(self._vault, s.path)
-            if target.is_file():
-                target.unlink()
+            # Delete through the core file API (ADR-0064); an already-gone file (404) is fine.
+            try:
+                await self._pages.delete_doc(s.path)
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
             await self._indexer.remove_path(s.path)
         elif s.operation == "move":
-            self._pages.move_item(s.path, s.to_path)
+            await self._pages.move_item(s.path, s.to_path)
             indexed = await self._reindex_move(s.path, s.to_path)
         elif s.operation == "mkdir":
-            self._pages.create_folder(s.path)
+            await self._pages.create_folder(s.path)
         elif s.operation == "mkproject":
-            self._pages.create_project(s.path)
+            await self._pages.create_project(s.path)
         else:  # defensive — propose validates, but never trust stored data blindly
             raise HTTPException(status_code=400, detail=f"unknown operation: {s.operation}")
         await self._store.delete(tenant=self._tenant, sid=sid)

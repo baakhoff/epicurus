@@ -20,15 +20,20 @@ def _hit(note_path: str, text: str, score: float, heading: str | None = None) ->
 
 
 def _review_platform(store: SuggestionStore, vault: object, vault_path: Path):  # type: ignore[no-untyped-def]
-    """A review + a platform mock (review on) for build_module in these tests."""
+    """A review + a platform mock (review on) for build_module in these tests.
+
+    These tests exercise only the read-only navigation tools / the search surface / the
+    manifest, never a vault write — so the mocked platform doubles as ``VaultPages``' file-API
+    client (constructor requirement) without any write actually being made.
+    """
     from epicurus_core import PlatformClient
     from epicurus_knowledge.pages import VaultPages
     from epicurus_knowledge.suggestions import SuggestionReview
 
-    pages = VaultPages(vault_path, vault)  # type: ignore[arg-type]
-    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant="test")  # type: ignore[arg-type]
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    pages = VaultPages(vault_path, vault, platform=platform, core_prefix="knowledge")  # type: ignore[arg-type]
+    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant="test")  # type: ignore[arg-type]
     return review, platform
 
 

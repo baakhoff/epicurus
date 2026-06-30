@@ -6,6 +6,13 @@ Covers:
 - ``SuggestionReview`` — diff computation, approve (create/update/delete), reject, 404s
 - the ``review`` page HTTP surface + the literal-vs-param route ordering vs the editor
 - the ``knowledge_propose_edit`` MCP tool — stages, never writes; rejects bad input
+
+Vault WRITES now go through the core-owned file API (ADR-0064): ``SuggestionReview.approve``
+writes via ``VaultPages`` which calls ``platform.files_*``. These tests back that client with
+a real ``LocalFileStore`` on disk (``_FilePlatform``) so an approved write actually lands in
+the tmp tree and the unchanged reads/index/``_current_content`` observe it. The vault is the
+file-API layout ``<tmp>/<tenant>/knowledge`` (``vault_dir``); a vault-relative ``rel`` maps to
+the core path ``knowledge/<rel>`` → ``<tmp>/<tenant>/knowledge/<rel>``.
 """
 
 from __future__ import annotations
@@ -13,12 +20,14 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core.contracts import ToolEnvelope
+from epicurus_core.files import FileEntry, LocalFileStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.service import build_module
@@ -30,9 +39,25 @@ from epicurus_knowledge.suggestions import (
 )
 
 TENANT = "test"
+# The core FileStore tenant the fake writes under (LocalFileStore validates the id). The
+# suggestion-queue tenant above is unrelated to the file-space tenant segment below.
+FILE_TENANT = "local"
+CORE_PREFIX = "knowledge"
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
+
+
+def vault_dir(files_root: Path) -> Path:
+    """The on-disk vault under a fake-core files root: ``<root>/<file-tenant>/knowledge``."""
+    return files_root / FILE_TENANT / CORE_PREFIX
+
+
+def _make_vault(files_root: Path) -> Path:
+    """Create and return the vault dir so fixtures can pre-write into it before a review."""
+    vault = vault_dir(files_root)
+    vault.mkdir(parents=True, exist_ok=True)
+    return vault
 
 
 class _FakeIndexer:
@@ -54,6 +79,62 @@ class _FakeIndexer:
         # A folder move reconciles via a full incremental pass (#KB-refactor).
         self.ran += 1
         return {"indexed": 0, "deleted": 0, "unchanged": 0}
+
+
+class _FilePlatform:
+    """A ``PlatformClient`` stand-in whose ``files_*`` delegate to a real on-disk store.
+
+    Backs the migrated vault writes (write_doc / delete_doc / move_item / create_folder /
+    create_project) with actual disk I/O so the reads/index/``_current_content`` see them;
+    ``files_move`` maps the store's errors to ``httpx.HTTPStatusError`` 409/404/400 so the
+    route status mapping is exercised exactly as the real platform client raises.
+    """
+
+    def __init__(self, files_root: Path) -> None:
+        self._store = LocalFileStore(files_root)
+
+    async def files_write(self, path: str, content: str) -> FileEntry:
+        return await self._store.write_text(tenant=FILE_TENANT, path=path, content=content)
+
+    async def files_make_dir(self, path: str) -> FileEntry:
+        return await self._store.ensure_dir(tenant=FILE_TENANT, path=path)
+
+    async def files_stat(self, path: str) -> FileEntry | None:
+        return await self._store.stat(tenant=FILE_TENANT, path=path)
+
+    async def files_list(self, path: str = "") -> list[FileEntry]:
+        return await self._store.list_dir(tenant=FILE_TENANT, path=path)
+
+    async def files_delete(self, path: str) -> bool:
+        return await self._store.delete(tenant=FILE_TENANT, path=path)
+
+    async def files_move(self, src: str, dst: str) -> FileEntry:
+        try:
+            return await self._store.move(tenant=FILE_TENANT, src=src, dst=dst)
+        except FileExistsError as exc:
+            raise _status_error(409) from exc
+        except FileNotFoundError as exc:
+            raise _status_error(404) from exc
+        except ValueError as exc:
+            raise _status_error(400) from exc
+
+
+def _status_error(code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://core/platform/v1/files/move")
+    return httpx.HTTPStatusError(
+        f"HTTP {code}", request=request, response=httpx.Response(code, request=request)
+    )
+
+
+def _pages(files_root: Path, indexer: object, **kw: object) -> VaultPages:
+    """A fake-core-backed ``VaultPages`` over ``vault_dir(files_root)`` (writes land on disk)."""
+    return VaultPages(
+        vault_dir(files_root),
+        indexer,  # type: ignore[arg-type]
+        platform=_FilePlatform(files_root),  # type: ignore[arg-type]
+        core_prefix=CORE_PREFIX,
+        **kw,  # type: ignore[arg-type]
+    )
 
 
 async def _store() -> SuggestionStore:
@@ -151,8 +232,9 @@ def test_validate_operation_rejects_unknown(op: str) -> None:
 async def _review(tmp_path: Path) -> tuple[SuggestionReview, SuggestionStore, _FakeIndexer]:
     store = await _store()
     indexer = _FakeIndexer()
-    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
-    review = SuggestionReview(store, pages, indexer, vault_path=tmp_path, tenant=TENANT)  # type: ignore[arg-type]
+    vault = _make_vault(tmp_path)
+    pages = _pages(tmp_path, indexer)
+    review = SuggestionReview(store, pages, indexer, vault_path=vault, tenant=TENANT)  # type: ignore[arg-type]
     return review, store, indexer
 
 
@@ -167,8 +249,8 @@ async def test_review_create_diff_is_all_additions(tmp_path: Path) -> None:
 
 
 async def test_review_update_diff_shows_delta(tmp_path: Path) -> None:
-    (tmp_path / "doc.md").write_text("line1\nline2\n", encoding="utf-8")
     review, store, _ = await _review(tmp_path)
+    (vault_dir(tmp_path) / "doc.md").write_text("line1\nline2\n", encoding="utf-8")
     await _add(store, path="doc.md", operation="update", content="line1\nCHANGED\n")
     diff = (await review.list_review()).suggestions[0].diff
     assert "-line2" in diff
@@ -176,8 +258,8 @@ async def test_review_update_diff_shows_delta(tmp_path: Path) -> None:
 
 
 async def test_review_delete_diff_is_all_removals(tmp_path: Path) -> None:
-    (tmp_path / "doomed.md").write_text("gone\n", encoding="utf-8")
     review, store, _ = await _review(tmp_path)
+    (vault_dir(tmp_path) / "doomed.md").write_text("gone\n", encoding="utf-8")
     await _add(store, path="doomed.md", operation="delete")
     diff = (await review.list_review()).suggestions[0].diff
     assert "-gone" in diff
@@ -188,38 +270,49 @@ async def test_approve_create_writes_and_indexes_then_drops(tmp_path: Path) -> N
     sid = await _add(store, path="note.md", operation="create", content="# Note\n")
     result = await review.approve(sid)
     assert result.status == "approved"
-    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "# Note\n"
+    assert (vault_dir(tmp_path) / "note.md").read_text(encoding="utf-8") == "# Note\n"
     assert "note.md" in indexer.indexed
     assert await store.list(tenant=TENANT) == []  # dropped from the queue
 
 
 async def test_approve_update_overwrites_existing(tmp_path: Path) -> None:
-    (tmp_path / "doc.md").write_text("old\n", encoding="utf-8")
     review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "doc.md").write_text("old\n", encoding="utf-8")
     sid = await _add(store, path="doc.md", operation="update", content="new\n")
     await review.approve(sid)
-    assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "new\n"
+    assert (vault_dir(tmp_path) / "doc.md").read_text(encoding="utf-8") == "new\n"
     assert "doc.md" in indexer.indexed
 
 
 async def test_approve_delete_unlinks_and_deindexes(tmp_path: Path) -> None:
-    (tmp_path / "doomed.md").write_text("bye\n", encoding="utf-8")
     review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "doomed.md").write_text("bye\n", encoding="utf-8")
     sid = await _add(store, path="doomed.md", operation="delete")
     result = await review.approve(sid)
     assert result.status == "approved"
-    assert not (tmp_path / "doomed.md").exists()
+    assert not (vault_dir(tmp_path) / "doomed.md").exists()
     assert "doomed.md" in indexer.removed
     assert await store.list(tenant=TENANT) == []
 
 
-async def test_reject_discards_without_touching_vault(tmp_path: Path) -> None:
-    (tmp_path / "doc.md").write_text("original\n", encoding="utf-8")
+async def test_approve_delete_tolerates_already_gone_file(tmp_path: Path) -> None:
+    # The file is already absent (no pre-write): the core delete 404s, which approve swallows,
+    # still de-indexes, and drops the suggestion — an apply must never wedge on a missing file.
     review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="ghost.md", operation="delete")
+    result = await review.approve(sid)
+    assert result.status == "approved"
+    assert "ghost.md" in indexer.removed
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_reject_discards_without_touching_vault(tmp_path: Path) -> None:
+    review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "doc.md").write_text("original\n", encoding="utf-8")
     sid = await _add(store, path="doc.md", operation="update", content="tampered\n")
     result = await review.reject(sid)
     assert result.status == "rejected"
-    assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "original\n"  # untouched
+    assert (vault_dir(tmp_path) / "doc.md").read_text(encoding="utf-8") == "original\n"  # untouched
     assert indexer.indexed == [] and indexer.removed == []
     assert await store.list(tenant=TENANT) == []
 
@@ -232,12 +325,13 @@ async def _read_only_review(
 ) -> tuple[SuggestionReview, SuggestionStore, _FakeIndexer]:
     store = await _store()
     indexer = _FakeIndexer()
-    pages = VaultPages(tmp_path, indexer, read_only=True)  # type: ignore[arg-type]
+    vault = _make_vault(tmp_path)
+    pages = _pages(tmp_path, indexer, read_only=True)
     review = SuggestionReview(
         store,
         pages,
         indexer,
-        vault_path=tmp_path,
+        vault_path=vault,
         tenant=TENANT,
         read_only=True,  # type: ignore[arg-type]
     )
@@ -253,7 +347,7 @@ async def test_approve_is_409_when_read_only_and_keeps_the_suggestion(tmp_path: 
         await review.approve(sid)
     assert err.value.status_code == 409
     # Nothing written or indexed, and the suggestion stays queued for when writing resumes.
-    assert not (tmp_path / "note.md").exists()
+    assert not (vault_dir(tmp_path) / "note.md").exists()
     assert indexer.indexed == []
     assert len(await store.list(tenant=TENANT)) == 1
 
@@ -299,7 +393,7 @@ def _app(review: SuggestionReview, pages: VaultPages) -> TestClient:
 async def test_review_endpoint_lists_pending(tmp_path: Path) -> None:
     review, store, indexer = await _review(tmp_path)
     await _add(store, path="a.md", operation="create", content="# A\n")
-    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
+    pages = _pages(tmp_path, indexer)
     client = _app(review, pages)
     resp = client.get("/pages/review")
     assert resp.status_code == 200
@@ -310,9 +404,9 @@ async def test_review_endpoint_lists_pending(tmp_path: Path) -> None:
 
 async def test_review_route_does_not_shadow_editor_vault(tmp_path: Path) -> None:
     """GET /pages/review hits review; GET /pages/vault still hits the editor (#216)."""
-    (tmp_path / "x.md").write_text("# X\n", encoding="utf-8")
     review, _, indexer = await _review(tmp_path)
-    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
+    (vault_dir(tmp_path) / "x.md").write_text("# X\n", encoding="utf-8")
+    pages = _pages(tmp_path, indexer)
     client = _app(review, pages)
     assert client.get("/pages/review").status_code == 200
     vault_resp = client.get("/pages/vault")
@@ -323,43 +417,46 @@ async def test_review_route_does_not_shadow_editor_vault(tmp_path: Path) -> None
 async def test_approve_endpoint_applies(tmp_path: Path) -> None:
     review, store, indexer = await _review(tmp_path)
     sid = await _add(store, path="note.md", operation="create", content="# Note\n")
-    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
+    pages = _pages(tmp_path, indexer)
     client = _app(review, pages)
     resp = client.post(f"/pages/review/suggestions/{sid}/approve")
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
-    assert (tmp_path / "note.md").exists()
+    assert (vault_dir(tmp_path) / "note.md").exists()
 
 
 async def test_reject_endpoint_discards(tmp_path: Path) -> None:
     review, store, indexer = await _review(tmp_path)
     sid = await _add(store, path="note.md", operation="create", content="# Note\n")
-    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
+    pages = _pages(tmp_path, indexer)
     client = _app(review, pages)
     resp = client.post(f"/pages/review/suggestions/{sid}/reject")
     assert resp.status_code == 200
     assert resp.json()["status"] == "rejected"
-    assert not (tmp_path / "note.md").exists()
+    assert not (vault_dir(tmp_path) / "note.md").exists()
 
 
 # ── the knowledge_propose_edit tool ───────────────────────────────────────────
 
 
-def _module_with_store(store: SuggestionStore, vault_path: Path, *, review_on: bool = True):  # type: ignore[no-untyped-def]
+def _module_with_store(store: SuggestionStore, files_root: Path, *, review_on: bool = True):  # type: ignore[no-untyped-def]
     from epicurus_core import PlatformClient
     from epicurus_knowledge.module_docs import ModuleDocsIndexer
 
-    vault = AsyncMock(spec=KnowledgeIndexer)
-    vault.index_path = AsyncMock(return_value=1)
-    vault.remove_path = AsyncMock(return_value=None)
+    # The vault is the file-API layout; build_module and VaultPages share that root, exactly
+    # as app.py wires them. Writes (auto-apply when review is off) go through the fake core.
+    vault = _make_vault(files_root)
+    vault_indexer = AsyncMock(spec=KnowledgeIndexer)
+    vault_indexer.index_path = AsyncMock(return_value=1)
+    vault_indexer.remove_path = AsyncMock(return_value=None)
     docs = AsyncMock(spec=KnowledgeIndexer)
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
-    pages = VaultPages(vault_path, vault)  # type: ignore[arg-type]
-    review = SuggestionReview(store, pages, vault, vault_path=vault_path, tenant=TENANT)  # type: ignore[arg-type]
+    pages = _pages(files_root, vault_indexer)
+    review = SuggestionReview(store, pages, vault_indexer, vault_path=vault, tenant=TENANT)  # type: ignore[arg-type]
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=review_on)
     return build_module(
-        vault, docs, module_docs, store, review, platform, tenant=TENANT, vault_path=vault_path
+        vault_indexer, docs, module_docs, store, review, platform, tenant=TENANT, vault_path=vault
     )
 
 
@@ -439,9 +536,9 @@ async def test_create_document_stages_a_create_suggestion(tmp_path: Path) -> Non
 
 
 async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
-    (tmp_path / "existing.md").write_text("# Already here\n", encoding="utf-8")
     store = await _store()
     module = _module_with_store(store, tmp_path)
+    (vault_dir(tmp_path) / "existing.md").write_text("# Already here\n", encoding="utf-8")
     content, _ = await module.mcp.call_tool(
         "knowledge_create_document",
         {"path": "existing.md", "content": "# New\n"},
@@ -494,9 +591,9 @@ async def test_store_roundtrips_to_path() -> None:
 
 
 async def test_review_move_has_empty_diff_and_to_path(tmp_path: Path) -> None:
-    (tmp_path / "kb").mkdir()
-    (tmp_path / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
     review, store, _ = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
+    (vault_dir(tmp_path) / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
     await _add(store, path="kb/a.md", operation="move", to_path="kb/b.md")
     s = (await review.list_review()).suggestions[0]
     assert s.operation == "move"
@@ -505,37 +602,37 @@ async def test_review_move_has_empty_diff_and_to_path(tmp_path: Path) -> None:
 
 
 async def test_approve_move_file_relocates_and_reindexes(tmp_path: Path) -> None:
-    (tmp_path / "kb").mkdir()
-    (tmp_path / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
     review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
+    (vault_dir(tmp_path) / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
     sid = await _add(store, path="kb/a.md", operation="move", to_path="kb/b.md")
     result = await review.approve(sid)
     assert result.status == "approved"
     assert result.path == "kb/b.md"
-    assert not (tmp_path / "kb" / "a.md").exists()
-    assert (tmp_path / "kb" / "b.md").is_file()
+    assert not (vault_dir(tmp_path) / "kb" / "a.md").exists()
+    assert (vault_dir(tmp_path) / "kb" / "b.md").is_file()
     assert "kb/a.md" in indexer.removed
     assert "kb/b.md" in indexer.indexed
     assert await store.list(tenant=TENANT) == []
 
 
 async def test_approve_move_folder_reconciles_index(tmp_path: Path) -> None:
-    (tmp_path / "kb" / "old").mkdir(parents=True)
-    (tmp_path / "kb" / "old" / "c.md").write_text("# C\n", encoding="utf-8")
     review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb" / "old").mkdir(parents=True)
+    (vault_dir(tmp_path) / "kb" / "old" / "c.md").write_text("# C\n", encoding="utf-8")
     sid = await _add(store, path="kb/old", operation="move", to_path="kb/new")
     await review.approve(sid)
-    assert (tmp_path / "kb" / "new" / "c.md").is_file()
-    assert not (tmp_path / "kb" / "old").exists()
+    assert (vault_dir(tmp_path) / "kb" / "new" / "c.md").is_file()
+    assert not (vault_dir(tmp_path) / "kb" / "old").exists()
     assert indexer.ran == 1  # a folder move triggers a full incremental reconcile
 
 
 async def test_approve_mkdir_creates_folder(tmp_path: Path) -> None:
-    (tmp_path / "kb").mkdir()
     review, store, _ = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
     sid = await _add(store, path="kb/ideas", operation="mkdir")
     await review.approve(sid)
-    assert (tmp_path / "kb" / "ideas").is_dir()
+    assert (vault_dir(tmp_path) / "kb" / "ideas").is_dir()
     assert await store.list(tenant=TENANT) == []
 
 
@@ -544,31 +641,32 @@ async def test_approve_mkproject_creates_top_level_folder(tmp_path: Path) -> Non
     sid = await _add(store, path="research", operation="mkproject")
     result = await review.approve(sid)
     assert result.status == "approved"
-    assert (tmp_path / "research").is_dir()
+    assert (vault_dir(tmp_path) / "research").is_dir()
     assert await store.list(tenant=TENANT) == []
 
 
 async def test_approve_update_honours_content_override(tmp_path: Path) -> None:
     # Per-hunk review (#KB-refactor): the operator approves a merged result, not the
     # agent's full proposal.
-    (tmp_path / "kb").mkdir()
-    (tmp_path / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
     review, store, _ = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
+    (vault_dir(tmp_path) / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
     sid = await _add(store, path="kb/doc.md", operation="update", content="full proposal\n")
     await review.approve(sid, content="operator merged\n")
-    assert (tmp_path / "kb" / "doc.md").read_text(encoding="utf-8") == "operator merged\n"
+    doc = vault_dir(tmp_path) / "kb" / "doc.md"
+    assert doc.read_text(encoding="utf-8") == "operator merged\n"
 
 
 async def test_approve_endpoint_accepts_content_body(tmp_path: Path) -> None:
-    (tmp_path / "kb").mkdir()
-    (tmp_path / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
     review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
+    (vault_dir(tmp_path) / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
     sid = await _add(store, path="kb/doc.md", operation="update", content="proposal\n")
-    pages = VaultPages(tmp_path, indexer)  # type: ignore[arg-type]
+    pages = _pages(tmp_path, indexer)
     client = _app(review, pages)
     resp = client.post(f"/pages/review/suggestions/{sid}/approve", json={"content": "merged\n"})
     assert resp.status_code == 200
-    assert (tmp_path / "kb" / "doc.md").read_text(encoding="utf-8") == "merged\n"
+    assert (vault_dir(tmp_path) / "kb" / "doc.md").read_text(encoding="utf-8") == "merged\n"
 
 
 # ── the structural propose tools ──────────────────────────────────────────────
@@ -663,5 +761,5 @@ async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None
     )
     env = _envelope(content)
     assert "applied directly" in env.text.lower()
-    assert (tmp_path / "kb" / "new.md").read_text(encoding="utf-8") == "# Auto\n"
+    assert (vault_dir(tmp_path) / "kb" / "new.md").read_text(encoding="utf-8") == "# Auto\n"
     assert await store.list(tenant=TENANT) == []

@@ -30,6 +30,7 @@ from epicurus_core import (
     build_file_store,
     configure_logging,
     get_logger,
+    setup_tracing,
 )
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
@@ -430,6 +431,10 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="epicurus core", lifespan=lifespan)
     add_ops_routes(app, service_name=SERVICE_NAME, version=_service_version())
+    # Distributed tracing to Tempo (#57) — a no-op unless OTEL_TRACES_ENABLED is set.
+    # Instruments every router below (agent loop, LLM gateway, platform API, files);
+    # EventBus publish/handle spans link in over NATS for one trace across the stack.
+    setup_tracing(app, settings, version=_service_version())
     app.include_router(
         create_platform_router(
             settings,

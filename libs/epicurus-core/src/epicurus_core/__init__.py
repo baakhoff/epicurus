@@ -78,6 +78,7 @@ from epicurus_core.tenancy import (
     set_current_tenant,
     validate_tenant_id,
 )
+from epicurus_core.tracing import get_tracer, setup_tracing
 
 __all__ = [
     "CONTRACT_VERSION",
@@ -141,6 +142,7 @@ __all__ = [
     "create_ops_router",
     "current_tenant",
     "get_logger",
+    "get_tracer",
     "is_valid_tenant_id",
     "reset_current_tenant",
     "route_paths",
@@ -150,6 +152,7 @@ __all__ = [
     "scope_subject",
     "session_id_for",
     "set_current_tenant",
+    "setup_tracing",
     "tool_envelope",
     "validate_tenant_id",
 ]

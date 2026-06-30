@@ -380,6 +380,8 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
+| `OTEL_TRACES_ENABLED` | `false` | Emit OpenTelemetry traces — the agent loop, platform API, and event bus — to Tempo (#57). See the [tracing reference](../reference/observability.md#tracing-57-adr-0068). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://tempo:4318` | OTLP/HTTP base URL for traces (the exporter appends `/v1/traces`). |
 
 Provider keys are **not** configured here — they go through the UI into OpenBao.
 

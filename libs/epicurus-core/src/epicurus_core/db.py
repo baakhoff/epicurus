@@ -9,7 +9,7 @@ and ``tasks_local`` (#218). The fix was a per-store ``_ensure_columns`` helper, 
 was copy-pasted across nine stores and invisible to CI (the SQLite unit tests and the
 runtime-smoke gate always build tables fresh, so drift only shows on a real upgraded
 deployment). This module promotes that helper into one shared, audited reconcile every
-store calls from ``init()`` after ``create_all`` (#249, ADR-0066).
+store calls from ``init()`` after ``create_all`` (#249, ADR-0067).
 
 It is **additive only**: it adds columns that exist on the ORM model but not yet in the
 live table. It never drops, renames, retypes, or backfills — those need a real migration

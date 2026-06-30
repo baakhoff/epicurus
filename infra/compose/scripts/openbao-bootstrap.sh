@@ -131,14 +131,49 @@ APP_TOKEN=$(printf '%s' "$token_json" | grep -o '"client_token":"[^"]*"' | cut -
 
 printf 'OPENBAO_TOKEN=%s\n' "$APP_TOKEN" >> "$SECRETS_FILE"
 
+# ── 6. NATS role credentials (#50, ADR-0066) ───────────────────────────────────
+# The authenticated bus (infra/compose/nats-server.conf) needs one password per role
+# (core / module / sys). Generate strong ones, record them in OpenBao as the source
+# of truth, and emit them to the secrets file — the SAME value feeds the nats server
+# AND every service that authenticates against it (compose maps each of
+# NATS_{CORE,MODULE,SYS}_PASSWORD to both sides). This replaces the weak `epicurus-dev`
+# compose defaults that are only safe on a private dev box.
+echo "Generating NATS role passwords..."
+nats_pw() { head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \t\r\n'; }
+NATS_CORE_PASSWORD=$(nats_pw)
+NATS_MODULE_PASSWORD=$(nats_pw)
+NATS_SYS_PASSWORD=$(nats_pw)
+
+# Source of truth in OpenBao, tenant-scoped (constraint #1; the policy grants
+# secret/data/tenants/*). A failure here is non-fatal — the secrets file still has them.
+TENANT="${DEFAULT_TENANT_ID:-local}"
+if BAO_TOKEN="$OPENBAO_ROOT_TOKEN" BAO kv put "secret/tenants/$TENANT/nats" \
+    core="$NATS_CORE_PASSWORD" module="$NATS_MODULE_PASSWORD" sys="$NATS_SYS_PASSWORD" \
+    > /dev/null 2>&1; then
+    echo "  stored at secret/tenants/$TENANT/nats"
+else
+    echo "  (warning: could not store NATS passwords in OpenBao; the secrets file still has them)"
+fi
+
+{
+    printf 'NATS_CORE_PASSWORD=%s\n'   "$NATS_CORE_PASSWORD"
+    printf 'NATS_MODULE_PASSWORD=%s\n' "$NATS_MODULE_PASSWORD"
+    printf 'NATS_SYS_PASSWORD=%s\n'    "$NATS_SYS_PASSWORD"
+} >> "$SECRETS_FILE"
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Bootstrap complete ==="
 echo ""
-echo "Add these two lines to your .env (or: source $SECRETS_FILE):"
+echo "Add these lines to your .env (or: source $SECRETS_FILE):"
 echo ""
-printf '  OPENBAO_UNSEAL_KEY=%s\n' "$OPENBAO_UNSEAL_KEY"
-printf '  OPENBAO_TOKEN=%s\n'      "$APP_TOKEN"
+printf '  OPENBAO_UNSEAL_KEY=%s\n'   "$OPENBAO_UNSEAL_KEY"
+printf '  OPENBAO_TOKEN=%s\n'        "$APP_TOKEN"
+printf '  NATS_CORE_PASSWORD=%s\n'   "$NATS_CORE_PASSWORD"
+printf '  NATS_MODULE_PASSWORD=%s\n' "$NATS_MODULE_PASSWORD"
+printf '  NATS_SYS_PASSWORD=%s\n'    "$NATS_SYS_PASSWORD"
 echo ""
 echo "The openbao-unseal container uses OPENBAO_UNSEAL_KEY to auto-unseal on"
-echo "every stack restart. Keep $SECRETS_FILE safe."
+echo "every stack restart. The NATS_* passwords authenticate the core/modules to the"
+echo "bus — set the same values for the nats service and the services. Keep"
+echo "$SECRETS_FILE safe."

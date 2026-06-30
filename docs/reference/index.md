@@ -22,7 +22,8 @@ A typical service wires the building blocks in this order:
    - **[`events`](events.md)** — `EventBus` for NATS publish / subscribe / request.
    - **[`secrets`](secrets.md)** — `SecretStore` for tenant-scoped secrets in OpenBao.
    - **[`modules`](modules.md)** — `EpicurusModule` to expose MCP tools + a manifest.
-5. **[`observability`](observability.md)** — mount `/health` + `/metrics`.
+5. **[`observability`](observability.md)** — mount `/health` + `/metrics`, and
+   `setup_tracing(app, settings)` for optional OpenTelemetry traces to Tempo.
 
 ```python
 from epicurus_core import CoreSettings, configure_logging, get_logger, set_current_tenant
@@ -45,10 +46,11 @@ log.info("service starting", service=settings.service_name)
 | [`messaging`](messaging.md) | `InboundMessage`, `OutboundMessage`, `MessageAttachment`, `MESSAGING_INBOUND/OUTBOUND`, `session_id_for` — the chat-bridge inbox contract (ADR-0058) |
 | [`modules`](modules.md) | `EpicurusModule`, `ModuleManifest`, `ToolSpec`, `EventSpec`, `CONTRACT_VERSION` |
 | [`observability`](observability.md) | `add_ops_routes`, `create_ops_router`, `HealthResponse` |
+| [`tracing`](observability.md#tracing-57-adr-0068) | `setup_tracing`, `get_tracer` — optional OpenTelemetry traces to Tempo (#57) |
 | [`secrets`](secrets.md) | `SecretStore`, `SecretError` |
 | [`platform-client`](platform-client.md) | `PlatformClient`, `PlatformMessage` — a module's typed access to core inference |
 | [`files`](files.md) | `FileStore`, `FileEntry`, `build_file_store` — the core-owned, swappable per-tenant file space (ADR-0052) |
-| [`db`](db.md) | `ensure_columns` — additive schema reconcile for stores without migrations (ADR-0066); not top-level, needs the `db` extra |
+| [`db`](db.md) | `ensure_columns` — additive schema reconcile for stores without migrations (ADR-0067); not top-level, needs the `db` extra |
 
 The module↔core **wire contract** (the HTTP endpoints behind `PlatformClient`) is
 documented in [platform-api](platform-api.md). The running services that consume all of

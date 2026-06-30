@@ -69,14 +69,23 @@ services:
   nats:
     image: nats:2.10
     restart: unless-stopped
-    # JetStream on, store dir, HTTP monitoring on :8222. The nats image has no
-    # shell, so readiness is checked from the host via http://localhost:8222/healthz.
-    command: ["-js", "-sd", "/data", "-m", "8222"]
+    # Authenticated (#50, ADR-0066): all of JetStream / store dir / monitoring and the
+    # account+user model live in nats-server.conf now. The nats image has no shell, so
+    # readiness is checked from the host via http://localhost:8222/healthz (the monitor
+    # port needs no auth). Role passwords come from the env, defaulted weak for dev —
+    # override NATS_{CORE,MODULE,SYS}_PASSWORD in .env (or from OpenBao) for real boxes;
+    # the SAME values must reach the services (they authenticate against this server).
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      NATS_CORE_PASSWORD: ${NATS_CORE_PASSWORD:-epicurus-dev}
+      NATS_MODULE_PASSWORD: ${NATS_MODULE_PASSWORD:-epicurus-dev}
+      NATS_SYS_PASSWORD: ${NATS_SYS_PASSWORD:-epicurus-dev}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${NATS_PORT:-4222}:4222"
       - "${BIND_ADDRESS:-127.0.0.1}:${NATS_MONITOR_PORT:-8222}:8222"
     volumes:
       - nats-data:/data
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
     networks: [epicurus]
 
   # Guards the qdrant data volume across server upgrades (#229). qdrant panics on

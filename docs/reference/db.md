@@ -5,7 +5,7 @@ framework. Services evolve their Postgres schema with `Base.metadata.create_all`
 creates a *missing* table but never alters an *existing* one — so a column added to a model
 after that table's first release silently never reaches an already-provisioned database, and
 every query that references it fails on Postgres with `column … does not exist`. This helper
-adds those columns in place at startup (#249, ADR-0066).
+adds those columns in place at startup (#249, ADR-0067).
 
 > Unlike the rest of `epicurus-core`, this is **not** importable from the top level. It needs
 > SQLAlchemy — the optional `db` extra — so a module without a database carries no ORM

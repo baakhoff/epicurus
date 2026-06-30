@@ -91,7 +91,13 @@ log = get_logger(__name__)
 
 # mount GET /health and GET /metrics on a FastAPI app:
 # add_ops_routes(fastapi_app, service_name="greeter")
+# and optional OpenTelemetry tracing (a no-op unless OTEL_TRACES_ENABLED):
+# setup_tracing(fastapi_app, settings, version=version)
 ```
+
+`task new-module` already wires `setup_tracing` into the generated `app.py`, so a new
+module emits traces to Tempo with no extra code — see the
+[tracing reference](../reference/observability.md#tracing-57-adr-0068).
 
 ## Call the LLM gateway via `PlatformClient`
 

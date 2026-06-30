@@ -268,7 +268,7 @@ leading JSON value is salvaged from any trailing junk, and anything unparseable 
 | `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled` | The per-module **review on/off** toggle (#KB-refactor): `{enabled: bool}`. When **on** (the default — a missing/NULL pref reads as `true`) the module stages agent changes for approval on its `review` page; when **off** the module applies them directly. The module reads this through `PlatformClient.get_suggestions_enabled()`; the shell's review-page header writes it. `PUT` **404**s an unknown module. Persisted in Postgres (`module_prefs`). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
-| `GET /platform/v1/modules/{name}/read?path=…` | Proxy a module's `GET /read` text-file endpoint for the Files split-screen reader (#KB-refactor): `{path, name, content}`. Upstream 4xx pass through (415 binary, 413 too large, 404 missing); an unreachable module is a controlled **502**. |
+| `GET /platform/v1/modules/{name}/read?path=…` | Proxy an **editor** module's `GET /read` text-file endpoint for its split-screen reader (knowledge, notes): `{path, name, content}`. Upstream 4xx pass through (415 binary, 413 too large, 404 missing); an unreachable module is a controlled **502**. (The unified **Files** read is core-owned at `GET /platform/v1/files/read` — ADR-0063; see [file space](../reference/files.md).) |
 | `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…` | Create a new knowledge base (project / top-level scope) in an editor page's store (#KB-refactor). 409 if it exists, 400 for an invalid name; the module enforces name-safety. |
 | `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve` | Approve a staged suggestion — the module applies + indexes it (#220, ADR-0033). Optional `{content}` body is the operator's **per-hunk-merged** result for an edit, forwarded so only the approved changes are written (#KB-refactor). Operator-only. |
 | `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/reject` | Reject a staged suggestion — the module discards it, nothing written (#220). Operator-only. |
@@ -294,6 +294,21 @@ upstream failure to a **controlled** status, not an unhandled exception (#209): 
 client error (4xx) passes through as-is (e.g. a missing entity stays a `404`), while a 5xx,
 a timeout, or a connection failure becomes a `502` carrying the operation — so a slow or
 erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
+
+### Chat bridges (ADR-0062)
+
+The connect/manage surface behind the web shell's **Settings → Chat bridges** (#369). The core
+owns connecting a bridge because the browser must never hold a token (constraint #6) and a
+module is stateless w.r.t. identity (constraint #4): it writes the per-tenant bot token to
+OpenBao (`messaging/<bridge>` → `{token, enabled}`) and then calls the [messaging](messaging.md)
+module's reload control path so the bridge connects at runtime — no restart.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /platform/v1/messaging/bridges` | List every bridge + its [`BridgeStatus`](../reference/messaging.md#bridgestatus) (proxied from the module's `/status`). |
+| `PUT /platform/v1/messaging/bridges/{bridge}/token` | **Connect**: store the write-only bot token in OpenBao and reload the bridge (`{token}`). **404** unknown/unmanageable bridge, **400** blank token. |
+| `POST /platform/v1/messaging/bridges/{bridge}/enabled` | **On/off** without forgetting the token (`{enabled}`); **400** if no token is stored yet. |
+| `DELETE /platform/v1/messaging/bridges/{bridge}` | **Disconnect**: clear the token from OpenBao and reload (idempotent). |
 
 ### Maintenance orchestrator (ADR-0060)
 

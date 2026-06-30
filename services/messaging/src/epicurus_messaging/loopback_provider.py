@@ -10,7 +10,7 @@ It is the default provider, so a fresh install has a working bridge path out of 
 from __future__ import annotations
 
 from epicurus_core import InboundMessage, OutboundMessage, get_logger
-from epicurus_messaging.providers import InboundHandler
+from epicurus_messaging.providers import BridgeStatus, InboundHandler
 
 log = get_logger("messaging.loopback")
 
@@ -45,6 +45,19 @@ class LoopbackProvider:
 
     async def stop(self) -> None:
         self._on_inbound = None
+
+    async def status(self) -> BridgeStatus:
+        # Always in-process and on; not operator-managed (no token to connect), so manageable
+        # is false and the connect/disconnect UI skips it. ``delivered`` rides along in detail.
+        return BridgeStatus(
+            bridge=self._bridge,
+            label="Loopback (dev echo)",
+            manageable=False,
+            configured=True,
+            enabled=True,
+            connected=True,
+            detail=f"in-process echo · {len(self.sent)} delivered",
+        )
 
     async def inject(
         self,

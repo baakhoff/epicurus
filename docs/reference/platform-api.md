@@ -9,8 +9,10 @@ Use the typed [`PlatformClient`](#platformclient) from `epicurus_core` rather
 than crafting HTTP calls by hand.
 
 > The **file space** endpoints (`/platform/v1/files/*`) — the core-owned, swappable per-tenant
-> file store that modules read and write through `PlatformClient.files_*` (ADR-0052) — are
-> documented on their own page: [file space](files.md).
+> file store that modules read and write through `PlatformClient.files_*` (ADR-0052), plus the
+> core-owned unified **Files** browser / search / read / download
+> (`/platform/v1/files/{page,search,read,download}`, ADR-0063) — are documented on their own
+> page: [file space](files.md).
 
 ---
 
@@ -204,11 +206,15 @@ through the normal apply path). The review-page header reads `GET` and writes `P
 **404**s an unknown module. Persisted in `module_prefs`. Generic across any module with a
 `review` page — today knowledge and notes.
 
-### `GET /platform/v1/modules/storage/read?path=…`
+### Files read / download moved to the core (ADR-0063)
 
-Proxy the storage module's text-file read for the Files split-screen reader →
-`{path, name, content}`. Upstream errors pass through: **415** binary / non-UTF-8, **413**
-larger than 256 KB, **404** missing, **400** traversal; an unreachable module is **502**.
+The unified **Files** read and download are now **core-owned** at `GET /platform/v1/files/read`
+and `GET /platform/v1/files/download` — the core reads the file space first and **falls back to
+the storage object store** (`GET /objects/read` / `GET /download` on the storage module) for
+object entries (chat uploads, agent-written files). The former storage filesystem read proxy
+(`GET /platform/v1/modules/storage/read`) is **removed**; see [file space](files.md). The generic
+`GET /platform/v1/modules/{name}/read` proxy still serves an **editor** module's split-screen
+reader (knowledge, notes).
 
 ### `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…`
 

@@ -8,7 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
 import { BoardView } from "@/components/archetypes/BoardView";
-import { BrowserView } from "@/components/archetypes/BrowserView";
+import { BrowserView, type BrowserSource } from "@/components/archetypes/BrowserView";
 import { CalendarView } from "@/components/archetypes/CalendarView";
 import { EditorView } from "@/components/archetypes/EditorView";
 import { ReviewView } from "@/components/archetypes/ReviewView";
@@ -51,6 +51,16 @@ export function ModulePageScreen() {
     );
   }
 
+  // A module-backed BrowserSource for the `browser` archetype (ADR-0063). The view stays
+  // data-source-agnostic; this adapter replicates the page proxy's q-overrides-path params.
+  const browserSource: BrowserSource = {
+    queryKey: ["module-page", moduleName, pageId],
+    fetchPage: (path, q) =>
+      api.modulePage(moduleName, pageId, q ? { q } : path ? { path } : undefined),
+    readText: (p) => api.readModuleText(moduleName, p),
+    move: (f, t) => api.moveModuleItem(moduleName, pageId, f, t),
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b border-edge px-4 py-2.5">
@@ -59,7 +69,7 @@ export function ModulePageScreen() {
       </div>
       <div className="min-h-0 flex-1">
         {page.archetype === "browser" ? (
-          <BrowserView module={moduleName} pageId={pageId} />
+          <BrowserView source={browserSource} />
         ) : page.archetype === "calendar" ? (
           <CalendarView module={moduleName} pageId={pageId} />
         ) : page.archetype === "editor" ? (

@@ -1,12 +1,15 @@
-"""Runnable messaging service: ops endpoints + manifest, with the bridge wired to NATS.
+"""Runnable messaging service: ops endpoints + manifest, with the bridges wired to NATS.
 
-It connects the active :class:`~epicurus_messaging.providers.BridgeProvider` to the inbox
-contract: a message the bridge receives is published on ``messaging.inbound`` (the core runs
-the turn), and each ``messaging.outbound`` reply the core emits is handed to the bridge to
-deliver. The module never calls an LLM (constraint #8).
+It connects the :class:`~epicurus_messaging.manager.BridgeManager` to the inbox contract: a
+message any bridge receives is published on ``messaging.inbound`` (the core runs the turn), and
+each ``messaging.outbound`` reply is dispatched to the bridge it belongs to. The module never
+calls an LLM (constraint #8).
 
 The outbound subscription is under the configured default tenant (single-tenant v1, mirroring
 the core's inbound consumer); multi-tenant fan-out is the same follow-up noted in ADR-0058.
+``POST /bridges/{bridge}/reload`` is the core's control path: after the operator stores or
+clears a bridge's token, the core calls it so the bridge connects/disconnects at runtime with
+no module restart (ADR-0062).
 """
 
 from __future__ import annotations
@@ -33,8 +36,7 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
-from epicurus_messaging.loopback_provider import LoopbackProvider
-from epicurus_messaging.service import MODULE_NAME, build_module, build_provider
+from epicurus_messaging.service import MODULE_NAME, build_bridges, build_module
 from epicurus_messaging.settings import MessagingSettings
 
 
@@ -63,8 +65,8 @@ def create_app() -> FastAPI:
     log = get_logger(MODULE_NAME)
     tenant = settings.default_tenant_id
     secrets = SecretStore.from_settings(settings)
-    provider = build_provider(settings, secrets)
-    module = build_module(provider)
+    manager = build_bridges(settings, secrets)
+    module = build_module(manager)
     bus = EventBus.from_settings(settings)
     mcp_app = module.http_app()
 
@@ -73,25 +75,25 @@ def create_app() -> FastAPI:
         await bus.publish(MESSAGING_INBOUND, message.model_dump(), tenant_id=message.tenant)
 
     async def _on_outbound(event: Event) -> None:
-        """The core produced a reply → deliver it via the active bridge."""
+        """The core produced a reply → dispatch it to the bridge it belongs to."""
         try:
             message = OutboundMessage.model_validate(event.json())
         except (ValidationError, ValueError) as exc:
             log.warning("dropping unparseable outbound message", error=str(exc))
             return
-        await provider.send(message)
+        await manager.dispatch(message)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await bus.connect()
             await bus.subscribe(MESSAGING_OUTBOUND, _on_outbound, tenant_id=tenant)
-            await provider.start(_publish_inbound)
-            log.info("messaging service ready", provider=provider.provider_name(), tenant=tenant)
+            await manager.start_all(_publish_inbound)
+            log.info("messaging service ready", bridges=manager.provider_names(), tenant=tenant)
             try:
                 yield
             finally:
-                await provider.stop()
+                await manager.stop_all()
                 await bus.close()
 
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
@@ -101,32 +103,35 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def status() -> dict[str, Any]:
-        """Live status the shell renders (proxied by the core at /modules/messaging/status)."""
-        body: dict[str, Any] = {
-            "provider": provider.provider_name(),
-            # Loopback is always live; a real bridge reports whether its token loaded + it polls.
-            "connected": provider.connected(),
-            "inbound_subject": MESSAGING_INBOUND,
-            "outbound_subject": MESSAGING_OUTBOUND,
-        }
-        if isinstance(provider, LoopbackProvider):
-            body["delivered"] = len(provider.sent)
-        return body
+        """Live status the shell renders (proxied by the core at /modules/messaging/status):
+        the two subjects and a ``bridges`` list, each with connect/enabled/connected state."""
+        return await manager.status()
+
+    @app.post("/bridges/{bridge}/reload")
+    async def reload_bridge(bridge: str) -> dict[str, Any]:
+        """Reconnect one bridge after its token/enabled changed — the core's control path (#369).
+
+        Called by the core right after it writes or clears the bridge's token in OpenBao, so the
+        bridge connects/disconnects at runtime without a module restart (ADR-0062). Returns the
+        bridge's fresh :class:`~epicurus_messaging.providers.BridgeStatus`. **404** for an unknown
+        bridge; **503** if the manager has not started yet.
+        """
+        try:
+            new_status = await manager.reload(bridge)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown bridge {bridge!r}") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return new_status.model_dump()
 
     @app.post("/loopback/inject")
     async def loopback_inject(body: _LoopbackInject) -> dict[str, Any]:
-        """Originate an inbound message through the loopback bridge (dev/manual e2e).
+        """Originate an inbound message through the always-on loopback bridge (dev/manual e2e).
 
-        Only valid for the loopback provider; a real bridge originates from its own
-        webhook/poller. Lets a developer drive the full inbound → turn → outbound path with a
-        model running, without a Telegram/Discord account.
+        Lets a developer drive the full inbound → turn → outbound path with a model running,
+        without a Telegram/Discord account.
         """
-        if not isinstance(provider, LoopbackProvider):
-            raise HTTPException(
-                status_code=404,
-                detail="loopback inject is only available for the loopback provider",
-            )
-        message = await provider.inject(
+        message = await manager.loopback.inject(
             tenant=body.tenant or tenant,
             channel_id=body.channel_id,
             text=body.text,

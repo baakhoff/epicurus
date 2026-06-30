@@ -1,20 +1,27 @@
-"""Runnable storage service: ops endpoints + MCP tools + upload ingest + download."""
+"""Runnable storage service: ops endpoints + MCP tools + upload ingest + object surface.
+
+After the file-space migration (ADR-0063) the core owns the file index and serves the Files
+browser UI; storage owns the object store. So this app no longer mounts ``/data`` or scans a
+tree — it exposes the object surface the core's Files view proxies (``/objects``, object read /
+download / move) plus the chat-upload sink, and its MCP tools read the file space through the
+core's platform API.
+"""
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import (
     EventBus,
+    PlatformClient,
     add_manifest_route,
     add_ops_routes,
     configure_logging,
@@ -22,19 +29,14 @@ from epicurus_core import (
 )
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
-from epicurus_storage.scanner import scan
 from epicurus_storage.service import (
     MODULE_NAME,
-    STORAGE_PAGE_ID,
     build_module,
-    build_page_data,
     ingest_object,
     load_object_download,
-    load_text_file,
     move_item,
 )
 from epicurus_storage.settings import READ_MAX_BYTES, StorageSettings
-from epicurus_storage.watcher import FilesWatcher
 
 
 def _attachment_disposition(name: str) -> str:
@@ -51,10 +53,20 @@ def _service_version() -> str:
 
 
 class MoveBody(BaseModel):
-    """Request body for ``POST /pages/{page_id}/move`` (shared move contract, #391)."""
+    """Request body for ``POST /objects/move`` (shared move contract, #391)."""
 
     from_path: str
     to_path: str
+
+
+class ObjectEntryOut(BaseModel):
+    """One object-store entry, in the shape the core's Files view consumes."""
+
+    path: str
+    name: str
+    size: int
+    mtime: float
+    kind: str
 
 
 def create_app() -> FastAPI:
@@ -71,70 +83,33 @@ def create_app() -> FastAPI:
         secret_key=settings.minio_secret_key,
     )
     bus = EventBus.from_settings(settings)
-    # Tenant-scope the served/indexed tree (constraint #1): /data/<tenant>. The whole
-    # epicurus-files volume mounts at /data (storage gets it read-only); we serve, index,
-    # and confine reads/downloads to the tenant subtree so knowledge (/data/<tenant>/knowledge)
-    # and notes (/data/<tenant>/notes) show up, while sibling tenants stay invisible. The
-    # relative_to() confinement on /read + /download then scopes to this subtree automatically.
-    served_root = settings.storage_root / settings.default_tenant_id
+    # The agent file tools read the core-owned file space through the platform API (ADR-0063).
+    platform = PlatformClient(
+        base_url=settings.platform_url,
+        tenant_id=settings.default_tenant_id,
+        module=MODULE_NAME,
+    )
+    _tenant = settings.default_tenant_id
     module = build_module(
         index,
         objects,
-        storage_root=str(served_root),
-        tenant=settings.default_tenant_id,
+        platform=platform,
+        tenant=_tenant,
         hidden_prefixes=tuple(
             p.strip() for p in settings.agent_hidden_prefixes.split(",") if p.strip()
         ),
     )
     mcp_app = module.http_app()
 
-    # Serialise the startup scan and every watch-triggered rescan (#390): scanner.scan holds
-    # no internal lock, so two concurrent walks would race on the shared upsert/purge. The
-    # watcher drives this same helper, so a burst that fires mid-startup simply waits out the
-    # in-flight scan instead of double-walking the tree.
-    scan_lock = asyncio.Lock()
-
-    async def _rescan() -> int:
-        async with scan_lock:
-            return await scan(served_root, index, tenant=settings.default_tenant_id)
-
-    # Live files-tree sync (#390): when enabled, watch the served tree and rescan
-    # incrementally on change so files landed after startup show up in Files / search.
-    watcher = (
-        FilesWatcher(
-            served_root,
-            _rescan,
-            debounce_ms=settings.storage_watch_debounce_ms,
-        )
-        if settings.storage_watch
-        else None
-    )
-
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
             await index.init()
             await bus.connect()
-            log.info(
-                "storage service ready",
-                root=str(served_root),
-                tenant=settings.default_tenant_id,
-                watch=settings.storage_watch,
-            )
-            try:
-                await _rescan()
-            except Exception as exc:
-                log.warning("initial scan failed", error=str(exc))
-            # Serve immediately; watch in the background (mirrors knowledge, ADR-0035).
-            watch_task = asyncio.create_task(watcher.run()) if watcher is not None else None
+            log.info("storage service ready", tenant=_tenant)
             try:
                 yield
             finally:
-                if watcher is not None and watch_task is not None:
-                    watcher.stop()
-                    watch_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await watch_task
                 await bus.close()
                 await engine.dispose()
 
@@ -142,10 +117,6 @@ def create_app() -> FastAPI:
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
     app.mount("/mcp", mcp_app)
-
-    _root = served_root
-    _tenant = settings.default_tenant_id
-    _download_base = f"/platform/v1/modules/{MODULE_NAME}/download"
 
     @app.post("/ingest")
     async def ingest(
@@ -157,7 +128,7 @@ def create_app() -> FastAPI:
 
         The core's attachment-upload route POSTs the raw bytes here (the ``Content-Type``
         header carries the media type) so the upload is kept in the object store and
-        becomes browsable in the Files page. Returns the stored object's
+        becomes browsable in the core Files page. Returns the stored object's
         ``{key, name, size}``.
         """
         data = await request.body()
@@ -172,113 +143,68 @@ def create_app() -> FastAPI:
             data=data,
         )
 
-    @app.get("/download")
-    async def download(
-        path: str = Query(..., description="Path relative to the storage root"),
-    ) -> Response:
-        """Stream a file — a catalogued object or a file from the indexed tree.
+    # ── Object surface (the core's Files view proxies these, ADR-0063) ────────
 
-        Any ``source="object"`` entry (a chat upload or a file the agent saved) is streamed
-        from MinIO; every other *path* is resolved against the configured storage root, with
-        path-traversal attempts (``..`` components) rejected with HTTP 400.
-        """
-        # The index entry's source is the sole authority for object-vs-filesystem: an object
-        # (a chat upload OR a file the agent saved under any key) streams from MinIO, everything
-        # else resolves against the read-only tree. We can't shortcut by an `uploads/` prefix —
-        # agent objects aren't confined to it (#347) — so we always consult the catalogue first;
-        # `load_object_download` returns None for a filesystem entry before touching MinIO.
-        try:
-            obj = await load_object_download(
-                index=index, objects=objects, tenant=_tenant, path=path
-            )
-        except Exception as exc:  # an index/object hiccup must not break fs downloads
-            log.warning("object download lookup failed", path=path, error=str(exc))
-            obj = None
-        if obj is not None:
-            return Response(
-                content=obj.data,
-                media_type=obj.content_type,
-                headers={"content-disposition": _attachment_disposition(obj.name)},
-            )
-
-        try:
-            resolved = (_root / path).resolve()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="invalid path") from exc
-
-        try:
-            resolved.relative_to(_root.resolve())
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="path escapes storage root") from exc
-
-        if not resolved.exists():
-            raise HTTPException(status_code=404, detail="not found")
-        if not resolved.is_file():
-            raise HTTPException(status_code=400, detail="path is not a file")
-
-        return FileResponse(str(resolved), filename=resolved.name)
-
-    @app.get("/read")
-    async def read_text(
-        path: str = Query(..., description="Path relative to the storage root"),
-    ) -> dict[str, object]:
-        """Return a text file's contents for the Files split-screen reader (#KB-refactor).
-
-        A catalogued ``source="object"`` entry (upload or agent-written) is decoded from MinIO;
-        every other *path* is read from the read-only tree. 400 traversal, 404 missing, 413 too
-        large, 415 binary.
-        """
-        # Same source-led routing as /download: an object (upload or agent-written) decodes
-        # from MinIO, anything else reads from the read-only tree (#347).
-        try:
-            obj = await load_object_download(
-                index=index, objects=objects, tenant=_tenant, path=path
-            )
-        except Exception as exc:  # an index/object hiccup must not break fs reads
-            log.warning("object read lookup failed", path=path, error=str(exc))
-            obj = None
-        if obj is not None:
-            if len(obj.data) > READ_MAX_BYTES:
-                raise HTTPException(status_code=413, detail="file is too large to preview")
-            try:
-                text = obj.data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
-            return {"path": path, "name": obj.name, "content": text}
-        return load_text_file(_root, path).model_dump()
-
-    @app.get("/pages/{page_id}")
-    async def page(
-        page_id: str,
-        path: str = Query(default="", description="Directory path to browse (empty = root)"),
+    @app.get("/objects")
+    async def list_objects(
+        path: str = Query(default="", description="Directory to list (empty = root)"),
         q: str = Query(default="", description="Search query; if set, overrides path browsing"),
-    ) -> dict[str, object]:
-        """Serve the Files browser page data (ADR-0018); the core proxies this.
+        tenant_id: str | None = Query(default=None),
+    ) -> dict[str, list[ObjectEntryOut]]:
+        """List/search object-store entries for the core's unified Files view.
 
-        Returns a ``BrowserData``-shaped payload: ``{title, path, search_enabled, items}``.
-        Each item carries ``nav_path`` (for directories) or ``href`` (for files) so the
-        shell can navigate and download without talking to the module directly.
+        Returns ``{entries:[{path,name,size,mtime,kind}]}`` — browse under *path* when *q* is
+        empty, otherwise search. The store is single-tenant (this module's default tenant); the
+        ``tenant_id`` query is accepted for forward-compatibility.
         """
-        if page_id != STORAGE_PAGE_ID:
-            raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
-
         if q.strip():
             entries = await index.search(tenant=_tenant, query=q.strip(), limit=200)
         else:
             entries = await index.browse(tenant=_tenant, path=path)
+        return {
+            "entries": [
+                ObjectEntryOut(path=e.path, name=e.name, size=e.size, mtime=e.mtime, kind=e.kind)
+                for e in entries
+            ]
+        }
 
-        return build_page_data(entries, path=path, query=q.strip(), download_base=_download_base)
+    @app.get("/objects/read")
+    async def read_object(
+        path: str = Query(..., description="Object path to read"),
+        tenant_id: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        """Return an object's text for the Files split-screen reader. 404/413/415 on error."""
+        obj = await load_object_download(index=index, objects=objects, tenant=_tenant, path=path)
+        if obj is None:
+            raise HTTPException(status_code=404, detail="not found")
+        if len(obj.data) > READ_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="file is too large to preview")
+        try:
+            text = obj.data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
+        return {"path": path, "name": obj.name, "content": text}
 
-    @app.post("/pages/{page_id}/move")
-    async def move_page(page_id: str, body: MoveBody) -> dict[str, str]:
-        """Move/rename a writable Files entry (#381 / #391); the core proxies this.
+    @app.get("/download")
+    async def download(
+        path: str = Query(..., description="Object path to download"),
+        tenant_id: str | None = Query(default=None),
+    ) -> Response:
+        """Stream a catalogued object from MinIO (the core proxies file-space files itself)."""
+        obj = await load_object_download(index=index, objects=objects, tenant=_tenant, path=path)
+        if obj is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return Response(
+            content=obj.data,
+            media_type=obj.content_type,
+            headers={"content-disposition": _attachment_disposition(obj.name)},
+        )
 
-        Mirrors the knowledge/notes editor move contract (``{from_path, to_path}`` →
-        ``{path}``) so the shell drives all three the same way. Only object-store entries are
-        movable — a read-only scanned file returns 400.
-        """
-        if page_id != STORAGE_PAGE_ID:
-            raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
+    @app.post("/objects/move")
+    async def move_object(
+        body: MoveBody, tenant_id: str | None = Query(default=None)
+    ) -> dict[str, str]:
+        """Move/rename a writable object-store entry (#381 / #391); the core proxies this."""
         return await move_item(
             index=index,
             objects=objects,

@@ -24,6 +24,29 @@ Run only unit tests (no Docker needed):
 uv run pytest -m "not integration"
 ```
 
+## Per-test timeout
+
+Every test runs under a **60-second deadline** (`pytest-timeout`, set in
+`pyproject.toml`). A test that exceeds it fails with a dumped stack instead of
+hanging the run, so a real async deadlock — an `await` inside `except
+CancelledError`, a task cancelled before its first step — surfaces loudly in CI
+rather than blocking the gate until the job's hard timeout. The portable `thread`
+method is used (signal-based timeouts are POSIX-only; development runs on Windows).
+
+Healthy tests finish in well under a second, so the deadline only ever trips a
+genuine hang. Two escape hatches keep legitimately slow tests green:
+
+- **Integration tests get a larger budget** automatically — a cold testcontainers
+  image pull can take longer than 60s. The repo-root `conftest.py` lifts the
+  ceiling for any `@pytest.mark.integration` test that carries no timeout of its own.
+- **Override per test** when one is genuinely slow:
+
+  ```python
+  @pytest.mark.timeout(120)   # raise it for this test
+  @pytest.mark.timeout(0)     # or disable the deadline entirely
+  def test_something_slow(): ...
+  ```
+
 ## What good tests look like
 
 - Cover the contract, the edge cases, and the failure modes — not just the happy

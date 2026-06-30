@@ -48,6 +48,9 @@ from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.file_index import FileIndex
+from epicurus_core_app.file_scan import scan as scan_file_space
+from epicurus_core_app.file_watch import FileWatcher
 from epicurus_core_app.files_routes import create_files_router
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
@@ -70,7 +73,12 @@ from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
-from epicurus_core_app.messaging import InboundConsumer
+from epicurus_core_app.messaging import (
+    BridgeAdmin,
+    InboundConsumer,
+    RegistryBridgeClient,
+    create_messaging_router,
+)
 from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import (
     ModuleRegistry,
@@ -79,6 +87,7 @@ from epicurus_core_app.modules import (
 )
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
+from epicurus_core_app.object_backend import StorageObjectBackend
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.settings import CoreAppSettings
@@ -279,6 +288,29 @@ def create_app() -> FastAPI:
         s3_access_key=settings.files_s3_access_key,
         s3_secret_key=settings.files_s3_secret_key,
     )
+    # The core-owned Files UI (ADR-0063, Phase 2): a file index catalogues the FileStore tree —
+    # walked at startup, watched for changes — and powers the Files page + search; the object
+    # backend folds in the storage module's uploads/agent objects so the core serves one unified
+    # Files view. Only the local backend has a real tree to watch (S3 has no inotify surface).
+    file_index = FileIndex(engine)
+    file_objects = StorageObjectBackend(registry)
+    file_scan_lock = asyncio.Lock()
+
+    async def _rescan_files() -> int:
+        # Serialise the startup walk and every watch-triggered rescan against each other (the
+        # scan holds no internal lock), so a change mid-startup waits rather than double-walks.
+        async with file_scan_lock:
+            return await scan_file_space(file_store, file_index, tenant=settings.default_tenant_id)
+
+    file_watcher = (
+        FileWatcher(
+            settings.files_root / settings.default_tenant_id,
+            _rescan_files,
+            debounce_ms=settings.files_watch_debounce_ms,
+        )
+        if settings.files_backend == "local" and settings.files_watch
+        else None
+    )
     # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
     # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out
     # (heavy, manual-only). The manual "run everything" trigger is always available; the nightly
@@ -331,14 +363,20 @@ def create_app() -> FastAPI:
             await extraction_queue.init()
         except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
             log.error("extraction queue init failed; nightly extraction off", error=str(exc))
-        # Provision the tenant's file-space root (core-owned provisioning, ADR-0052). Until the
-        # shared volume is mounted into the core (a follow-up phase), the local root won't exist
-        # yet — skip cleanly rather than logging an error on every boot.
+        # Provision the tenant's file-space root and index it (core-owned, ADR-0052/0061). The
+        # core now mounts the shared volume (Phase 2), so the local root exists at boot: init the
+        # file index, ensure the tenant root, then walk it in. Best-effort throughout — a DB or
+        # scan hiccup degrades the Files page rather than blocking startup.
+        try:
+            await file_index.init()
+        except Exception as exc:
+            log.error("file index init failed; Files search disabled", error=str(exc))
         if settings.files_backend != "local" or settings.files_root.exists():
             try:
                 await file_store.ensure_tenant_root(tenant=settings.default_tenant_id)
-            except Exception as exc:  # never block startup on a provisioning hiccup
-                log.warning("file-space provisioning failed", error=str(exc))
+                await _rescan_files()
+            except Exception as exc:  # never block startup on a provisioning/scan hiccup
+                log.warning("file-space provisioning/scan failed", error=str(exc))
         # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
         # startup never blocks on the network; the task self-heals on transient failures.
         catalog_task = asyncio.create_task(catalog.run_periodic())
@@ -347,6 +385,10 @@ def create_app() -> FastAPI:
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
         # Evict finished in-flight runs past their grace window (#376), even with no new traffic.
         live_run_reaper = asyncio.create_task(live_runs.reap_periodically())
+        # Keep the file index live: re-walk on a debounced change (local backend only, ADR-0063).
+        file_watch_task = (
+            asyncio.create_task(file_watcher.run()) if file_watcher is not None else None
+        )
         # Start consuming inbound bridge messages (ADR-0058). Best-effort: a NATS hiccup here
         # must not block startup — the rest of the core (web chat) stays up regardless.
         if settings.messaging_inbound_enabled:
@@ -375,6 +417,11 @@ def create_app() -> FastAPI:
                 await live_run_reaper
             with suppress(asyncio.CancelledError):
                 await maintenance_task
+            if file_watcher is not None and file_watch_task is not None:
+                file_watcher.stop()
+                file_watch_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await file_watch_task
             # Let in-flight turns finish (and persist) before the engine closes under them (#376).
             await live_runs.drain()
             await bus.close()
@@ -391,7 +438,14 @@ def create_app() -> FastAPI:
             default_tenant=settings.default_tenant_id,
         )
     )
-    app.include_router(create_files_router(file_store, default_tenant=settings.default_tenant_id))
+    app.include_router(
+        create_files_router(
+            file_store,
+            default_tenant=settings.default_tenant_id,
+            index=file_index,
+            objects=file_objects,
+        )
+    )
     app.include_router(
         create_maintenance_router(maintenance, default_tenant=settings.default_tenant_id)
     )
@@ -428,6 +482,18 @@ def create_app() -> FastAPI:
     app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
     app.include_router(create_suggestions_router(registry))
+    # Chat-bridge admin (#369, ADR-0062): connect/manage the messaging module's bridges. The core
+    # writes per-tenant bot tokens to OpenBao and reloads the module so a bridge connects at
+    # runtime; the browser never holds a token (constraint #6).
+    app.include_router(
+        create_messaging_router(
+            BridgeAdmin(
+                secrets,
+                RegistryBridgeClient(registry),
+                tenant=settings.default_tenant_id,
+            )
+        )
+    )
     app.include_router(
         create_oauth_router(
             oauth,

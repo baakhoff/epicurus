@@ -150,6 +150,14 @@ class CoreAppSettings(CoreSettings):
     files_s3_url: str = "http://minio:9000"
     files_s3_access_key: str = "epicurus"
     files_s3_secret_key: str = "epicurus-dev"
+    # Live file-index sync (ADR-0063): watch the local file-space tree and incrementally rescan
+    # on change, so a file written through the file API, an external write, or an Obsidian-Sync
+    # drop shows up in the Files view and search without a restart. Local backend only (S3 has
+    # no inotify surface). On by default; FILES_WATCH=false disables it for a huge tree.
+    files_watch: bool = True
+    # Coalescing window (ms) for a burst of changes before a rescan fires — a module dropping
+    # many files at once is grouped into one incremental pass. Passed to the watcher's debounce.
+    files_watch_debounce_ms: int = 1500
 
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.

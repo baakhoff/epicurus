@@ -109,6 +109,11 @@ def create_app() -> FastAPI:
     vault_pages = VaultPages(
         vault_root,
         vault_indexer,
+        # Writes go through the core file API (ADR-0064): /data is mounted read-only here.
+        # The core FileStore root is /data/<tenant>; the vault is /data/<tenant>/knowledge,
+        # so the core prefix is the vault dir name and a vault-relative `rel` → `knowledge/rel`.
+        platform=platform,
+        core_prefix=settings.vault_path.name,
         read_only=vault_read_only,
         # Surface the bundled platform docs as the read-only "__docs__" scope (#KB-refactor).
         docs_path=settings.docs_path,

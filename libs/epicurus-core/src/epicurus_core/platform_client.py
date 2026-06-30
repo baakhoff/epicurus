@@ -240,6 +240,20 @@ class PlatformClient:
             resp.raise_for_status()
             return [FileEntry.model_validate(e) for e in resp.json()["entries"]]
 
+    async def files_search(self, query: str, *, limit: int = 50) -> list[FileEntry]:
+        """Search the tenant file space by name/path fragment (the core-owned index).
+
+        Case-insensitive; returns up to *limit* matching entries. Backs a module's agent
+        file-search tool now that the core — not the module — owns the file index (ADR-0063).
+        """
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                "/platform/v1/files/search",
+                params={"q": query, "limit": str(limit), "tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            return [FileEntry.model_validate(e) for e in resp.json()["entries"]]
+
     async def files_read(self, path: str) -> str:
         """Read a UTF-8 text file from the tenant file space.
 

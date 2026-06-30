@@ -43,7 +43,8 @@ New modules are assigned here (echo sits just below at `8080`).
 | `8090` | mail | `MAIL_PORT` |
 | `8091` | tasks | `TASKS_PORT` |
 | `8092` | notes | `NOTES_PORT` |
-| `8093–8099` | _(free — next module assigned here)_ | — |
+| `8093` | messaging | `MESSAGING_PORT` |
+| `8094–8099` | _(free — next module assigned here)_ | — |
 
 ## Data plane & ops
 

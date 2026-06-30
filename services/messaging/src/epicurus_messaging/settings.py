@@ -6,12 +6,13 @@ from epicurus_core import CoreSettings
 
 
 class MessagingSettings(CoreSettings):
-    """Adds the active-bridge selection to the shared settings."""
+    """The shared core settings; the module needs no bridge-specific settings of its own."""
 
-    # The active bridge provider. ``loopback`` (default) is the built-in in-process echo
-    # bridge — no external service, no secret — so a fresh install has a working path. Real
-    # bridges (``telegram``, ``discord``, …) fan out after the foundation (#365+) and read
-    # their per-tenant bot token from OpenBao.
+    # Retained for backward compatibility only (ADR-0062): bridge selection is no longer a
+    # single env choice. The module now runs every bridge at once — the always-on loopback
+    # echo plus each real bridge, which stays dormant until its per-tenant bot token is stored
+    # in OpenBao and the operator connects it from the web surface (#369). This value is
+    # ignored; ``extra="ignore"`` keeps an existing ``MESSAGING_PROVIDER`` env harmless.
     messaging_provider: str = "loopback"
 
     # Telegram bridge knobs (used when ``messaging_provider == "telegram"``). The bot token

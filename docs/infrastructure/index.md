@@ -30,26 +30,39 @@ It is a single volume mounted at `/data` in each of them, set by one env var
 directory to expose real files — never the host home dir). The on-disk tree is
 **tenant-scoped** (constraint #1): every module inserts a `<tenant>/` segment so the layout is
 `/data/<tenant>/…`, where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The mount stays
-`/data`; only the in-container path carries the segment. Each module owns a subtree:
+`/data`; only the in-container path carries the segment. The **core** mounts the volume and the
+file-owning modules each own a subtree:
 
-- **storage** mounts it **read-only** and indexes the tenant subtree `/data/<tenant>` as the
-  unified **Files** view.
-- **knowledge** mounts it **read-write** and owns `/data/<tenant>/knowledge` (each top-level
-  folder is a knowledge base / project).
-- **notes** mounts it **read-write** and owns `/data/<tenant>/notes` (the read-only `.md` mirror
-  of authored notes; Postgres stays the source of truth).
+- **core** mounts it and owns the **file index** over the tenant subtree `/data/<tenant>` — it
+  scans + watches the tree and serves the unified **Files** view (browser / read / download),
+  merging in the storage module's objects (ADR-0063). The **storage** module **no longer mounts
+  `/data`**; it reads the file space through the core file API.
+- **knowledge** mounts it **read-only** and owns `/data/<tenant>/knowledge` (each top-level
+  folder is a knowledge base / project). It **reads** + indexes the tree on this mount but
+  **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>`),
+  so the core performs the on-disk write (#356, ADR-0064).
+- **notes** **no longer mounts `/data`** (since #357/ADR-0065). It owns the `notes/` subtree
+  logically — the write-only `.md` mirror of authored notes (Postgres stays the source of truth) —
+  but **writes through the core file API** (`PlatformClient.files_*`, core path `notes/<rel>`), so
+  the **core** performs the on-disk write into `/data/<tenant>/notes`. Notes reads nothing from the
+  volume and drops its `files-init` dependency.
 
 `EPICURUS_FILES_ROOT` **replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and
 `STORAGE_HOST_ROOT`; existing deployments move old vault contents into
 `<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`).
 
-A one-shot **`files-init`** container prepares the tree before any module starts (it is a
-`depends_on: service_completed_successfully` of storage / knowledge / notes, mirroring
-`qdrant-init` and the OpenBao chown). A fresh named volume is created **root-owned**, but the
-modules run as uid 10001 — so without this they would hit `PermissionError` (HTTP 500)
-creating folders or saving documents. `files-init` creates `/data/<tenant>/knowledge` and
-`/data/<tenant>/notes` and chowns **only those** to uid 10001, leaving the rest of a
-bind-mounted tree (e.g. an operator's Obsidian vault) untouched.
+A one-shot **`files-init`** container still **provisions the tree** before the volume's writers
+start (a `depends_on: service_completed_successfully`, mirroring `qdrant-init` and the OpenBao
+chown). It **remains** the file-space provisioning bootstrap even though the modules have moved
+off the mount: **storage** (Phase 2) and **notes** (Phase 4, #357/ADR-0065) no longer mount
+`/data` and no longer depend on it; the **core** (which owns the read-write mount and now performs
+both knowledge's and notes' on-disk writes) and read-only **knowledge** are what the chowned
+directories now serve. A fresh named volume is created **root-owned**, but the core and modules
+run as uid 10001 — so without this they would hit `PermissionError` (HTTP 500) creating folders or
+saving documents. `files-init` creates `/data/<tenant>/knowledge` and `/data/<tenant>/notes` and
+chowns **only those** to uid 10001, leaving the rest of a bind-mounted tree (e.g. an operator's
+Obsidian vault) untouched. (Retiring `files-init` — folding a surgical chown into the core image's
+entrypoint — is the remaining follow-up of #357.)
 
 ## Edge gateway
 

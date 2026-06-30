@@ -41,11 +41,19 @@ services:
       # KV-cache apply (#307): the core writes ollama.env here; Ollama mounts it read-only and
       # sources it on (re)start. A named volume, so the choice persists across reconciles.
       - ollama-runtime:/etc/epicurus
+      # The shared file space (ADR-0063): the core now owns it — mounts the volume read-write at
+      # FILES_ROOT (/data), provisions the tenant root, indexes the tree, and serves the Files UI.
+      # Default an empty named volume; set EPICURUS_FILES_ROOT to a host dir to expose real files.
+      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${CORE_PORT:-8082}:8080"
     depends_on:
+      # files-init (data plane) creates + chowns /data/<tenant> so the core (uid 10001) can
+      # provision and index the file space on a fresh root-owned volume (ADR-0063).
+      files-init:
+        condition: service_completed_successfully
       nats:
         condition: service_started
       ollama:

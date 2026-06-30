@@ -10,7 +10,7 @@ contract. This is the map of every running block — each row links its full ref
 | --- | --- | --- | --- | --- |
 | **core-app** | core | the brain — agent loop, LLM gateway, cross-chat memory, power states, the platform API, and the MCP host | `8082` | [core-app](core-app.md) |
 | **web** | core | the phone-first PWA shell — chat, model manager, power toggle, manifest-driven module UI | `8084` | [web](web.md) |
-| **storage** | module | a read-only index of a file tree (list / search / read / download) plus a MinIO object store | `8083` | [storage](storage.md) |
+| **storage** | module | a MinIO object store + the chat-upload sink; agent file tools (list / search / read) over the core file space — the unified **Files** view is core-owned (ADR-0063) | `8083` | [storage](storage.md) |
 | **knowledge** | module | Obsidian-vault RAG — incremental index into a tenant-scoped Qdrant collection | `8085` | [knowledge](knowledge.md) |
 | **websearch** | module | self-hosted web search via SearXNG — no API key required | `8086` | [websearch](websearch.md) |
 | **calendar** | module | provider-neutral calendar — events and scheduling (local + Google) | `8087` | [calendar](calendar.md) |

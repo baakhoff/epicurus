@@ -1,16 +1,19 @@
 """Integration tests: the messaging app's NATS wiring end-to-end. Requires Docker.
 
 Boots the full app (its lifespan connects NATS, subscribes ``messaging.outbound``, and starts
-the bridge) and proves both directions over a real NATS container:
+every bridge) and proves both directions over a real NATS container:
 
-* ``POST /loopback/inject`` → the bridge publishes ``messaging.inbound``;
-* a published ``messaging.outbound`` → the bridge delivers it (visible as ``delivered`` in /status).
+* ``POST /loopback/inject`` → the loopback bridge publishes ``messaging.inbound``;
+* a published ``messaging.outbound`` → it is dispatched to the matching bridge (visible in the
+  loopback bridge's ``detail`` in ``/status``);
+* ``POST /bridges/{bridge}/reload`` → the core's runtime connect/disconnect control path.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,6 +40,11 @@ def nats_url() -> Iterator[str]:
         yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(4222)}"
 
 
+def _bridge(status: dict[str, Any], name: str) -> dict[str, Any]:
+    """The one bridge entry named ``name`` from a ``/status`` body."""
+    return next(b for b in status["bridges"] if b["bridge"] == name)
+
+
 def test_health_and_status(nats_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NATS_URL", nats_url)
     monkeypatch.setenv("DEFAULT_TENANT_ID", "local")
@@ -46,10 +54,18 @@ def test_health_and_status(nats_url: str, monkeypatch: pytest.MonkeyPatch) -> No
         assert health.json()["service"] == "messaging"
 
         status = client.get("/status").json()
-        assert status["provider"] == "loopback"
-        assert status["connected"] is True
         assert status["inbound_subject"] == MESSAGING_INBOUND
-        assert status["delivered"] == 0
+        assert status["outbound_subject"] == MESSAGING_OUTBOUND
+
+        loopback = _bridge(status, "loopback")
+        assert loopback["connected"] is True
+        assert loopback["manageable"] is False
+
+        # Discord is constructed but dormant (no token configured in this environment).
+        discord = _bridge(status, "discord")
+        assert discord["manageable"] is True
+        assert discord["configured"] is False
+        assert discord["connected"] is False
 
 
 def test_inject_publishes_inbound(nats_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,7 +97,7 @@ def test_inject_publishes_inbound(nats_url: str, monkeypatch: pytest.MonkeyPatch
 
 
 def test_outbound_is_delivered(nats_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A messaging.outbound reply → the bridge delivers it (delivered count rises)."""
+    """A messaging.outbound reply for the loopback bridge → it is dispatched and delivered."""
     monkeypatch.setenv("NATS_URL", nats_url)
     monkeypatch.setenv("DEFAULT_TENANT_ID", "local")
 
@@ -97,13 +113,27 @@ def test_outbound_is_delivered(nats_url: str, monkeypatch: pytest.MonkeyPatch) -
             await bus.client.flush()
 
     with TestClient(create_app()) as client:
-        assert client.get("/status").json()["delivered"] == 0
+        assert "0 delivered" in _bridge(client.get("/status").json(), "loopback")["detail"]
         asyncio.run(_publish_outbound())
         # The subscription delivers asynchronously; poll /status briefly until it lands.
         for _ in range(50):
-            if client.get("/status").json()["delivered"] >= 1:
+            if "1 delivered" in _bridge(client.get("/status").json(), "loopback")["detail"]:
                 break
             import time
 
             time.sleep(0.1)
-        assert client.get("/status").json()["delivered"] == 1
+        assert "1 delivered" in _bridge(client.get("/status").json(), "loopback")["detail"]
+
+
+def test_reload_bridge_control_path(nats_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /bridges/{bridge}/reload reconnects one bridge (404 for an unknown one)."""
+    monkeypatch.setenv("NATS_URL", nats_url)
+    monkeypatch.setenv("DEFAULT_TENANT_ID", "local")
+    with TestClient(create_app()) as client:
+        ok = client.post("/bridges/discord/reload")
+        assert ok.status_code == 200
+        assert ok.json()["bridge"] == "discord"
+        assert ok.json()["connected"] is False  # still no token → still dormant
+
+        missing = client.post("/bridges/nope/reload")
+        assert missing.status_code == 404

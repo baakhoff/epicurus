@@ -898,6 +898,22 @@ export const OAuthClientStatus = z.object({
   configured: z.boolean(),
 });
 
+/* ── Messaging bridges (ADR-0062) ────────────────────────────────────────── */
+
+/** One chat bridge's live state, from the messaging module via the core (#369).
+ *  `configured` = a bot token is stored; `enabled` = the operator's on/off; `connected` =
+ *  the live link is up. `manageable` is false for the in-process loopback bridge. */
+export const BridgeStatus = z.object({
+  bridge: z.string(),
+  label: z.string(),
+  manageable: z.boolean(),
+  configured: z.boolean(),
+  enabled: z.boolean(),
+  connected: z.boolean(),
+  detail: z.string().default(""),
+});
+export type BridgeStatus = z.infer<typeof BridgeStatus>;
+
 /* ── Log stream (ADR-0031) ───────────────────────────────────────────────── */
 
 /** One structured log entry emitted by the core (ADR-0031). */

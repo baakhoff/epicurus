@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Discord chat bridge + connect/manage bridges from the web** (#366, #369) — the first real
+  Phase-4 bridge, and the operator surface to run it. The `messaging` module now runs **every
+  bridge at once** (a `BridgeManager`): the always-on **loopback** echo plus each real bridge,
+  dormant until connected — each `messaging.outbound` reply is **dispatched to the bridge named by
+  the message**, and a new `POST /bridges/{bridge}/reload` control path lets a bridge connect at
+  runtime with no restart. The **Discord** provider (`discord.py`) reads inbound over the gateway
+  (DMs always; in a server only when **@mentioned**; ignores its own messages) and posts replies
+  over REST (thread-aware, chunked to Discord's 2000-char limit), reading its bot token from
+  OpenBao. The core gains a **bridge-admin** surface — `GET /platform/v1/messaging/bridges` plus
+  connect (write-only token) / on-off / disconnect — that writes the token to OpenBao and reloads
+  the module, so the browser never holds a token (constraint #6). The web adds a **Settings → Chat
+  bridges** card (connect/disconnect, an on/off switch, live per-bridge status). ADR-0062.
+  `messaging` 0.1.0→0.2.0, `core-app` 0.49.0→0.50.0, `web` 0.65.0→0.66.0.
 - **Messaging foundation: chat bridges, inbound → turn → outbound** (#364) — the gating
   foundation for Phase 4. A new **normalized inbox contract** in `epicurus-core`
   (`InboundMessage` / `OutboundMessage` + the `messaging.inbound` / `messaging.outbound`

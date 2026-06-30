@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core-app"
-version = "0.50.0"
+version = "0.51.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [

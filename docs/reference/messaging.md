@@ -89,5 +89,55 @@ async with EventBus(settings.nats_url) as bus:
     #   and publishes the reply on messaging.outbound for the bridge to deliver.
 ```
 
+## Bridge management (ADR-0062)
+
+The `messaging` module runs **every bridge at once** — the always-on in-process `loopback` echo
+plus each real bridge (Discord, …), which stays dormant until its per-tenant bot token is
+stored. An outbound reply is dispatched to the bridge named by `OutboundMessage.bridge`.
+
+### `BridgeStatus`
+
+One bridge's live state — reported by the module's `GET /status` (`bridges[]`) and surfaced to
+the operator by the core (#369).
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `bridge` | `str` | Provider id (`discord`, `loopback`, …). |
+| `label` | `str` | Human name for the shell. |
+| `manageable` | `bool` | Operator connects/disconnects it (false for `loopback`). |
+| `configured` | `bool` | A bot token is stored in OpenBao. |
+| `enabled` | `bool` | The operator's on/off (kept across reconnects). |
+| `connected` | `bool` | The live link to the external service is up right now. |
+| `detail` | `str` | Short human summary (`2 server(s) · 5 channel(s)`, `no bot token set`, …). |
+
+### Module HTTP (internal, core → module)
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /status` | `{inbound_subject, outbound_subject, bridges: [BridgeStatus, …]}`. |
+| `POST /bridges/{bridge}/reload` | The core's control path: re-read the bridge's token and (re)connect or disconnect it at runtime. Returns the bridge's fresh `BridgeStatus`. **404** unknown bridge. |
+
+### Core HTTP — bridge admin (`/platform/v1/messaging`, #369)
+
+The browser never holds a token (constraint #6); the core writes it to OpenBao
+(`messaging/<bridge>` → `{token, enabled}`), then calls the module's reload so the bridge
+connects at runtime — no restart.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /platform/v1/messaging/bridges` | List every bridge + its `BridgeStatus`. |
+| `PUT /platform/v1/messaging/bridges/{bridge}/token` | Connect: store the write-only bot token (and reload). Body `{token}`. |
+| `POST /platform/v1/messaging/bridges/{bridge}/enabled` | On/off without forgetting the token. Body `{enabled}`. |
+| `DELETE /platform/v1/messaging/bridges/{bridge}` | Disconnect: clear the token (and reload). |
+
+### Discord bridge (#366)
+
+The `discord` provider maintains the Discord **gateway** (WebSocket, via `discord.py`) for
+inbound and posts replies with the REST API (thread-aware, chunked to Discord's 2000-char
+limit). It **ignores its own messages**, and in a shared server treats a message as a turn only
+when the **bot is @mentioned** (a DM is always a turn). Reading message text requires the
+privileged **Message Content Intent**; see [messaging](../services/messaging.md) for the bot
+setup (intents, invite scopes and permissions).
+
 See the running services that speak this contract: [messaging](../services/messaging.md)
 (the module side) and [core-app](../services/core-app.md#events-nats) (the inbound consumer).

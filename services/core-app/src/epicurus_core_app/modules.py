@@ -194,9 +194,10 @@ class ModuleRegistry:
     async def base_url(self, name: str) -> str:
         """The reachable base URL of the module called ``name`` (404 if unavailable).
 
-        The public, health-gated way for in-core consumers (e.g. the Files view's object
-        bridge, ADR-0063) to reach a module — a disabled or down module raises rather than
-        returning a stale address.
+        The public, health-gated way for in-core consumers — the Files view's object bridge
+        (ADR-0063) and the messaging bridge-admin's reload control path (ADR-0062) — to reach a
+        module; a disabled or down module raises rather than returning a stale address. The
+        browser never sees these URLs; the core stays the sole gateway.
         """
         base, _ = await self._resolve(name)
         return base

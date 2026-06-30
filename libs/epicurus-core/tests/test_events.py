@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 
+import nats.errors
 import pytest
 from structlog.testing import capture_logs
 from testcontainers.core.container import DockerContainer
@@ -114,3 +115,56 @@ async def test_tenant_isolation(nats_url: str) -> None:
 
     assert event.subject == "acme.demo.topic"
     assert event.data == b"y"
+
+
+# ── Authentication (ADR-0066) ──────────────────────────────────────────────────
+# The real stack runs an authenticated server (infra/compose/nats-server.conf with
+# accounts/users). Here we prove the EventBus's auth contract against a server that
+# requires credentials, using NATS's single-user CLI auth (the simplest way to make a
+# testcontainer reject anonymous clients; the per-role subject permissions are
+# validated by the config + the runtime-smoke boot of every service).
+
+_NATS_USER = "core"
+_NATS_PASSWORD = "s3cret-test"
+
+
+@pytest.fixture(scope="module")
+def authed_nats_url() -> Iterator[str]:
+    container = (
+        DockerContainer("nats:2.10")
+        .with_command(f"-js --user {_NATS_USER} --pass {_NATS_PASSWORD}")
+        .with_exposed_ports(4222)
+    )
+    with container:
+        wait_for_logs(container, "Server is ready")
+        host = container.get_container_host_ip()
+        port = container.get_exposed_port(4222)
+        yield f"nats://{host}:{port}"
+
+
+async def test_server_rejects_anonymous_connection(authed_nats_url: str) -> None:
+    # The server rejects a client that presents no credentials. We connect at the
+    # nats-py level with reconnect disabled so the auth violation raises promptly —
+    # the EventBus keeps nats-py's default reconnect loop, which instead retries an
+    # auth failure (a misconfigured service crash-loops rather than hanging forever).
+    # wait_for guards against any hang (a builtin TimeoutError would fail loudly, since
+    # it is not a nats.errors.Error).
+    with pytest.raises(nats.errors.Error) as excinfo:
+        await asyncio.wait_for(
+            nats.connect(authed_nats_url, allow_reconnect=False, connect_timeout=3),
+            timeout=10,
+        )
+    assert "Authorization" in str(excinfo.value)
+
+
+async def test_credentialed_connection_round_trips(authed_nats_url: str) -> None:
+    received: asyncio.Queue[Event] = asyncio.Queue()
+
+    async with EventBus(authed_nats_url, user=_NATS_USER, password=_NATS_PASSWORD) as bus:
+        await bus.subscribe("demo.secure", received.put, tenant_id="acme")
+        await bus.client.flush()
+        await bus.publish("demo.secure", b"ok", tenant_id="acme")
+        event = await asyncio.wait_for(received.get(), timeout=2)
+
+    assert event.subject == "acme.demo.secure"
+    assert event.data == b"ok"

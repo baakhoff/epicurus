@@ -886,7 +886,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-core"
-version = "0.17.0"
+version = "0.18.0"
 source = { editable = "libs/epicurus-core" }
 dependencies = [
     { name = "fastapi" },

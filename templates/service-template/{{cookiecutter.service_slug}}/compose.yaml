@@ -11,6 +11,11 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
+      # Modules authenticate to the (authenticated) bus as the shared `module` role
+      # (ADR-0066): tenant-scoped application subjects only. Dev-weak password default;
+      # override NATS_MODULE_PASSWORD in .env / from OpenBao for real deployments.
+      NATS_USER: module
+      NATS_PASSWORD: ${NATS_MODULE_PASSWORD:-epicurus-dev}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # Uncomment if this module calls back into the core for LLM / embeddings via

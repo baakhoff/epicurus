@@ -20,6 +20,23 @@ def test_defaults() -> None:
     assert s.use_json_logs is False  # local -> console
 
 
+def test_nats_auth_defaults_to_anonymous() -> None:
+    # No credentials by default — the EventBus connects anonymously (ADR-0066), which
+    # keeps it usable against an un-authenticated server (the integration testcontainers).
+    s = CoreSettings()
+    assert s.nats_url == "nats://localhost:4222"
+    assert s.nats_user is None
+    assert s.nats_password is None
+
+
+def test_nats_auth_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NATS_USER", "core")
+    monkeypatch.setenv("NATS_PASSWORD", "s3cret")
+    s = CoreSettings()
+    assert s.nats_user == "core"
+    assert s.nats_password == "s3cret"
+
+
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("SERVICE_NAME", "agent")

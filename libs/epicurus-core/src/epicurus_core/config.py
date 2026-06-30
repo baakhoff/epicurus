@@ -49,6 +49,15 @@ class CoreSettings(BaseSettings):
     # the contract is local-only.
     nats_url: str = "nats://localhost:4222"
 
+    # NATS authentication (ADR-0066). The server requires a credentialed connection;
+    # each service authenticates as its role user — the core as ``core`` (full bus),
+    # every module as ``module`` (tenant-scoped subjects). Both default to ``None`` so
+    # the EventBus still connects anonymously against an un-authenticated server (the
+    # integration testcontainers), and the password comes from the environment —
+    # weak dev defaults in compose, strong values from OpenBao in real deployments.
+    nats_user: str | None = None
+    nats_password: str | None = None
+
     # OpenBao (secrets). On the internal Docker network the address is
     # http://openbao:8200. The token is the bootstrap secret, injected at runtime
     # — directly via OPENBAO_TOKEN, or via OPENBAO_TOKEN_FILE pointing at a

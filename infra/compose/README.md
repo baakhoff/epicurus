@@ -9,7 +9,7 @@ services and the edge (a gateway and private ingress) are layered on separately.
 | --- | --- | --- | --- |
 | postgres | `postgres:17` | 5432 | Relational store (schema-per-service) |
 | valkey | `valkey/valkey:8` | 6379 | Cache / queues / rate-limit (Redis-compatible, BSD) |
-| nats | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring |
+| nats | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); **authenticated** (role users `core`/`module`/`sys` via `nats-server.conf`); 8222 = monitoring. See [docs/infrastructure/nats.md](../../docs/infrastructure/nats.md) |
 | qdrant | `qdrant/qdrant:v1.12.4` | 6333, 6334 | Vector DB (RAG + memory) |
 | openbao | `openbao/openbao:2.2.0` | 8200 | Secrets — persistent file storage; bootstrap once, auto-unseals on restart |
 | openbao-unseal | `openbao/openbao:2.2.0` | — | Sidecar: polls seal status and unseals on every stack start |

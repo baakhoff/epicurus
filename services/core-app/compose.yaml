@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
+      NATS_USER: core
+      NATS_PASSWORD: ${NATS_CORE_PASSWORD:-epicurus-dev}
       OLLAMA_URL: http://ollama:11434
       # ── LLM gateway tuning (all optional; blank/unset = provider default) ──
       # Set any of these and restart — no code edit needed (issue #114).

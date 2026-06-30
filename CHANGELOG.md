@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **NATS authentication** (#50) — the event bus now **requires credentials**; it previously
+  ran open, so any client on the internal network could publish/subscribe across all subjects.
+  A new `infra/compose/nats-server.conf` defines an account/user model with three roles — `core`
+  (full bus), `module` (tenant-scoped subjects), and `sys` (monitoring) — and the `EventBus`
+  authenticates with a per-role `NATS_USER`/`NATS_PASSWORD`. The OpenBao bootstrap generates strong
+  per-role passwords (recorded in OpenBao, written to `.env.secrets`); compose keeps weak
+  `epicurus-dev` defaults so local/dev `up` is unchanged. New modules authenticate as `module`
+  automatically via the service template. Enforced **per-tenant** isolation (account-per-tenant)
+  is the deferred SaaS-track step (ADR-0066). `epicurus-core` → 0.18.0.
+
 - **Discord chat bridge + connect/manage bridges from the web** (#366, #369) — the first real
   Phase-4 bridge, and the operator surface to run it. The `messaging` module now runs **every
   bridge at once** (a `BridgeManager`): the always-on **loopback** echo plus each real bridge,

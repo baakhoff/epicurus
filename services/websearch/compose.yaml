@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
+      NATS_USER: module
+      NATS_PASSWORD: ${NATS_MODULE_PASSWORD:-epicurus-dev}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SEARXNG_URL: http://searxng:8080

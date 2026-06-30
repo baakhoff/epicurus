@@ -28,7 +28,7 @@ def build_module() -> EpicurusModule:
     """Build the echo module and register its tool and declared events."""
     module = EpicurusModule(
         "echo",
-        version="0.2.2",
+        version="0.3.0",
         description="Echoes messages — proves the MCP tool + NATS event contract.",
         config=["greeting"],
         ui=UiSection(

@@ -13,6 +13,10 @@ services:
       NATS_PASSWORD: ${NATS_MODULE_PASSWORD:-epicurus-dev}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # OpenTelemetry tracing (#57). Off by default; set OTEL_TRACES_ENABLED=true with
+      # the `observability` profile up to emit spans to Tempo over OTLP/HTTP.
+      OTEL_TRACES_ENABLED: ${OTEL_TRACES_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
     # Loopback-bound by default; the gateway is the intended front door. Set
     # BIND_ADDRESS to expose directly (the module<->core contract stays local).
     ports:

@@ -39,7 +39,9 @@ proxies — `echoes` here) · `GET /resolve/{kind}/{ref_id}` (hover-card resolve
 ## Configuration
 
 Declares one config key, `greeting`. Otherwise just the shared
-[`CoreSettings`](../reference/config.md) (`NATS_URL`, `DEFAULT_TENANT_ID`, …).
+[`CoreSettings`](../reference/config.md) (`NATS_URL`, `DEFAULT_TENANT_ID`, …), including
+optional OpenTelemetry tracing (`OTEL_TRACES_ENABLED`, off by default) — echo is the
+reference module that wires [`setup_tracing`](../reference/observability.md#tracing-57-adr-0068).
 
 ## Data model
 

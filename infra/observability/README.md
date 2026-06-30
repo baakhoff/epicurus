@@ -36,9 +36,12 @@ datasources are pre-wired:
   only for containers in the `epicurus` compose project and labels each stream with
   `service_name` (the compose service) and `container`, so unrelated containers on
   the host are ignored and you can filter by service.
-- **Traces** infrastructure is ready — Tempo receives OTLP directly; services
-  start emitting spans when OpenTelemetry tracing is wired into `epicurus-core`
-  (a follow-up).
+- **Traces** flow today (#57) when enabled — every service emits OpenTelemetry spans
+  to Tempo over OTLP/HTTP, covering FastAPI requests and the NATS event bus (trace
+  context propagates across the bus, so one trace spans publisher → handler). Opt-in
+  like this whole stack: set `OTEL_TRACES_ENABLED=true` and bring it up with the
+  `observability` profile. Wiring + config: the
+  [tracing reference](../../docs/reference/observability.md#tracing-57-adr-0068).
 - **Alerts** are evaluated by Prometheus from `infra/observability/prometheus/rules/`
   and visible in Grafana under **Alerting → Alert rules** (External — Prometheus).
 

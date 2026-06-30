@@ -29,6 +29,8 @@ add service-specific fields.
 | `openbao_url` | `OPENBAO_URL` | `str` | `http://localhost:8200` | Secrets — see [`secrets`](secrets.md). |
 | `openbao_token` | `OPENBAO_TOKEN` | `str \| None` | `None` | Bootstrap token, injected at runtime. |
 | `openbao_token_file` | `OPENBAO_TOKEN_FILE` | `str \| None` | `None` | Path to a file holding the token (e.g. a mounted Docker secret); used when `openbao_token` is unset. |
+| `otel_traces_enabled` | `OTEL_TRACES_ENABLED` | `bool` | `False` | Emit OpenTelemetry traces to Tempo — see [tracing](observability.md#tracing-57-adr-0068). |
+| `otel_exporter_otlp_endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` | `str` | `http://tempo:4318` | OTLP/HTTP base URL for traces; the exporter appends `/v1/traces`. |
 
 ### Properties & methods
 

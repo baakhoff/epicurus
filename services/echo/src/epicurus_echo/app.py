@@ -23,6 +23,7 @@ from epicurus_core import (
     add_ops_routes,
     configure_logging,
     get_logger,
+    setup_tracing,
 )
 from epicurus_echo.service import (
     ECHO_PAGE_ID,
@@ -65,6 +66,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="echo", lifespan=lifespan)
     add_ops_routes(app, service_name="echo", version=_service_version())
+    # Distributed tracing to Tempo (#57) — a no-op unless OTEL_TRACES_ENABLED is set.
+    setup_tracing(app, settings, version=_service_version())
     add_manifest_route(app, module)
 
     @app.get("/pages/{page_id}")

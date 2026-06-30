@@ -57,6 +57,14 @@ class CoreSettings(BaseSettings):
     openbao_token: str | None = None
     openbao_token_file: str | None = None
 
+    # OpenTelemetry tracing (epicurus_core.tracing, #57). Off by default — the lean
+    # stack pays nothing and disabled tracing is a runtime no-op. Set
+    # OTEL_TRACES_ENABLED=true (with the `observability` profile up, so Tempo is
+    # listening) to emit spans fleet-wide. The endpoint is the OTLP/HTTP base — the
+    # exporter appends `/v1/traces` — pointing at Tempo on the internal Docker network.
+    otel_traces_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://tempo:4318"
+
     @field_validator("default_tenant_id")
     @classmethod
     def _validate_default_tenant(cls, value: str) -> str:

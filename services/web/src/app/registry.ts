@@ -4,7 +4,7 @@
  * entries here without restructuring the shell.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, Blocks, Cpu, Inbox, MessageCircle, Settings } from "lucide-react";
+import { Activity, Blocks, Cpu, Folder, Inbox, MessageCircle, Settings } from "lucide-react";
 
 import type { ModuleSnapshot, PageArchetype } from "@/lib/contracts";
 
@@ -23,6 +23,9 @@ export const SURFACES: Surface[] = [
   { path: "/suggestions", label: "Suggestions", icon: Inbox },
   { path: "/models", label: "Models", icon: Cpu },
   { path: "/modules", label: "Modules", icon: Blocks },
+  // The file space is a core-owned surface (ADR-0063) — the Files browser no longer
+  // comes from the storage module's manifest.
+  { path: "/files", label: "Files", icon: Folder },
   { path: "/settings", label: "Settings", icon: Settings },
   { path: "/observability", label: "Observability", icon: Activity },
 ];

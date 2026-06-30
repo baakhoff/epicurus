@@ -30,10 +30,13 @@ It is a single volume mounted at `/data` in each of them, set by one env var
 directory to expose real files — never the host home dir). The on-disk tree is
 **tenant-scoped** (constraint #1): every module inserts a `<tenant>/` segment so the layout is
 `/data/<tenant>/…`, where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The mount stays
-`/data`; only the in-container path carries the segment. Each module owns a subtree:
+`/data`; only the in-container path carries the segment. The **core** mounts the volume and the
+file-owning modules each own a subtree:
 
-- **storage** mounts it **read-only** and indexes the tenant subtree `/data/<tenant>` as the
-  unified **Files** view.
+- **core** mounts it and owns the **file index** over the tenant subtree `/data/<tenant>` — it
+  scans + watches the tree and serves the unified **Files** view (browser / read / download),
+  merging in the storage module's objects (ADR-0063). The **storage** module **no longer mounts
+  `/data`**; it reads the file space through the core file API.
 - **knowledge** mounts it **read-write** and owns `/data/<tenant>/knowledge` (each top-level
   folder is a knowledge base / project).
 - **notes** mounts it **read-write** and owns `/data/<tenant>/notes` (the read-only `.md` mirror

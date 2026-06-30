@@ -13,6 +13,7 @@ import { moduleIcon } from "@/lib/icons";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { ChatScreen } from "@/screens/ChatScreen";
+import { FilesScreen } from "@/screens/FilesScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
 import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
@@ -157,6 +158,7 @@ export function Shell() {
             <Route path="/suggestions" element={<SuggestionsScreen />} />
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
+            <Route path="/files" element={<FilesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />
             <Route path="/observability" element={<ObservabilityScreen />} />
             <Route path="/m/:moduleName/:pageId" element={<ModulePageScreen />} />

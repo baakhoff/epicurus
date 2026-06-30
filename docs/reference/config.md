@@ -103,6 +103,8 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `files_root` | `FILES_ROOT` | `str` | `/data` | Local-backend base; the tenant file tree is `FILES_ROOT/<tenant>`. |
 | `files_s3_url` | `FILES_S3_URL` | `str` | `http://minio:9000` | S3 endpoint when `files_backend=s3`. |
 | `files_s3_access_key` / `files_s3_secret_key` | `FILES_S3_ACCESS_KEY` / `FILES_S3_SECRET_KEY` | `str` | `epicurus` / `epicurus-dev` | S3 credentials (dev defaults; OpenBao later). |
+| `files_watch` | `FILES_WATCH` | `bool` | `true` | Watch the mounted file space and **incrementally rescan on change** so files landed after startup show in the core Files page and search without a restart (ADR-0063). On by default. Set `false` for startup-only scanning. |
+| `files_watch_debounce_ms` | `FILES_WATCH_DEBOUNCE_MS` | `int` | `1500` | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires. |
 
 ### Properties
 
@@ -114,24 +116,32 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 
 ## Shared file space (per-module storage roots)
 
-The file-owning modules (storage, knowledge, notes) share **one** file tree — the *shared
-file space* (#KB-refactor). One deployment-level env var mounts it; the module settings below
-are the in-container paths under it.
+The **core** plus the file-owning modules (knowledge, notes) share **one** file tree — the
+*shared file space* (#KB-refactor). One deployment-level env var mounts it; the settings below
+are the in-container paths under it. Since the file-space migration Phase 2 (ADR-0063) the
+**core** mounts the volume and owns the file index + the unified Files browser; **storage no
+longer mounts `/data`** (it reads the file space through the core file API — see
+[file space](files.md)), so its in-container root and scan/watch knobs are gone.
 
 | Env var | Default | Scope | Meaning |
 | --- | --- | --- | --- |
-| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for storage (read-only), knowledge (read-write), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. The on-disk tree is tenant-scoped: a one-shot `files-init` container creates `/data/<tenant>/knowledge` + `/data/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`) and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
-| `STORAGE_ROOT` | `/data` | storage | In-container **base** of the shared-file-space mount; storage serves and indexes the tenant subtree `STORAGE_ROOT/<tenant>` read-only (tenant-scoped, constraint #1). |
-| `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | storage | Comma-separated top-level subtrees (relative to the served tenant subtree) hidden from the **agent's** file tools (`storage_list`/`storage_search`/`storage_read`); the operator-facing Files page / `/read` / `/download` are unaffected (#KB-refactor, storage v0.5.0). `notes/` holds private note bodies the agent must not read. Set empty to hide nothing. |
-| `STORAGE_WATCH` | `true` | storage | Watch the served tenant subtree and **incrementally rescan on change** (create/modify/delete), so files landed after startup show up in the Files page and name search without a restart or a manual `storage_rescan` (#390, storage v0.6.0, ADR-0057). On by default — it fixes a real stale-index bug. Set `false` to keep startup-only scanning. |
-| `STORAGE_WATCH_DEBOUNCE_MS` | `1500` | storage | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires; a module dropping many files at once is grouped into one incremental pass (#390, storage v0.6.0). |
+| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for the **core** (the file index, read-write), knowledge (read-write), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. The on-disk tree is tenant-scoped: a one-shot `files-init` container creates `/data/<tenant>/knowledge` + `/data/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`) and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
+| `FILES_WATCH` | `true` | core-app | Watch the mounted file space and **incrementally rescan on change** (create/modify/delete), so files landed after startup show in the core Files page and name search without a restart (ADR-0063). On by default. Set `false` for startup-only scanning. Also listed under [`CoreAppSettings`](#coreappsettings). |
+| `FILES_WATCH_DEBOUNCE_MS` | `1500` | core-app | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires; a module dropping many files at once is grouped into one incremental pass. |
+| `PLATFORM_URL` | `http://core-app:8080` | storage | The core base URL. Storage's agent file tools read the file space through the core file API (`PlatformClient.files_*`) against this URL — storage no longer mounts `/data` (ADR-0063). |
+| `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | storage | Comma-separated top-level subtrees hidden from the **agent's** file tools (`storage_list`/`storage_search`/`storage_read`); the operator-facing core Files surface is unaffected (#KB-refactor, storage v0.5.0). `notes/` holds private note bodies the agent must not read. Set empty to hide nothing. |
 | `VAULT_PATH` | `/data/knowledge` | knowledge | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge`, and each top-level folder under it is a project (knowledge base). Was `/vault` before #KB-refactor. |
 | `NOTES_ROOT` | `/data/notes` | notes | Notes' path within the shared file space; the on-disk `.md` mirror is tenant-scoped to `<files-root>/<tenant>/notes`. Each saved note is mirrored as `<slug>.md`; Postgres stays the source of truth (#KB-refactor). |
 
-The on-disk file tree is **tenant-scoped** (constraint #1): the three modules build their
-roots as `<files-root>/<tenant>/{knowledge,notes}` (and storage serves `<files-root>/<tenant>`),
-where `<tenant>` is `DEFAULT_TENANT_ID` (default `local`). The volume mount stays `/data` —
-only the in-container path carries the tenant segment.
+The on-disk file tree is **tenant-scoped** (constraint #1): the core indexes
+`<files-root>/<tenant>`, and knowledge and notes build their roots as
+`<files-root>/<tenant>/{knowledge,notes}`, where `<tenant>` is `DEFAULT_TENANT_ID` (default
+`local`). The volume mount stays `/data` — only the in-container path carries the tenant segment.
+
+> **Removed (ADR-0063).** `STORAGE_ROOT`, `STORAGE_WATCH`, and `STORAGE_WATCH_DEBOUNCE_MS` are
+> gone — storage no longer mounts or scans the file space; the core does (behind `FILES_WATCH` /
+> `FILES_WATCH_DEBOUNCE_MS`). Existing storage deployments drop those env vars and set
+> `PLATFORM_URL`.
 
 **Migration note for existing deployments.** `EPICURUS_FILES_ROOT` replaces
 `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. Move old vault contents into

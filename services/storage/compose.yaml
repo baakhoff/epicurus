@@ -12,28 +12,16 @@ services:
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
-      # In-container BASE of the shared file space (#KB-refactor). The served/indexed tree is
-      # tenant-scoped (constraint #1): storage serves STORAGE_ROOT/<tenant> (i.e.
-      # /data/<tenant>) read-only as the unified "Files" view, showing every module's folder
-      # (knowledge/, notes/) plus uploads. The service appends the DEFAULT_TENANT_ID segment.
-      STORAGE_ROOT: ${STORAGE_ROOT:-/data}
+      # The agent file tools read the core-owned file space through the platform API (ADR-0063);
+      # storage no longer mounts /data. Point at the core on the internal network.
+      PLATFORM_URL: ${PLATFORM_URL:-http://core-app:8080}
       # MinIO (S3-compatible) object store for app-managed objects.
       MINIO_URL: ${MINIO_URL:-http://minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-epicurus}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-epicurus-dev}
-    volumes:
-      # The SHARED file space (#KB-refactor), read-only here: storage only indexes and
-      # serves it. The same volume is mounted read-write by knowledge (and notes), which
-      # own subfolders under it. Default an empty named volume; set EPICURUS_FILES_ROOT in
-      # .env to a host directory to expose real files. (Never default to the host home
-      # dir: it would index ~/.ssh etc.) Replaces the old per-module STORAGE_HOST_ROOT.
-      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${STORAGE_PORT:-8083}:8080"
     depends_on:
-      # files-init (data plane) creates + chowns the module subdirs before anyone mounts.
-      files-init:
-        condition: service_completed_successfully
       nats:
         condition: service_started
       postgres:
@@ -54,5 +42,7 @@ services:
       - epicurus.metrics.port=8080
     networks: [epicurus]
 
-# The shared `epicurus-files` volume is declared in the data plane
-# (infra/compose/docker-compose.yml) and mounted read-write by knowledge/notes.
+# Storage no longer mounts the shared `epicurus-files` volume (ADR-0063): the core owns the
+# file space and serves the Files UI. Storage reads it through the core's platform API and keeps
+# only its MinIO object store. The volume is declared in the data plane
+# (infra/compose/docker-compose.yml) and mounted by the core and by knowledge/notes.

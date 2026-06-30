@@ -378,6 +378,21 @@ images to GHCR.
 
 ### Changed
 
+- **Shared additive schema reconcile (`epicurus_core.db.ensure_columns`)** (#249) — every store
+  evolves its schema with `create_all`, which creates a missing table but never alters an
+  existing one, so a column added after a table's first release silently never reached an
+  already-provisioned Postgres (the bug that hit `llm_prefs` in #214 and `tasks_local` in #218).
+  The per-store `_ensure_columns` helpers — copy-pasted across nine stores — are now one audited
+  helper in `epicurus-core` (behind the optional `db` extra; ADR-0066): it adds any model column
+  the live table lacks, reproducing the model's type and, where a `server_default` exists, its
+  `NOT NULL` + default (so a reconciled column matches a freshly-created one), and relaxes a
+  NOT-NULL-without-default column to nullable so the add never fails on a populated table.
+  Audited the remaining `create_all` stores (notes, knowledge/notes indexes, core file index, …)
+  — all single-release, no drift — and **fixed** knowledge `to_path`'s malformed
+  `server_default=""` (which rendered no default at all) to a quoted `''`. No behaviour change
+  for existing deployments. `epicurus-core` 0.17.0→0.18.0 (also reconciling its drifted
+  `_version.py`, 0.16.0→0.18.0); `tasks` 0.11.0→0.11.1, `calendar`
+  0.10.0→0.10.1, `storage` 0.8.0→0.8.1, `knowledge` 0.19.0→0.19.1, `core-app` 0.51.0→0.51.1.
 - **The context-window suggestion now reflects your KV-cache type and the model's real
   limits — and is no longer clipped to 32k** — the Models-page estimate of "how big a context
   can this box hold?" assumed a fixed f16 KV cache and capped at a flat 32,768, ignoring two

@@ -16,7 +16,6 @@ from sqlalchemy import (
     Text,
     delete,
     func,
-    inspect,
     select,
     update,
 )
@@ -25,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import Attachment, EntityRef
+from epicurus_core.db import ensure_columns
 from epicurus_core_app.agent.activity import MessageActivity
 
 # JSON columns added to agent_messages after the table's first release (v0.2). On an
@@ -120,21 +120,13 @@ class ConversationStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add post-v0.2 JSON columns to an existing table.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        There is no migration framework (the store uses ``create_all``), so on a
-        deployment that predates these columns we add them in place. The column type is
-        compiled per-dialect (``JSON`` on Postgres, TEXT-backed on SQLite), so this is
-        portable across prod and the tests' SQLite.
+        ``entity_refs`` / ``attachments`` (ADR-0019) and ``activity`` (ADR-0041) are nullable
+        JSON columns added after v0.2; they are added in place on an older table. See
+        :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(StoredMessage.__tablename__)}
-        for name in _ADDED_JSON_COLUMNS:
-            if name not in existing:
-                type_sql = StoredMessage.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-                sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {StoredMessage.__tablename__} ADD COLUMN {name} {type_sql}"
-                )
+        ensure_columns(sync_conn, StoredMessage.__table__, _ADDED_JSON_COLUMNS)
 
     async def append(
         self,

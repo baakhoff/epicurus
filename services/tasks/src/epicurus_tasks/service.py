@@ -101,7 +101,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.11.1",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."

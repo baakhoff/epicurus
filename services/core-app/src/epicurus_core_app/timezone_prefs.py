@@ -9,10 +9,12 @@ configured default (``DEFAULT_TIMEZONE``).
 
 from __future__ import annotations
 
-from sqlalchemy import String, inspect
+from sqlalchemy import String
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from epicurus_core.db import ensure_columns
 
 
 class _TzBase(DeclarativeBase):
@@ -52,20 +54,12 @@ class TimezonePrefsStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add columns introduced after the table's first release.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        No migration framework (the store uses ``create_all``); mirrors
-        ``LlmPrefsStore._ensure_columns`` so a pre-existing table self-heals rather than
-        500ing on a column added in a later release.
+        ``timezone`` self-heals on a table provisioned before it existed rather than 500ing.
+        See :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_TimezonePrefRow.__tablename__)}
-        table = _TimezonePrefRow.__tablename__
-        for name in ("timezone",):
-            if name not in existing:
-                col = _TimezonePrefRow.__table__.c[name]
-                type_sql = col.type.compile(dialect=sync_conn.dialect)
-                sync_conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {type_sql}")
+        ensure_columns(sync_conn, _TimezonePrefRow.__table__, ("timezone",))
 
     async def get_timezone(self, tenant: str) -> str:
         """Return the stored IANA timezone, or the configured default if unset."""

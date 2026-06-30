@@ -519,7 +519,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.10.0"
+    assert manifest.version == "0.10.1"
 
 
 async def test_manifest_declares_calendar_oauth_scope(

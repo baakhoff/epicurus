@@ -32,12 +32,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, String, Text, func, inspect, select
+from sqlalchemy import DateTime, String, Text, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import get_logger
+from epicurus_core.db import ensure_columns
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages
 from epicurus_knowledge.refs import doc_title, safe_relative
@@ -120,7 +121,10 @@ class _StoredSuggestion(_SuggestionBase):
     origin: Mapped[str] = mapped_column(String(64), default="agent")
     note: Mapped[str] = mapped_column(Text, default="")
     # Destination path for a ``move`` operation; empty for all others (#KB-refactor).
-    to_path: Mapped[str] = mapped_column(String(4096), server_default="", default="")
+    # ``server_default`` is raw SQL, hence the quoted empty-string literal — so a freshly
+    # created column and the additive reconcile's ``DEFAULT ''`` agree (the bare ``""`` it
+    # carried before rendered no default at all).
+    to_path: Mapped[str] = mapped_column(String(4096), server_default="''", default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -139,21 +143,13 @@ class SuggestionStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add post-#220 columns to an existing ``knowledge_suggestions`` table.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        No migration framework (the store uses ``create_all``), so a deployment that predates
-        a column gets it added in place with its default. Portable across Postgres and SQLite.
+        ``to_path`` (#220 move support) carries a ``server_default`` of ``''``, so the helper
+        adds it ``NOT NULL DEFAULT ''`` — backfilling existing rows. See
+        :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {c["name"] for c in inspector.get_columns(_StoredSuggestion.__tablename__)}
-        for name in _ADDED_COLUMNS:
-            if name not in existing:
-                column = _StoredSuggestion.__table__.c[name]
-                type_sql = column.type.compile(dialect=sync_conn.dialect)
-                sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {_StoredSuggestion.__tablename__} "
-                    f"ADD COLUMN {name} {type_sql} NOT NULL DEFAULT ''"
-                )
+        ensure_columns(sync_conn, _StoredSuggestion.__table__, _ADDED_COLUMNS)
 
     async def add(
         self,

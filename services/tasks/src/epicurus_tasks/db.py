@@ -15,7 +15,6 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     func,
-    inspect,
     select,
     update,
 )
@@ -23,10 +22,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from epicurus_core import get_logger
+from epicurus_core.db import ensure_columns
 from epicurus_tasks.models import Task, TaskScope
-
-log = get_logger("epicurus_tasks.db")
 
 _TaskStatus = Literal["open", "in_progress", "done"]
 
@@ -96,31 +93,13 @@ class TaskStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add columns introduced after the table's first release.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        There is no migration framework — the store uses ``create_all``, which builds a
-        missing table but never alters an existing one. On a database provisioned before
-        #218 added the ``status`` / ``priority`` / ``tags`` fields (v0.5.0) those columns
-        are missing, so every task read 500s on Postgres with
-        ``column tasks_local.status does not exist`` — not just the board, but
-        ``tasks_list``, the attachment picker, and the resolver, which all SELECT them.
-        This adds the missing columns in place, compiling a per-dialect type so it is
-        portable across Postgres and the tests' SQLite. Additive only: drops, renames,
-        type changes, and NOT NULL backfills still need a real migration.
-
-        Mirrors ``LlmPrefsStore._ensure_columns`` — the same drift class for the same
-        reason (the store has no Alembic).
+        ``status`` / ``priority`` / ``tags`` arrived in v0.5.0 (#218); a database provisioned
+        before then lacks them and every task read 500s on Postgres until they are added in
+        place. See :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_StoredTask.__tablename__)}
-        for name in _ADDED_COLUMNS:
-            if name in existing:
-                continue
-            type_sql = _StoredTask.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-            sync_conn.exec_driver_sql(
-                f"ALTER TABLE {_StoredTask.__tablename__} ADD COLUMN {name} {type_sql}"
-            )
-            log.info("reconciled tasks_local: added missing column", column=name)
+        ensure_columns(sync_conn, _StoredTask.__table__, _ADDED_COLUMNS)
 
     async def list_tasks(self, *, tenant_id: str, scope: TaskScope = "open") -> list[Task]:
         """Return tasks for *tenant_id*, newest first, filtered by *scope* (ADR-0049).

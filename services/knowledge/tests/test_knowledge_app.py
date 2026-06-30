@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.19.0"
+    assert manifest.version == "0.19.1"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:

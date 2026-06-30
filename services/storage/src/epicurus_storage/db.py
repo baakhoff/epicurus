@@ -14,13 +14,14 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     func,
-    inspect,
     or_,
     select,
 )
 from sqlalchemy.engine import Connection, CursorResult
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from epicurus_core.db import ensure_columns
 
 FileKind = Literal["file", "dir"]
 
@@ -102,23 +103,13 @@ class FileIndex:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add post-v0.2 columns to an existing ``storage_files`` table.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        There is no migration framework (the index uses ``create_all``), so on a
-        deployment that predates a column we add it in place with its default, which
-        backfills existing rows. Compiled per-dialect, so it is portable across the
-        Postgres prod path and the tests' SQLite.
+        ``source`` (#KB-refactor) carries a ``server_default`` of ``'fs'``, so the helper
+        adds it ``NOT NULL DEFAULT 'fs'`` — backfilling existing rows. See
+        :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_StoredFile.__tablename__)}
-        for name in _ADDED_COLUMNS:
-            if name not in existing:
-                column = _StoredFile.__table__.c[name]
-                type_sql = column.type.compile(dialect=sync_conn.dialect)
-                sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {_StoredFile.__tablename__} "
-                    f"ADD COLUMN {name} {type_sql} NOT NULL DEFAULT 'fs'"
-                )
+        ensure_columns(sync_conn, _StoredFile.__table__, _ADDED_COLUMNS)
 
     async def upsert_batch(
         self,

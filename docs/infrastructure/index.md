@@ -13,7 +13,7 @@ The stateful services every block builds on (`infra/compose/`):
 | --- | --- | --- | --- |
 | **Postgres** | `postgres:17` | 5432 | Relational store (tables per service: `agent_messages`, `storage_files`, `knowledge_notes`). |
 | **Valkey** | `valkey/valkey:8` | 6379 | Cache / queues (Redis-compatible, SSPL-free — ADR-0002). |
-| **NATS** | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring. |
+| **NATS** | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring. **Authenticated** (role users `core`/`module`/`sys`) — see [NATS](nats.md). |
 | **Qdrant** | `qdrant/qdrant:${QDRANT_TAG}` | 6333, 6334 | Vector DB — memory recall + knowledge RAG. Upgrade-safe via the `qdrant-init` guard — see [Qdrant](qdrant.md). |
 | **OpenBao** | `openbao/openbao:2.2.0` | 8200 | Secrets — persistent file storage, auto-unseal sidecar. See [Secrets](secrets.md). |
 | **MinIO** | `minio/minio` | 9000, 9001 | S3-compatible object store for app-managed objects. |
@@ -122,3 +122,5 @@ See the [Architecture](../developer/architecture.md) guide for how the pieces fi
   unseal key off-box, and run a verified restore.
 - [Qdrant (vector store + upgrades)](qdrant.md) — the upgrade auto-recovery guard
   (`qdrant-init`), the healthcheck, and the qdrant version policy.
+- [NATS (authenticated bus)](nats.md) — the account/user auth model, how services
+  authenticate, credential flow, and the deferred per-tenant isolation.

@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from sqlalchemy import Integer, String, Text, inspect
+from sqlalchemy import Integer, String, Text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from epicurus_core.db import ensure_columns
 
 
 class _PrefBase(DeclarativeBase):
@@ -59,28 +61,24 @@ class LlmPrefsStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add columns introduced after the table's first release.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        No migration framework (the store uses ``create_all``); on a deployment that
-        predates ``global_default`` / ``embed_default`` (#214) or ``context_window`` we add
-        them in place, with a per-dialect type so it is portable across Postgres and the
-        tests' SQLite. Without this, an existing ``llm_prefs`` table 500s on every
-        prefs/embedding read with ``column llm_prefs.embed_default does not exist``.
+        ``global_default`` / ``embed_default`` (#214), ``context_window``, ``kv_cache_type``,
+        and ``agent_max_steps`` all postdate the table's first release; without this an
+        existing ``llm_prefs`` table 500s on every prefs/embedding read. See
+        :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_LlmPrefRow.__tablename__)}
-        for name in (
-            "global_default",
-            "embed_default",
-            "context_window",
-            "kv_cache_type",
-            "agent_max_steps",
-        ):
-            if name not in existing:
-                type_sql = _LlmPrefRow.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-                sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {_LlmPrefRow.__tablename__} ADD COLUMN {name} {type_sql}"
-                )
+        ensure_columns(
+            sync_conn,
+            _LlmPrefRow.__table__,
+            (
+                "global_default",
+                "embed_default",
+                "context_window",
+                "kv_cache_type",
+                "agent_max_steps",
+            ),
+        )
 
     async def _get_or_create(self, session: AsyncSession, tenant: str) -> _LlmPrefRow:
         row = await session.get(_LlmPrefRow, tenant)

@@ -7,13 +7,25 @@ tenant-scoped via [`scope_subject`](tenancy.md).
 
 ```python
 class EventBus:
-    def __init__(self, url: str = "nats://localhost:4222") -> None
+    def __init__(
+        self,
+        url: str = "nats://localhost:4222",
+        *,
+        user: str | None = None,
+        password: str | None = None,
+    ) -> None
     @classmethod
     def from_settings(cls, settings: CoreSettings) -> EventBus
 ```
 
 Use it as an async context manager (`async with EventBus(...) as bus:`) or call
 `connect()` / `close()` yourself.
+
+`user` / `password` authenticate the connection (the bus requires it — #50, ADR-0066).
+They are optional: both `None` connects **anonymously**, which keeps the bus usable
+against an un-authenticated server (e.g. the integration testcontainers).
+`from_settings` reads them from `NATS_USER` / `NATS_PASSWORD` — in the stack the core
+authenticates as `core` and modules as `module`. See [NATS](../infrastructure/nats.md).
 
 ### Methods
 

@@ -31,12 +31,13 @@
 - [events](reference/events.md)
 - [messaging (inbox contract)](reference/messaging.md)
 - [secrets](reference/secrets.md)
-- [observability & log stream](reference/observability.md)
+- [observability, tracing & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)
 - [platform API](reference/platform-api.md)
 - [OAuth 2.0](reference/oauth.md)
 - [platform client](reference/platform-client.md)
 - [file space](reference/files.md)
+- [db (schema reconcile)](reference/db.md)
 - [host-port registry](reference/ports.md)
 
 **Infrastructure**
@@ -47,6 +48,7 @@
 - [Startup and recovery](infrastructure/startup-and-recovery.md)
 - [Backup and restore](infrastructure/backup-and-restore.md)
 - [Qdrant (vector store + upgrades)](infrastructure/qdrant.md)
+- [NATS (authenticated bus)](infrastructure/nats.md)
 
 **Developer Guide**
 

@@ -17,6 +17,7 @@ from epicurus_core import (
     add_ops_routes,
     configure_logging,
     get_logger,
+    setup_tracing,
 )
 from {{ cookiecutter.package_name }}.service import MODULE_NAME, build_module
 
@@ -52,6 +53,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
+    # Distributed tracing to Tempo (#57) — a no-op unless OTEL_TRACES_ENABLED is set.
+    setup_tracing(app, settings, version=_service_version())
     # GET /manifest — how the core discovers this module's tools (ADR-0004). Without
     # it the agent never sees the module and the smoke gate's discovery check fails.
     add_manifest_route(app, module)

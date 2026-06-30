@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-storage"
-version = "0.8.0"
+version = "0.8.1"
 description = "Storage module — agent file tools over the core file space, MinIO object store, upload ingest, and inline object read."
 requires-python = ">=3.11"
 dependencies = [

@@ -49,6 +49,15 @@ class CoreSettings(BaseSettings):
     # the contract is local-only.
     nats_url: str = "nats://localhost:4222"
 
+    # NATS authentication (ADR-0066). The server requires a credentialed connection;
+    # each service authenticates as its role user — the core as ``core`` (full bus),
+    # every module as ``module`` (tenant-scoped subjects). Both default to ``None`` so
+    # the EventBus still connects anonymously against an un-authenticated server (the
+    # integration testcontainers), and the password comes from the environment —
+    # weak dev defaults in compose, strong values from OpenBao in real deployments.
+    nats_user: str | None = None
+    nats_password: str | None = None
+
     # OpenBao (secrets). On the internal Docker network the address is
     # http://openbao:8200. The token is the bootstrap secret, injected at runtime
     # — directly via OPENBAO_TOKEN, or via OPENBAO_TOKEN_FILE pointing at a
@@ -56,6 +65,14 @@ class CoreSettings(BaseSettings):
     openbao_url: str = "http://localhost:8200"
     openbao_token: str | None = None
     openbao_token_file: str | None = None
+
+    # OpenTelemetry tracing (epicurus_core.tracing, #57). Off by default — the lean
+    # stack pays nothing and disabled tracing is a runtime no-op. Set
+    # OTEL_TRACES_ENABLED=true (with the `observability` profile up, so Tempo is
+    # listening) to emit spans fleet-wide. The endpoint is the OTLP/HTTP base — the
+    # exporter appends `/v1/traces` — pointing at Tempo on the internal Docker network.
+    otel_traces_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://tempo:4318"
 
     @field_validator("default_tenant_id")
     @classmethod

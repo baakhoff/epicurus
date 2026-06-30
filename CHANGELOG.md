@@ -14,6 +14,25 @@ images to GHCR.
 
 ### Added
 
+- **NATS authentication** (#50) — the event bus now **requires credentials**; it previously
+  ran open, so any client on the internal network could publish/subscribe across all subjects.
+  A new `infra/compose/nats-server.conf` defines an account/user model with three roles — `core`
+  (full bus), `module` (tenant-scoped subjects), and `sys` (monitoring) — and the `EventBus`
+  authenticates with a per-role `NATS_USER`/`NATS_PASSWORD`. The OpenBao bootstrap generates strong
+  per-role passwords (recorded in OpenBao, written to `.env.secrets`); compose keeps weak
+  `epicurus-dev` defaults so local/dev `up` is unchanged. New modules authenticate as `module`
+  automatically via the service template. Enforced **per-tenant** isolation (account-per-tenant)
+  is the deferred SaaS-track step (ADR-0066). `epicurus-core` → 0.19.0.
+
+- **OpenTelemetry tracing → Tempo** (#57) — the observability stack's third signal. `epicurus-core`
+  gains `epicurus_core.tracing` (`setup_tracing` / `get_tracer`): optional, env-driven distributed
+  tracing that instruments FastAPI requests and the NATS `EventBus` (publish / request / handle), with
+  W3C trace-context propagated across the bus so one trace spans publisher → handler, exported to Tempo
+  over OTLP/HTTP. **Off by default** (`OTEL_TRACES_ENABLED`); a runtime no-op when disabled, so the lean
+  stack pays nothing. Spans carry only structure (route, subject, tenant, byte size) — never payloads or
+  prompt content, the logs' redaction posture. The service template + echo + core-app wire it, so a new
+  module traces out of the box; enable fleet-wide with `OTEL_TRACES_ENABLED=true` and the `observability`
+  profile. ADR-0068. `epicurus-core` 0.17.0→0.18.0, `core-app` 0.51.0→0.52.0, `echo` 0.2.2→0.3.0.
 - **Discord chat bridge + connect/manage bridges from the web** (#366, #369) — the first real
   Phase-4 bridge, and the operator surface to run it. The `messaging` module now runs **every
   bridge at once** (a `BridgeManager`): the always-on **loopback** echo plus each real bridge,
@@ -389,7 +408,23 @@ images to GHCR.
   `depends_on` from `core-app`/`knowledge` are removed; the module subtrees (`knowledge/`, `notes/`)
   are created by the core on first write (the read-only knowledge indexer already tolerates a
   not-yet-created dir). One fewer data-plane container; completes the #346 file-space arc.
-  `core-app` 0.51.0→0.52.0.
+  `core-app` 0.51.0→0.53.0.
+
+- **Shared additive schema reconcile (`epicurus_core.db.ensure_columns`)** (#249) — every store
+  evolves its schema with `create_all`, which creates a missing table but never alters an
+  existing one, so a column added after a table's first release silently never reached an
+  already-provisioned Postgres (the bug that hit `llm_prefs` in #214 and `tasks_local` in #218).
+  The per-store `_ensure_columns` helpers — copy-pasted across nine stores — are now one audited
+  helper in `epicurus-core` (behind the optional `db` extra; ADR-0067): it adds any model column
+  the live table lacks, reproducing the model's type and, where a `server_default` exists, its
+  `NOT NULL` + default (so a reconciled column matches a freshly-created one), and relaxes a
+  NOT-NULL-without-default column to nullable so the add never fails on a populated table.
+  Audited the remaining `create_all` stores (notes, knowledge/notes indexes, core file index, …)
+  — all single-release, no drift — and **fixed** knowledge `to_path`'s malformed
+  `server_default=""` (which rendered no default at all) to a quoted `''`. No behaviour change
+  for existing deployments. `epicurus-core` 0.17.0→0.20.0 (also reconciling its drifted
+  `_version.py`, 0.16.0→0.20.0); `tasks` 0.11.0→0.11.1, `calendar`
+  0.10.0→0.10.1, `storage` 0.8.0→0.8.1, `knowledge` 0.19.0→0.19.1, `core-app` 0.51.0→0.52.1.
 - **The context-window suggestion now reflects your KV-cache type and the model's real
   limits — and is no longer clipped to 32k** — the Models-page estimate of "how big a context
   can this box hold?" assumed a fixed f16 KV cache and capped at a flat 32,768, ignoring two

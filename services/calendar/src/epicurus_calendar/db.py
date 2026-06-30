@@ -21,7 +21,6 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     func,
-    inspect,
     select,
 )
 from sqlalchemy.engine import Connection
@@ -29,9 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_calendar.models import Event
-from epicurus_core import get_logger
-
-log = get_logger("epicurus_calendar.db")
+from epicurus_core.db import ensure_columns
 
 # Columns added after the table's first release; reconciled in place at startup by
 # ``LocalEventStore._ensure_columns`` (the store has no migration framework).
@@ -78,26 +75,14 @@ class LocalEventStore:
 
     @staticmethod
     def _ensure_columns(sync_conn: Connection) -> None:
-        """Idempotently add columns introduced after the table's first release.
+        """Reconcile columns added after first release via the shared additive helper (#249).
 
-        There is no migration framework — the store uses ``create_all``, which builds a
-        missing table but never alters an existing one. On a database provisioned before
-        ``all_day`` was added, every local event read would 500 on Postgres with
-        ``column calendar_events.all_day does not exist``. This adds the column in place,
-        compiling a per-dialect type so it is portable across Postgres and the tests'
-        SQLite. Additive only — mirrors ``TaskStore._ensure_columns`` (same drift class).
-        Existing rows read NULL, coerced to ``False`` in ``_row_to_event``.
+        ``all_day`` postdates the table's first release; a database provisioned before then
+        lacks it and every local event read 500s on Postgres until it is added in place. It
+        has no server default, so it is added nullable and existing rows read NULL, coerced
+        to ``False`` in ``_row_to_event``. See :func:`epicurus_core.db.ensure_columns`.
         """
-        inspector = inspect(sync_conn)
-        existing = {col["name"] for col in inspector.get_columns(_StoredEvent.__tablename__)}
-        for name in _ADDED_COLUMNS:
-            if name in existing:
-                continue
-            type_sql = _StoredEvent.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-            sync_conn.exec_driver_sql(
-                f"ALTER TABLE {_StoredEvent.__tablename__} ADD COLUMN {name} {type_sql}"
-            )
-            log.info("reconciled calendar_events: added missing column", column=name)
+        ensure_columns(sync_conn, _StoredEvent.__table__, _ADDED_COLUMNS)
 
     async def list_events(self, *, tenant: str, start: datetime, end: datetime) -> list[Event]:
         """Return all events for *tenant* that overlap ``[start, end)``."""

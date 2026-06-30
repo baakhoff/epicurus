@@ -37,10 +37,12 @@ The script (requires Docker Compose to be running):
 3. Enables the KV v2 secrets engine at the `secret/` mount.
 4. Creates the `epicurus-core` policy (read/write access to `secret/data/tenants/*`).
 5. Creates a non-expiring app token scoped to that policy.
-6. Writes `OPENBAO_UNSEAL_KEY` and `OPENBAO_TOKEN` to `infra/compose/.env.secrets`
-   (gitignored).
+6. Generates strong **NATS role passwords** (`core` / `module` / `sys`), records them at
+   `secret/tenants/<tenant>/nats`, and adds them to the secrets file (#50, ADR-0066).
+7. Writes `OPENBAO_UNSEAL_KEY`, `OPENBAO_TOKEN`, and `NATS_{CORE,MODULE,SYS}_PASSWORD` to
+   `infra/compose/.env.secrets` (gitignored).
 
-After the script completes, add the two values to your `.env`:
+After the script completes, add the values to your `.env`:
 
 ```bash
 # infra/compose/.env.secrets is generated — never commit it
@@ -95,6 +97,7 @@ Registered base paths (set by the core service at runtime):
 | `modules/<name>/config` | Per-module config blob |
 | `oauth/clients/<provider>` | Operator-provisioned OAuth client (`client_id`, `client_secret`) |
 | `oauth/tokens/<provider>` | User-granted OAuth tokens (`access_token`, `refresh_token`, `expires_at`, `scope`, `token_type`) |
+| `nats` | NATS role passwords (`core`, `module`, `sys`) — the authenticated bus's source of truth (written by the bootstrap, ADR-0066). See [NATS](nats.md). |
 
 ## Configuration
 

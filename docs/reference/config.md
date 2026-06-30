@@ -24,6 +24,8 @@ add service-specific fields.
 | `json_logs` | `JSON_LOGS` | `bool \| None` | `None` | Force JSON logs; `None` = decide by env. |
 | `default_tenant_id` | `DEFAULT_TENANT_ID` | `str` | `"local"` | Tenant for self-host (validated). |
 | `nats_url` | `NATS_URL` | `str` | `nats://localhost:4222` | Event bus — see [`events`](events.md). |
+| `nats_user` | `NATS_USER` | `str \| None` | `None` | Bus auth role (`core` / `module`); `None` connects anonymously. See [NATS](../infrastructure/nats.md). |
+| `nats_password` | `NATS_PASSWORD` | `str \| None` | `None` | Bus auth password for the role (the server-side `NATS_{CORE,MODULE,SYS}_PASSWORD` it matches are documented in [NATS](../infrastructure/nats.md)). |
 | `openbao_url` | `OPENBAO_URL` | `str` | `http://localhost:8200` | Secrets — see [`secrets`](secrets.md). |
 | `openbao_token` | `OPENBAO_TOKEN` | `str \| None` | `None` | Bootstrap token, injected at runtime. |
 | `openbao_token_file` | `OPENBAO_TOKEN_FILE` | `str \| None` | `None` | Path to a file holding the token (e.g. a mounted Docker secret); used when `openbao_token` is unset. |

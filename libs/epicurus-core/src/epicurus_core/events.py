@@ -111,15 +111,28 @@ Replier = Callable[[Event], Awaitable[Payload]]
 
 
 class EventBus:
-    """Async NATS client. Use as ``async with EventBus.from_settings(s) as bus``."""
+    """Async NATS client. Use as ``async with EventBus.from_settings(s) as bus``.
 
-    def __init__(self, url: str = "nats://localhost:4222") -> None:
+    ``user``/``password`` authenticate the connection (ADR-0066). They are optional:
+    when both are ``None`` the client connects anonymously, which keeps the bus usable
+    against an un-authenticated server (e.g. the integration testcontainers).
+    """
+
+    def __init__(
+        self,
+        url: str = "nats://localhost:4222",
+        *,
+        user: str | None = None,
+        password: str | None = None,
+    ) -> None:
         self._url = url
+        self._user = user
+        self._password = password
         self._nc: NATSClient | None = None
 
     @classmethod
     def from_settings(cls, settings: CoreSettings) -> EventBus:
-        return cls(settings.nats_url)
+        return cls(settings.nats_url, user=settings.nats_user, password=settings.nats_password)
 
     @property
     def client(self) -> NATSClient:
@@ -128,8 +141,12 @@ class EventBus:
         return self._nc
 
     async def connect(self) -> None:
+        # user/password are forwarded only when set; nats-py treats ``None`` as
+        # "no credentials" (anonymous), so an un-authenticated server still works.
         self._nc = await nats.connect(
             self._url,
+            user=self._user,
+            password=self._password,
             error_cb=self._on_error,
             disconnected_cb=self._on_disconnected,
             reconnected_cb=self._on_reconnected,

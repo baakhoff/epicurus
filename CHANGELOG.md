@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **NATS authentication** (#50) — the event bus now **requires credentials**; it previously
+  ran open, so any client on the internal network could publish/subscribe across all subjects.
+  A new `infra/compose/nats-server.conf` defines an account/user model with three roles — `core`
+  (full bus), `module` (tenant-scoped subjects), and `sys` (monitoring) — and the `EventBus`
+  authenticates with a per-role `NATS_USER`/`NATS_PASSWORD`. The OpenBao bootstrap generates strong
+  per-role passwords (recorded in OpenBao, written to `.env.secrets`); compose keeps weak
+  `epicurus-dev` defaults so local/dev `up` is unchanged. New modules authenticate as `module`
+  automatically via the service template. Enforced **per-tenant** isolation (account-per-tenant)
+  is the deferred SaaS-track step (ADR-0066). `epicurus-core` → 0.19.0.
+
 - **OpenTelemetry tracing → Tempo** (#57) — the observability stack's third signal. `epicurus-core`
   gains `epicurus_core.tracing` (`setup_tracing` / `get_tracer`): optional, env-driven distributed
   tracing that instruments FastAPI requests and the NATS `EventBus` (publish / request / handle), with

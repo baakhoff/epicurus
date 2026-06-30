@@ -32,6 +32,9 @@ class LoopbackProvider:
     def secret_names(self) -> list[str]:
         return []  # in-process; no credential
 
+    def connected(self) -> bool:
+        return True  # in-process echo bridge — always live once constructed
+
     async def start(self, on_inbound: InboundHandler) -> None:
         self._on_inbound = on_inbound
 

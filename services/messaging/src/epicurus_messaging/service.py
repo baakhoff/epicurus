@@ -26,6 +26,7 @@ from epicurus_messaging.loopback_provider import LoopbackProvider
 from epicurus_messaging.manager import BridgeManager
 from epicurus_messaging.providers import BridgeProvider
 from epicurus_messaging.settings import MessagingSettings
+from epicurus_messaging.telegram_provider import TelegramProvider
 
 MODULE_NAME = "messaging"
 
@@ -44,6 +45,12 @@ def build_bridges(settings: MessagingSettings, secrets: SecretStore) -> BridgeMa
     providers: list[BridgeProvider] = [
         loopback,
         DiscordProvider(secrets=secrets, tenant=tenant),
+        TelegramProvider(
+            secrets,
+            tenant=tenant,
+            api_base=settings.telegram_api_base,
+            poll_timeout=settings.telegram_poll_timeout,
+        ),
     ]
     return BridgeManager(providers, loopback=loopback)
 

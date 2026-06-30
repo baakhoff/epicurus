@@ -14,3 +14,9 @@ class MessagingSettings(CoreSettings):
     # in OpenBao and the operator connects it from the web surface (#369). This value is
     # ignored; ``extra="ignore"`` keeps an existing ``MESSAGING_PROVIDER`` env harmless.
     messaging_provider: str = "loopback"
+
+    # Telegram bridge knobs (used when ``messaging_provider == "telegram"``). The bot token
+    # itself is never here — it is read per-tenant from OpenBao (``messaging/telegram``).
+    # ``telegram_api_base`` is overridable so tests can point at a local mock.
+    telegram_api_base: str = "https://api.telegram.org"
+    telegram_poll_timeout: int = 30  # getUpdates long-poll seconds (server holds the request)

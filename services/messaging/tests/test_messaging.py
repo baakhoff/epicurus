@@ -70,12 +70,13 @@ async def test_module_manifest_declares_events_no_tools_and_bridge_secrets() -> 
 
 
 # ── bridge manager ──────────────────────────────────────────────────────────────────────
-def test_build_bridges_runs_loopback_and_discord() -> None:
+def test_build_bridges_runs_loopback_discord_and_telegram() -> None:
     manager = build_bridges(_settings(), _FakeSecrets())  # type: ignore[arg-type]
     names = manager.provider_names()
     assert "loopback" in names
     assert "discord" in names
-    assert manager.secret_names() == ["messaging/discord"]
+    assert "telegram" in names
+    assert manager.secret_names() == ["messaging/discord", "messaging/telegram"]
     assert isinstance(manager.loopback, LoopbackProvider)
 
 

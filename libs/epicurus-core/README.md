@@ -15,6 +15,10 @@ Shared contract and runtime used by every epicurus service.
   `GET /health` + `GET /metrics` (Prometheus) surface.
 - **`events`** — `EventBus`: async NATS client (the event backbone). Tenant-scoped
   `publish` / `subscribe` / `request` / `reply`.
+- **`tracing`** — `setup_tracing` / `get_tracer`: optional OpenTelemetry distributed
+  tracing to Tempo (OTLP/HTTP), covering FastAPI requests + the `EventBus` (trace
+  context propagates across NATS). Env-driven on/off (`OTEL_TRACES_ENABLED`), a no-op
+  when disabled.
 - **`module`** — `EpicurusModule`: the MCP module base (wraps `FastMCP`). Register
   tools, declare emitted/consumed events, serve over HTTP (`http_app()`), and
   generate the **manifest**.
@@ -25,7 +29,6 @@ Shared contract and runtime used by every epicurus service.
 
 ## Pending (follow-up changes)
 
-- OpenTelemetry tracing helpers
 - NATS JetStream persistence (durable streams)
 
 ## Usage

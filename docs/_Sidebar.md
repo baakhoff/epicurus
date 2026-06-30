@@ -31,7 +31,7 @@
 - [events](reference/events.md)
 - [messaging (inbox contract)](reference/messaging.md)
 - [secrets](reference/secrets.md)
-- [observability & log stream](reference/observability.md)
+- [observability, tracing & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)
 - [platform API](reference/platform-api.md)
 - [OAuth 2.0](reference/oauth.md)

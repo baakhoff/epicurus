@@ -116,22 +116,24 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 
 ## Shared file space (per-module storage roots)
 
-The **core** plus the file-owning modules (knowledge, notes) share **one** file tree — the
+The **core** plus the file-owning module **knowledge** share **one** file tree — the
 *shared file space* (#KB-refactor). One deployment-level env var mounts it; the settings below
 are the in-container paths under it. Since the file-space migration Phase 2 (ADR-0063) the
 **core** mounts the volume and owns the file index + the unified Files browser; **storage no
 longer mounts `/data`** (it reads the file space through the core file API — see
-[file space](files.md)), so its in-container root and scan/watch knobs are gone.
+[file space](files.md)), so its in-container root and scan/watch knobs are gone. Since Phase 4
+(#357/ADR-0065) **notes no longer mounts `/data`** either — it writes its `.md` mirror through
+the core file API, so only the core and knowledge still bind the volume.
 
 | Env var | Default | Scope | Meaning |
 | --- | --- | --- | --- |
-| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for the **core** (the file index, read-write), knowledge (**read-only** since #356/ADR-0064 — its writes go through the core file API), and notes (read-write). Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. The on-disk tree is tenant-scoped: a one-shot `files-init` container creates `/data/<tenant>/knowledge` + `/data/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`) and chowns them to uid 10001 (see [Infrastructure](../infrastructure/index.md#shared-file-space)). |
+| `EPICURUS_FILES_ROOT` | empty named volume (`epicurus-files`) | compose | The host path (or named volume) bound at `/data` for the **core** (the file index, read-write) and knowledge (**read-only** since #356/ADR-0064 — its writes go through the core file API). **Notes mounts it no more** (since #357/ADR-0065): notes writes its `.md` mirror through the core file API, so the core's read-write mount does the on-disk write. Point it at a host directory to expose real files; never the host home dir. **Replaces** the old per-module `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. The on-disk tree is tenant-scoped: a one-shot `files-init` container creates `/data/<tenant>/knowledge` + `/data/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`) and chowns them to uid 10001 — it remains the file-space provisioning bootstrap even though notes no longer mounts the volume (the core writes the notes subtree) — see [Infrastructure](../infrastructure/index.md#shared-file-space). |
 | `FILES_WATCH` | `true` | core-app | Watch the mounted file space and **incrementally rescan on change** (create/modify/delete), so files landed after startup show in the core Files page and name search without a restart (ADR-0063). On by default. Set `false` for startup-only scanning. Also listed under [`CoreAppSettings`](#coreappsettings). |
 | `FILES_WATCH_DEBOUNCE_MS` | `1500` | core-app | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires; a module dropping many files at once is grouped into one incremental pass. |
-| `PLATFORM_URL` | `http://core-app:8080` | storage, knowledge | The core base URL for the file API (`PlatformClient.files_*`). **Storage** reads the file space through it — storage no longer mounts `/data` (ADR-0063). **Knowledge** writes through it (its `/data` mount is read-only since #356/ADR-0064); knowledge also already used it for embeddings. |
+| `PLATFORM_URL` | `http://core-app:8080` | storage, knowledge, notes | The core base URL for the file API (`PlatformClient.files_*`). **Storage** reads the file space through it — storage no longer mounts `/data` (ADR-0063). **Knowledge** writes through it (its `/data` mount is read-only since #356/ADR-0064); knowledge also already used it for embeddings. **Notes** writes its `.md` mirror through it and mounts **no** `/data` at all (since #357/ADR-0065); notes also already used it for embeddings. |
 | `STORAGE_AGENT_HIDDEN_PREFIXES` | `notes` | storage | Comma-separated top-level subtrees hidden from the **agent's** file tools (`storage_list`/`storage_search`/`storage_read`); the operator-facing core Files surface is unaffected (#KB-refactor, storage v0.5.0). `notes/` holds private note bodies the agent must not read. Set empty to hide nothing. |
 | `VAULT_PATH` | `/data/knowledge` | knowledge | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge`, and each top-level folder under it is a project (knowledge base). Was `/vault` before #KB-refactor. Since File-space Phase 3 (#356, ADR-0064) the mount is **read-only** — knowledge reads + indexes it, but **writes** go through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>`), not this mount. |
-| `NOTES_ROOT` | `/data/notes` | notes | Notes' path within the shared file space; the on-disk `.md` mirror is tenant-scoped to `<files-root>/<tenant>/notes`. Each saved note is mirrored as `<slug>.md`; Postgres stays the source of truth (#KB-refactor). |
+| `NOTES_ROOT` | `/data/notes` | notes | The **logical** base for the `.md` mirror's path mapping — **not a mount** (since File-space Phase 4, #357/ADR-0065). A note slug maps to the core file-API path `notes/<slug>.md`; the **core** writes it on disk into `<files-root>/<tenant>/notes`. Each saved note is mirrored as `<slug>.md`; Postgres stays the source of truth (#KB-refactor). |
 
 The on-disk file tree is **tenant-scoped** (constraint #1): the core indexes
 `<files-root>/<tenant>`, and knowledge and notes build their roots as

@@ -14,12 +14,15 @@ changes (debounced incremental rescan, `FILES_WATCH` / `FILES_WATCH_DEBOUNCE_MS`
 `GET /platform/v1/files/{page,search,download}` (ADR-0063), and the storage module's objects are
 **merged in** so chat uploads and agent-written files show alongside the file-space tree.
 
-> **Phased rollout (ADR-0052 → ADR-0064).** This page documents **Phases 1–3**: the abstraction
+> **Phased rollout (ADR-0052 → ADR-0065).** This page documents **Phases 1–4**: the abstraction
 > and wire contract (Phase 1), the core taking ownership of the volume mount, the file index, and
 > the Files browser / read / download with the storage module reading through this API (Phase 2),
-> and the **knowledge** module routing its writes through this API while its mount drops to
-> read-only (Phase 3, #356/ADR-0064 — see the phase plan below). Notes still mounts the shared
-> `/data` volume read-write to write its `.md` mirror; migrating it is the remaining follow-up.
+> the **knowledge** module routing its writes through this API while its mount drops to
+> read-only (Phase 3, #356/ADR-0064), and the **notes** module routing its `.md`-mirror writes
+> through this API and **dropping its `/data` mount entirely** (Phase 4, #357/ADR-0065 — see the
+> phase plan below). The one-shot **`files-init`** provisioning bootstrap remains (its retirement —
+> the last bit of #357 — is a follow-up that moves a surgical volume-chown into the core image's
+> entrypoint), so the file space is core-owned but the provisioning container still runs.
 
 ## The epicurus-core API
 
@@ -119,7 +122,7 @@ against a MinIO/S3 endpoint. The Files page / read / move / download **merge wit
 the **storage module** for object entries (chat uploads, agent-written files), proxied over the
 internal network. Uses **no AI**.
 
-## Phase plan (ADR-0052 → ADR-0063)
+## Phase plan (ADR-0052 → ADR-0065)
 
 - **Phase 1 (done):** the `FileStore` abstraction, the `/platform/v1/files/*` contract,
   `PlatformClient.files_*`, and core-side provisioning. Additive — the modules were unchanged.
@@ -133,7 +136,14 @@ internal network. Uses **no AI**.
   suggestions; a vault path maps to the core path `knowledge/<rel>`). Its `/data` mount drops to
   **read-only** (reads + the incremental indexer + the #232 watcher stay on it); a follow-up
   migrates the reads off the mount so it can be dropped entirely.
-- **Phase 4:** notes mirror through the file API and drops its direct mount; `files-init` retires.
+- **Phase 4 (done, #357/ADR-0065):** the **notes** module is now the **third write-consumer** of
+  the file API — after storage (Phase 2) and knowledge (Phase 3). Its `.md` mirror (`write` /
+  `delete` / startup `backfill`) routes through `PlatformClient.files_*` at core path
+  `notes/<rel>`, and notes **drops its `/data` mount entirely** (it reads nothing from disk — the
+  indexer and editor read Postgres — and drops its `files-init` dependency). Postgres stays the
+  source of truth; the mirror is write-only output. **`files-init` is not yet retired** — that last
+  bit of #357 is a separate infra follow-up (move a surgical volume-chown into the core image's
+  entrypoint), so the file space is core-owned but the provisioning bootstrap container remains.
 
 ## Run & extend
 

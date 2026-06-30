@@ -12,12 +12,15 @@ Unlike knowledge — which indexes an Obsidian vault that lives on disk — note
 in the app, so their content is **externalized state** (Postgres), not local disk
 (constraint #2). Embeddings are obtained **through the core** (no model key lives here).
 
-Each saved note is also **mirrored** as `<slug>.md` under `/data/<tenant>/notes` in the
-**shared file space** (tenant-scoped, constraint #1; #KB-refactor), so notes appear in the
-storage module's Files view and can be read in
-its split-screen reader alongside the knowledge base. Postgres stays the **source of truth**;
-the mirror is read-only output, kept current on every save (best-effort, never failing a
-save), with a one-time startup backfill of pre-existing notes.
+Each saved note is also **mirrored** as `<slug>.md` under `notes/` in the **shared file space**
+(tenant-scoped, constraint #1; #KB-refactor; #357/ADR-0065), so notes appear in the unified
+Files view and can be read in its split-screen reader alongside the knowledge base. Notes
+**no longer mounts the shared `/data` volume** — the mirror is written **through the core file
+API** (`PlatformClient.files_*`, core path `notes/<rel>`), so the core performs the on-disk
+write into its read-write `/data/<tenant>/notes`; `NOTES_ROOT` is now just the logical base for
+the mirror's path mapping, not a mount. Postgres stays the **source of truth**; the mirror is
+write-only output, kept current on every save (best-effort, never failing a save), with a
+one-time startup backfill of pre-existing notes.
 
 ## Privacy — what the agent can and cannot do
 
@@ -205,9 +208,12 @@ data flows through the core.
    suggestion writes the composed body.
 2. The module derives the **title** from the body and **upserts** the row in Postgres
    (the source of truth) — written first so an edit is never lost.
-3. It **mirrors** the note to `<notes_root>/<slug>.md` in the shared file space so it shows
-   in Files (#KB-refactor) — best-effort, never raising, and done before indexing so the
-   file reflects the saved body even if the embed round-trip fails.
+3. It **mirrors** the note to `notes/<slug>.md` in the shared file space so it shows in Files
+   (#KB-refactor; #357/ADR-0065) — written **through the core file API**
+   (`PlatformClient.files_write`, core path `notes/<rel>`; the core does the on-disk write),
+   best-effort, never raising, and done before indexing so the file reflects the saved body
+   even if the embed round-trip fails. `NOTES_ROOT` only maps a slug to that core path; notes
+   mounts no volume.
 4. It then **chunks** the body heading-aware (hard-splitting past `CHUNK_MAX_CHARS`),
    **embeds** each chunk via the core's [`PlatformClient`](../reference/platform-client.md)
    (`POST /platform/v1/embed`, **no model key here**), and **upserts** the vectors into
@@ -226,22 +232,23 @@ collection exists so a future, opt-in retrieval feature needs no re-index.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `PLATFORM_URL` | `http://core-app:8080` | The core's base URL (embeddings via the platform API). |
+| `PLATFORM_URL` | `http://core-app:8080` | The core's base URL — embeddings **and the file API** (`PlatformClient.files_*`, for the `.md` mirror) via the platform API. |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Note bodies + the suggestion queue (source of truth). |
-| `NOTES_ROOT` | `/data/notes` | Notes' path within the shared file space; the on-disk `.md` mirror is tenant-scoped to `<files-root>/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`). Each saved note is mirrored as `<slug>.md` so it shows in the storage Files view (#KB-refactor). Postgres stays the source of truth; the mirror is read-only output. |
+| `NOTES_ROOT` | `/data/notes` | The **logical** base for the mirror's path mapping — **not a mount** (#357/ADR-0065). A note slug maps to the core file-API path `notes/<slug>.md` (the `/data` prefix is stripped); the **core** writes it into its read-write `<files-root>/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`). Each saved note is mirrored as `<slug>.md` so it shows in the unified Files view (#KB-refactor). Postgres stays the source of truth; the mirror is write-only output. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
 | `NOTES_PORT` | `8092` | Host port (loopback-bound by default). |
 
 Postgres remains the source of truth — notes are authored in-app, so their bodies are
-externalized state, not local disk (constraint #2). The container does mount the **shared
-file space** (`EPICURUS_FILES_ROOT`, the same `/data` volume storage and knowledge use)
-**read-write** at `/data/<tenant>/notes` purely to write the `.md` mirror — the on-disk tree
-is tenant-scoped (constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`, the mount stays `/data`).
-The one-shot `files-init` container creates and chowns that folder to uid 10001 first so a
-save never hits a `PermissionError`. Losing the mirror never loses a note. The agent's view of `notes/` through
-the storage file tools is hidden by storage's `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`,
-see [storage](storage.md)).
+externalized state, not local disk (constraint #2). Since File-space Phase 4 (#357/ADR-0065)
+the container **mounts no `/data` volume at all** — it reads nothing from disk (the indexer and
+editor read Postgres), and its only file output, the `.md` mirror, is written **through the core
+file API** (`PlatformClient.files_*`, core path `notes/<rel>`). The **core** owns the read-write
+`/data/<tenant>` mount and performs the on-disk write (the on-disk tree stays tenant-scoped,
+constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`), so notes no longer needs `files-init` to chown
+a notes folder for it — the core writes into a directory it owns. Losing the mirror never loses a
+note. The agent's view of `notes/` through the storage file tools is hidden by storage's
+`STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`, see [storage](storage.md)).
 
 ## Data model
 
@@ -262,20 +269,25 @@ see [storage](storage.md)).
   only ever holds pending suggestions.
 - **Qdrant `<tenant>__notes`** — note chunk embeddings (cosine), one collection per tenant.
   Each point payload: `{slug, chunk_index, heading, text}`.
-- **`/data/<tenant>/notes/<slug>.md`** — the read-only `.md` mirror in the shared file space
-  (tenant-scoped, constraint #1; derived output, not a store of record; #KB-refactor). Written best-effort on each save and on a
-  one-time startup backfill; slug-confined so a slug carrying `..` can never escape the
-  notes folder. The storage module reads it (Files view + split-screen reader), but hides it
-  from the agent's file tools.
+- **`notes/<slug>.md`** (core path) → **`/data/<tenant>/notes/<slug>.md`** on disk — the
+  write-only `.md` mirror in the shared file space (tenant-scoped, constraint #1; derived output,
+  not a store of record; #KB-refactor; #357/ADR-0065). Notes does **not** own this on disk —
+  it writes it **through the core file API** (`PlatformClient.files_write`, core path
+  `notes/<rel>`) and the **core** performs the on-disk write into the mount it owns. Written
+  best-effort on each save and on a one-time startup backfill; the core's `normalize_rel`
+  rejects any `..` so a slug can never escape the notes subtree. The unified Files surface reads
+  it (Files view + split-screen reader); storage hides it from the agent's file tools.
 
 Everything is tenant-scoped: the Postgres rows, the suggestion queue, the Qdrant collection
 name, and the NATS subject.
 
 ## Dependencies
 
-core-app (embeddings + status/page/attachment/suggestion proxy via the platform API) · Qdrant
-(vectors) · Postgres (note bodies + suggestion queue) · NATS (the `notes.saved` event) · the
-shared file space (the `.md` mirror, read by storage).
+core-app (embeddings + **the file API for the `.md` mirror**, `PlatformClient.files_*` — plus
+status/page/attachment/suggestion proxy, all via the platform API) · Qdrant (vectors) · Postgres
+(note bodies + suggestion queue) · NATS (the `notes.saved` event). Notes **mounts no `/data`
+volume** (#357/ADR-0065): its only file output goes through the core, which owns the file space;
+the mirror is read back through the unified Files surface.
 
 ## Run & extend
 
@@ -290,7 +302,7 @@ Package `epicurus_notes`:
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | The `notes` + `note_versions` tables + CRUD (`NotesStore`) — the source of truth, incl. version snapshots (ADR-0046) — and the `note_folders` table + CRUD (`NoteFolderStore`) for explicit/empty folders (#KB-refactor). |
 | `indexer.py` | Chunk + embed + upsert into `<tenant>__notes` (`NotesIndexer`); no search method (private + attach-only). |
-| `mirror.py` | The read-only `.md` mirror to the shared file space (#KB-refactor): `NotesMirror` (slug-confined `write` per save, `delete` on note removal, and a one-time `backfill`), best-effort throughout. |
+| `mirror.py` | The write-only `.md` mirror to the shared file space via **the core file API** (#KB-refactor; #357/ADR-0065): `NotesMirror` maps a slug to core path `notes/<rel>` and calls `PlatformClient.files_write` / `files_delete` (`write` per save, `delete` on note removal, a one-time `backfill`), best-effort throughout. No direct disk I/O — the core performs the on-disk write. |
 | `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + version snapshot + re-index), `delete_doc`, the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following), and `list_versions`/`get_version` (ADR-0046). |
 | `suggestions.py` | The `review` page surface (ADR-0033): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional per-hunk `content`), and `create_note_review_router`. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |

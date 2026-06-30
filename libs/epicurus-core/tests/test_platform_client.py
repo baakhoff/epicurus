@@ -300,6 +300,21 @@ async def test_files_list_parses_entries(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(entries) == 1 and entries[0].kind == "dir"
 
 
+async def test_files_search_parses_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_http(
+        monkeypatch,
+        _Resp(body={"entries": [{"path": "notes/a.md", "name": "a.md", "kind": "file"}]}),
+        captured,
+    )
+    entries = await PlatformClient(base_url="http://core:8080", tenant_id="local").files_search(
+        "a", limit=10
+    )
+    assert captured["url"] == "/platform/v1/files/search"
+    assert captured["params"] == {"q": "a", "limit": "10", "tenant_id": "local"}
+    assert len(entries) == 1 and entries[0].path == "notes/a.md"
+
+
 async def test_files_read_returns_content(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     _patch_http(

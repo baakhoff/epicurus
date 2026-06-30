@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.18.0"
+    assert manifest.version == "0.19.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -70,11 +70,17 @@ def _module():  # type: ignore[no-untyped-def]
 
     store = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
     vault = _indexer_stub()
-    review = SuggestionReview(
-        store, VaultPages(Path("/vault"), vault), vault, vault_path=Path("/vault"), tenant="test"
-    )
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    # Manifest-only test — no vault write happens, so the mocked platform satisfies the
+    # VaultPages file-API client requirement without any files_* call being made.
+    review = SuggestionReview(
+        store,
+        VaultPages(Path("/vault"), vault, platform=platform, core_prefix="knowledge"),
+        vault,
+        vault_path=Path("/vault"),
+        tenant="test",
+    )
     return build_module(
         vault,
         _indexer_stub(),

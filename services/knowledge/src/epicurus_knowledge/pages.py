@@ -20,13 +20,13 @@ For folder paths :func:`~epicurus_knowledge.refs.safe_dir_relative` is used inst
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from epicurus_core import get_logger
+from epicurus_core import PlatformClient, get_logger
 from epicurus_knowledge.db import VersionStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.refs import (
@@ -165,6 +165,8 @@ class VaultPages:
         vault_path: Path,
         indexer: KnowledgeIndexer,
         *,
+        platform: PlatformClient,
+        core_prefix: str,
         read_only: bool = False,
         docs_path: Path | None = None,
         versions: VersionStore | None = None,
@@ -172,6 +174,13 @@ class VaultPages:
     ) -> None:
         self._vault = vault_path
         self._indexer = indexer
+        # All vault WRITES go through the core-owned file API (ADR-0064): knowledge mounts
+        # /data read-only for the indexer/reads/watcher and never writes the volume itself.
+        # The core's FileStore root is /data/<tenant>; the vault is /data/<tenant>/knowledge,
+        # so a vault-relative path maps to the core path ``<core_prefix>/<rel>`` where
+        # ``core_prefix`` is the vault dir name (``settings.vault_path.name``).
+        self._platform = platform
+        self._core_prefix = core_prefix
         # Watch mode (#232): the vault is externally owned, so every write is refused and
         # the file-tree CRUD is hidden (the shell honours read_only / can_manage_files).
         self._read_only = read_only
@@ -197,6 +206,16 @@ class VaultPages:
         """The platform docs are read-only; refuse any write that targets them."""
         if self._is_docs(rel):
             raise HTTPException(status_code=409, detail="platform docs are read-only")
+
+    def _core_path(self, validated: Path) -> str:
+        """The core file-API path for a vault-confined *validated* path.
+
+        ``validated`` is a path under the vault root (already resolved by ``safe_*``); the
+        core FileStore root is the tenant dir one level above the vault, so the core key is
+        ``<core_prefix>/<vault-relative posix path>`` (``core_prefix`` = the vault dir name).
+        ``safe_*`` returns a *resolved* path, so resolve the vault root for ``relative_to``.
+        """
+        return f"{self._core_prefix}/{validated.relative_to(self._vault.resolve()).as_posix()}"
 
     def list_scopes(self) -> list[EditorScope]:
         """The knowledge bases (projects) plus the read-only platform-docs reference scope."""
@@ -259,16 +278,17 @@ class VaultPages:
             can_create_scope=not self._read_only,
         )
 
-    def create_project(self, name: str) -> EditorScope:
+    async def create_project(self, name: str) -> EditorScope:
         """Create a new knowledge base — a top-level folder under the vault root.
 
         409 if it already exists, 400 for an invalid name, 409 when the vault is read-only.
         """
         self._ensure_writable()
         target = safe_project(self._vault, name)
-        if target.exists():
+        core = self._core_path(target)
+        if await self._platform.files_stat(core) is not None:
             raise HTTPException(status_code=409, detail=f"knowledge base already exists: {name}")
-        target.mkdir(parents=True, exist_ok=False)
+        await self._platform.files_make_dir(core)
         log.info("knowledge base created", name=target.name)
         return EditorScope(id=target.name, title=target.name, kind="project")
 
@@ -283,13 +303,13 @@ class VaultPages:
         """
         self._ensure_writable()
         target = safe_project(self._vault, name)
-        if not target.is_dir():
+        if await self._platform.files_stat(self._core_path(target)) is None:
             raise HTTPException(status_code=404, detail=f"no such knowledge base: {name}")
         # De-index first (Qdrant vectors + ledger rows) so nothing lingers in search, then
-        # remove the files. The project folder is a single top-level segment, so its
-        # vault-relative path is just its name; documents under it are `<name>/…`.
+        # remove the files through the core file API. The project folder is a single top-level
+        # segment, so its vault-relative path is just its name; documents under it are `<name>/…`.
         removed = await self._indexer.remove_under(f"{target.name}/")
-        shutil.rmtree(target)
+        await self._platform.files_delete(self._core_path(target))
         log.info("knowledge base deleted", name=target.name, deindexed=removed)
         return removed
 
@@ -322,8 +342,8 @@ class VaultPages:
         self._ensure_writable()
         self._reject_docs_write(rel)
         target = safe_relative(self._vault, rel)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        # The core owns the write (creating parents) — knowledge no longer writes /data (ADR-0064).
+        await self._platform.files_write(self._core_path(target), content)
         indexed = True
         chunk_count = 0
         try:
@@ -351,7 +371,7 @@ class VaultPages:
         except Exception as exc:  # version history is best-effort; the save already landed
             log.warning("save succeeded but version snapshot failed", path=rel, error=str(exc))
 
-    def create_folder(self, rel: str) -> dict[str, str]:
+    async def create_folder(self, rel: str) -> dict[str, str]:
         """Create a directory at *rel* relative to the vault root.
 
         409 if it already exists, 400 for any path-safety violation, 409 when the vault is
@@ -360,13 +380,14 @@ class VaultPages:
         self._ensure_writable()
         self._reject_docs_write(rel)
         target = safe_dir_relative(self._vault, rel)
-        if target.exists():
+        core = self._core_path(target)
+        if await self._platform.files_stat(core) is not None:
             raise HTTPException(status_code=409, detail=f"folder already exists: {rel}")
-        target.mkdir(parents=True, exist_ok=False)
+        await self._platform.files_make_dir(core)
         log.info("folder created", path=rel)
         return {"path": rel}
 
-    def delete_doc(self, rel: str) -> None:
+    async def delete_doc(self, rel: str) -> None:
         """Delete a ``.md`` file at *rel* relative to the vault root.
 
         404 if it does not exist, 400 for any path-safety violation, 409 when the vault is
@@ -375,12 +396,14 @@ class VaultPages:
         self._ensure_writable()
         self._reject_docs_write(rel)
         target = safe_relative(self._vault, rel)
-        if not target.is_file():
+        core = self._core_path(target)
+        st = await self._platform.files_stat(core)
+        if st is None or st.kind != "file":
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
-        target.unlink()
+        await self._platform.files_delete(core)
         log.info("document deleted", path=rel)
 
-    def delete_folder(self, rel: str) -> None:
+    async def delete_folder(self, rel: str) -> None:
         """Delete an **empty** directory at *rel* relative to the vault root.
 
         404 if it does not exist, 409 if it is not empty, 400 for any
@@ -389,36 +412,46 @@ class VaultPages:
         self._ensure_writable()
         self._reject_docs_write(rel)
         target = safe_dir_relative(self._vault, rel)
-        if not target.exists():
+        core = self._core_path(target)
+        st = await self._platform.files_stat(core)
+        if st is None:
             raise HTTPException(status_code=404, detail=f"no such folder: {rel}")
-        if not target.is_dir():
+        if st.kind != "dir":
             raise HTTPException(status_code=400, detail=f"not a directory: {rel}")
-        if any(target.iterdir()):
+        if await self._platform.files_list(core):
             raise HTTPException(status_code=409, detail=f"folder is not empty: {rel}")
-        target.rmdir()
+        await self._platform.files_delete(core)
         log.info("folder deleted", path=rel)
 
-    def move_item(self, from_rel: str, to_rel: str) -> dict[str, str]:
+    async def move_item(self, from_rel: str, to_rel: str) -> dict[str, str]:
         """Move or rename a file or folder within the vault.
 
-        The *from* path is resolved via the appropriate safety check (file or
-        directory); the *to* path is always resolved via
-        :func:`~epicurus_knowledge.refs.safe_dir_relative` (no ``.md``
-        requirement, because both files and directories land here). 404 if the
-        source does not exist, 409 if the destination already exists, 400 for
-        any path-safety violation, 409 when the vault is externally owned (watch mode, #232).
+        Both paths are resolved via :func:`~epicurus_knowledge.refs.safe_dir_relative` (no
+        ``.md`` requirement, because both files and directories land here). The core file API
+        owns the move and its conflict checks (ADR-0064): 404 if the source does not exist,
+        409 if the destination already exists, 400 for any path-safety violation, 409 when the
+        vault is externally owned (watch mode, #232).
         """
         self._ensure_writable()
         self._reject_docs_write(from_rel)
         self._reject_docs_write(to_rel)
         from_target = safe_dir_relative(self._vault, from_rel)
         to_target = safe_dir_relative(self._vault, to_rel)
-        if not from_target.exists():
-            raise HTTPException(status_code=404, detail=f"no such file or folder: {from_rel}")
-        if to_target.exists():
-            raise HTTPException(status_code=409, detail=f"destination already exists: {to_rel}")
-        to_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(from_target), str(to_target))
+        try:
+            await self._platform.files_move(
+                self._core_path(from_target), self._core_path(to_target)
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 404:
+                raise HTTPException(
+                    status_code=404, detail=f"no such file or folder: {from_rel}"
+                ) from exc
+            if status == 409:
+                raise HTTPException(
+                    status_code=409, detail=f"destination already exists: {to_rel}"
+                ) from exc
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
         log.info("item moved", from_path=from_rel, to_path=to_rel)
         return {"path": to_rel}
 
@@ -490,7 +523,7 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
         # Create a new knowledge base (top-level folder) — the operator's "New knowledge
         # base" control. The agent's equivalent goes through the review queue instead.
         _require_known_page(page_id)
-        return pages.create_project(name)
+        return await pages.create_project(name)
 
     @router.get("/pages/{page_id}/doc", response_model=EditorDocContent)
     async def get_doc(page_id: str, path: str = Query(...)) -> EditorDocContent:
@@ -519,17 +552,17 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
     @router.post("/pages/{page_id}/folder")
     async def post_folder(page_id: str, path: str = Query(...)) -> dict[str, str]:
         _require_known_page(page_id)
-        return pages.create_folder(path)
+        return await pages.create_folder(path)
 
     @router.delete("/pages/{page_id}/doc", status_code=204)
     async def delete_doc(page_id: str, path: str = Query(...)) -> None:
         _require_known_page(page_id)
-        pages.delete_doc(path)
+        await pages.delete_doc(path)
 
     @router.delete("/pages/{page_id}/folder", status_code=204)
     async def delete_folder(page_id: str, path: str = Query(...)) -> None:
         _require_known_page(page_id)
-        pages.delete_folder(path)
+        await pages.delete_folder(path)
 
     @router.delete("/pages/{page_id}/project", status_code=204)
     async def delete_project(page_id: str, name: str = Query(...)) -> None:
@@ -541,6 +574,6 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
     @router.post("/pages/{page_id}/move")
     async def post_move(page_id: str, body: MoveBody) -> dict[str, str]:
         _require_known_page(page_id)
-        return pages.move_item(body.from_path, body.to_path)
+        return await pages.move_item(body.from_path, body.to_path)
 
     return router

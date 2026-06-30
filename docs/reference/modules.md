@@ -168,7 +168,7 @@ and `?q=`. The `browser` archetype's data shape is:
       "body": "…",               // optional: shown in the detail pane
       "icon": "file",             // optional: glyph name
       "nav_path": "docs",         // optional: set on directories to enable drill-in
-      "href": "/platform/v1/modules/storage/download?path=…"  // optional: download URL for files
+      "href": "/platform/v1/modules/{name}/download?path=…"  // optional: download URL for files
     }
   ]
 }
@@ -307,11 +307,13 @@ Proxied at:
 - `DELETE /platform/v1/modules/{name}/pages/{id}/folder?path=<rel>`
 - `POST /platform/v1/modules/{name}/pages/{id}/move`
 
-> **`…/move` is the one shared mutation.** It accepts an `editor` **or** a `browser` page — the
-> storage Files browser renames/relocates its writable entries through this exact
-> `{from_path, to_path}` → `{path}` contract (#391, ADR-0059). Every other endpoint above is
-> editor-only. The receiving module enforces what is actually movable (storage allows only its
-> writable object entries, returning **400** for a read-only scanned file).
+> **`…/move` is the one shared mutation.** Here it is the **`editor`** archetype's move
+> (knowledge, notes); every other endpoint above is editor-only. The same
+> `{from_path, to_path}` → `{path}` move contract (ADR-0059) is also how the core's unified
+> **Files** browser relocates a storage object — but that now goes through the core-owned Files
+> surface, which calls the storage module's `POST /objects/move` (#391, ADR-0063), not a module
+> page move. The receiving store enforces what is actually movable (storage allows only its
+> writable object entries).
 
 Scope (knowledge-base) management — gated on `can_create_scope` — adds
 `POST /pages/{id}/project?name=<name>` (create a top-level scope → `{id, title, kind}`) and

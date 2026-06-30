@@ -36,11 +36,12 @@ def _module_for(vault_indexer: Any, docs_indexer: Any, module_docs: Any, vault: 
     from epicurus_knowledge.suggestions import SuggestionReview
 
     store = _suggestions()
-    review = SuggestionReview(
-        store, VaultPages(vault, vault_indexer), vault_indexer, vault_path=vault, tenant=TENANT
-    )
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=True)
+    # These tests exercise reindex + manifest, never a vault write, so the mocked platform
+    # doubles as VaultPages' file-API client (ADR-0064) without any files_* call being made.
+    pages = VaultPages(vault, vault_indexer, platform=platform, core_prefix="knowledge")
+    review = SuggestionReview(store, pages, vault_indexer, vault_path=vault, tenant=TENANT)
     return build_module(
         vault_indexer,
         docs_indexer,

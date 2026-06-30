@@ -27,9 +27,10 @@ The operator runs Obsidian (with Sync) on the same host as epicurus, or onto a f
 that host can see, and bind-mounts that vault directory into the `knowledge` container.
 
 epicurus **already supports the mount**: the shared file space (`EPICURUS_FILES_ROOT`, the
-tenant-scoped `knowledge/` subfolder mounted at `/data/<tenant>/knowledge` — read-write,
-container uid 10001; `<tenant>` = `DEFAULT_TENANT_ID`; see
-[knowledge](../services/knowledge.md)) holds the vault.
+tenant-scoped `knowledge/` subfolder mounted at `/data/<tenant>/knowledge`, container uid 10001;
+`<tenant>` = `DEFAULT_TENANT_ID`; see [knowledge](../services/knowledge.md)) holds the vault.
+(The recommended sync path is watch mode, where epicurus only **reads** the vault; as of
+#356/ADR-0064 the knowledge mount is read-only generally — writes go through the core file API.)
 So the only real gap is **change detection**: today the index refreshes on startup or on
 an explicit `knowledge_reindex`; edits that Obsidian Sync lands in the folder aren't
 picked up until then.

@@ -16,15 +16,22 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from epicurus_core.files import FileEntry, LocalFileStore
 from epicurus_knowledge.db import MAX_VERSIONS, VersionStore
 from epicurus_knowledge.pages import EditorData, VaultPages, create_pages_router
 
 TENANT = "test"
+# The core file-space tenant the fake store writes under (LocalFileStore validates the id),
+# distinct from the version-history tenant above. The vault is ``<tmp>/<file-tenant>/knowledge``
+# and writes flow through the core file API (ADR-0064) to that same tree.
+FILE_TENANT = "local"
+CORE_PREFIX = "knowledge"
 
 
 # ── VersionStore (the Postgres-backed history) ────────────────────────────────
@@ -159,17 +166,78 @@ class _FakeIndexer:
         return 3
 
 
+class _FilePlatform:
+    """A ``PlatformClient`` stand-in whose ``files_*`` hit a real on-disk ``LocalFileStore``.
+
+    Backs the migrated ``write_doc`` so a save lands on disk (ADR-0064); only ``files_write``
+    is reached by these version tests, but the full surface is provided for completeness.
+    """
+
+    def __init__(self, files_root: Path) -> None:
+        self._store = LocalFileStore(files_root)
+
+    async def files_write(self, path: str, content: str) -> FileEntry:
+        return await self._store.write_text(tenant=FILE_TENANT, path=path, content=content)
+
+    async def files_make_dir(self, path: str) -> FileEntry:
+        return await self._store.ensure_dir(tenant=FILE_TENANT, path=path)
+
+    async def files_stat(self, path: str) -> FileEntry | None:
+        return await self._store.stat(tenant=FILE_TENANT, path=path)
+
+    async def files_list(self, path: str = "") -> list[FileEntry]:
+        return await self._store.list_dir(tenant=FILE_TENANT, path=path)
+
+    async def files_delete(self, path: str) -> bool:
+        return await self._store.delete(tenant=FILE_TENANT, path=path)
+
+    async def files_move(self, src: str, dst: str) -> FileEntry:
+        try:
+            return await self._store.move(tenant=FILE_TENANT, src=src, dst=dst)
+        except FileExistsError as exc:
+            raise _status_error(409) from exc
+        except FileNotFoundError as exc:
+            raise _status_error(404) from exc
+        except ValueError as exc:
+            raise _status_error(400) from exc
+
+
+def _status_error(code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://core/platform/v1/files/move")
+    return httpx.HTTPStatusError(
+        f"HTTP {code}", request=request, response=httpx.Response(code, request=request)
+    )
+
+
+def vault_dir(files_root: Path) -> Path:
+    """The on-disk vault under a fake-core files root: ``<root>/<file-tenant>/knowledge``."""
+    return files_root / FILE_TENANT / CORE_PREFIX
+
+
+def _make_pages(files_root: Path, indexer: object, **kw: object) -> VaultPages:
+    """A fake-core-backed ``VaultPages`` over ``vault_dir(files_root)``."""
+    return VaultPages(
+        _vault(files_root),
+        indexer,  # type: ignore[arg-type]
+        platform=_FilePlatform(files_root),  # type: ignore[arg-type]
+        core_prefix=CORE_PREFIX,
+        **kw,  # type: ignore[arg-type]
+    )
+
+
 def _vault(tmp_path: Path) -> Path:
-    (tmp_path / "alpha.md").write_text("# Alpha\n", encoding="utf-8")
-    return tmp_path
+    vault = vault_dir(tmp_path)
+    vault.mkdir(parents=True, exist_ok=True)
+    (vault / "alpha.md").write_text("# Alpha\n", encoding="utf-8")
+    return vault
 
 
 async def _pages(tmp_path: Path, *, read_only: bool = False, fail: bool = False) -> VaultPages:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     store = VersionStore(engine)
     await store.init()
-    return VaultPages(
-        _vault(tmp_path),
+    return _make_pages(
+        tmp_path,
         _FakeIndexer(fail=fail),
         read_only=read_only,
         versions=store,
@@ -183,7 +251,7 @@ def test_editor_data_is_versioned_by_default() -> None:
 
 
 def test_list_docs_reports_versioned(tmp_path: Path) -> None:
-    pages = VaultPages(_vault(tmp_path), _FakeIndexer())
+    pages = _make_pages(tmp_path, _FakeIndexer())
     assert pages.list_docs().versioned is True
 
 
@@ -271,7 +339,7 @@ async def test_read_only_vault_still_lists_versions_but_save_is_409(tmp_path: Pa
     # Seed one historical version directly (as if written before watch mode was enabled).
     await store.add_version(tenant=TENANT, note_path="alpha.md", title="alpha", content="historic")
     indexer = _FakeIndexer()
-    pages = VaultPages(_vault(tmp_path), indexer, read_only=True, versions=store, tenant=TENANT)
+    pages = _make_pages(tmp_path, indexer, read_only=True, versions=store, tenant=TENANT)
     # Writing is refused (no new version).
     with pytest.raises(HTTPException) as err:
         await pages.write_doc("alpha.md", "should not land")
@@ -286,7 +354,7 @@ async def test_read_only_vault_still_lists_versions_but_save_is_409(tmp_path: Pa
 
 async def test_versions_disabled_when_store_absent(tmp_path: Path) -> None:
     # Without a store (the bare test wiring), the editor still works; history is empty.
-    pages = VaultPages(_vault(tmp_path), _FakeIndexer())
+    pages = _make_pages(tmp_path, _FakeIndexer())
     await pages.write_doc("alpha.md", "no-history")
     assert (await pages.list_versions("alpha.md")).versions == []
     with pytest.raises(HTTPException) as err:
@@ -304,8 +372,8 @@ async def _client(tmp_path: Path, *, read_only: bool = False) -> TestClient:
     app = FastAPI()
     app.include_router(
         create_pages_router(
-            VaultPages(
-                _vault(tmp_path),
+            _make_pages(
+                tmp_path,
                 _FakeIndexer(),
                 read_only=read_only,
                 versions=store,

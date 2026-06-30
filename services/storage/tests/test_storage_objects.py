@@ -7,6 +7,8 @@ Run only when the integration marker is selected:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from testcontainers.minio import MinioContainer  # type: ignore[import-untyped]
 
@@ -16,7 +18,7 @@ TENANT = "test"
 
 
 @pytest.fixture(scope="module")
-def minio_store() -> ObjectStore:
+def minio_store() -> Iterator[ObjectStore]:
     with MinioContainer() as minio:
         yield ObjectStore(
             url=f"http://{minio.get_container_host_ip()}:{minio.get_exposed_port(9000)}",

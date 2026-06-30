@@ -73,7 +73,7 @@ class RegistryBridgeClient:
 
     async def reload(self, bridge: str) -> dict[str, Any]:
         """POST the module's ``/bridges/{bridge}/reload`` control path; return its fresh status."""
-        base = await self._registry.module_base(MESSAGING_MODULE)
+        base = await self._registry.base_url(MESSAGING_MODULE)
         try:
             async with httpx.AsyncClient(base_url=base, timeout=15) as client:
                 resp = await client.post(f"/bridges/{bridge}/reload")

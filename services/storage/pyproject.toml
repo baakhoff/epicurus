@@ -1,13 +1,13 @@
 [project]
 name = "epicurus-storage"
-version = "0.7.0"
-description = "Storage module — file-tree index, agent file tools, MinIO object store, upload ingest, and inline text read."
+version = "0.8.0"
+description = "Storage module — agent file tools over the core file space, MinIO object store, upload ingest, and inline object read."
 requires-python = ">=3.11"
 dependencies = [
     "epicurus-core",
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "sqlalchemy[asyncio]>=2.0.50",
+    "fastapi>=0.138.2",
+    "uvicorn[standard]>=0.49.0",
+    "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",
     "aioboto3>=13.0",
     # Files-tree watcher for live rescan on external change (#390). Already present

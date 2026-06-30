@@ -33,7 +33,7 @@ epicurus
 │  ├─ core-app    the brain — agent · LLM gateway · memory · power · platform API · MCP host · log stream
 │  └─ web         the phone-first PWA shell — chat · models · modules · settings · observability
 ├─ modules        (sidecars; add one by running one more container)
-│  ├─ storage     file-tree index (list / search / read) + MinIO object store
+│  ├─ storage     MinIO object store + chat-upload sink; agent file tools over the core file space
 │  ├─ knowledge   Obsidian-vault RAG (incremental index + search)
 │  ├─ calendar    provider-neutral calendar (local + Google)
 │  ├─ mail        Gmail-backed mail (search · read · send)

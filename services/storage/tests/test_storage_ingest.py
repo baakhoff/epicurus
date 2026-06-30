@@ -7,11 +7,10 @@ integration marker) in test_storage_objects.py.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from epicurus_core import FileEntry
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore, StoredObject
 from epicurus_storage.service import (
@@ -23,6 +22,19 @@ from epicurus_storage.service import (
 )
 
 TENANT = "test"
+
+
+class _NoFilesPlatform:
+    """A PlatformClient stub whose file space is empty — these tests are object-only."""
+
+    async def files_list(self, path: str = "") -> list[FileEntry]:
+        return []
+
+    async def files_search(self, query: str, *, limit: int = 50) -> list[FileEntry]:
+        return []
+
+    async def files_read(self, path: str) -> str:  # pragma: no cover - not reached here
+        raise AssertionError("the file space should not be read in object-only tests")
 
 
 class _FakeObjectStore(ObjectStore):
@@ -362,14 +374,15 @@ async def test_put_object_survives_a_rescan(index: FileIndex, objects: _FakeObje
 
 
 async def test_agent_reads_back_an_object_it_saved(
-    index: FileIndex, objects: _FakeObjectStore, tmp_path: Path
+    index: FileIndex, objects: _FakeObjectStore
 ) -> None:
     # storage_read serves source="object" entries from the store, so a file the agent saved
     # via storage_object_put reads back through the same tool that now lists it.
-    module = build_module(index, objects, storage_root=str(tmp_path), tenant=TENANT)
+    module = build_module(index, objects, platform=_NoFilesPlatform(), tenant=TENANT)  # type: ignore[arg-type]
     await module.mcp.call_tool(
         "storage_object_put", {"key": "memo.md", "content": "agent wrote it"}
     )
     _content, structured = await module.mcp.call_tool("storage_read", {"path": "memo.md"})
+    assert isinstance(structured, dict)
     payload = structured.get("result") or structured
     assert payload == "agent wrote it"

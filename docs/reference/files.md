@@ -14,11 +14,12 @@ changes (debounced incremental rescan, `FILES_WATCH` / `FILES_WATCH_DEBOUNCE_MS`
 `GET /platform/v1/files/{page,search,download}` (ADR-0063), and the storage module's objects are
 **merged in** so chat uploads and agent-written files show alongside the file-space tree.
 
-> **Phased rollout (ADR-0052 → ADR-0063).** This page documents **Phases 1–2**: the abstraction
-> and wire contract (Phase 1), then the core taking ownership of the volume mount, the file index,
-> and the Files browser / read / download, with the storage module reading through this API
-> (Phase 2). Knowledge and notes still mount the shared `/data` volume directly today; migrating
-> them onto this API is staged follow-up (see the phase plan below).
+> **Phased rollout (ADR-0052 → ADR-0064).** This page documents **Phases 1–3**: the abstraction
+> and wire contract (Phase 1), the core taking ownership of the volume mount, the file index, and
+> the Files browser / read / download with the storage module reading through this API (Phase 2),
+> and the **knowledge** module routing its writes through this API while its mount drops to
+> read-only (Phase 3, #356/ADR-0064 — see the phase plan below). Notes still mounts the shared
+> `/data` volume read-write to write its `.md` mirror; migrating it is the remaining follow-up.
 
 ## The epicurus-core API
 
@@ -126,7 +127,12 @@ internal network. Uses **no AI**.
   file index (startup scan + watcher), and the Files browser / read / download move to the core
   (`/platform/v1/files/{page,search,download}`); the storage module reads the file space through
   this API and contributes its objects (read/move/download fall back to it).
-- **Phase 3:** knowledge writes through the file API and drops its direct `/data` mount.
+- **Phase 3 (done, #356/ADR-0064):** the **knowledge** module is now a **write-consumer** of
+  the file API — after storage (Phase 2), it is the second module to route its writes through
+  `PlatformClient.files_*` (the editor save, the file-tree CRUD, and the agent's approved
+  suggestions; a vault path maps to the core path `knowledge/<rel>`). Its `/data` mount drops to
+  **read-only** (reads + the incremental indexer + the #232 watcher stay on it); a follow-up
+  migrates the reads off the mount so it can be dropped entirely.
 - **Phase 4:** notes mirror through the file API and drops its direct mount; `files-init` retires.
 
 ## Run & extend

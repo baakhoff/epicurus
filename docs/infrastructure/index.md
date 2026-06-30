@@ -37,8 +37,10 @@ file-owning modules each own a subtree:
   scans + watches the tree and serves the unified **Files** view (browser / read / download),
   merging in the storage module's objects (ADR-0063). The **storage** module **no longer mounts
   `/data`**; it reads the file space through the core file API.
-- **knowledge** mounts it **read-write** and owns `/data/<tenant>/knowledge` (each top-level
-  folder is a knowledge base / project).
+- **knowledge** mounts it **read-only** and owns `/data/<tenant>/knowledge` (each top-level
+  folder is a knowledge base / project). It **reads** + indexes the tree on this mount but
+  **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>`),
+  so the core performs the on-disk write (#356, ADR-0064).
 - **notes** mounts it **read-write** and owns `/data/<tenant>/notes` (the read-only `.md` mirror
   of authored notes; Postgres stays the source of truth).
 

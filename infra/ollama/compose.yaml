@@ -13,7 +13,7 @@ services:
   # apply the operator's KV-cache choice (#307). Without this, that write hits a root-owned
   # volume and fails with PermissionError; the ollama container mounts the same volume :ro and
   # so cannot chown it either (#392). The env file sits directly at the volume root, so we chown
-  # the root — no subdirs needed. Mirrors files-init / qdrant-init / the OpenBao chown.
+  # the root — no subdirs needed. Mirrors qdrant-init, the core image entrypoint, and the OpenBao chown.
   ollama-init:
     image: alpine:3.21
     restart: "no"

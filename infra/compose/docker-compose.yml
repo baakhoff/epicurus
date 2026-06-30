@@ -231,38 +231,6 @@ services:
       start_period: 10s
     networks: [epicurus]
 
-  # One-shot: prepares the shared file space (#KB-refactor) so the file-owning modules
-  # can write it. A fresh named volume is created **root-owned**, but storage/knowledge/
-  # notes run as uid 10001 — so without this, knowledge's "create folder"/"new document"
-  # (and notes' saves) fail with PermissionError → HTTP 500. This creates each module's
-  # subdirectory and chowns **only those** to 10001, leaving the rest of a bind-mounted
-  # tree (e.g. an operator's Obsidian vault) untouched. Mirrors qdrant-init/openbao.
-  files-init:
-    image: alpine:3.21
-    restart: "no"
-    user: root
-    environment:
-      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
-    volumes:
-      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data
-    entrypoint:
-      - /bin/sh
-      - -c
-      # The tree is tenant-scoped (constraint #1): /data/<tenant>/{knowledge,notes}. $$ is
-      # compose's escape for a literal $, so the shell — not compose — expands the env var.
-      - |
-        set -eu
-        mkdir -p "/data/$$DEFAULT_TENANT_ID"
-        chown 10001:10001 "/data/$$DEFAULT_TENANT_ID"
-        chmod 755 "/data/$$DEFAULT_TENANT_ID"
-        for d in knowledge notes; do
-          mkdir -p "/data/$$DEFAULT_TENANT_ID/$$d"
-          chown 10001:10001 "/data/$$DEFAULT_TENANT_ID/$$d"
-          chmod 755 "/data/$$DEFAULT_TENANT_ID/$$d"
-        done
-        echo "files-init: ensured /data/$$DEFAULT_TENANT_ID/{knowledge,notes} owned by uid 10001"
-    networks: [epicurus]
-
   # One-shot: waits for MinIO to be healthy then creates the default bucket.
   # Real per-tenant bucket provisioning is the storage module's concern (Phase 2);
   # this seeds the single dev bucket so the storage module has somewhere to write.

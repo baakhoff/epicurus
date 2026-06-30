@@ -397,6 +397,19 @@ images to GHCR.
 
 ### Changed
 
+- **Retire the `files-init` one-shot — the core image's entrypoint provisions the tenant
+  file-space root** (#421) — after the file-space migration (Phases 2–4) the core is the sole
+  writer of `/data` (storage/notes mount nothing, knowledge mounts read-only), and `files-init`
+  survived only to `chown` the root-owned `epicurus-files` named volume so the core (uid 10001)
+  could write a fresh one. That chown now lives in the **core image's entrypoint** (ADR-0069): a
+  small stdlib-only Python entrypoint starts as root, creates and `chown`s **only** `/data/<tenant>`
+  (never `-R`, so a bind-mounted Obsidian vault's contents are left untouched), then drops to uid
+  10001 and `exec`s the app — which therefore never runs as root. The `files-init` service and the
+  `depends_on` from `core-app`/`knowledge` are removed; the module subtrees (`knowledge/`, `notes/`)
+  are created by the core on first write (the read-only knowledge indexer already tolerates a
+  not-yet-created dir). One fewer data-plane container; completes the #346 file-space arc.
+  `core-app` 0.51.0→0.53.0.
+
 - **Shared additive schema reconcile (`epicurus_core.db.ensure_columns`)** (#249) — every store
   evolves its schema with `create_all`, which creates a missing table but never alters an
   existing one, so a column added after a table's first release silently never reached an

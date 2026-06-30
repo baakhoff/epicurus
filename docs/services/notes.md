@@ -245,8 +245,9 @@ the container **mounts no `/data` volume at all** — it reads nothing from disk
 editor read Postgres), and its only file output, the `.md` mirror, is written **through the core
 file API** (`PlatformClient.files_*`, core path `notes/<rel>`). The **core** owns the read-write
 `/data/<tenant>` mount and performs the on-disk write (the on-disk tree stays tenant-scoped,
-constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`), so notes no longer needs `files-init` to chown
-a notes folder for it — the core writes into a directory it owns. Losing the mirror never loses a
+constraint #1; `<tenant>` = `DEFAULT_TENANT_ID`), so notes needs no file-space provisioning of its
+own — the core (whose image entrypoint chowns the tenant root, #421/ADR-0069) writes into a
+directory it owns. Losing the mirror never loses a
 note. The agent's view of `notes/` through the storage file tools is hidden by storage's
 `STORAGE_AGENT_HIDDEN_PREFIXES` (default `notes`, see [storage](storage.md)).
 

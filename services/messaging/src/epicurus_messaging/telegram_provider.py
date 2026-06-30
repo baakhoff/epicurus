@@ -33,7 +33,7 @@ from typing import Any
 import httpx
 
 from epicurus_core import InboundMessage, OutboundMessage, SecretStore, get_logger
-from epicurus_messaging.providers import InboundHandler, bridge_token
+from epicurus_messaging.providers import BridgeStatus, InboundHandler, load_bridge_secret
 
 log = get_logger("messaging.telegram")
 
@@ -74,6 +74,10 @@ class TelegramProvider:
         self._on_inbound: InboundHandler | None = None
         self._task: asyncio.Task[None] | None = None
         self._offset: int | None = None  # next getUpdates offset (last update_id + 1)
+        self._configured = False  # a bot token is stored
+        self._enabled = True  # the operator's on/off
+        self._connected = False  # the poll loop is live
+        self._detail = "not connected"
 
     def provider_name(self) -> str:
         return TELEGRAM_BRIDGE
@@ -81,27 +85,58 @@ class TelegramProvider:
     def secret_names(self) -> list[str]:
         return [f"messaging/{TELEGRAM_BRIDGE}"]
 
-    def connected(self) -> bool:
-        """True once the bot token is loaded and the poll loop is running."""
-        return self._token is not None and self._task is not None
-
     async def start(self, on_inbound: InboundHandler) -> None:
-        """Load the token and begin long-polling; idle (no poll loop) if no token is stored."""
+        """Connect if a token is stored and the bridge is enabled; else stay dormant.
+
+        Re-reads the stored token + enabled flag every call, so the manager reconnects a token
+        or on/off change by calling :meth:`stop` then ``start`` again (ADR-0062). Never raises for
+        the not-connected cases (no token / disabled) — they are normal states ``status`` reports.
+        """
         self._on_inbound = on_inbound
-        self._token = await bridge_token(self._secrets, TELEGRAM_BRIDGE, tenant=self._tenant)
-        if self._token is None:
+        try:
+            token, enabled = await load_bridge_secret(
+                self._secrets, TELEGRAM_BRIDGE, tenant=self._tenant
+            )
+        except Exception as exc:  # vault unreachable → stay dormant, never abort the module
+            self._configured = False
+            self._connected = False
+            self._detail = "token store unavailable"
+            log.warning("telegram bridge could not read its token", error=str(exc))
+            return
+        self._token = token
+        self._configured = token is not None
+        self._enabled = enabled
+        if token is None:
+            self._connected = False
+            self._detail = "no bot token set"
             log.warning(
-                "telegram bridge has no token; idle until messaging/telegram is set and the "
-                "service restarts",
+                "telegram bridge has no token; idle until messaging/telegram is set",
                 tenant=self._tenant,
             )
+            return
+        if not enabled:
+            self._connected = False
+            self._detail = "disabled by operator"
             return
         if self._client is None:
             # The read timeout must outlast a long poll, or the client aborts mid-wait.
             timeout = httpx.Timeout(self._poll_timeout + 10.0)
             self._client = httpx.AsyncClient(base_url=self._api_base, timeout=timeout)
         self._task = asyncio.create_task(self._poll_loop())
+        self._connected = True
+        self._detail = "polling for updates"
         log.info("telegram bridge started", tenant=self._tenant, poll_timeout=self._poll_timeout)
+
+    async def status(self) -> BridgeStatus:
+        return BridgeStatus(
+            bridge=TELEGRAM_BRIDGE,
+            label="Telegram",
+            manageable=True,
+            configured=self._configured,
+            enabled=self._enabled,
+            connected=self._connected,
+            detail=self._detail,
+        )
 
     async def send(self, message: OutboundMessage) -> None:
         """Deliver a reply via ``sendMessage``, split to Telegram's length limit, thread-aware."""
@@ -130,6 +165,7 @@ class TelegramProvider:
 
     async def stop(self) -> None:
         """Stop polling and release the client (only if we built it)."""
+        self._connected = False
         task, self._task = self._task, None
         if task is not None:
             task.cancel()

@@ -239,7 +239,7 @@ async def test_start_without_token_idles() -> None:
         raise AssertionError("idle bridge must not receive")
 
     await provider.start(_on)
-    assert provider.connected() is False
+    assert (await provider.status()).connected is False
     await provider.stop()  # clean even though nothing started
 
 
@@ -286,7 +286,7 @@ async def test_poll_loop_publishes_inbound_and_advances_offset() -> None:
         got.set()
 
     await provider.start(_on)
-    assert provider.connected() is True
+    assert (await provider.status()).connected is True
     try:
         await asyncio.wait_for(got.wait(), timeout=5)
     finally:

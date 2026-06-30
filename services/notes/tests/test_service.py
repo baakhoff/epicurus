@@ -33,7 +33,7 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.5.0"
+    assert manifest.version == "0.6.0"
 
 
 async def test_exposes_write_and_list_tools_but_no_read() -> None:

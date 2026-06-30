@@ -179,7 +179,8 @@ docker compose up -d storage
 
 Storage no longer needs a `/data` mount; it reaches the file space through the core
 (`PLATFORM_URL`). The shared `epicurus-files` volume is mounted by the **core** (and still by
-knowledge / notes until later phases) — see [Infrastructure](../infrastructure/index.md#shared-file-space).
+knowledge, read-only); **notes** has also dropped its mount (#357/ADR-0065) and writes its `.md`
+mirror through the core file API — see [Infrastructure](../infrastructure/index.md#shared-file-space).
 
 Package `epicurus_storage`: `db.py` (`storage_files` catalogue + queries + `subtree`/`repath`
 for the move re-key), `object_store.py` (MinIO via aioboto3 — text **and** binary

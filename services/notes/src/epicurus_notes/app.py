@@ -71,11 +71,15 @@ def create_app() -> FastAPI:
         """Announce a saved note on NATS (tenant-scoped) for downstream consumers."""
         await bus.publish(SAVED_SUBJECT, {"slug": slug}, tenant_id=tenant)
 
-    # Tenant-scope the file tree (constraint #1): <files-root>/<tenant>/notes. The shared
-    # epicurus-files volume mounts at /data; the on-disk .md mirror lives under the tenant
-    # segment so the layout stays per-tenant even on the shared volume.
+    # Tenant-scope the file tree (constraint #1): <files-root>/<tenant>/notes. The mirror now
+    # writes through the core file API (ADR-0065) — notes mounts no shared volume; notes_root
+    # survives only as the base for the mirror's path-confinement arithmetic, and core_prefix
+    # ("notes") maps a confined target to its core path (the core FileStore root is the tenant
+    # segment, so the mirror is the "notes" subtree under it).
     notes_root = settings.notes_root.parent / tenant / settings.notes_root.name
-    mirror = NotesMirror(notes_root, store, tenant=tenant)
+    mirror = NotesMirror(
+        notes_root, store, tenant=tenant, platform=platform, core_prefix=settings.notes_root.name
+    )
     pages = NotesPages(
         store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror, folders=folders
     )

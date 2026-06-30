@@ -17,7 +17,7 @@ COPY --from=build /app/.venv /app/.venv
 # The container starts as root so the entrypoint can chown the (root-owned, on first boot)
 # epicurus-files volume's tenant root — uid 10001 cannot chown a root-owned volume itself. The
 # entrypoint then drops to this unprivileged user before exec'ing the app, so the app never runs
-# as root. This replaces the files-init one-shot (#421, ADR-0068).
+# as root. This replaces the files-init one-shot (#421, ADR-0069).
 RUN useradd --create-home --uid 10001 epicurus
 COPY services/core-app/docker-entrypoint.py /usr/local/bin/docker-entrypoint.py
 EXPOSE 8080

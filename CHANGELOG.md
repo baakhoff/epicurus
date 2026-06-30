@@ -382,7 +382,7 @@ images to GHCR.
   file-space root** (#421) — after the file-space migration (Phases 2–4) the core is the sole
   writer of `/data` (storage/notes mount nothing, knowledge mounts read-only), and `files-init`
   survived only to `chown` the root-owned `epicurus-files` named volume so the core (uid 10001)
-  could write a fresh one. That chown now lives in the **core image's entrypoint** (ADR-0068): a
+  could write a fresh one. That chown now lives in the **core image's entrypoint** (ADR-0069): a
   small stdlib-only Python entrypoint starts as root, creates and `chown`s **only** `/data/<tenant>`
   (never `-R`, so a bind-mounted Obsidian vault's contents are left untouched), then drops to uid
   10001 and `exec`s the app — which therefore never runs as root. The `files-init` service and the

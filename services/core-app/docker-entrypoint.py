@@ -4,7 +4,7 @@
 The core is the sole writer of the shared file space (`/data`, ADR-0063). A fresh
 `epicurus-files` named volume is created **root-owned**, and the app runs as uid 10001 — which
 cannot `chown` a root-owned volume itself. The old `files-init` one-shot did that chown; this
-entrypoint folds it into the core image (#421, ADR-0068): start as root, create and `chown`
+entrypoint folds it into the core image (#421, ADR-0069): start as root, create and `chown`
 **only** the tenant root, drop privileges, then `exec` the app as uid 10001.
 
 The chown is **surgical** — the tenant root directory only, never recursive. An operator may

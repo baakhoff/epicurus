@@ -21,7 +21,7 @@ changes (debounced incremental rescan, `FILES_WATCH` / `FILES_WATCH_DEBOUNCE_MS`
 > read-only (Phase 3, #356/ADR-0064), and the **notes** module routing its `.md`-mirror writes
 > through this API and **dropping its `/data` mount entirely** (Phase 4, #357/ADR-0065 — see the
 > phase plan below). The tenant-root chown now lives in the **core image's entrypoint**
-> (#421/ADR-0068), retiring the old `files-init` one-shot: the file space is fully core-owned with
+> (#421/ADR-0069), retiring the old `files-init` one-shot: the file space is fully core-owned with
 > no separate provisioning container.
 
 ## The epicurus-core API
@@ -142,7 +142,7 @@ internal network. Uses **no AI**.
   `notes/<rel>`, and notes **drops its `/data` mount entirely** (it reads nothing from disk — the
   indexer and editor read Postgres). Postgres stays the source of truth; the mirror is write-only
   output. The tenant-root chown the old `files-init` one-shot did is now folded into the **core
-  image's entrypoint** (#421/ADR-0068): the container starts as root, chowns `/data/<tenant>` only,
+  image's entrypoint** (#421/ADR-0069): the container starts as root, chowns `/data/<tenant>` only,
   then drops to uid 10001 — so the file space is fully core-owned with no init container.
 
 ## Run & extend

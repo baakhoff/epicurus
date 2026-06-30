@@ -51,7 +51,7 @@ file-owning modules each own a subtree:
 `STORAGE_HOST_ROOT`; existing deployments move old vault contents into
 `<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`).
 
-The **core image's entrypoint** **provisions the tenant root** before the app starts (#421/ADR-0068,
+The **core image's entrypoint** **provisions the tenant root** before the app starts (#421/ADR-0069,
 replacing the old `files-init` one-shot): a fresh named volume is created **root-owned**, but the
 core writes it as uid 10001 — which cannot `chown` a root-owned volume itself — so the container
 starts as root, creates and `chown`s **only** `/data/<tenant>` to uid 10001, then drops to uid 10001

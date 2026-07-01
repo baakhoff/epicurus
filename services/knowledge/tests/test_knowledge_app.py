@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.19.1"
+    assert manifest.version == "0.20.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -65,6 +65,7 @@ def _module():  # type: ignore[no-untyped-def]
 
     from epicurus_core import PlatformClient
     from epicurus_knowledge.pages import VaultPages
+    from epicurus_knowledge.reader import DiskVaultReader
     from epicurus_knowledge.service import build_module
     from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore
 
@@ -72,13 +73,16 @@ def _module():  # type: ignore[no-untyped-def]
     vault = _indexer_stub()
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=True)
-    # Manifest-only test — no vault write happens, so the mocked platform satisfies the
-    # VaultPages file-API client requirement without any files_* call being made.
+    # Manifest-only test — no vault read/write happens, so the mocked platform satisfies the
+    # VaultPages file-API client requirement and the reader is never exercised.
+    reader = DiskVaultReader(Path("/vault"))
     review = SuggestionReview(
         store,
-        VaultPages(Path("/vault"), vault, platform=platform, core_prefix="knowledge"),
+        VaultPages(
+            Path("/vault"), vault, platform=platform, core_prefix="knowledge", reader=reader
+        ),
         vault,
-        vault_path=Path("/vault"),
+        reader=reader,
         tenant="test",
     )
     return build_module(
@@ -90,6 +94,7 @@ def _module():  # type: ignore[no-untyped-def]
         platform,
         tenant="test",
         vault_path=Path("/vault"),
+        reader=reader,
     )
 
 

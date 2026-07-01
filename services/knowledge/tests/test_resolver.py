@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from epicurus_knowledge.reader import DiskVaultReader
 from epicurus_knowledge.refs import SOURCE_DOC, SOURCE_NOTE, encode_ref
 from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
 
@@ -39,8 +40,8 @@ def _resolver(
         "# Knowledge service\n\nDocs body here.", encoding="utf-8"
     )
     return KnowledgeResolver(
-        vault_path=vault,
-        docs_path=docs,
+        vault_reader=DiskVaultReader(vault),
+        docs_reader=DiskVaultReader(docs),
         note_index=note_ledger or _FakeLedger(),  # type: ignore[arg-type]
         doc_index=doc_ledger or _FakeLedger(),  # type: ignore[arg-type]
         tenant="t1",

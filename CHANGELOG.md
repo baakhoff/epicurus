@@ -397,6 +397,19 @@ images to GHCR.
 
 ### Changed
 
+- **Knowledge reads the vault through the core file API — its `/data` mount is gone** (#346) —
+  the read-path tail of the file-space migration. A new `VaultReader` seam (ADR-0070) puts every
+  read site — the incremental indexer, the editor's `read_doc`/`list_docs`, the attachment picker,
+  the hover-card resolver, the suggestion-review diff, and the agent read tools — behind one
+  interface with two backends: the default **`ApiVaultReader`** speaks `PlatformClient.files_*`
+  to the core (so reads follow the swappable local-FS ↔ S3 backend and the module mounts **no**
+  `/data` volume — the core is now the **sole** mounter), and **`DiskVaultReader`** serves watch
+  mode (#232) and the bundled-docs tree. A core outage **raises and retries** (capped backoff) —
+  it can never read as an empty vault and de-index everything; a genuinely absent vault reads
+  empty. **Operator note:** Obsidian **watch mode** now needs a `docker-compose.override.yml`
+  re-adding the read-only vault mount — see `docs/developer/obsidian-sync.md` for the recipe.
+  `knowledge` 0.19.1→0.20.0.
+
 - **Retire the `files-init` one-shot — the core image's entrypoint provisions the tenant
   file-space root** (#421) — after the file-space migration (Phases 2–4) the core is the sole
   writer of `/data` (storage/notes mount nothing, knowledge mounts read-only), and `files-init`

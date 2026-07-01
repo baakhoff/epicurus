@@ -1,4 +1,4 @@
-"""The vault **read** seam — how knowledge reads its markdown tree (#346, ADR-0064).
+"""The vault **read** seam — how knowledge reads its markdown tree (#346, ADR-0070).
 
 Knowledge's writes already go through the core-owned file API (ADR-0064); this seam moves
 its *reads* there too, so the module mounts no ``/data`` volume in the common case and the

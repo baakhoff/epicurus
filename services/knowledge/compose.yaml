@@ -32,7 +32,7 @@ services:
       # docs/developer/obsidian-sync.md for the same-host and headless (Git) recipes.
       VAULT_WATCH: ${VAULT_WATCH:-false}
       VAULT_WATCH_DEBOUNCE_MS: ${VAULT_WATCH_DEBOUNCE_MS:-1500}
-    # No /data mount (#346, ADR-0064): knowledge reads AND writes the vault through the
+    # No /data mount (#346, ADR-0070): knowledge reads AND writes the vault through the
     # core-owned file API (PlatformClient.files_*), so the read path follows the swappable
     # local-FS ↔ S3 backend (constraint #3) and the module holds no shared-volume mount — the
     # core is the sole mounter of /data (storage went the same way in ADR-0063). Watch mode is

@@ -72,7 +72,7 @@ def create_app() -> FastAPI:
     # (settings.docs_path, /docs) are deliberately NOT scoped — they are shared & read-only.
     vault_root = settings.vault_path.parent / settings.default_tenant_id / settings.vault_path.name
 
-    # The vault READ backend (#346, ADR-0064). Default (normal mode): the core file API, so
+    # The vault READ backend (#346, ADR-0070). Default (normal mode): the core file API, so
     # the module mounts no /data volume and reads follow the swappable FileStore backend
     # (constraint #3). Watch mode (#232): the externally-owned Obsidian vault is bind-mounted
     # and inotify-watched — no file-API analogue — so it reads the disk mount directly, as
@@ -121,7 +121,7 @@ def create_app() -> FastAPI:
     vault_pages = VaultPages(
         vault_root,
         vault_indexer,
-        # Reads and writes both go through the core file API (ADR-0064, #346): the core
+        # Reads and writes both go through the core file API (ADR-0064/ADR-0070, #346): the core
         # FileStore root is /data/<tenant>; the vault is /data/<tenant>/knowledge, so the core
         # prefix is the vault dir name and a vault-relative `rel` → `knowledge/rel`.
         platform=platform,

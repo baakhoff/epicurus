@@ -101,7 +101,7 @@ def safe_vault_rel(rel: str) -> str:
 
     The **read-path** counterpart to :func:`safe_relative`. Where that resolves against a
     real on-disk root and returns a ``Path``, this is filesystem-independent: the vault is
-    read through the core file API (ADR-0064), which enforces its own containment, so the
+    read through the core file API (ADR-0070), which enforces its own containment, so the
     module holds no ``/data`` mount to resolve against. Rejects empty, absolute,
     ``..``-traversal, and non-``.md`` paths (400), then hands the :class:`~reader.VaultReader`
     a clean ``rel`` it maps to the core key.

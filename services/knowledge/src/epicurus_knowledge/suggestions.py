@@ -307,7 +307,7 @@ class SuggestionReview:
         self._store = store
         self._pages = pages
         self._indexer = indexer
-        # Reads the current content for the review diff through the file API (#346, ADR-0064).
+        # Reads the current content for the review diff through the file API (#346, ADR-0070).
         self._reader = reader
         self._tenant = tenant
         # Watch mode (#232, ADR-0035): the vault is externally owned, so an approval —

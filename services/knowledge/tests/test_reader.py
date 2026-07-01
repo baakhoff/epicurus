@@ -1,4 +1,4 @@
-"""Tests for the VaultReader read seam (#346, ADR-0064).
+"""Tests for the VaultReader read seam (#346, ADR-0070).
 
 The two backends — :class:`DiskVaultReader` and :class:`ApiVaultReader` — must behave
 identically over the same tree, so most tests are parametrized over both. The API reader is

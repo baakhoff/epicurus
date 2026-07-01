@@ -93,7 +93,7 @@ class KnowledgeIndexer:
         vault_path: Root directory to read ``.md`` files from. A convenience: when no
             ``reader`` is given it becomes a :class:`~reader.DiskVaultReader` over this path
             (the bundled docs source, the watch-mode vault, and the tests).
-        reader: The vault read backend (#346, ADR-0064). The default (normal mode) is an
+        reader: The vault read backend (#346, ADR-0070). The default (normal mode) is an
             :class:`~reader.ApiVaultReader` so the module reads through the core file API and
             mounts no ``/data`` volume; watch mode and the docs source pass a disk reader.
             Exactly one of ``reader`` / ``vault_path`` supplies the read root.

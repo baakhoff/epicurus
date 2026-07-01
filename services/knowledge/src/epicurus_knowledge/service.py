@@ -244,7 +244,7 @@ def build_module(
         tenant: The tenant whose suggestion queue the propose tool writes to.
         vault_path: Vault root — the (filesystem-independent) boundary the propose tools
             path-confine an edit target against (``safe_*``; no mount needed to validate).
-        reader: The vault read backend (#346, ADR-0064) the agent's read tools —
+        reader: The vault read backend (#346, ADR-0070) the agent's read tools —
             ``knowledge_list_projects`` / ``knowledge_tree`` / ``knowledge_read_document`` —
             and the create-tool existence guard use, so they read through the core file API.
     """

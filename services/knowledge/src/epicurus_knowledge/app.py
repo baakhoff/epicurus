@@ -26,6 +26,7 @@ from epicurus_knowledge.db import DocIndex, NoteIndex, VersionStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
+from epicurus_knowledge.reader import ApiVaultReader, DiskVaultReader
 from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
 from epicurus_knowledge.runner import IndexRunner
 from epicurus_knowledge.service import MODULE_NAME, build_module, module_docs
@@ -66,17 +67,28 @@ def create_app() -> FastAPI:
         module=MODULE_NAME,  # so the indexer can resolve its embedding-model slot (#128)
     )
 
-    # Tenant-scope the file tree (constraint #1): <files-root>/<tenant>/knowledge. The whole
-    # epicurus-files volume mounts at /data; the on-disk vault lives under the tenant segment
-    # so the layout stays per-tenant even on the shared volume. The bundled platform docs
+    # Tenant-scope the file tree (constraint #1): the vault is <files-root>/<tenant>/knowledge,
+    # i.e. the core key ``knowledge/…`` under the tenant root. The bundled platform docs
     # (settings.docs_path, /docs) are deliberately NOT scoped — they are shared & read-only.
     vault_root = settings.vault_path.parent / settings.default_tenant_id / settings.vault_path.name
+
+    # The vault READ backend (#346, ADR-0064). Default (normal mode): the core file API, so
+    # the module mounts no /data volume and reads follow the swappable FileStore backend
+    # (constraint #3). Watch mode (#232): the externally-owned Obsidian vault is bind-mounted
+    # and inotify-watched — no file-API analogue — so it reads the disk mount directly, as
+    # before. The bundled docs are always an image-mounted disk tree, outside the file space.
+    vault_reader = (
+        DiskVaultReader(vault_root)
+        if settings.vault_watch
+        else ApiVaultReader(platform, settings.vault_path.name)
+    )
+    docs_reader = DiskVaultReader(settings.docs_path)
 
     vault_indexer = KnowledgeIndexer(
         note_index,
         qdrant,
         platform,
-        vault_path=vault_root,
+        reader=vault_reader,
         tenant=settings.default_tenant_id,
         collection_base="knowledge",
         chunk_max_chars=settings.chunk_max_chars,
@@ -86,7 +98,7 @@ def create_app() -> FastAPI:
         doc_index,
         qdrant,
         platform,
-        vault_path=settings.docs_path,
+        reader=docs_reader,
         tenant=settings.default_tenant_id,
         collection_base="docs",
         chunk_max_chars=settings.chunk_max_chars,
@@ -109,11 +121,12 @@ def create_app() -> FastAPI:
     vault_pages = VaultPages(
         vault_root,
         vault_indexer,
-        # Writes go through the core file API (ADR-0064): /data is mounted read-only here.
-        # The core FileStore root is /data/<tenant>; the vault is /data/<tenant>/knowledge,
-        # so the core prefix is the vault dir name and a vault-relative `rel` → `knowledge/rel`.
+        # Reads and writes both go through the core file API (ADR-0064, #346): the core
+        # FileStore root is /data/<tenant>; the vault is /data/<tenant>/knowledge, so the core
+        # prefix is the vault dir name and a vault-relative `rel` → `knowledge/rel`.
         platform=platform,
         core_prefix=settings.vault_path.name,
+        reader=vault_reader,
         read_only=vault_read_only,
         # Surface the bundled platform docs as the read-only "__docs__" scope (#KB-refactor).
         docs_path=settings.docs_path,
@@ -124,12 +137,12 @@ def create_app() -> FastAPI:
         suggestion_store,
         vault_pages,
         vault_indexer,
-        vault_path=vault_root,
+        reader=vault_reader,
         tenant=settings.default_tenant_id,
         read_only=vault_read_only,
     )
     # build_module takes the review + platform so its propose tools can auto-apply when the
-    # operator has turned review off (#KB-refactor).
+    # operator has turned review off (#KB-refactor); the reader backs the agent read tools.
     module = build_module(
         vault_indexer,
         docs_indexer,
@@ -139,6 +152,7 @@ def create_app() -> FastAPI:
         platform,
         tenant=settings.default_tenant_id,
         vault_path=vault_root,
+        reader=vault_reader,
     )
     mcp_app = module.http_app()
 
@@ -215,14 +229,14 @@ def create_app() -> FastAPI:
     app.include_router(create_pages_router(vault_pages))
 
     # Attachment source (#137): pick a vault doc to attach to a chat turn as context.
-    app.include_router(create_attachments_router(VaultAttachments(vault_root)))
+    app.include_router(create_attachments_router(VaultAttachments(vault_reader)))
 
     # Hover-card resolver (#143): a cited vault note or platform doc → a HoverCard.
     app.include_router(
         create_resolver_router(
             KnowledgeResolver(
-                vault_path=vault_root,
-                docs_path=settings.docs_path,
+                vault_reader=vault_reader,
+                docs_reader=docs_reader,
                 note_index=note_index,
                 doc_index=doc_index,
                 tenant=settings.default_tenant_id,

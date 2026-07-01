@@ -23,23 +23,20 @@ services:
       # base path; the service inserts the DEFAULT_TENANT_ID segment. Each top-level folder
       # under it is a "project" (knowledge base). Storage indexes the same tree read-only.
       VAULT_PATH: ${VAULT_PATH:-/data/knowledge}
-      # Live vault sync (#232): watch the bind-mounted vault and re-index on change, so
-      # edits Obsidian Sync lands on disk show up in search without a manual re-index.
-      # Off by default. Enabling it makes the vault **externally owned** — the Knowledge
-      # editor page goes read-only and Obsidian becomes the sole author (ADR-0035). Use
-      # it when KNOWLEDGE_HOST_VAULT points at an Obsidian-synced folder; see
+      # Live vault sync (#232): watch a bind-mounted vault and re-index on change, so edits
+      # Obsidian Sync lands on disk show up in search without a manual re-index. Off by
+      # default. Enabling it makes the vault **externally owned** — the Knowledge editor page
+      # goes read-only and Obsidian becomes the sole author (ADR-0035) — and it reads the vault
+      # from a disk mount (the inotify watcher has no file-API analogue). So watch mode also
+      # needs a compose override that mounts the vault back into this container; see
       # docs/developer/obsidian-sync.md for the same-host and headless (Git) recipes.
       VAULT_WATCH: ${VAULT_WATCH:-false}
       VAULT_WATCH_DEBOUNCE_MS: ${VAULT_WATCH_DEBOUNCE_MS:-1500}
-    volumes:
-      # The SHARED file space, mounted READ-ONLY (#356, ADR-0064): knowledge now writes the
-      # vault through the core-owned file API (PlatformClient.files_*), so it mounts the volume
-      # read-only purely for the indexer's os.walk/read, the doc reads, the resolver/attachments,
-      # and the live-vault watcher. The core owns /data/<tenant>/knowledge writes (one swappable
-      # local-FS ↔ S3 backend) and provisions the tenant root from its image entrypoint (#421);
-      # the indexer tolerates a not-yet-created knowledge/ dir. storage likewise mounts read-only
-      # for the Files view. Default an empty named volume; set EPICURUS_FILES_ROOT to a host dir.
-      - ${EPICURUS_FILES_ROOT:-epicurus-files}:/data:ro
+    # No /data mount (#346, ADR-0064): knowledge reads AND writes the vault through the
+    # core-owned file API (PlatformClient.files_*), so the read path follows the swappable
+    # local-FS ↔ S3 backend (constraint #3) and the module holds no shared-volume mount — the
+    # core is the sole mounter of /data (storage went the same way in ADR-0063). Watch mode is
+    # the one exception and re-adds a read-only mount via an override (obsidian-sync.md).
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${KNOWLEDGE_PORT:-8085}:8080"
     depends_on:
@@ -64,4 +61,5 @@ services:
     networks: [epicurus]
 
 # The shared `epicurus-files` volume is declared in the data plane
-# (infra/compose/docker-compose.yml); storage mounts the same volume read-only.
+# (infra/compose/docker-compose.yml) and mounted only by the core now — knowledge and storage
+# both reach the file space through the core file API. Watch mode's override remounts it here.

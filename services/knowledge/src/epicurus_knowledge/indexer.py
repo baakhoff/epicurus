@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +29,7 @@ from qdrant_client.models import (
 from epicurus_core import PlatformClient, get_logger, scope_collection
 from epicurus_knowledge.chunker import Chunk, chunk_note
 from epicurus_knowledge.db import DocIndex, NoteIndex
+from epicurus_knowledge.reader import DiskVaultReader, VaultReader
 
 
 class SearchHit(TypedDict):
@@ -56,6 +56,19 @@ def _content_hash(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _mtime_ns(mtime: float) -> int:
+    """A :class:`~epicurus_core.files.FileEntry` float ``mtime`` (seconds) as integer ns.
+
+    The ledger tracks ``mtime_ns`` for the fast "unchanged" skip. Reads now come from the
+    file API, which reports ``mtime`` as float seconds (``os.stat_result.st_mtime``, or S3
+    ``LastModified``), so the ns value is derived, not the raw ``st_mtime_ns``. It is stable
+    run-to-run for an unchanged file, so the skip still holds; the first pass after this
+    change re-reads each file once (its stored raw-ns won't match the derived value) but the
+    content hash matches, so nothing re-embeds — a one-time reconcile, no data churn.
+    """
+    return round(mtime * 1_000_000_000)
+
+
 @dataclass(slots=True)
 class _PendingNote:
     """A new/changed note awaiting batched embedding during a ``run`` (#230)."""
@@ -77,7 +90,13 @@ class KnowledgeIndexer:
         note_index: Postgres-backed file hash/mtime tracker (NoteIndex or DocIndex).
         qdrant: Async Qdrant client.
         platform: Platform API client (embeddings come from the core).
-        vault_path: Root directory to walk for ``.md`` files.
+        vault_path: Root directory to read ``.md`` files from. A convenience: when no
+            ``reader`` is given it becomes a :class:`~reader.DiskVaultReader` over this path
+            (the bundled docs source, the watch-mode vault, and the tests).
+        reader: The vault read backend (#346, ADR-0064). The default (normal mode) is an
+            :class:`~reader.ApiVaultReader` so the module reads through the core file API and
+            mounts no ``/data`` volume; watch mode and the docs source pass a disk reader.
+            Exactly one of ``reader`` / ``vault_path`` supplies the read root.
         tenant: Tenant ID — scopes the Qdrant collection name.
         collection_base: Base name passed to ``scope_collection``; becomes
             ``<tenant>__<base>`` in Qdrant.  Defaults to ``"knowledge"`` for
@@ -95,16 +114,21 @@ class KnowledgeIndexer:
         qdrant: AsyncQdrantClient,
         platform: PlatformClient,
         *,
-        vault_path: Path,
+        vault_path: Path | None = None,
+        reader: VaultReader | None = None,
         tenant: str,
         collection_base: str = "knowledge",
         chunk_max_chars: int = 2000,
         embed_batch_size: int = 64,
     ) -> None:
+        if reader is None:
+            if vault_path is None:
+                raise ValueError("KnowledgeIndexer needs a reader or a vault_path")
+            reader = DiskVaultReader(vault_path)
         self._notes = note_index
         self._qdrant = qdrant
         self._platform = platform
-        self._vault = vault_path
+        self._reader = reader
         self._tenant = tenant
         self._max_chars = chunk_max_chars
         self._batch_size = max(1, embed_batch_size)
@@ -294,18 +318,23 @@ class KnowledgeIndexer:
         file rather than walking the whole vault. Any prior vectors for the path are
         deleted first so a shrunk document leaves no stale chunks behind. The DB
         ledger is updated so the next full ``run`` treats the file as unchanged.
+
+        The content is read back through the file API (the core wrote it, ADR-0064); a
+        vanished file (``None``) raises so the caller's best-effort ``indexed=False`` path
+        fires rather than a silent no-op.
         """
-        fpath = self._vault / rel
-        raw = fpath.read_bytes()
-        content_hash = _content_hash(raw)
+        content = await self._reader.read_text(rel)
+        if content is None:
+            raise FileNotFoundError(rel)
+        content_hash = _content_hash(content.encode("utf-8"))
         if await self._notes.get(tenant=self._tenant, note_path=rel) is not None:
             await self._delete_note_vectors(rel)
-        content = raw.decode("utf-8", errors="replace")
         chunk_count = await self._index_note(rel, content, model=await self._embedding_model())
+        entry = await self._reader.stat(rel)
         await self._notes.upsert(
             tenant=self._tenant,
             note_path=rel,
-            mtime_ns=fpath.stat().st_mtime_ns,
+            mtime_ns=_mtime_ns(entry.mtime) if entry is not None else 0,
             content_hash=content_hash,
             chunk_count=chunk_count,
         )
@@ -380,74 +409,71 @@ class KnowledgeIndexer:
         pending: list[_PendingNote] = []
         pending_chunks = 0
 
-        if not self._vault.exists():
-            log.warning("vault path does not exist", path=str(self._vault))
+        # The read backend reports the vault root missing as "does not exist" — a
+        # not-yet-provisioned ``knowledge/`` dir, not an error (a core outage *raises* from
+        # ``md_entries`` below and the run retries, so an unreachable core never looks empty
+        # and de-indexes everything).
+        if not await self._reader.exists():
+            log.warning("vault path does not exist")
             return {"indexed": 0, "deleted": 0, "unchanged": 0}
 
         model = await self._embedding_model()  # operator's choice, resolved once per run (#128)
 
-        for dirpath, _dirs, filenames in os.walk(self._vault):
-            dir_abs = Path(dirpath)
-            for fname in filenames:
-                if not fname.endswith(".md"):
-                    continue
-                fpath = dir_abs / fname
-                try:
-                    st = fpath.stat()
-                except OSError:
-                    continue
-                rel = fpath.relative_to(self._vault).as_posix()
-                seen_paths.add(rel)
+        for entry in await self._reader.md_entries():
+            rel = entry.path
+            seen_paths.add(rel)
 
-                mtime_ns = st.st_mtime_ns
-                existing = await self._notes.get(tenant=self._tenant, note_path=rel)
+            mtime_ns = _mtime_ns(entry.mtime)
+            existing = await self._notes.get(tenant=self._tenant, note_path=rel)
 
-                if existing is not None and existing.mtime_ns == mtime_ns:
-                    # Fast path: mtime unchanged, skip reading the file.
-                    unchanged += 1
-                    continue
+            if existing is not None and existing.mtime_ns == mtime_ns:
+                # Fast path: mtime unchanged, skip reading the file.
+                unchanged += 1
+                continue
 
-                raw = fpath.read_bytes()
-                content_hash = _content_hash(raw)
+            content = await self._reader.read_text(rel)
+            if content is None:
+                # Vanished mid-walk, or unreadable (too large / binary via the file API).
+                continue
+            content_hash = _content_hash(content.encode("utf-8"))
 
-                if existing is not None and existing.content_hash == content_hash:
-                    # File was touched but content is identical; update mtime only.
-                    await self._notes.upsert(
-                        tenant=self._tenant,
-                        note_path=rel,
-                        mtime_ns=mtime_ns,
-                        content_hash=content_hash,
-                        chunk_count=existing.chunk_count,
-                    )
-                    unchanged += 1
-                    continue
+            if existing is not None and existing.content_hash == content_hash:
+                # File was touched but content is identical; update mtime only.
+                await self._notes.upsert(
+                    tenant=self._tenant,
+                    note_path=rel,
+                    mtime_ns=mtime_ns,
+                    content_hash=content_hash,
+                    chunk_count=existing.chunk_count,
+                )
+                unchanged += 1
+                continue
 
-                # New or genuinely changed note — re-index.
-                if existing is not None:
-                    await self._delete_note_vectors(rel)
+            # New or genuinely changed note — re-index.
+            if existing is not None:
+                await self._delete_note_vectors(rel)
 
-                content = raw.decode("utf-8", errors="replace")
-                chunks = chunk_note(content, self._max_chars)
-                indexed += 1
-                if not chunks:
-                    # No embeddable content, but record the file so it isn't re-read
-                    # every run (mirrors _index_note returning 0).
-                    await self._notes.upsert(
-                        tenant=self._tenant,
-                        note_path=rel,
-                        mtime_ns=mtime_ns,
-                        content_hash=content_hash,
-                        chunk_count=0,
-                    )
-                    continue
+            chunks = chunk_note(content, self._max_chars)
+            indexed += 1
+            if not chunks:
+                # No embeddable content, but record the file so it isn't re-read
+                # every run (mirrors _index_note returning 0).
+                await self._notes.upsert(
+                    tenant=self._tenant,
+                    note_path=rel,
+                    mtime_ns=mtime_ns,
+                    content_hash=content_hash,
+                    chunk_count=0,
+                )
+                continue
 
-                pending.append(_PendingNote(rel, mtime_ns, content_hash, chunks))
-                pending_chunks += len(chunks)
-                log.debug("queued note", path=rel, chunks=len(chunks))
-                if pending_chunks >= self._batch_size:
-                    await self._flush_batch(pending, model=model)
-                    pending.clear()
-                    pending_chunks = 0
+            pending.append(_PendingNote(rel, mtime_ns, content_hash, chunks))
+            pending_chunks += len(chunks)
+            log.debug("queued note", path=rel, chunks=len(chunks))
+            if pending_chunks >= self._batch_size:
+                await self._flush_batch(pending, model=model)
+                pending.clear()
+                pending_chunks = 0
 
         # Embed and persist any notes still queued below the batch threshold.
         await self._flush_batch(pending, model=model)

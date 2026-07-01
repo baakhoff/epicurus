@@ -17,12 +17,14 @@ changes (debounced incremental rescan, `FILES_WATCH` / `FILES_WATCH_DEBOUNCE_MS`
 > **Phased rollout (ADR-0052 → ADR-0065).** This page documents **Phases 1–4**: the abstraction
 > and wire contract (Phase 1), the core taking ownership of the volume mount, the file index, and
 > the Files browser / read / download with the storage module reading through this API (Phase 2),
-> the **knowledge** module routing its writes through this API while its mount drops to
-> read-only (Phase 3, #356/ADR-0064), and the **notes** module routing its `.md`-mirror writes
-> through this API and **dropping its `/data` mount entirely** (Phase 4, #357/ADR-0065 — see the
-> phase plan below). The tenant-root chown now lives in the **core image's entrypoint**
-> (#421/ADR-0069), retiring the old `files-init` one-shot: the file space is fully core-owned with
-> no separate provisioning container.
+> the **knowledge** module routing its writes through this API — then its reads too, **dropping
+> its `/data` mount** in normal mode (Phase 3 + tail, #356/ADR-0064 + #346/ADR-0070), and the
+> **notes** module routing its `.md`-mirror writes through this API and **dropping its `/data`
+> mount entirely** (Phase 4, #357/ADR-0065 — see the phase plan below). The tenant-root chown now
+> lives in the **core image's entrypoint** (#421/ADR-0069), retiring the old `files-init` one-shot:
+> the file space is fully core-owned, the **core is the sole mounter of `/data`**, and no module
+> mounts it (watch-mode knowledge is the lone opt-in exception — an external Obsidian vault on a
+> disk mount, not the core-owned space).
 
 ## The epicurus-core API
 
@@ -130,12 +132,14 @@ internal network. Uses **no AI**.
   file index (startup scan + watcher), and the Files browser / read / download move to the core
   (`/platform/v1/files/{page,search,download}`); the storage module reads the file space through
   this API and contributes its objects (read/move/download fall back to it).
-- **Phase 3 (done, #356/ADR-0064):** the **knowledge** module is now a **write-consumer** of
-  the file API — after storage (Phase 2), it is the second module to route its writes through
-  `PlatformClient.files_*` (the editor save, the file-tree CRUD, and the agent's approved
-  suggestions; a vault path maps to the core path `knowledge/<rel>`). Its `/data` mount drops to
-  **read-only** (reads + the incremental indexer + the #232 watcher stay on it); a follow-up
-  migrates the reads off the mount so it can be dropped entirely.
+- **Phase 3 (done, #356/ADR-0064) + read-path tail (done, #346/ADR-0070):** the **knowledge**
+  module is now a full **consumer** of the file API. Phase 3 routed its writes through
+  `PlatformClient.files_*` (the editor save, the file-tree CRUD, the agent's approved suggestions;
+  a vault path maps to the core path `knowledge/<rel>`) and dropped the mount to read-only; the
+  tail (#346/ADR-0070) routes its **reads** — the incremental indexer, `read_doc`/`list_docs`,
+  attachments, the resolver, the review diff, the agent read tools — through the same API behind a
+  `VaultReader` seam, so knowledge **holds no `/data` mount** in normal mode. Watch mode (#232) is
+  the lone exception: its inotify watcher reads a disk mount, re-added via a compose override.
 - **Phase 4 (done, #357/ADR-0065):** the **notes** module is now the **third write-consumer** of
   the file API — after storage (Phase 2) and knowledge (Phase 3). Its `.md` mirror (`write` /
   `delete` / startup `backfill`) routes through `PlatformClient.files_*` at core path

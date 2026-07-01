@@ -41,17 +41,16 @@ from epicurus_core import (
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.module_docs import ModuleDocsIndexer
 from epicurus_knowledge.pages import VAULT_PAGE_ID
+from epicurus_knowledge.reader import VaultReader
 from epicurus_knowledge.refs import (
     KNOWLEDGE_KIND,
     SOURCE_DOC,
     SOURCE_NOTE,
     doc_title,
     encode_ref,
-    iter_projects,
-    iter_tree_nodes,
     safe_dir_relative,
     safe_project,
-    safe_relative,
+    safe_vault_rel,
 )
 from epicurus_knowledge.suggestions import (
     REVIEW_PAGE_ID,
@@ -228,6 +227,7 @@ def build_module(
     *,
     tenant: str,
     vault_path: Path,
+    reader: VaultReader,
 ) -> EpicurusModule:
     """Build the knowledge module and register its tools.
 
@@ -242,11 +242,15 @@ def build_module(
         review: Applies a staged change when the operator has review turned off.
         platform: Reads the suggestions-review on/off setting (#KB-refactor).
         tenant: The tenant whose suggestion queue the propose tool writes to.
-        vault_path: Vault root, used to path-confine a proposed edit's target.
+        vault_path: Vault root — the (filesystem-independent) boundary the propose tools
+            path-confine an edit target against (``safe_*``; no mount needed to validate).
+        reader: The vault read backend (#346, ADR-0064) the agent's read tools —
+            ``knowledge_list_projects`` / ``knowledge_tree`` / ``knowledge_read_document`` —
+            and the create-tool existence guard use, so they read through the core file API.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.19.1",
+        version="0.20.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -428,11 +432,11 @@ def build_module(
         """
         try:
             # Path-confine to the vault (``.md`` only, no traversal) before staging it.
-            target = safe_relative(vault_path, path)
-        except Exception as exc:  # HTTPException(detail=...) from safe_relative
+            rel = safe_vault_rel(path)
+        except Exception as exc:  # HTTPException(detail=...) from safe_vault_rel
             detail = getattr(exc, "detail", str(exc))
             return tool_envelope(f"Cannot propose change to {path!r}: {detail}", [])
-        if reject_existing and target.exists():
+        if reject_existing and await reader.exists(rel):
             return tool_envelope(
                 f"{path!r} already exists — use knowledge_propose_edit to update it instead.",
                 [],
@@ -525,7 +529,7 @@ def build_module(
         what exists before reading, organising, or proposing changes. A document inside a
         knowledge base is addressed as ``<project>/<path>.md``.
         """
-        projects = iter_projects(vault_path)
+        projects = await reader.projects()
         if not projects:
             return "No knowledge bases yet. Propose one with knowledge_propose_project(name)."
         return "Knowledge bases:\n" + "\n".join(f"- {p}" for p in projects)
@@ -538,13 +542,13 @@ def build_module(
         knowledge base. Use this to learn where notes live so you can read them, decide
         where new notes belong, or plan a move. Paths are ``<project>/<folder>/<doc>.md``.
         """
-        projects = [project.strip()] if project.strip() else iter_projects(vault_path)
+        projects = [project.strip()] if project.strip() else await reader.projects()
         if not projects:
             return "No knowledge bases yet."
         lines: list[str] = []
         for proj in projects:
             lines.append(f"{proj}/")
-            nodes = iter_tree_nodes(vault_path, subdir=proj)
+            nodes = await reader.tree(subdir=proj)
             if not nodes:
                 lines.append("  (empty)")
             for node in nodes:
@@ -564,13 +568,14 @@ def build_module(
         or the document does not exist.
         """
         try:
-            target = safe_relative(vault_path, path)
-        except Exception as exc:  # HTTPException(detail=...) from safe_relative
+            rel = safe_vault_rel(path)
+        except Exception as exc:  # HTTPException(detail=...) from safe_vault_rel
             detail = getattr(exc, "detail", str(exc))
             return f"Cannot read {path!r}: {detail}"
-        if not target.is_file():
+        content = await reader.read_text(rel)
+        if content is None:
             return f"No such document: {path}"
-        return target.read_text(encoding="utf-8", errors="replace")
+        return content
 
     # ── Structural changes (staged for review, like every agent write) ───────────
 

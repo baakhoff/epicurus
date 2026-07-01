@@ -30,6 +30,7 @@ from epicurus_core.contracts import ToolEnvelope
 from epicurus_core.files import FileEntry, LocalFileStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
+from epicurus_knowledge.reader import DiskVaultReader
 from epicurus_knowledge.service import build_module
 from epicurus_knowledge.suggestions import (
     SuggestionReview,
@@ -104,6 +105,12 @@ class _FilePlatform:
 
     async def files_list(self, path: str = "") -> list[FileEntry]:
         return await self._store.list_dir(tenant=FILE_TENANT, path=path)
+
+    async def files_read(self, path: str) -> str:
+        try:
+            return await self._store.read_text(tenant=FILE_TENANT, path=path)
+        except FileNotFoundError as exc:
+            raise _status_error(404) from exc
 
     async def files_delete(self, path: str) -> bool:
         return await self._store.delete(tenant=FILE_TENANT, path=path)
@@ -234,7 +241,7 @@ async def _review(tmp_path: Path) -> tuple[SuggestionReview, SuggestionStore, _F
     indexer = _FakeIndexer()
     vault = _make_vault(tmp_path)
     pages = _pages(tmp_path, indexer)
-    review = SuggestionReview(store, pages, indexer, vault_path=vault, tenant=TENANT)  # type: ignore[arg-type]
+    review = SuggestionReview(store, pages, indexer, reader=DiskVaultReader(vault), tenant=TENANT)
     return review, store, indexer
 
 
@@ -331,9 +338,9 @@ async def _read_only_review(
         store,
         pages,
         indexer,
-        vault_path=vault,
+        reader=DiskVaultReader(vault),
         tenant=TENANT,
-        read_only=True,  # type: ignore[arg-type]
+        read_only=True,
     )
     return review, store, indexer
 
@@ -452,11 +459,20 @@ def _module_with_store(store: SuggestionStore, files_root: Path, *, review_on: b
     docs = AsyncMock(spec=KnowledgeIndexer)
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
     pages = _pages(files_root, vault_indexer)
-    review = SuggestionReview(store, pages, vault_indexer, vault_path=vault, tenant=TENANT)  # type: ignore[arg-type]
+    reader = DiskVaultReader(vault)
+    review = SuggestionReview(store, pages, vault_indexer, reader=reader, tenant=TENANT)
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=review_on)
     return build_module(
-        vault_indexer, docs, module_docs, store, review, platform, tenant=TENANT, vault_path=vault
+        vault_indexer,
+        docs,
+        module_docs,
+        store,
+        review,
+        platform,
+        tenant=TENANT,
+        vault_path=vault,
+        reader=reader,
     )
 
 

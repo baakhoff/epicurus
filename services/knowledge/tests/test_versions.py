@@ -188,6 +188,12 @@ class _FilePlatform:
     async def files_list(self, path: str = "") -> list[FileEntry]:
         return await self._store.list_dir(tenant=FILE_TENANT, path=path)
 
+    async def files_read(self, path: str) -> str:
+        try:
+            return await self._store.read_text(tenant=FILE_TENANT, path=path)
+        except FileNotFoundError as exc:
+            raise _status_error(404) from exc
+
     async def files_delete(self, path: str) -> bool:
         return await self._store.delete(tenant=FILE_TENANT, path=path)
 
@@ -250,9 +256,9 @@ def test_editor_data_is_versioned_by_default() -> None:
     assert EditorData().versioned is True
 
 
-def test_list_docs_reports_versioned(tmp_path: Path) -> None:
+async def test_list_docs_reports_versioned(tmp_path: Path) -> None:
     pages = _make_pages(tmp_path, _FakeIndexer())
-    assert pages.list_docs().versioned is True
+    assert (await pages.list_docs()).versioned is True
 
 
 async def test_save_snapshots_a_version(tmp_path: Path) -> None:

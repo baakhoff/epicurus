@@ -28,7 +28,6 @@ from __future__ import annotations
 import difflib
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -41,7 +40,8 @@ from epicurus_core import get_logger
 from epicurus_core.db import ensure_columns
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages
-from epicurus_knowledge.refs import doc_title, safe_relative
+from epicurus_knowledge.reader import VaultReader
+from epicurus_knowledge.refs import doc_title, safe_vault_rel
 
 log = get_logger("knowledge.suggestions")
 
@@ -300,14 +300,15 @@ class SuggestionReview:
         pages: VaultPages,
         indexer: KnowledgeIndexer,
         *,
-        vault_path: Path,
+        reader: VaultReader,
         tenant: str,
         read_only: bool = False,
     ) -> None:
         self._store = store
         self._pages = pages
         self._indexer = indexer
-        self._vault = vault_path
+        # Reads the current content for the review diff through the file API (#346, ADR-0070).
+        self._reader = reader
         self._tenant = tenant
         # Watch mode (#232, ADR-0035): the vault is externally owned, so an approval —
         # which would write the vault — is refused. The agent may still *propose* (no
@@ -315,12 +316,9 @@ class SuggestionReview:
         # blocked. The operator makes the change in Obsidian instead.
         self._read_only = read_only
 
-    def _current_content(self, rel: str) -> str:
+    async def _current_content(self, rel: str) -> str:
         """The doc's current vault content, or ``""`` if it does not exist yet."""
-        target = safe_relative(self._vault, rel)
-        if not target.is_file():
-            return ""
-        return target.read_text(encoding="utf-8", errors="replace")
+        return await self._reader.read_text(safe_vault_rel(rel)) or ""
 
     async def list_review(self) -> ReviewData:
         """The pending queue, each content change paired with a diff against the live vault.
@@ -335,7 +333,7 @@ class SuggestionReview:
             current = ""
             content = ""
             if s.operation in _DIFF_OPERATIONS:
-                current = self._current_content(s.path)
+                current = await self._current_content(s.path)
                 content = "" if s.operation == "delete" else s.proposed_content
                 diff = _unified_diff(s.path, current, content)
             items.append(

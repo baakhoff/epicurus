@@ -13,7 +13,6 @@ docs** have no editor page, so they resolve to a card without a link.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
@@ -22,12 +21,13 @@ from fastapi import APIRouter, HTTPException
 from epicurus_core import HoverCard, HoverCardDetail, HoverCardLink, get_logger
 from epicurus_knowledge.db import DocIndex, NoteIndex
 from epicurus_knowledge.pages import VAULT_PAGE_ID
+from epicurus_knowledge.reader import VaultReader
 from epicurus_knowledge.refs import (
     KNOWLEDGE_KIND,
     SOURCE_DOC,
     decode_ref,
     doc_title,
-    safe_relative,
+    safe_vault_rel,
 )
 
 log = get_logger("knowledge.resolver")
@@ -48,14 +48,14 @@ class KnowledgeResolver:
     def __init__(
         self,
         *,
-        vault_path: Path,
-        docs_path: Path,
+        vault_reader: VaultReader,
+        docs_reader: VaultReader,
         note_index: NoteIndex,
         doc_index: DocIndex,
         tenant: str,
     ) -> None:
-        self._vault = vault_path
-        self._docs = docs_path
+        self._vault_reader = vault_reader
+        self._docs_reader = docs_reader
         self._note_index = note_index
         self._doc_index = doc_index
         self._tenant = tenant
@@ -67,14 +67,13 @@ class KnowledgeResolver:
         source, path = decode_ref(ref_id)
 
         is_doc = source == SOURCE_DOC
-        root = self._docs if is_doc else self._vault
+        reader = self._docs_reader if is_doc else self._vault_reader
         index: _IndexLedger = self._doc_index if is_doc else self._note_index
         display_path = f"docs/{path}" if is_doc else path
 
-        target = safe_relative(root, path)
-        if not target.is_file():
+        text = await reader.read_text(safe_vault_rel(path))
+        if text is None:
             raise HTTPException(status_code=404, detail=f"no such document: {display_path}")
-        text = target.read_text(encoding="utf-8", errors="replace")
 
         details = [HoverCardDetail(label="Path", value=display_path)]
         tags = _frontmatter_tags(text)

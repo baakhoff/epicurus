@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from epicurus_core.files import FileEntry, LocalFileStore
 from epicurus_knowledge.pages import VaultPages, create_pages_router
-from epicurus_knowledge.refs import iter_tree_nodes, safe_dir_relative
+from epicurus_knowledge.refs import safe_dir_relative
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -66,6 +66,9 @@ class _FilePlatform:
 
     async def files_list(self, path: str = "") -> list[FileEntry]:
         return await self._store.list_dir(tenant=TENANT, path=path)
+
+    async def files_read(self, path: str) -> str:
+        return await self._store.read_text(tenant=TENANT, path=path)
 
     async def files_delete(self, path: str) -> bool:
         return await self._store.delete(tenant=TENANT, path=path)
@@ -143,50 +146,12 @@ def test_safe_dir_relative_accepts_md_extension(tmp_path: Path) -> None:
     assert target == (tmp_path.resolve() / "notes.txt")
 
 
-# ── iter_tree_nodes ───────────────────────────────────────────────────────────
-
-
-def test_iter_tree_nodes_structure(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    nodes = iter_tree_nodes(vault)
-    paths = [(n["path"], n["type"]) for n in nodes]
-    # Dirs appear before their files; depth-first sorted order.
-    assert ("projects", "dir") in paths
-    assert ("projects/archived", "dir") in paths
-    assert ("projects/beta.md", "file") in paths
-    assert ("projects/archived/gamma.md", "file") in paths
-    assert ("alpha.md", "file") in paths
-
-
-def test_iter_tree_nodes_dirs_before_files_at_each_level(tmp_path: Path) -> None:
-    """Directories must appear before files at the same level."""
-    vault = _vault(tmp_path)
-    nodes = iter_tree_nodes(vault)
-    paths = [n["path"] for n in nodes]
-    # "projects" (dir) must come before "alpha.md" (file) at root level.
-    assert paths.index("projects") < paths.index("alpha.md")
-
-
-def test_iter_tree_nodes_empty_root(tmp_path: Path) -> None:
-    assert iter_tree_nodes(tmp_path / "absent") == []
-
-
-def test_iter_tree_nodes_skips_hidden_dirs(tmp_path: Path) -> None:
-    hidden = tmp_path / ".obsidian"
-    hidden.mkdir()
-    (hidden / "secret.md").write_text("x", encoding="utf-8")
-    (tmp_path / "visible.md").write_text("y", encoding="utf-8")
-    nodes = iter_tree_nodes(tmp_path)
-    paths = [n["path"] for n in nodes]
-    assert ".obsidian" not in paths
-    assert ".obsidian/secret.md" not in paths
-    assert "visible.md" in paths
-
-
+# The vault-tree walk itself (dir/file structure, ordering, hidden-dir skipping) is covered
+# by the VaultReader in test_reader.py; here we cover how the editor page surfaces it.
 # ── list_docs includes dirs and can_manage_files ──────────────────────────────
 
 
-def test_list_docs_includes_dirs_and_files(tmp_path: Path) -> None:
+async def test_list_docs_includes_dirs_and_files(tmp_path: Path) -> None:
     # The vault's top-level "projects" folder is now a knowledge base (project); list_docs
     # defaults to it and returns its contents scope-relative (#KB-refactor).
     pages = VaultPages(
@@ -195,7 +160,7 @@ def test_list_docs_includes_dirs_and_files(tmp_path: Path) -> None:
         platform=_FilePlatform(tmp_path),  # type: ignore[arg-type]
         core_prefix=CORE_PREFIX,
     )
-    data = pages.list_docs()
+    data = await pages.list_docs()
     assert data.scope == "projects"
     types = {d.path: d.type for d in data.docs}
     assert types["archived"] == "dir"

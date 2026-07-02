@@ -1,4 +1,8 @@
-"""Tests for knowledge as a chat attachment source (#137): picker + resolve."""
+"""Tests for knowledge as a chat attachment source (#137): picker + resolve.
+
+Attachments read the vault through a :class:`~epicurus_knowledge.reader.VaultReader`
+(#346); a :class:`DiskVaultReader` over a tmp tree backs these unit tests.
+"""
 
 from __future__ import annotations
 
@@ -10,20 +14,25 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
+from epicurus_knowledge.reader import DiskVaultReader
 from epicurus_knowledge.refs import SOURCE_DOC, SOURCE_NOTE, decode_ref, encode_ref
 
 
 def _vault(tmp_path: Path) -> Path:
-    (tmp_path / "alpha.md").write_text("# Alpha\nbody", encoding="utf-8")
+    (tmp_path / "alpha.md").write_text("# Alpha\nbody", encoding="utf-8", newline="\n")
     sub = tmp_path / "projects"
     sub.mkdir()
-    (sub / "beta.md").write_text("# Beta\n", encoding="utf-8")
+    (sub / "beta.md").write_text("# Beta\n", encoding="utf-8", newline="\n")
     (tmp_path / "skip.txt").write_text("ignored", encoding="utf-8")  # non-md is skipped
     return tmp_path
 
 
-def test_list_returns_vault_docs_as_items(tmp_path: Path) -> None:
-    items = VaultAttachments(_vault(tmp_path)).list()
+def _attachments(tmp_path: Path) -> VaultAttachments:
+    return VaultAttachments(DiskVaultReader(_vault(tmp_path)))
+
+
+async def test_list_returns_vault_docs_as_items(tmp_path: Path) -> None:
+    items = await _attachments(tmp_path).list()
     assert [i.title for i in items] == ["alpha", "beta"]
     assert all(i.kind == "knowledge" for i in items)
     # ref_id is opaque but decodes back to the (source, path) it names.
@@ -33,37 +42,37 @@ def test_list_returns_vault_docs_as_items(tmp_path: Path) -> None:
     ]
 
 
-def test_list_empty_when_no_vault(tmp_path: Path) -> None:
-    assert VaultAttachments(tmp_path / "absent").list() == []
+async def test_list_empty_when_no_vault(tmp_path: Path) -> None:
+    assert await VaultAttachments(DiskVaultReader(tmp_path / "absent")).list() == []
 
 
-def test_read_returns_document_text(tmp_path: Path) -> None:
-    att = VaultAttachments(_vault(tmp_path))
-    content = att.read(encode_ref(SOURCE_NOTE, "alpha.md"))
+async def test_read_returns_document_text(tmp_path: Path) -> None:
+    att = _attachments(tmp_path)
+    content = await att.read(encode_ref(SOURCE_NOTE, "alpha.md"))
     assert content.text == "# Alpha\nbody"
     assert content.title == "alpha"
     assert content.path == "alpha.md"
 
 
-def test_read_rejects_non_vault_source(tmp_path: Path) -> None:
+async def test_read_rejects_non_vault_source(tmp_path: Path) -> None:
     # A doc-source id never came from this (vault-only) picker.
-    att = VaultAttachments(_vault(tmp_path))
+    att = _attachments(tmp_path)
     with pytest.raises(HTTPException) as err:
-        att.read(encode_ref(SOURCE_DOC, "alpha.md"))
+        await att.read(encode_ref(SOURCE_DOC, "alpha.md"))
     assert err.value.status_code == 404
 
 
-def test_read_missing_is_404(tmp_path: Path) -> None:
-    att = VaultAttachments(_vault(tmp_path))
+async def test_read_missing_is_404(tmp_path: Path) -> None:
+    att = _attachments(tmp_path)
     with pytest.raises(HTTPException) as err:
-        att.read(encode_ref(SOURCE_NOTE, "ghost.md"))
+        await att.read(encode_ref(SOURCE_NOTE, "ghost.md"))
     assert err.value.status_code == 404
 
 
-def test_read_traversal_is_400(tmp_path: Path) -> None:
-    att = VaultAttachments(_vault(tmp_path))
+async def test_read_traversal_is_400(tmp_path: Path) -> None:
+    att = _attachments(tmp_path)
     with pytest.raises(HTTPException) as err:
-        att.read(encode_ref(SOURCE_NOTE, "../outside.md"))
+        await att.read(encode_ref(SOURCE_NOTE, "../outside.md"))
     assert err.value.status_code == 400
 
 
@@ -72,7 +81,7 @@ def test_read_traversal_is_400(tmp_path: Path) -> None:
 
 def _client(tmp_path: Path) -> TestClient:
     app = FastAPI()
-    app.include_router(create_attachments_router(VaultAttachments(_vault(tmp_path))))
+    app.include_router(create_attachments_router(_attachments(tmp_path)))
     return TestClient(app)
 
 

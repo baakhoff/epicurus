@@ -20,9 +20,13 @@ tenant-scoped Qdrant collections. Knowledge documents live under `/data/<tenant>
 in the **shared file space** (tenant-scoped, constraint #1) — the same tree the core indexes
 for the unified Files view (#KB-refactor). Since File-space Phase 3 (#356, ADR-0064) the
 module's **writes** route through the core-owned file API (`PlatformClient.files_*`, core path
-`knowledge/<rel>`) rather than touching the mount; the `/data` volume is now mounted
-**read-only** and serves only reads (the incremental indexer, the editor's read/list,
-attachments, hover-cards, and the #232 vault watcher). Host port **8085**.
+`knowledge/<rel>`); the read-path follow-up (#346, ADR-0070) moves the **reads** there too — the
+incremental indexer, the editor's read/list, attachments, hover-cards, and the review diff all
+go through the file API via a `VaultReader` seam, so in the default (normal) mode knowledge
+**mounts no `/data` volume at all** and the read path follows the swappable local-FS ↔ S3
+backend (constraint #3). The sole exception is **watch mode** (`VAULT_WATCH=true`, #232): the
+inotify vault watcher has no file-API analogue, so a watched external Obsidian vault is read
+from a disk mount, exactly as before. Host port **8085**.
 
 ## The contract it exposes
 
@@ -125,14 +129,14 @@ writes it back to the knowledge base and **re-indexes just that file** into
 agent (knowledge is agent-retrievable by default — contrast the Notes module). The
 editor component is **core-owned and shared**; Notes reuses it.
 
-The operator experience is unchanged; only the **write mechanism** moved. Since File-space
-Phase 3 (#356, ADR-0064) the save and all file-tree CRUD (create/delete folder, delete doc,
-move/rename, create/delete knowledge base) write through the core file API
+The operator experience is unchanged; only the **file-access mechanism** moved. Since
+File-space Phase 3 (#356, ADR-0064) the save and all file-tree CRUD (create/delete folder,
+delete doc, move/rename, create/delete knowledge base) write through the core file API
 (`PlatformClient.files_*`) — a vault-relative path maps to the core path `knowledge/<rel>`, and
-the core writes it to its read-write `/data/<tenant>` mount. Qdrant re-indexing runs **after**
-the core write, unchanged. The module's own `/data` mount is therefore **read-only** (see
-Configuration); the default empty named volume and an operator-bound Obsidian vault both still
-work, since the writes now go through the core (which owns the read-write mount).
+the core writes it to its read-write `/data/<tenant>` mount. The read-path follow-up (#346,
+ADR-0070) then routes the editor's **read/list** (`read_doc` / `list_docs`) through the same
+file API, so in normal mode the module holds **no `/data` mount** at all. Qdrant re-indexing
+runs **after** the core write, unchanged.
 
 **Read-only when the vault is externally owned (#232, ADR-0035).** With a watched external
 vault (`VAULT_WATCH=true`, see *Live vault sync* below) the page returns `read_only: true`
@@ -333,6 +337,12 @@ changes (window `VAULT_WATCH_DEBOUNCE_MS`, default 1500 ms) triggers one increme
 `KnowledgeIndexer.run()`. Because the indexer is hash/mtime-incremental, a watch event over
 a synced folder only re-embeds the files that actually changed.
 
+> **Watch mode needs the vault mounted (#346, ADR-0070).** In normal mode knowledge holds no
+> `/data` mount — it reads through the core file API. Watch mode is the exception: its inotify
+> watcher and its reads both need the vault on disk, so enabling `VAULT_WATCH=true` also
+> requires a **compose override** that mounts your vault into the container. See
+> [Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md) for the exact override.
+
 - **Debounced & scoped.** A burst (Obsidian Sync writes many files at once) coalesces into
   a single pass; `.obsidian/` and `.trash/` are ignored and only `.md` files trigger work.
   A deletion still carries its `.md` path, so removals flow through and their vectors are
@@ -400,7 +410,7 @@ platform services read these docs if needed.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `VAULT_PATH` | `/data/knowledge` | Knowledge's path within the shared file space; the on-disk tree is tenant-scoped to `<files-root>/<tenant>/knowledge` (`<tenant>` = `DEFAULT_TENANT_ID`). Each top-level folder under it is a project (knowledge base). Lives under the same `/data` tree the core mounts and indexes for the unified Files view (#KB-refactor, ADR-0063). The module mounts it **read-only** for its reads + indexer (#356, ADR-0064) — writes go through the core file API (core path `knowledge/<rel>`), not this mount. |
+| `VAULT_PATH` | `/data/knowledge` | Knowledge's path within the shared file space; the tree is tenant-scoped to `<files-root>/<tenant>/knowledge` (`<tenant>` = `DEFAULT_TENANT_ID`). Each top-level folder under it is a project (knowledge base). It lives under the `/data` tree the **core** mounts and indexes for the unified Files view (#KB-refactor, ADR-0063). Knowledge itself **mounts no `/data` volume** in normal mode: both reads and writes go through the core file API (core key `knowledge/<rel>`) — #346/ADR-0070. `VAULT_PATH` is still the in-container key prefix (its `.name`, `knowledge`, is the core prefix). Watch mode (`VAULT_WATCH=true`) is the exception and re-mounts this path from disk via an override (see [Obsidian sync](../developer/obsidian-sync.md)). |
 | `DOCS_PATH` | `/docs` | In-container path of the platform docs (bundled in image). |
 | `PLATFORM_URL` | `http://core-app:8080` | The core's base URL — for embeddings *and* the file API (`PlatformClient.files_*`), through which every knowledge write now flows (#356, ADR-0064). |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector index. |
@@ -414,30 +424,33 @@ platform services read these docs if needed.
 | `VAULT_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of vault changes before a re-index is triggered. |
 
 Knowledge documents live at `/data/<tenant>/knowledge` in the **shared file space** — bound
-via `EPICURUS_FILES_ROOT` (the single env var that mounts the whole `/data` tree for the core,
-knowledge, and notes), which defaults to an **empty named volume**. Since File-space Phase 3
-(#356, ADR-0064) knowledge mounts this volume **read-only**: it serves the module's reads
-(the incremental indexer, the editor's read/list, attachments, the hover-card resolver, the
-review diff, and the #232 watcher) while every **write** goes through the core file API — the
-core writes to its own read-write `/data/<tenant>` mount, so a vault-relative path resolves to
-the core path `knowledge/<rel>`. (A follow-up migrates the reads/indexer off the mount too, so
-knowledge can drop it entirely.) The on-disk tree is **tenant-scoped** (constraint #1):
-knowledge inserts a `<tenant>/` segment (`<tenant>` = `DEFAULT_TENANT_ID`, default `local`) —
-the volume mount stays `/data`, only the in-container path carries the segment. Point
-`EPICURUS_FILES_ROOT` at a host directory to expose real files; the **core image's entrypoint**
-creates and chowns `/data/<tenant>` to uid 10001 before dropping privileges, so the **core's**
-write of an editor create/save never hits a `PermissionError` on a fresh volume — and knowledge's
-read-only indexer tolerates a `knowledge/` subdir the core has not written yet (#421/ADR-0069 —
-see [Infrastructure](../infrastructure/index.md#shared-file-space)).
-`EPICURUS_FILES_ROOT` **replaces** the old per-module `KNOWLEDGE_HOST_VAULT`; existing
-deployments move their old vault contents into `<files-root>/<tenant>/knowledge/<project>/`.
-The platform docs at `/docs` are always present — bundled at image build time, **not**
-tenant-scoped (shared & read-only), and not editable from the shell.
+into the **core** via `EPICURUS_FILES_ROOT` (the env var that mounts the `/data` tree; it
+defaults to an **empty named volume**). Since File-space Phase 3 (#356, ADR-0064) every
+**write** went through the core file API; the read-path follow-up (#346, ADR-0070) routes the
+**reads** — the incremental indexer, the editor's read/list, attachments, the hover-card
+resolver, the review diff, and the agent read tools — through the file API too, via a
+`VaultReader` seam. So in the default (normal) mode **knowledge mounts no `/data` volume**: the
+core is the sole mounter of `/data`, and knowledge reaches the space entirely over the platform
+API (a vault-relative path resolves to the core key `knowledge/<rel>`). This satisfies
+constraint #3 for knowledge — the read/write path follows the core's swappable local-FS ↔ S3
+backend. The tree is **tenant-scoped** (constraint #1): the `<tenant>/` segment (`<tenant>` =
+`DEFAULT_TENANT_ID`, default `local`) sits under `/data`. The **core image's entrypoint**
+creates and chowns `/data/<tenant>` to uid 10001 before dropping privileges, so the core's
+write of an editor create/save never hits a `PermissionError` on a fresh volume — and
+knowledge's indexer tolerates a `knowledge/` subdir the core has not written yet (the file API
+returns an empty listing, not an error) (#421/ADR-0069 — see
+[Infrastructure](../infrastructure/index.md#shared-file-space)). The platform docs at `/docs`
+are always present — bundled at image build time, read directly from that image mount (a disk
+reader), **not** tenant-scoped (shared & read-only), and not editable from the shell.
 
-In **watch mode** (`VAULT_WATCH=true`) epicurus only ever **reads** the vault — already
-read-only, so no write reaches the file API there. To watch your own Obsidian-synced folder,
-bind it under `/data/<tenant>/knowledge` (the container user needs read access). See
-[Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md).
+**Watch mode is the exception (#232 + #346).** With a watched external vault
+(`VAULT_WATCH=true`) the inotify watcher and the reads both need the vault on disk (there is no
+inotify over the file API), so watch mode reads it from a **disk mount** exactly as before — and
+because the default no longer mounts `/data`, enabling watch mode also requires a **compose
+override** that mounts your Obsidian-synced folder under `/data/<tenant>/knowledge` (the
+container user needs read access). `EPICURUS_FILES_ROOT` **replaces** the old per-module
+`KNOWLEDGE_HOST_VAULT`. See
+[Keeping the vault in sync with Obsidian](../developer/obsidian-sync.md) for the exact recipe.
 
 ## Data model
 
@@ -471,16 +484,18 @@ Each Qdrant point payload: `{note_path, chunk_index, heading, text}`.
 
 The **document bytes** themselves are not owned by this module's data model. They live in the
 shared file space under the core's [`FileStore`](../reference/files.md) (`/data/<tenant>/knowledge`,
-core path `knowledge/<rel>`): knowledge **reads** them from its read-only mount and **writes**
-them through the core file API (#356, ADR-0064). The Postgres ledgers and Qdrant collections
-above are derived indexes over those files.
+core path `knowledge/<rel>`): knowledge **reads and writes** them through the core file API
+(`PlatformClient.files_*` — #356/ADR-0064 for writes, #346/ADR-0070 for reads), holding no
+`/data` mount in normal mode. The Postgres ledgers and Qdrant collections above are derived
+indexes over those files.
 
 ## Dependencies
 
-core-app (embeddings, the **file API** for all writes — `PlatformClient.files_*`, #356/ADR-0064
-— and the status proxy, all via the platform API) · Qdrant (vectors) · Postgres (file tracking)
-· NATS (the index-completed event) · the **read-only** mounted vault (reads + indexer + #232
-watcher) · bundled docs.
+core-app (embeddings, the **file API** for all reads *and* writes — `PlatformClient.files_*`,
+#356/ADR-0064 for writes + #346/ADR-0070 for reads — and the status proxy, all via the platform
+API) · Qdrant (vectors) · Postgres (file tracking) · NATS (the index-completed event) · bundled
+docs (an image mount). In **watch mode** only (#232), also a disk mount of the external vault
+for the inotify watcher + its reads.
 
 ## Run & extend
 
@@ -499,15 +514,16 @@ Package `epicurus_knowledge`:
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. Also `knowledge_versions` (`VersionStore`): editor-save content snapshots with dedup + 50-version retention (#ADR-0046). |
-| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source); accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; a run-lock serialises full passes so the watcher (#232) and startup index never overlap. |
+| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source **and a `VaultReader`**); the walk + single-file read go through the reader (the file API by default — #346/ADR-0070), deriving `mtime_ns` from the entry mtime; accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; a run-lock serialises full passes so the watcher (#232) and startup index never overlap. |
 | `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
-| `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). Started by `app.py` when `VAULT_WATCH=true`. |
+| `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). The one path that still reads the disk directly — inotify has no file-API analogue — so it (and the reads it triggers) run only in **watch mode**, where the vault is a disk mount (#346/ADR-0070). Started by `app.py` when `VAULT_WATCH=true`. |
 | `service.py` | MCP tools — read-only navigation (`knowledge_search` → entity-ref chips, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`), `knowledge_reindex`, and the write tools that stage suggestions (`knowledge_create_document` (create), `knowledge_propose_edit` update/delete, `knowledge_propose_move`, `knowledge_propose_rename` (rename-in-place → a `move` suggestion), `knowledge_propose_folder`, `knowledge_propose_project` — #KB-refactor / #220) + manifest UI + the `editor` and `review` page specs. |
-| `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` **reads** from the read-only mount and **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>` — #356/ADR-0064); `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |
-| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store (with the added `to_path` column), `SuggestionReview` (diff + apply on approve / discard on reject, across create/update/delete/move/mkdir/mkproject; approve takes optional per-hunk `content` — #KB-refactor), and `create_review_router`. Apply writes through the core file API like the editor save (#356/ADR-0064). Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
-| `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries (`safe_relative` for `.md` files, `safe_dir_relative` for directories, `safe_project` for a knowledge-base name) + walks (`iter_md_files`, `iter_tree_nodes`, `iter_projects`). |
-| `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`). |
-| `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`). |
+| `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` **reads** through a `VaultReader` (the file API by default — #346/ADR-0070; a `DiskVaultReader` for the bundled `__docs__` scope) and **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>` — #356/ADR-0064); `create_pages_router` registers the HTTP endpoints. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |
+| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store (with the added `to_path` column), `SuggestionReview` (diff + apply on approve / discard on reject, across create/update/delete/move/mkdir/mkproject; approve takes optional per-hunk `content` — #KB-refactor), and `create_review_router`. The review diff reads the current content through a `VaultReader` (#346/ADR-0070); apply writes through the core file API like the editor save (#356/ADR-0064). Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
+| `reader.py` | The vault **read** seam (#346, ADR-0070): `VaultReader` (`list_dir`/`read_text`/`stat` + the shared recursive `projects`/`tree`/`md_entries` walks) with two backends — `ApiVaultReader` (the default: reads through `PlatformClient.files_*`, no `/data` mount) and `DiskVaultReader` (the bundled `/docs`, and the watch-mode vault). Every read site consumes this instead of the filesystem. |
+| `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries: `safe_relative`/`safe_dir_relative`/`safe_project` (resolve against a real root — used by the disk reader + write path) and the filesystem-independent `safe_vault_rel`/`safe_vault_dir_rel` (validate a vault-relative `.md` / dir path and return clean posix — used by the read sites over the file API). |
+| `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`), reading through the `VaultReader`. |
+| `resolver.py` | The hover-card resolver (#143): a cited vault note or platform doc → a `HoverCard` (`KnowledgeResolver`), reading content through a `VaultReader` (vault + docs). |
 | `module_docs.py` | `ModuleDocLedger` (Postgres tracking for module-contributed docs) + `ModuleDocsIndexer` (HTTP-based diff/embed/upsert for module docs, #215). |
-| `app.py` | Lifespan, `GET /status`, the `/pages/*` (review router first, then editor) + `/attachments/*` + `/resolve/*` + `/module-docs` routers; launches the background `IndexRunner` (#230) so startup never blocks on the first index, and the `VaultWatcher` (#232) when `VAULT_WATCH` is set. |
+| `app.py` | Lifespan, `GET /status`, the `/pages/*` (review router first, then editor) + `/attachments/*` + `/resolve/*` + `/module-docs` routers; builds the vault `VaultReader` — an `ApiVaultReader` by default, a `DiskVaultReader` under `VAULT_WATCH` (#346/ADR-0070) — plus a `DiskVaultReader` for the bundled docs, and threads them into the indexer, pages, suggestions, attachments, resolver, and agent tools; launches the background `IndexRunner` (#230) so startup never blocks on the first index, and the `VaultWatcher` (#232) when `VAULT_WATCH` is set. |
 | `settings.py` | `KnowledgeSettings` (adds `vault_path`, `docs_path`, Qdrant, DB, platform URL, and the `VAULT_WATCH`/`VAULT_WATCH_DEBOUNCE_MS` watch fields + the derived `vault_read_only`). |

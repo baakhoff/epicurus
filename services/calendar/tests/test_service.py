@@ -519,7 +519,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.10.2"
+    assert manifest.version == "0.10.3"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -732,6 +732,125 @@ async def test_router_deletes_event_where_it_lives() -> None:
     assert google.events == []
     # A second delete finds nothing anywhere → False.
     assert await router.delete_event(tenant_id="t1", event_id=g.id) is False
+
+
+class _MultiCalGoogle(_MockGoogleProvider):
+    """Calendar-aware mock: events live in named calendars; records which are probed."""
+
+    def __init__(self, calendars: dict[str, list[Event]]) -> None:
+        super().__init__()
+        self.calendars = calendars
+        self.update_probes: list[str] = []
+        self.delete_probes: list[str] = []
+
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+        all_day: bool | None = None,
+    ) -> Event | None:
+        cal = calendar_id or "primary"
+        self.update_probes.append(cal)
+        for i, e in enumerate(self.calendars.get(cal, [])):
+            if e.id == event_id:
+                updated = e.model_copy(update={"title": title} if title is not None else {})
+                self.calendars[cal][i] = updated
+                return updated
+        return None
+
+    async def delete_event(
+        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+    ) -> bool:
+        cal = calendar_id or "primary"
+        self.delete_probes.append(cal)
+        events = self.calendars.get(cal, [])
+        remaining = [e for e in events if e.id != event_id]
+        self.calendars[cal] = remaining
+        return len(remaining) < len(events)
+
+
+async def _multi_cal_router() -> tuple[CollectionRouter, _MultiCalGoogle]:
+    """A router over two enabled Google calendars; the event lives on the second."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    google = _MultiCalGoogle(
+        {"primary": [], "work": [_event(id="w1", title="Old", provider="google")]}
+    )
+    prefs = CollectionPrefs(enabled=[_google_ref("primary"), _google_ref("work")])
+    router = CollectionRouter(
+        local=LocalCalendarProvider(store=store),
+        external={"google": google},
+        prefs=_StaticPrefs(prefs),
+    )
+    return router, google
+
+
+async def test_router_update_targets_the_home_calendar_token_first() -> None:
+    # The page tags every event with its calendar token (#378); passing it routes the
+    # edit straight to the owning calendar instead of probing the enabled set (#435).
+    router, google = await _multi_cal_router()
+    updated = await router.update_event(
+        tenant_id="t1", event_id="w1", title="New", calendar_id="google:work"
+    )
+    assert updated is not None
+    assert updated.title == "New"
+    assert google.update_probes == ["work"]  # went straight there — no probing
+
+
+async def test_router_update_without_token_probes_enabled_in_order() -> None:
+    # Without a home-calendar hint the cascade still finds the event (#208).
+    router, google = await _multi_cal_router()
+    updated = await router.update_event(tenant_id="t1", event_id="w1", title="New")
+    assert updated is not None
+    assert google.update_probes == ["primary", "work"]
+
+
+async def test_router_delete_targets_the_home_calendar_token_first() -> None:
+    router, google = await _multi_cal_router()
+    assert await router.delete_event(tenant_id="t1", event_id="w1", calendar_id="google:work")
+    assert google.delete_probes == ["work"]
+
+
+async def test_update_tool_threads_home_calendar_token() -> None:
+    # The Edit action's args carry the event's token; the tool must pass it through to
+    # the router so the write targets the owning calendar (#435).
+    router, google = await _multi_cal_router()
+    module = build_module(router, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": "w1", "title": "Via tool", "calendar_id": "google:work"},
+    )
+    assert _extract(structured)["title"] == "Via tool"
+    assert google.update_probes == ["work"]
+
+
+async def test_delete_tool_threads_home_calendar_token() -> None:
+    router, google = await _multi_cal_router()
+    module = build_module(router, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_delete_event", {"event_id": "w1", "calendar_id": "google:work"}
+    )
+    assert _extract(structured)["deleted"] is True
+    assert google.delete_probes == ["work"]
+
+
+def test_event_actions_carry_home_calendar_token() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    tagged = _event_with_actions(_event(calendar_id="google:work"))
+    for action in tagged["actions"]:
+        assert action["args"] == {"event_id": "e1", "calendar_id": "google:work"}
+    bare = _event_with_actions(_event())
+    for action in bare["actions"]:
+        assert action["args"] == {"event_id": "e1"}
 
 
 async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:

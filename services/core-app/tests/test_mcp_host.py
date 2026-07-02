@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from epicurus_core_app.agent.mcp_host import McpHost
+import pytest
+
+from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
 
 
 def _recording_client() -> tuple[list[str], object]:
@@ -148,6 +150,83 @@ async def test_discover_with_empty_filter_includes_all_tools() -> None:
         specs, _ = await host.discover()
 
     assert {s["function"]["name"] for s in specs} == {"tool_a", "tool_b"}
+
+
+# ── Tool errors surface, never swallow (#435) ─────────────────────────────────
+
+
+def _call_transport(result: MagicMock) -> tuple[object, object]:
+    """(transport_cm, session_cm) mocks whose ``call_tool`` returns *result*."""
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    session.call_tool = AsyncMock(return_value=result)
+
+    transport_cm = MagicMock()
+    transport_cm.__aenter__ = AsyncMock(return_value=(None, None, None))
+    transport_cm.__aexit__ = AsyncMock(return_value=False)
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    return transport_cm, session_cm
+
+
+def _tool_result(text: str, *, is_error: bool) -> MagicMock:
+    block = MagicMock()
+    block.text = text
+    result = MagicMock()
+    result.isError = is_error
+    result.content = [block] if text else []
+    return result
+
+
+async def test_call_returns_text_on_success() -> None:
+    host = McpHost([])
+    transport_cm, session_cm = _call_transport(_tool_result("all good", is_error=False))
+    with (
+        patch(
+            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
+            return_value=transport_cm,
+        ),
+        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+    ):
+        out = await host.call("some_tool", {}, "http://m:8080/mcp", tenant="t1")
+    assert out == "all good"
+
+
+async def test_call_raises_tool_call_error_on_iserror() -> None:
+    # FastMCP reports a tool exception as an error *result*, not a transport error; the
+    # host must raise so callers can tell failure from output — previously the error
+    # text read as a successful call and the web closed the form as if it worked (#435).
+    host = McpHost([])
+    transport_cm, session_cm = _call_transport(
+        _tool_result(
+            "Error executing tool calendar_update_event: event 'e1' not found", is_error=True
+        )
+    )
+    with (
+        patch(
+            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
+            return_value=transport_cm,
+        ),
+        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+        pytest.raises(ToolCallError, match="event 'e1' not found"),
+    ):
+        await host.call("calendar_update_event", {}, "http://m:8080/mcp", tenant="t1")
+
+
+async def test_call_error_without_text_gets_fallback_message() -> None:
+    host = McpHost([])
+    transport_cm, session_cm = _call_transport(_tool_result("", is_error=True))
+    with (
+        patch(
+            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
+            return_value=transport_cm,
+        ),
+        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+        pytest.raises(ToolCallError, match="'boom' failed"),
+    ):
+        await host.call("boom", {}, "http://m:8080/mcp", tenant="t1")
 
 
 # ── Core built-in tools (ADR-0039) ────────────────────────────────────────────

@@ -114,13 +114,20 @@ class CollectionRouter(CalendarProvider):
         events.sort(key=lambda e: e.start)
         return events
 
-    def _search_refs(self, prefs: CollectionPrefs) -> list[CollectionRef]:
+    def _search_refs(
+        self, prefs: CollectionPrefs, *, first: CollectionRef | None = None
+    ) -> list[CollectionRef]:
         """Ordered, de-duplicated places to find a single event by id.
 
-        Active collection first, then the rest of the enabled set, then the local store —
-        a referenced event resolves (and is edited/deleted) wherever it lives.
+        *first* — when the caller knows the event's home calendar (the page tags every
+        event with its token, #378) — is tried before anything else, so an edit/delete
+        goes straight to the owning calendar instead of probing the whole enabled set
+        (#435). Then the active collection, the rest of the enabled set, and the local
+        store — a referenced event resolves (and is edited/deleted) wherever it lives.
         """
         refs: list[CollectionRef] = []
+        if first is not None:
+            refs.append(first)
         if prefs.active is not None:
             refs.append(prefs.active)
         refs.extend(prefs.enabled)
@@ -206,10 +213,13 @@ class CollectionRouter(CalendarProvider):
         calendar_id: str | None = None,
         all_day: bool | None = None,
     ) -> Event | None:
-        # Edit the event wherever it lives: try the active collection, then the rest of
-        # the enabled set, then local — the first source that has it wins (#208).
+        # Edit the event wherever it lives: the caller-supplied home calendar first
+        # (``calendar_id`` is an ``account[:collection]`` token here, as in create),
+        # then the active collection, the rest of the enabled set, and local — the
+        # first source that has it wins (#208, #435).
+        first = decode_collection_token(calendar_id) if calendar_id else None
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs):
+        for ref in self._search_refs(prefs, first=first):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue
@@ -240,9 +250,11 @@ class CollectionRouter(CalendarProvider):
     async def delete_event(
         self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
     ) -> bool:
-        # Delete the event wherever it lives (#208).
+        # Delete the event wherever it lives (#208); a supplied home-calendar token is
+        # tried first (#435), mirroring update_event.
+        first = decode_collection_token(calendar_id) if calendar_id else None
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs):
+        for ref in self._search_refs(prefs, first=first):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue

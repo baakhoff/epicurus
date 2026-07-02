@@ -94,6 +94,23 @@ prefs = await client.get_collections()
 targets = prefs.enabled or [CollectionRef(account="local")]   # overlay, or local default
 ```
 
+### `await client.get_timezone() -> str`
+
+The operator's configured IANA timezone (ADR-0039), e.g. `"Europe/Belgrade"`. Backed by
+`GET /platform/v1/timezone`. A module that accepts **naive (offset-less) date/time inputs**
+— natural-language event or task times — reads them as wall time in this zone instead of
+assuming UTC, so the operator's "3 PM" is their 3 PM (#433). The method raises on an
+unreachable core; the caller owns the fallback (degrade to UTC), since a broken timezone
+lookup must not fail the write it decorates.
+
+```python
+try:
+    zone = ZoneInfo(await client.get_timezone())
+except Exception:
+    zone = UTC                              # degrade, never fail the write
+start = naive_start.replace(tzinfo=zone)    # naive input -> operator wall time
+```
+
 ### `await client.get_suggestions_enabled() -> bool`
 
 Whether the operator wants the agent's changes **reviewed** for this module (#KB-refactor),

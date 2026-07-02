@@ -519,7 +519,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.10.1"
+    assert manifest.version == "0.10.2"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -645,11 +645,59 @@ async def test_router_writes_to_active_collection() -> None:
     assert google.events[-1].title == "Routed"
 
 
-async def test_router_writes_local_when_no_active() -> None:
-    router, local, _ = await _router(CollectionPrefs())
+async def test_router_write_default_prefers_first_enabled_external() -> None:
+    # No explicit active: the first enabled external calendar takes the write (#433) —
+    # a new event must not silently land in the local store while Google is connected.
+    router, local, google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    created = await router.create_event(tenant_id="t1", title="Default", start=_dt(14), end=_dt(15))
+    assert created.provider == "google"
+    assert google.events[-1].title == "Default"
+    assert await local.get_event(tenant_id="t1", event_id=created.id) is None
+
+
+async def test_router_write_default_uses_connected_provider_when_nothing_enabled() -> None:
+    # Nothing enabled but Google is connected: the write still prefers Google's own
+    # default calendar (an empty collection → ``primary``) over the local store (#433).
+    router, _local, google = await _router(CollectionPrefs())
+    created = await router.create_event(tenant_id="t1", title="Primary", start=_dt(14), end=_dt(15))
+    assert created.provider == "google"
+    assert google.events[-1].title == "Primary"
+
+
+async def test_router_writes_local_when_nothing_connected() -> None:
+    # Local takes the write only when no external provider is connected (#433).
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    router = CollectionRouter(
+        local=local,
+        external={"google": _DisconnectedGoogle()},
+        prefs=_StaticPrefs(CollectionPrefs()),
+    )
     created = await router.create_event(tenant_id="t1", title="Default", start=_dt(14), end=_dt(15))
     assert created.provider == "local"
     assert await local.get_event(tenant_id="t1", event_id=created.id) is not None
+
+
+async def test_router_write_default_survives_availability_error() -> None:
+    # A provider whose availability check blows up must not break the write — it falls
+    # through to the local default rather than raising.
+    class _FlakyGoogle(_MockGoogleProvider):
+        async def is_available(self, *, tenant_id: str) -> bool:
+            raise RuntimeError("token service down")
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    router = CollectionRouter(
+        local=local, external={"google": _FlakyGoogle()}, prefs=_StaticPrefs(CollectionPrefs())
+    )
+    created = await router.create_event(
+        tenant_id="t1", title="Still works", start=_dt(14), end=_dt(15)
+    )
+    assert created.provider == "local"
 
 
 async def test_router_get_event_searches_enabled_and_local() -> None:
@@ -1076,7 +1124,8 @@ async def test_build_calendar_choices_lists_writable_calendars() -> None:
     assert values[0] == "local"
     assert "google:primary" in values
     assert "google:team@x.com" not in values
-    assert default == "local"  # no active set → first choice
+    # No active set → the first connected external calendar, not the silent Local (#433).
+    assert default == "google:primary"
 
 
 async def test_build_calendar_choices_default_is_active() -> None:
@@ -1113,17 +1162,130 @@ async def test_new_event_action_adds_calendar_picker_when_choices() -> None:
 
 
 async def test_router_create_honors_calendar_id_token() -> None:
-    # Active is local, but an explicit token routes the create to the Google calendar.
-    router, _local, google = await _router(CollectionPrefs())
+    # An explicit token always wins: the create routes to the named local store even
+    # though the connected Google would otherwise be the write default.
+    router, local, _google = await _router(CollectionPrefs())
     created = await router.create_event(
         tenant_id="t1",
-        title="On Google",
+        title="On Local",
         start=_dt(14),
         end=_dt(15),
-        calendar_id="google:primary",
+        calendar_id="local",
     )
-    assert created.provider == "google"
-    assert google.events[-1].title == "On Google"
+    assert created.provider == "local"
+    assert await local.get_event(tenant_id="t1", event_id=created.id) is not None
+
+
+# ── Operator-timezone handling for naive inputs (#433) ─────────────────────────
+
+
+def _tz(name: str) -> Any:
+    """A TimezoneSource stub returning a fixed IANA zone name."""
+
+    async def source() -> str:
+        return name
+
+    return source
+
+
+async def test_create_event_reads_naive_start_in_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # "15:00" with no offset is the operator's 3 PM — Europe/Belgrade is UTC+2 in July,
+    # so the stored instant is 13:00 UTC, not 15:00 UTC (#433).
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Local time", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
+    )
+    result = _extract(structured)
+    stored = await local_provider.get_event(tenant_id="t1", event_id=result["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 13, 0, tzinfo=UTC)
+    assert stored.end == datetime(2026, 7, 2, 14, 0, tzinfo=UTC)
+
+
+async def test_create_event_late_evening_stays_on_local_date(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # 00:30 "today" in Belgrade is 22:30 *yesterday* in UTC — the instant must reflect
+    # the operator's date, which is how "for today" stopped landing on the wrong day.
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Midnight", "start": "2026-07-02T00:30:00", "end": "2026-07-02T01:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 1, 22, 30, tzinfo=UTC)
+
+
+async def test_create_event_honors_explicit_offset(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # A value that carries its own offset is pinned to it — the operator zone only
+    # applies to naive values.
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Pinned",
+            "start": "2026-07-02T15:00:00+05:00",
+            "end": "2026-07-02T16:00:00+05:00",
+        },
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 10, 0, tzinfo=UTC)
+
+
+async def test_update_event_reads_naive_bounds_in_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Move me", start=_dt(9), end=_dt(10)
+    )
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    await module.mcp.call_tool(
+        "calendar_update_event",
+        {
+            "event_id": created.id,
+            "start": "2026-07-02T15:00:00",
+            "end": "2026-07-02T16:00:00",
+        },
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=created.id)
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 13, 0, tzinfo=UTC)
+
+
+async def test_unknown_operator_timezone_degrades_to_utc(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Neverland/Nowhere"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Fallback", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 15, 0, tzinfo=UTC)
+
+
+async def test_timezone_source_error_degrades_to_utc(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    async def broken() -> str:
+        raise RuntimeError("core down")
+
+    module = build_module(local_provider, tenant_id="t1", timezone=broken)
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Fallback", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 15, 0, tzinfo=UTC)
 
 
 # ── Google provider all-day mapping ────────────────────────────────────────────

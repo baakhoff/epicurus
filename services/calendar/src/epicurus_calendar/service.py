@@ -19,9 +19,10 @@ resolves a referenced event to a core **hover-card**, and it is a
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from pydantic import Field
 
@@ -40,8 +41,11 @@ from epicurus_core import (
     HoverCardDetail,
     PageSpec,
     UiSection,
+    get_logger,
     tool_envelope,
 )
+
+log = get_logger("epicurus_calendar.service")
 
 MODULE_NAME = "calendar"
 CALENDAR_PAGE_ID = "calendar"
@@ -80,8 +84,37 @@ _MAX_RANGE_DAYS = 92
 _ATTACH_RANGE_DAYS = 30
 _ATTACH_LIMIT = 50
 
+#: Returns the operator's configured IANA timezone (the core's, ADR-0039) — in the
+#: running service ``PlatformClient.get_timezone``; a stub (or ``None`` → UTC) in tests.
+TimezoneSource = Callable[[], Awaitable[str]]
 
-def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
+
+async def _resolve_timezone(source: TimezoneSource | None) -> tzinfo:
+    """The zone naive tool inputs are read in: the operator's timezone, else UTC (#433).
+
+    Best-effort by design — an unreachable core or an unknown zone name degrades to UTC
+    (the pre-#433 behaviour) rather than failing the write.
+    """
+    if source is None:
+        return UTC
+    try:
+        name = await source()
+    except Exception as exc:
+        log.warning("operator timezone unavailable; reading naive times as UTC", error=str(exc))
+        return UTC
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        log.warning("unknown operator timezone; reading naive times as UTC", timezone=name)
+        return UTC
+
+
+def build_module(
+    provider: CalendarProvider,
+    tenant_id: str,
+    *,
+    timezone: TimezoneSource | None = None,
+) -> EpicurusModule:
     """Build the calendar module and register its MCP tools.
 
     Args:
@@ -90,10 +123,12 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
             that fans across the operator's enabled/active collections (ADR-0030); a
             single provider in unit tests.
         tenant_id: Default tenant for all tool calls.
+        timezone: Source of the operator's IANA timezone (ADR-0039) — naive start/end
+            inputs are read in this zone instead of UTC (#433). ``None`` means UTC.
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.1",
+        version="0.10.2",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -197,9 +232,12 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
 
         Args:
             title: Event title (required).
-            start: Start in ISO-8601, e.g. ``"2025-06-15T10:00:00+00:00"``; a date
+            start: Start in ISO-8601, e.g. ``"2025-06-15T10:00:00"``. A value without a
+                UTC offset is the operator's **local wall time** (their configured
+                timezone); include an offset only to pin a different zone. A date
                 (``"2025-06-15"``) when *all_day* is set.
-            end: End in ISO-8601; for an all-day event, the inclusive last date.
+            end: End in ISO-8601 (same timezone rule); for an all-day event, the
+                inclusive last date.
             all_day: When true, *start*/*end* are dates and the event spans whole days.
             location: Optional location string (address, room name, or URL).
             description: Optional description or agenda.
@@ -208,7 +246,8 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
 
         Returns the created event dict with all fields populated.
         """
-        start_dt, end_dt = _parse_bounds(start, end, all_day=all_day)
+        tz = await _resolve_timezone(timezone)
+        start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
         event = await provider.create_event(
             tenant_id=tenant_id,
             title=title,
@@ -242,8 +281,11 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
         Args:
             event_id: The id of the event to edit (from a listing or the page).
             title: New title, if changing it.
-            start: New start, if changing it (ISO-8601, or a date when *all_day*).
-            end: New end, if changing it (the inclusive last date when *all_day*).
+            start: New start, if changing it (ISO-8601, or a date when *all_day*). A
+                value without a UTC offset is the operator's local wall time (their
+                configured timezone).
+            end: New end, if changing it (same timezone rule; the inclusive last date
+                when *all_day*).
             all_day: Set to switch the event between all-day and timed (supply start/end
                 to match); omit to leave its all-day-ness unchanged.
             location: New location, if changing it.
@@ -251,7 +293,8 @@ def build_module(provider: CalendarProvider, tenant_id: str) -> EpicurusModule:
 
         Returns the updated event dict. Raises if no such event exists.
         """
-        start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day)
+        tz = await _resolve_timezone(timezone)
+        start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
         event = await provider.update_event(
             tenant_id=tenant_id,
             event_id=event_id,
@@ -351,20 +394,38 @@ def _all_day_bounds(start: str, end: str) -> tuple[datetime, datetime]:
     return start_dt, max(end_dt, start_dt + _DAY)
 
 
-def _parse_bounds(start: str, end: str, *, all_day: bool) -> tuple[datetime, datetime]:
-    """Parse required create-event bounds: dates for all-day, else ISO datetimes."""
+def _parse_wall_time(value: str, tz: tzinfo) -> datetime:
+    """Parse an ISO datetime, reading a naive value as wall time in *tz* (#433).
+
+    A value carrying its own UTC offset is honoured as-is; one without (the common
+    natural-language case — the agent writes the operator's "3 PM" as ``T15:00:00``)
+    is the operator's local time, not UTC. ``tz`` is the operator's configured zone.
+    """
+    parsed = datetime.fromisoformat(value)
+    return parsed.replace(tzinfo=tz) if parsed.tzinfo is None else parsed
+
+
+def _parse_bounds(
+    start: str, end: str, *, all_day: bool, tz: tzinfo = UTC
+) -> tuple[datetime, datetime]:
+    """Parse required create-event bounds: dates for all-day, else ISO datetimes.
+
+    Naive (offset-less) datetimes are read as wall time in *tz*; all-day dates are
+    floating and need no zone.
+    """
     if all_day:
         return _all_day_bounds(start, end)
-    return datetime.fromisoformat(start), datetime.fromisoformat(end)
+    return _parse_wall_time(start, tz), _parse_wall_time(end, tz)
 
 
 def _parse_update_bounds(
-    start: str | None, end: str | None, *, all_day: bool | None
+    start: str | None, end: str | None, *, all_day: bool | None, tz: tzinfo = UTC
 ) -> tuple[datetime | None, datetime | None]:
     """Parse the supplied edit bounds (either may be ``None``), all-day-aware.
 
     With both bounds present the all-day branch reuses :func:`_all_day_bounds` so the end
     is made exclusive; a lone bound is parsed in isolation (the page always sends both).
+    Naive timed values are read as wall time in *tz* (#433).
     """
     if all_day:
         if start is not None and end is not None:
@@ -372,8 +433,8 @@ def _parse_update_bounds(
         start_dt = _date_to_utc_midnight(start) if start is not None else None
         end_dt = _date_to_utc_midnight(end) + _DAY if end is not None else None
         return start_dt, end_dt
-    start_dt = datetime.fromisoformat(start) if start else None
-    end_dt = datetime.fromisoformat(end) if end else None
+    start_dt = _parse_wall_time(start, tz) if start else None
+    end_dt = _parse_wall_time(end, tz) if end else None
     return start_dt, end_dt
 
 
@@ -631,8 +692,10 @@ async def build_calendar_choices(
     each *connected* external account, as ``{value, label}`` where ``value`` is an
     ``account:collection`` token (ADR-0030). Best-effort: a provider that errors or is
     disconnected is skipped, so a transient Google outage degrades to local rather than
-    breaking the page. The returned default token is the operator's active calendar (or
-    the first choice when none is set).
+    breaking the page. The returned default token is the operator's active calendar;
+    with none set, the first connected external calendar (Google lists the primary
+    first) is preselected over the silent local store — local is the default only when
+    nothing external is connected (#433).
     """
     local_token = encode_collection_token(CollectionRef(account=LOCAL_ACCOUNT))
     choices: list[dict[str, str]] = [{"value": local_token, "label": LOCAL_CALENDAR_LABEL}]
@@ -647,7 +710,9 @@ async def build_calendar_choices(
                 choices.append({"value": encode_collection_token(ref), "label": col.title})
         except Exception:  # a bad source must not break the page
             continue
-    default = encode_collection_token(active) if active is not None else choices[0]["value"]
+    if active is not None:
+        return choices, encode_collection_token(active)
+    default = choices[1]["value"] if len(choices) > 1 else choices[0]["value"]
     return choices, default
 
 

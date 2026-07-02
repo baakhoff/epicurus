@@ -14,8 +14,9 @@ from epicurus_knowledge.refs import (
     decode_ref,
     doc_title,
     encode_ref,
-    iter_md_files,
     safe_relative,
+    safe_vault_dir_rel,
+    safe_vault_rel,
 )
 
 
@@ -59,20 +60,6 @@ def test_doc_title_strips_dirs_and_suffix() -> None:
     assert doc_title("projects/beta.md") == "beta"
 
 
-def test_iter_md_files_sorted_md_only(tmp_path: Path) -> None:
-    (tmp_path / "b.md").write_text("b", encoding="utf-8")
-    (tmp_path / "a.md").write_text("a", encoding="utf-8")
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "c.md").write_text("c", encoding="utf-8")
-    (tmp_path / "skip.txt").write_text("x", encoding="utf-8")
-    assert iter_md_files(tmp_path) == ["a.md", "b.md", "sub/c.md"]
-
-
-def test_iter_md_files_absent_root(tmp_path: Path) -> None:
-    assert iter_md_files(tmp_path / "nope") == []
-
-
 @pytest.mark.parametrize(
     "bad",
     ["../escape.md", "/etc/passwd", "..\\windows\\evil.md", "notes.txt", "   "],
@@ -86,3 +73,34 @@ def test_safe_relative_rejects(tmp_path: Path, bad: str) -> None:
 def test_safe_relative_confines_under_root(tmp_path: Path) -> None:
     target = safe_relative(tmp_path, "sub/note.md")
     assert target == (tmp_path.resolve() / "sub" / "note.md")
+
+
+# ── safe_vault_rel / safe_vault_dir_rel: the filesystem-independent read validators ──
+
+
+def test_safe_vault_rel_returns_clean_posix() -> None:
+    assert safe_vault_rel("kb/sub/note.md") == "kb/sub/note.md"
+    assert safe_vault_rel("  kb\\sub\\note.md  ") == "kb/sub/note.md"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["../escape.md", "/etc/passwd", "..\\windows\\evil.md", "notes.txt", "   "],
+)
+def test_safe_vault_rel_rejects(bad: str) -> None:
+    with pytest.raises(HTTPException) as err:
+        safe_vault_rel(bad)
+    assert err.value.status_code == 400
+
+
+def test_safe_vault_dir_rel_allows_non_md() -> None:
+    # Directories (and any name) are allowed — no ``.md`` requirement.
+    assert safe_vault_dir_rel("kb/archived") == "kb/archived"
+    assert safe_vault_dir_rel("notes.txt") == "notes.txt"
+
+
+@pytest.mark.parametrize("bad", ["../escape", "/etc/passwd", "   "])
+def test_safe_vault_dir_rel_rejects_traversal(bad: str) -> None:
+    with pytest.raises(HTTPException) as err:
+        safe_vault_dir_rel(bad)
+    assert err.value.status_code == 400

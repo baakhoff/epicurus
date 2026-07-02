@@ -368,13 +368,15 @@ function Toolbar({
       </div>
 
       <div className="flex items-center gap-2">
-        {/* Page-level actions (e.g. "New event") — core-rendered from the page data (#208). */}
+        {/* Page-level actions (e.g. "New event") — core-rendered from the page data (#208).
+            size="sm" matches the Today/view-switcher controls in this toolbar (#427). */}
         {actions.map((action) => (
           <ActionControl
             key={action.tool + action.label}
             module={module}
             pageId={pageId}
             action={action}
+            size="sm"
           />
         ))}
         {/* Pick which calendars are visible (#378) — only when more than one is in view. */}

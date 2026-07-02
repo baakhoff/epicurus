@@ -24,7 +24,7 @@ from epicurus_core import Collection
 #: single instance the caller identified (the default; least blast radius); ``"all"`` — the
 #: whole series (identified by its own id, or resolved from an instance's series). Ignored
 #: for a one-off event. "This and following" is a deliberately deferred follow-up — see
-#: ADR-0074 — since it requires splitting a series in two, a materially harder operation.
+#: ADR-0075 — since it requires splitting a series in two, a materially harder operation.
 EditScope = Literal["this", "all"]
 
 

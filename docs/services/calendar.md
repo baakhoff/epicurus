@@ -53,12 +53,12 @@ module is a **chat-attachment source** so an event can be attached to a turn. It
 only — the core renders the chip, the hover-card, and the panel (see *Entity references,
 hover-cards & attachments* under Contract, below).
 
-Since **v0.11** (#432, ADR-0074) events support **recurrence** (an RFC 5545 RRULE) and
+Since **v0.11** (#432, ADR-0075) events support **recurrence** (an RFC 5545 RRULE) and
 **attendees** (a guest list). A recurring event is one stored *series* (the master, carrying
 the rule) plus zero or more *exceptions* overriding a single occurrence (edited or deleted);
 editing/deleting takes an `edit_scope` of `"this"` (one occurrence) or `"all"` (the whole
 series) — see *Recurring events* under Contract, below. Google Meet / conferencing and the
-"this and following" edit scope are deliberately out of scope for now (ADR-0074).
+"this and following" edit scope are deliberately out of scope for now (ADR-0075).
 
 ## Contract
 
@@ -119,7 +119,7 @@ shell renders them on their calendar date with **no timezone conversion**. Treat
 date as a UTC instant is what made events appear one day early for viewers behind UTC; the
 floating-date contract fixes it end-to-end (ADR-0037, #252).
 
-### Recurring events & attendees (#432, ADR-0074)
+### Recurring events & attendees (#432, ADR-0075)
 
 A recurring event is one **series** — the *master* row/object, carrying `recurrence` (an
 RFC 5545 RRULE, e.g. `"FREQ=WEEKLY;COUNT=10"`) — plus zero or more **exceptions** overriding
@@ -144,7 +144,7 @@ was given (a lookup on Google; parsed from the id locally), then edited/deleted 
 Setting `recurrence` requires `edit_scope="all"` — a single occurrence can't carry its own
 rule (`edit_scope="this"` with `recurrence` set raises).
 
-**Deliberately out of scope** (ADR-0074): a `"this and following"` edit scope (splitting a
+**Deliberately out of scope** (ADR-0075): a `"this and following"` edit scope (splitting a
 series into two) and Google Meet / conferencing — both filed as follow-ups, not implemented
 here.
 

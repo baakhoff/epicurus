@@ -111,8 +111,9 @@ floating-date contract fixes it end-to-end (ADR-0037, #252).
 The module declares `collections = {noun: "calendar", multi: true, providers: ["google"]}`
 in its manifest and serves **`GET /accounts`**: one account per supported external provider,
 each with `connected` (the live OAuth state) and, when connected, its `collections` (every
-Google calendar — `{account, collection, title, writable}`). `local` is never listed — it is
-the silent default.
+Google calendar — `{account, collection, title, writable, color?}`, primary first, with the
+user's own Google calendar colour when set — the shell tints that calendar's events and menu
+dot with it, #431). `local` is never listed — it is the silent default.
 
 The core merges this with the operator's stored selection and serves it to the shell at
 `GET /platform/v1/modules/calendar/collections`; the shell renders per-calendar on/off

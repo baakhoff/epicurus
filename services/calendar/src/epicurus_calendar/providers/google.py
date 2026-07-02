@@ -283,6 +283,9 @@ class GoogleCalendarProvider(CalendarProvider):
                 collection=str(item.get("id", "")),
                 title=str(item.get("summaryOverride") or item.get("summary") or item.get("id", "")),
                 writable=str(item.get("accessRole", "")) in _WRITABLE_ROLES,
+                # The user's own calendar colour — the shell tints that calendar's
+                # events and menu dot with it instead of a derived hue (#431).
+                color=str(item["backgroundColor"]) if item.get("backgroundColor") else None,
             )
             for item in items
         ]

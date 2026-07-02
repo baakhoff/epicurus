@@ -50,7 +50,7 @@ async def test_list_collections_sorts_primary_first() -> None:
     assert collections[1].writable is False  # reader role → not offered as a write target
 
 
-async def test_list_collections_maps_titles_and_roles() -> None:
+async def test_list_collections_maps_titles_roles_and_colour() -> None:
     items = [
         {
             "id": "me@example.com",
@@ -58,7 +58,9 @@ async def test_list_collections_maps_titles_and_roles() -> None:
             "summaryOverride": "Personal",
             "accessRole": "owner",
             "primary": True,
+            "backgroundColor": "#af4fd7",
         },
+        {"id": "team@group", "summary": "Team", "accessRole": "writer"},
     ]
     prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
     with patch(
@@ -68,3 +70,7 @@ async def test_list_collections_maps_titles_and_roles() -> None:
         collections = await prov.list_collections(tenant_id="local")
     assert collections[0].title == "Personal"  # the operator's rename wins over the raw summary
     assert collections[0].account == "google"
+    # The user's own calendar colour rides along so the shell can tint events (#431);
+    # a calendar without one carries None and the shell derives a hue.
+    assert collections[0].color == "#af4fd7"
+    assert collections[1].color is None

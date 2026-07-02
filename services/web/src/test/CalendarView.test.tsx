@@ -168,6 +168,116 @@ describe("CalendarView", () => {
     );
   });
 
+  it("lists every enabled calendar in the menu, not only those with in-window events (#431)", async () => {
+    mockCollections.mockResolvedValue({
+      noun: "calendar",
+      multi: true,
+      accounts: [
+        {
+          account: "google",
+          provider: "google",
+          label: "Google",
+          connected: true,
+          collections: [
+            {
+              account: "google",
+              collection: "primary",
+              title: "Work Calendar",
+              writable: true,
+              enabled: true,
+            },
+            {
+              account: "google",
+              collection: "family@group",
+              title: "Family",
+              writable: true,
+              enabled: true,
+            },
+            {
+              account: "google",
+              collection: "off@group",
+              title: "Disabled one",
+              writable: true,
+              enabled: false,
+            },
+          ],
+        },
+      ],
+    });
+    // Only one calendar has an event in this window — the menu must still list both
+    // enabled calendars (and not the disabled one).
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e2",
+          title: "Sync",
+          start: "2026-06-16T10:00:00",
+          end: "2026-06-16T10:30:00",
+          provider: "google",
+          calendar_id: "google:primary",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Sync");
+
+    fireEvent.click(await screen.findByLabelText("Choose visible calendars"));
+    expect(await screen.findByText("Work Calendar")).toBeInTheDocument();
+    expect(screen.getByText("Family")).toBeInTheDocument(); // enabled but empty this window
+    expect(screen.queryByText("Disabled one")).toBeNull(); // not enabled → no toggle
+  });
+
+  it("tints event chips with the calendar's own colour, matching the menu dot (#431)", async () => {
+    mockCollections.mockResolvedValue({
+      noun: "calendar",
+      multi: true,
+      accounts: [
+        {
+          account: "google",
+          provider: "google",
+          label: "Google",
+          connected: true,
+          collections: [
+            {
+              account: "google",
+              collection: "primary",
+              title: "Work Calendar",
+              writable: true,
+              enabled: true,
+              color: "#af4fd7",
+            },
+            {
+              account: "google",
+              collection: "family@group",
+              title: "Family",
+              writable: true,
+              enabled: true,
+            },
+          ],
+        },
+      ],
+    });
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e2",
+          title: "Sync",
+          start: "2026-06-16T10:00:00",
+          end: "2026-06-16T10:30:00",
+          provider: "google",
+          calendar_id: "google:primary",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    // The chip carries the provider's colour as its --cal variable.
+    const chip = await screen.findByText("Sync");
+    expect(chip.closest("button")?.style.getPropertyValue("--cal")).toBe("#af4fd7");
+  });
+
   it("paints the cached window instantly on reopen, then revalidates (#379)", async () => {
     mockModulePage.mockResolvedValue(sample);
     const { unmount } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });

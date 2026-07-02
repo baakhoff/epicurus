@@ -10,6 +10,7 @@ from epicurus_core_app.maintenance import (
     MaintenanceJob,
     MaintenanceOrchestrator,
     extraction_drain_job,
+    facts_reembed_job,
     module_reindex_job,
 )
 
@@ -158,3 +159,12 @@ async def test_module_reindex_job_all_failed_is_error() -> None:
 
     status, _ = await module_reindex_job(reembed).run()
     assert status == "error"
+
+
+async def test_facts_reembed_job_reports_count() -> None:
+    async def reembed() -> int:
+        return 3
+
+    job = facts_reembed_job(reembed)
+    assert job.key == "facts-reembed" and job.nightly is False
+    assert await job.run() == ("ok", "re-embedded 3 fact(s)")

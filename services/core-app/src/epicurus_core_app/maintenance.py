@@ -214,3 +214,21 @@ def module_reindex_job(reembed: Callable[[], Awaitable[list[dict[str, str]]]]) -
     return MaintenanceJob(
         key="module-reindex", label="Module re-index / re-embed", run=_run, nightly=False
     )
+
+
+def facts_reembed_job(reembed: Callable[[], Awaitable[int]]) -> MaintenanceJob:
+    """Re-embed the tenant's memory facts (#436) — heavy, so manual-only (``nightly=False``).
+
+    *reembed* is a zero-arg closure over :meth:`UserFactStore.reembed_all` for the default
+    tenant. Facts aren't a module and don't go through the ``/reindex`` HTTP fan-out above, but
+    they're a Qdrant collection just as model-dependent as knowledge/notes, so this folds them
+    into the same "Re-embed everything" action (ADR-0054) instead of leaving them out of it.
+    """
+
+    async def _run() -> tuple[JobStatus, str]:
+        migrated = await reembed()
+        return "ok", f"re-embedded {migrated} fact(s)"
+
+    return MaintenanceJob(
+        key="facts-reembed", label="Memory facts re-embed", run=_run, nightly=False
+    )

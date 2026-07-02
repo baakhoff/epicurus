@@ -66,6 +66,7 @@ from epicurus_core_app.log_stream_routes import create_log_stream_router
 from epicurus_core_app.maintenance import (
     MaintenanceOrchestrator,
     extraction_drain_job,
+    facts_reembed_job,
     module_reindex_job,
 )
 from epicurus_core_app.maintenance_routes import create_maintenance_router
@@ -321,6 +322,7 @@ def create_app() -> FastAPI:
         [
             extraction_drain_job(extraction_runner.drain_once),
             module_reindex_job(registry.reembed),
+            facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
         ],
         bus=bus,
         default_tenant=settings.default_tenant_id,

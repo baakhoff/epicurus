@@ -475,6 +475,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Memory recall/save no longer silently break after an embedding-model change** (#436) — the
+  `<tenant>__facts` Qdrant collection was created at whatever dimension the embedder had when it
+  was first touched; swapping to a differently-sized model left it stale, and every recall/save
+  after that 400'd on a vector-dimension mismatch — recall silently degraded to "no memory" and
+  new facts silently stopped saving too. `UserFactStore` now checks a collection's dimension
+  against the current embedder on first use each process lifetime and **reconciles a drift in
+  place**: re-embeds every stored fact's text with the current embedder and recreates the
+  collection at the new size, preserving each fact's id and metadata (a fact has no source
+  document to cheaply recrawl the way a knowledge doc does, so unlike the module re-embed
+  fan-out this never drops data). Also folded into the manual "Re-embed everything" action
+  (ADR-0054) via a new **memory facts re-embed** maintenance job, so an operator-triggered
+  re-embed refreshes memory the same way it refreshes knowledge/notes. core-app 0.53.0→0.54.0.
 - **Uninstalling a module no longer hard-fails when the core can't reach Docker** (#382, amends
   ADR-0028) — "Remove module" returned a **503** ("the core has no Docker access") whenever the
   Docker socket wasn't mounted, leaving no way to remove a module. Removal is now **decoupled from

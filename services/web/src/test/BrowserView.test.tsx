@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -146,6 +146,27 @@ describe("BrowserView", () => {
     fireEvent.click(await screen.findByText("readme.txt"));
     expect(await screen.findByText("Download")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /rename/i })).toBeNull();
+  });
+
+  it("guards a folder tap against an immediate double-fire (Android PWA, #428)", async () => {
+    const fetchPage = vi.fn().mockResolvedValue({
+      title: "Files",
+      items: [{ id: "docs", title: "docs", nav_path: "docs" }],
+    });
+    const source = fakeSource({ fetchPage });
+    render(<BrowserView source={source} />, { wrapper });
+
+    const folder = await screen.findByText("docs");
+    // Both dispatches inside one act() so the second fires before the first's
+    // navigation commits and unmounts the row — reproducing a touchend+click
+    // double-fire on the same element, not two clicks on two different renders.
+    act(() => {
+      fireEvent.click(folder);
+      fireEvent.click(folder);
+    });
+
+    await waitFor(() => expect(fetchPage).toHaveBeenCalledWith("docs", ""));
+    expect(fetchPage.mock.calls.filter((c) => c[0] === "docs")).toHaveLength(1);
   });
 
   it("moves a file by dragging it onto a folder (#391)", async () => {

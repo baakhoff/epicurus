@@ -7,10 +7,14 @@ import { CalendarView } from "@/components/archetypes/CalendarView";
 
 const mockModulePage = vi.fn();
 const mockCollections = vi.fn();
+const mockModules = vi.fn();
+const mockInvoke = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
     getModuleCollections: (...args: unknown[]) => mockCollections(...args),
+    modules: (...args: unknown[]) => mockModules(...args),
+    invokeModuleTool: (...args: unknown[]) => mockInvoke(...args),
   },
 }));
 
@@ -43,6 +47,8 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-06-15T12:00:00Z"));
   mockModulePage.mockReset();
+  mockModules.mockReset().mockResolvedValue([]);
+  mockInvoke.mockReset();
   mockCollections.mockReset().mockResolvedValue({
     noun: "calendar",
     multi: true,
@@ -166,6 +172,21 @@ describe("CalendarView", () => {
     expect(localStorage.getItem("epicurus-cal-hidden:calendar:calendar")).toContain(
       "google:primary",
     );
+  });
+
+  // Regression guard (#427): the page-level action ("New event") must match the
+  // toolbar's other hand-rolled controls (Today, view switcher: text-xs), not the
+  // full form-sized Button used e.g. by the tasks board toolbar.
+  it("renders the page-level action at the toolbar's compact size", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      actions: [{ tool: "calendar_create_event", label: "New event" }],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    const button = await screen.findByRole("button", { name: /new event/i });
+    expect(button.className).toContain("text-xs");
+    expect(button.className).not.toContain("text-sm");
   });
 
   it("paints the cached window instantly on reopen, then revalidates (#379)", async () => {

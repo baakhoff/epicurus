@@ -34,24 +34,31 @@ const buttonStyles: Record<ButtonVariant, string> = {
 
 export function Button({
   variant = "outline",
+  size = "md",
   busy = false,
   className,
   children,
   disabled,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; busy?: boolean }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  /** `sm` matches a denser toolbar's hand-rolled controls (#427); `md` (default) is the form/CTA size. */
+  size?: "sm" | "md";
+  busy?: boolean;
+}) {
   return (
     <button
       className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-(--radius-field) px-3.5 py-2 text-sm",
+        "inline-flex items-center justify-center gap-2 rounded-(--radius-field)",
         "transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+        size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm",
         buttonStyles[variant],
         className,
       )}
       disabled={disabled || busy}
       {...rest}
     >
-      {busy && <Loader2 size={15} className="animate-spin" />}
+      {busy && <Loader2 size={size === "sm" ? 12 : 15} className="animate-spin" />}
       {children}
     </button>
   );

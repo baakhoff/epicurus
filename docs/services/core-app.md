@@ -173,7 +173,7 @@ enumerates a model's quants.) It is deliberately best-effort (any failure → em
 falls back to the manual box; a model not in the public library logs at debug, not warning)
 and, like the catalog, global rather than tenant-scoped.
 
-#### Re-embedding (#332, ADR-0054)
+#### Re-embedding (#332/#436, ADR-0054/ADR-0074)
 
 Changing the embedding model doesn't re-embed existing data on its own — vectors built with the
 old model don't match queries embedded with the new one. `POST /platform/v1/modules/reembed`
@@ -184,6 +184,17 @@ fan-out is best-effort and returns a per-module `started`/`error` status; progre
 each module's `/status`. Only embedding-backed modules opt in (knowledge — covering its vault
 **and** the shared module-docs collection — and notes); storage holds no embeddings. Single-
 tenant in v1: each module re-embeds its own tenant's corpus, which matches the core's.
+
+Memory facts aren't a module and don't have a `/reindex` endpoint, but they're just as
+model-dependent, so they're folded into the same action a different way (#436, ADR-0074): the
+**maintenance orchestrator**'s `facts-reembed` job (below) calls `UserFactStore.reembed_all`
+directly (core-resident, no HTTP hop) as part of the manual "run everything" trigger. Unlike a
+module's drop-and-recrawl, this **preserves each fact's id and text and only replaces the
+vector** — a fact has no source document to cheaply recrawl the way a knowledge doc does. The
+same reconcile also runs **lazily and automatically**: `UserFactStore._ensure` compares a
+collection's actual vector size against the current embedder's on first use each process
+lifetime, and self-heals a mismatch on the spot — so recall/save survive a model swap even
+before anyone clicks "Re-embed everything".
 
 #### Per-model settings (ADR-0044)
 
@@ -314,11 +325,13 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Two ship:
-the **memory fact-extraction drain** (light, nightly-eligible — drains the deferred-extraction
-queue, ADR-0051) and the **module re-index** fan-out (heavy, manual-only — the same `reembed`
-fan-out as above). Jobs run **sequenced** (gentle on a single GPU) and each is contained: one job's
-failure becomes an `error` result, never aborting the rest.
+registers by being added to the list; the run / route / schedule machinery is unchanged. Three
+ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
+deferred-extraction queue, ADR-0051), the **module re-index** fan-out (heavy, manual-only — the
+same `reembed` fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
+`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
+single GPU) and each is contained: one job's failure becomes an `error` result, never aborting
+the rest.
 
 | Method · Path | Purpose |
 | --- | --- |
@@ -428,7 +441,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   (cosine ≥ 0.92); recall searches this collection, and the **Settings → Memory** box lists /
   searches / forgets it. Raw conversation turns are **not** indexed — the verbatim transcript
   lives only in `agent_messages`. (The pre-ADR-0045 recall collection `<tenant>__memory` is no
-  longer written; any existing vectors are simply unused.)
+  longer written; any existing vectors are simply unused.) The collection is created at
+  whatever dimension the embedder had on first use; `UserFactStore._ensure` checks that dim
+  against the current embedder on each process's first touch and **reconciles a mismatch**
+  in place — re-embedding every stored fact's text and recreating the collection at the new
+  size, preserving each fact's id and metadata — rather than silently 400ing on every
+  recall/save the way it did before #436.
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
   extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`. In the
   default **nightly** mode the agent enqueues each exchange here instead of distilling it inline;

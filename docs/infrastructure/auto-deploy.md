@@ -67,8 +67,8 @@ keep `main` for vetted code and treat the testing box as disposable.
 ## Option A — Scheduled reconcile script (recommended for Windows)
 
 `infra/cd/reconcile.sh` runs `docker compose pull && docker compose up -d --remove-orphans`
-from the repo root.  Schedule it with **Windows Task Scheduler** so it runs while
-you sleep.
+from the repo root (or `task reconcile`, the same script).  Schedule it with **Windows Task
+Scheduler** so it runs while you sleep — or run it by hand for an immediate deploy.
 
 ### One-time GHCR login
 

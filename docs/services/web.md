@@ -103,7 +103,9 @@ renders each at `/m/:module/:pageId` via a first-party screen for that archetype
 detail), `calendar` (month / week / agenda — with per-calendar **visibility toggles** and an
 instant-paint **month cache** that revalidates in the background, #378/#379), `editor`
 (Obsidian-like doc), and `board`
-(columns of cards) all ship today. Page data is fetched through the core proxy
+(columns of cards) all ship today. `browser` guards its folder rows against the duplicated
+tap-navigation mobile PWAs can fire (a short debounce on folder taps plus a path-keyed list
+remount, #428). Page data is fetched through the core proxy
 (`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
 calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
 

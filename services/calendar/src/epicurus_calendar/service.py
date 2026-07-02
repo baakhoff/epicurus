@@ -128,7 +128,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.2",
+        version="0.10.3",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -272,11 +272,22 @@ def build_module(
         ] = None,
         location: str | None = None,
         description: _Multiline | None = None,
+        calendar_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Calendar the event lives on, as an account:collection token (the"
+                    " page tags each event with it); omit to search the enabled calendars."
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Edit an existing event and return the updated event.
 
         Only the fields you pass are changed; the rest are left as they are. The event
-        is found and edited wherever it lives across the enabled calendars (#208).
+        is found and edited wherever it lives across the enabled calendars (#208);
+        pass *calendar_id* (the event's own tag from a listing/page) to edit its home
+        calendar directly instead of probing each one (#435).
 
         Args:
             event_id: The id of the event to edit (from a listing or the page).
@@ -290,6 +301,8 @@ def build_module(
                 to match); omit to leave its all-day-ness unchanged.
             location: New location, if changing it.
             description: New description, if changing it.
+            calendar_id: Optional home-calendar token (account:collection) to target
+                directly; omit to search the enabled calendars.
 
         Returns the updated event dict. Raises if no such event exists.
         """
@@ -303,6 +316,7 @@ def build_module(
             end=end_dt,
             description=description,
             location=location,
+            calendar_id=calendar_id,
             all_day=all_day,
         )
         if event is None:
@@ -310,18 +324,34 @@ def build_module(
         return _event_payload(event)
 
     @module.tool()
-    async def calendar_delete_event(event_id: str) -> dict[str, Any]:
+    async def calendar_delete_event(
+        event_id: str,
+        calendar_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Calendar the event lives on, as an account:collection token (the"
+                    " page tags each event with it); omit to search the enabled calendars."
+                )
+            ),
+        ] = None,
+    ) -> dict[str, Any]:
         """Delete a calendar event by its id.
 
-        Removes the event wherever it lives across the enabled calendars (#208).
+        Removes the event wherever it lives across the enabled calendars (#208); pass
+        *calendar_id* (the event's own tag) to target its home calendar directly (#435).
 
         Args:
             event_id: The id of the event to delete.
+            calendar_id: Optional home-calendar token (account:collection); omit to
+                search the enabled calendars.
 
         Returns ``{"deleted": true, "id": ...}`` on success; raises if no such event
         exists.
         """
-        deleted = await provider.delete_event(tenant_id=tenant_id, event_id=event_id)
+        deleted = await provider.delete_event(
+            tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id
+        )
         if not deleted:
             raise ValueError(f"event {event_id!r} not found")
         return {"deleted": True, "id": event_id}
@@ -620,15 +650,23 @@ def _event_form_values(event: Event) -> dict[str, Any]:
 
 
 def _event_with_actions(event: Event) -> dict[str, Any]:
-    """An event dict plus its Edit/Delete actions for the editable calendar (#208)."""
+    """An event dict plus its Edit/Delete actions for the editable calendar (#208).
+
+    The args carry the event's home-calendar token (when the router tagged it, #378)
+    so the write goes straight to the owning calendar instead of probing the whole
+    enabled set (#435).
+    """
     data = _event_payload(event)
+    args: dict[str, Any] = {"event_id": event.id}
+    if event.calendar_id:
+        args["calendar_id"] = event.calendar_id
     data["actions"] = [
         {
             "tool": "calendar_update_event",
             "label": "Edit",
             "icon": "pencil",
             "form": True,
-            "args": {"event_id": event.id},
+            "args": args,
             "fields": _EVENT_FIELDS,
             "form_values": _event_form_values(event),
         },
@@ -638,7 +676,7 @@ def _event_with_actions(event: Event) -> dict[str, Any]:
             "icon": "trash",
             "intent": "danger",
             "confirm": f"Delete {event.title!r}? This can't be undone.",
-            "args": {"event_id": event.id},
+            "args": args,
         },
     ]
     return data

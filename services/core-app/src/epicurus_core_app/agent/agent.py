@@ -28,7 +28,7 @@ from epicurus_core_app.agent.activity import (
     append_tool,
 )
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
-from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
@@ -714,6 +714,11 @@ class Agent:
             return f"error: unknown tool {name!r}"
         try:
             return await self._mcp.call(name, arguments, url, tenant=tenant)
+        except ToolCallError as exc:
+            # The tool ran and reported failure; hand the model the tool's own error
+            # text — exactly what it received before the host raised on isError (#435).
+            log.warning("tool reported failure", tool=name, error=str(exc))
+            return str(exc)
         except Exception as exc:  # surface the failure to the model, don't crash the turn
             log.warning("tool call failed", tool=name, error=str(exc))
             return f"error: tool {name!r} failed: {exc}"

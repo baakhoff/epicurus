@@ -418,6 +418,9 @@ export const Collection = z.object({
   collection: z.string(),
   title: z.string(),
   writable: z.boolean().default(true),
+  /** Provider-supplied presentation colour (e.g. the Google calendar colour) — the shell
+   *  prefers it over a derived hue so events match the user's own colours (#431). */
+  color: z.string().nullish(),
   enabled: z.boolean().nullish(),
   active: z.boolean().nullish(),
 });

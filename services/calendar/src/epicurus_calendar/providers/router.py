@@ -23,8 +23,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
 
 log = get_logger("epicurus_calendar.router")
@@ -177,6 +177,8 @@ class CollectionRouter(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
     ) -> Event:
         # Unlike a plain provider (where ``calendar_id`` is a bare collection id), the
         # router reads it as an ``account[:collection]`` token the create form supplies so
@@ -198,6 +200,8 @@ class CollectionRouter(CalendarProvider):
             location=location,
             calendar_id=ref.collection or None,
             all_day=all_day,
+            recurrence=recurrence,
+            attendees=attendees,
         )
 
     async def update_event(
@@ -212,6 +216,9 @@ class CollectionRouter(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
         # Edit the event wherever it lives: the caller-supplied home calendar first
         # (``calendar_id`` is an ``account[:collection]`` token here, as in create),
@@ -234,6 +241,9 @@ class CollectionRouter(CalendarProvider):
                     location=location,
                     calendar_id=ref.collection or None,
                     all_day=all_day,
+                    recurrence=recurrence,
+                    attendees=attendees,
+                    edit_scope=edit_scope,
                 )
             except Exception as exc:
                 log.warning(
@@ -248,7 +258,12 @@ class CollectionRouter(CalendarProvider):
         return None
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
         # Delete the event wherever it lives (#208); a supplied home-calendar token is
         # tried first (#435), mirroring update_event.
@@ -260,7 +275,10 @@ class CollectionRouter(CalendarProvider):
                 continue
             try:
                 if await provider.delete_event(
-                    tenant_id=tenant_id, event_id=event_id, calendar_id=ref.collection or None
+                    tenant_id=tenant_id,
+                    event_id=event_id,
+                    calendar_id=ref.collection or None,
+                    edit_scope=edit_scope,
                 ):
                     return True
             except Exception as exc:

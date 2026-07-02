@@ -84,6 +84,39 @@ describe("CalendarView", () => {
     expect(screen.getByText("Room 4")).toBeInTheDocument();
   });
 
+  it("shows a recurring event's repeat rule and guest list in its detail (#432)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00",
+          end: "2026-06-15T09:30:00",
+          recurrence: "FREQ=WEEKLY;COUNT=4",
+          attendees: [
+            { email: "alice@example.com" },
+            { email: "bob@example.com", display_name: "Bob" },
+          ],
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    expect(await screen.findByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("alice@example.com, Bob")).toBeInTheDocument();
+  });
+
+  it("omits the repeat/guest lines for a plain event", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    await screen.findByText("Daily sync");
+    expect(screen.queryByText(/^(Weekly|Daily|Monthly|Yearly)$/)).toBeNull();
+  });
+
   it("re-fetches a new window when navigating", async () => {
     mockModulePage.mockResolvedValue(sample);
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });

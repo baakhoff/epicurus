@@ -21,8 +21,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_calendar.providers.google import _google_item_to_event, _google_when
 from epicurus_calendar.providers.local import LocalCalendarProvider
 from epicurus_calendar.providers.router import (
@@ -224,12 +224,39 @@ def test_event_hover_card_omits_location_when_absent() -> None:
     assert card["description"] == ""
 
 
+def test_event_hover_card_shows_recurrence_and_guests() -> None:
+    card = event_hover_card(
+        _event(
+            recurrence="FREQ=WEEKLY;COUNT=4",
+            attendees=[Attendee(email="alice@example.com"), Attendee(email="bob@example.com")],
+        )
+    )
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Repeats"] == "Weekly"
+    assert labels["Guests"] == "alice@example.com, bob@example.com"
+
+
+def test_event_hover_card_omits_recurrence_and_guests_when_absent() -> None:
+    card = event_hover_card(_event())
+    labels = [d["label"] for d in card["details"]]
+    assert "Repeats" not in labels
+    assert "Guests" not in labels
+
+
 def test_event_excerpt_includes_when_and_description() -> None:
     excerpt = event_excerpt(_event(description="Daily sync", location="Room 4"))
     assert "Standup" in excerpt
     assert "Room 4" in excerpt
     assert "Daily sync" in excerpt
     assert "09:00" in excerpt
+
+
+def test_event_excerpt_includes_recurrence_and_guests() -> None:
+    excerpt = event_excerpt(
+        _event(recurrence="FREQ=DAILY", attendees=[Attendee(email="alice@example.com")])
+    )
+    assert "Repeats: Daily" in excerpt
+    assert "Guests: alice@example.com" in excerpt
 
 
 def test_event_attachment_item_shape() -> None:
@@ -259,6 +286,80 @@ def test_format_when_multi_day_uses_arrow() -> None:
     ref = event_entity_ref(multi)
     assert ref.summary is not None
     assert "→" in ref.summary
+
+
+def test_event_entity_ref_appends_recurrence_label() -> None:
+    ref = event_entity_ref(_event(recurrence="FREQ=MONTHLY"))
+    assert ref.summary is not None
+    assert ref.summary.endswith("Monthly")
+
+
+# ── Recurrence humanizing + attendee parsing helpers (#432) ────────────────────
+
+
+def test_humanize_recurrence_known_frequencies() -> None:
+    from epicurus_calendar.service import _humanize_recurrence
+
+    assert _humanize_recurrence("FREQ=DAILY") == "Daily"
+    assert _humanize_recurrence("FREQ=WEEKLY;COUNT=10") == "Weekly"
+    assert _humanize_recurrence("FREQ=MONTHLY;INTERVAL=2") == "Monthly"
+    assert _humanize_recurrence("FREQ=YEARLY") == "Yearly"
+
+
+def test_humanize_recurrence_unknown_or_missing_freq() -> None:
+    from epicurus_calendar.service import _humanize_recurrence
+
+    assert _humanize_recurrence("FREQ=HOURLY") == "Hourly"
+    assert _humanize_recurrence("COUNT=10") == "Recurring"
+
+
+def test_parse_attendees_splits_and_trims() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    result = _parse_attendees(" alice@example.com ,bob@example.com")
+    assert result is not None
+    assert [a.email for a in result] == ["alice@example.com", "bob@example.com"]
+    assert all(a.response_status == "needsAction" for a in result)
+
+
+def test_parse_attendees_none_means_unchanged() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    assert _parse_attendees(None) is None
+
+
+def test_parse_attendees_blank_string_means_no_guests() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    assert _parse_attendees("   ") == []
+
+
+def test_parse_attendees_rejects_invalid_email() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    with pytest.raises(ValueError, match="not an email"):
+        _parse_attendees("not-an-email")
+
+
+def test_format_attendees_round_trips_parse_attendees() -> None:
+    from epicurus_calendar.service import _format_attendees, _parse_attendees
+
+    parsed = _parse_attendees("alice@example.com, bob@example.com")
+    assert parsed is not None
+    assert _format_attendees(parsed) == "alice@example.com, bob@example.com"
+
+
+def test_validate_recurrence_accepts_a_valid_rule() -> None:
+    from epicurus_calendar.service import _validate_recurrence
+
+    _validate_recurrence("FREQ=WEEKLY;COUNT=4", dtstart=_dt(9))  # must not raise
+
+
+def test_validate_recurrence_rejects_garbage() -> None:
+    from epicurus_calendar.service import _validate_recurrence
+
+    with pytest.raises(ValueError, match="invalid recurrence rule"):
+        _validate_recurrence("not an rrule", dtstart=_dt(9))
 
 
 async def test_fetch_event_returns_event(local_provider: LocalCalendarProvider) -> None:
@@ -333,6 +434,8 @@ class _MockGoogleProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
     ) -> Event:
         event = Event(
             id="g-1",
@@ -343,6 +446,8 @@ class _MockGoogleProvider(CalendarProvider):
             location=location,
             provider="google",
             all_day=all_day,
+            recurrence=recurrence,
+            attendees=attendees or [],
         )
         self.events.append(event)
         return event
@@ -359,6 +464,9 @@ class _MockGoogleProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
         for i, e in enumerate(self.events):
             if e.id == event_id:
@@ -372,6 +480,8 @@ class _MockGoogleProvider(CalendarProvider):
                             "description": description,
                             "location": location,
                             "all_day": all_day,
+                            "recurrence": recurrence,
+                            "attendees": attendees,
                         }.items()
                         if v is not None
                     }
@@ -381,7 +491,12 @@ class _MockGoogleProvider(CalendarProvider):
         return None
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
         before = len(self.events)
         self.events = [e for e in self.events if e.id != event_id]
@@ -519,7 +634,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.10.4"
+    assert manifest.version == "0.11.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -755,6 +870,9 @@ class _MultiCalGoogle(_MockGoogleProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
         cal = calendar_id or "primary"
         self.update_probes.append(cal)
@@ -766,7 +884,12 @@ class _MultiCalGoogle(_MockGoogleProvider):
         return None
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
         cal = calendar_id or "primary"
         self.delete_probes.append(cal)
@@ -1075,7 +1198,16 @@ async def test_calendar_page_declares_new_event_action(
     assert [a["tool"] for a in actions] == ["calendar_create_event"]
     new = actions[0]
     assert new["form"] is True
-    assert new["fields"] == ["title", "all_day", "start", "end", "location", "description"]
+    assert new["fields"] == [
+        "title",
+        "all_day",
+        "start",
+        "end",
+        "location",
+        "description",
+        "recurrence",
+        "attendees",
+    ]
     # The default time is prefilled so the picker opens on a sensible slot.
     assert "start" in new["form_values"] and "end" in new["form_values"]
     assert new["form_values"]["all_day"] is False
@@ -1195,6 +1327,207 @@ async def test_update_event_to_all_day(local_provider: LocalCalendarProvider) ->
     assert result["all_day"] is True
     assert result["start"] == "2025-06-15"
     assert result["end"] == "2025-06-16"
+
+
+# ── Recurrence + attendees via the MCP tools (#432) ─────────────────────────────
+
+
+async def test_create_event_tool_with_recurrence(local_provider: LocalCalendarProvider) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    result = _extract(structured)
+    assert result["recurrence"] == "FREQ=WEEKLY;COUNT=4"
+    assert result["recurring_event_id"] is None
+
+
+async def test_create_event_tool_with_invalid_recurrence_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    with pytest.raises(ToolError, match="invalid recurrence rule"):
+        await module.mcp.call_tool(
+            "calendar_create_event",
+            {
+                "title": "Standup",
+                "start": "2026-07-06T09:00:00+00:00",
+                "end": "2026-07-06T09:30:00+00:00",
+                "recurrence": "not an rrule",
+            },
+        )
+
+
+async def test_create_event_tool_with_attendees(local_provider: LocalCalendarProvider) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Sync",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "attendees": "alice@example.com, bob@example.com",
+        },
+    )
+    result = _extract(structured)
+    assert [a["email"] for a in result["attendees"]] == ["alice@example.com", "bob@example.com"]
+
+
+async def test_create_event_tool_with_invalid_attendee_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    with pytest.raises(ToolError, match="not an email"):
+        await module.mcp.call_tool(
+            "calendar_create_event",
+            {
+                "title": "Sync",
+                "start": "2026-07-06T09:00:00+00:00",
+                "end": "2026-07-06T09:30:00+00:00",
+                "attendees": "not-an-email",
+            },
+        )
+
+
+async def test_update_event_tool_this_occurrence(local_provider: LocalCalendarProvider) -> None:
+    from epicurus_calendar.db import instance_id
+
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event", {"event_id": iid, "title": "Standup (moved)"}
+    )
+    result = _extract(structured)
+    assert result["title"] == "Standup (moved)"
+    assert result["id"] == iid
+
+
+async def test_update_event_tool_recurrence_with_this_scope_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    from epicurus_calendar.db import instance_id
+
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    with pytest.raises(ToolError, match="single occurrence"):
+        await module.mcp.call_tool(
+            "calendar_update_event",
+            {"event_id": iid, "recurrence": "FREQ=DAILY", "edit_scope": "this"},
+        )
+
+
+async def test_update_event_tool_all_scope_renames_series(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": series_id, "title": "Renamed", "edit_scope": "all"},
+    )
+    assert _extract(structured)["title"] == "Renamed"
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert all("Renamed" in ref.title for ref in envelope.entity_refs)
+
+
+async def test_delete_event_tool_this_scope_removes_one_occurrence(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    from epicurus_calendar.db import instance_id
+
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool("calendar_delete_event", {"event_id": iid})
+    assert _extract(structured)["deleted"] is True
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert len(envelope.entity_refs) == 3  # 4 minus the deleted occurrence
+
+
+# ── _event_with_actions: edit_scope only appears for a recurring event (#432) ───
+
+
+def test_event_with_actions_recurring_gets_edit_scope_field() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    recurring = _event(recurrence="FREQ=WEEKLY;COUNT=4")
+    data = _event_with_actions(recurring)
+    edit, delete = data["actions"]
+    assert "edit_scope" in edit["fields"]
+    assert edit["field_choices"]["edit_scope"] == [
+        {"value": "this", "label": "This event"},
+        {"value": "all", "label": "All events"},
+    ]
+    assert delete["form"] is True
+    assert delete["fields"] == ["edit_scope"]
+    assert delete["form_values"] == {"edit_scope": "this"}
+    assert "confirm" in delete  # still present (schema requires it for a danger action)
+
+
+def test_event_with_actions_non_recurring_keeps_confirm_only_delete() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    data = _event_with_actions(_event())
+    edit, delete = data["actions"]
+    assert "edit_scope" not in edit["fields"]
+    assert "field_choices" not in edit
+    assert "form" not in delete
+    assert "confirm" in delete
+
+
+def test_event_with_actions_recurring_instance_also_gets_edit_scope() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    instance = _event(recurring_event_id="series-1", original_start=_dt(9))
+    data = _event_with_actions(instance)
+    edit, _delete = data["actions"]
+    assert "edit_scope" in edit["fields"]
 
 
 def test_new_event_action_includes_all_day_toggle(

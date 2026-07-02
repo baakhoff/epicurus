@@ -118,7 +118,11 @@ body,
    the bottom tab bar, anchored to the bottom of this overflow-hidden box, gets
    clipped out of view until you scroll and the bar retracts. Anchoring at top:0 with
    a dvh height keeps the root exactly the visible viewport, so nothing below the fold
-   is ever hidden. (100vh is the fallback for the rare engine without dvh.) */
+   is ever hidden. (100vh is the fallback for the rare engine without dvh.)
+
+   On Android PWA, dvh itself can still misreport for a moment right after a reload
+   (#429) — App.tsx mirrors the live `visualViewport` height into --app-height on
+   mount/resize, which wins over the raw dvh value below once set. */
 #root {
   position: fixed;
   top: 0;
@@ -126,6 +130,7 @@ body,
   right: 0;
   height: 100vh;
   height: 100dvh;
+  height: var(--app-height, 100dvh);
   overflow: hidden;
 }
 

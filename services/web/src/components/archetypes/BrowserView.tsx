@@ -104,6 +104,9 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  // Guards a folder tap against a double-fired click (touchend + click on Android
+  // PWA, #428) — a real second tap on a *different* row is never this close together.
+  const lastNavRef = useRef(0);
   const qc = useQueryClient();
 
   // Open a text file in the right-panel split-screen reader (#KB-refactor, req 6).
@@ -316,7 +319,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
           {data.items.length === 0 ? (
             <EmptyState quote={activeQuery ? "No matches." : "Nothing here yet."} />
           ) : (
-            <ul className="flex flex-col p-2">
+            <ul key={currentPath} className="flex flex-col p-2">
               {data.items.map((item) => {
                 const isFolder = !!item.nav_path;
                 const dropTarget = isFolder && !!dragId && dragId !== item.id;
@@ -336,6 +339,9 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       {...(isFolder ? dropProps(item.nav_path as string) : {})}
                       onClick={() => {
                         if (item.nav_path) {
+                          const now = Date.now();
+                          if (now - lastNavRef.current < 500) return;
+                          lastNavRef.current = now;
                           navigateTo(item.nav_path);
                         } else {
                           setSelectedId(item.id);

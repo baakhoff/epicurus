@@ -1,13 +1,25 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { NumberInput, Select, Switch, TextInput, Tooltip } from "@/components/ui";
+import { Button, NumberInput, Select, Switch, TextInput, Tooltip } from "@/components/ui";
 
 function thumb(sw: HTMLElement): HTMLElement {
   const span = sw.querySelector("span");
   if (!span) throw new Error("switch has no thumb");
   return span as HTMLElement;
 }
+
+// size="sm" (#427): a denser toolbar (e.g. the calendar's) can opt a full Button down
+// to match its hand-rolled small controls, without affecting the "md" default used
+// everywhere else (forms, the board toolbar).
+describe("Button", () => {
+  it("uses the comfortable size by default and a compact one for size='sm'", () => {
+    const { rerender } = render(<Button>Save</Button>);
+    expect(screen.getByRole("button", { name: "Save" }).className).toContain("text-sm");
+    rerender(<Button size="sm">Save</Button>);
+    expect(screen.getByRole("button", { name: "Save" }).className).toContain("text-xs");
+  });
+});
 
 describe("Switch", () => {
   it("exposes the switch role with the label as its accessible name", () => {

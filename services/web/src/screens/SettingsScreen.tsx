@@ -418,6 +418,11 @@ export function SettingsScreen() {
   const theme = usePrefs((s) => s.theme);
   const setTheme = usePrefs((s) => s.setTheme);
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
+  // Chat bridges are a messaging-module capability — hide the card (and skip its API
+  // calls) unless messaging is installed and enabled (#430).
+  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+  const messagingEnabled =
+    modules.data?.some((m) => m.manifest.name === "messaging" && m.enabled) ?? false;
   const location = useLocation();
   const navigate = useNavigate();
   const [oauthNotice, setOauthNotice] = useState<{
@@ -500,7 +505,7 @@ export function SettingsScreen() {
           </div>
         </Card>
 
-        <ChatBridgesCard />
+        {messagingEnabled && <ChatBridgesCard />}
 
         <TimezoneCard />
 

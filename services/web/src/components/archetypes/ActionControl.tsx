@@ -77,12 +77,15 @@ export function ActionControl({
   pageId,
   action,
   compact = false,
+  size,
   onSuccess,
 }: {
   module: string;
   pageId: string;
   action: BoardAction;
   compact?: boolean;
+  /** Passed through to the full (non-compact) Button — shrink a denser toolbar (#427). */
+  size?: "sm" | "md";
   /** Called after a successful invocation (e.g. to close an event-detail modal). */
   onSuccess?: () => void;
 }) {
@@ -171,7 +174,7 @@ export function ActionControl({
           {action.label}
         </button>
       ) : (
-        <Button variant={fullVariant} busy={invoke.isPending} onClick={onClick}>
+        <Button variant={fullVariant} size={size} busy={invoke.isPending} onClick={onClick}>
           {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
           {action.label}
         </Button>

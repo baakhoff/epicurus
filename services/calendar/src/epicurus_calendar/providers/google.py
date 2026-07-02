@@ -261,11 +261,13 @@ class GoogleCalendarProvider(CalendarProvider):
             return False
 
     async def list_collections(self, *, tenant_id: str) -> list[Collection]:
-        """Every calendar in the account's calendarList (ADR-0030).
+        """Every calendar in the account's calendarList (ADR-0030), primary first.
 
         Each becomes a toggleable collection in the shell; ``writable`` reflects the
         Google access role so a read-only (subscribed) calendar can be kept out of the
-        active/write picker.
+        active/write picker. The account's **primary** calendar sorts first (the API's
+        order is unspecified) so it is the natural default wherever "the first Google
+        calendar" is picked — the New-event picker's preselection (#433).
         """
         headers = await self._auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as http:
@@ -274,7 +276,7 @@ class GoogleCalendarProvider(CalendarProvider):
                 headers=headers,
             )
             resp.raise_for_status()
-        items = resp.json().get("items", [])
+        items = sorted(resp.json().get("items", []), key=lambda i: not i.get("primary", False))
         return [
             Collection(
                 account="google",

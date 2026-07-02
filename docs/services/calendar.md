@@ -21,7 +21,10 @@ provider chosen at startup. The operator connects an account (Google), sees ever
 it exposes, toggles which to show, and picks the one new events land on — all from the
 core-rendered connected-accounts section. A `CollectionRouter` (`providers/router.py`) reads
 the stored selection from the core and overlays the **enabled** calendars on read while
-writing to the **active** one; with nothing enabled it falls back to local.
+writing to the **active** one; with nothing enabled it falls back to local. When no active
+calendar is set, writes prefer a **connected external calendar** — the first enabled one,
+else a connected provider's own default (Google's `primary`) — and land in the silent local
+store only when nothing external is connected (#433).
 
 The domain model is provider-neutral: an `Event` is an `Event` regardless of
 backend.  Adding a new provider (CalDAV, Microsoft Exchange, …) requires
@@ -57,14 +60,15 @@ hover-cards & attachments* under Contract, below).
 | Tool | Description |
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
-| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?)` | Create a new event. `start`/`end` are ISO-8601 strings, or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **active** calendar, or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). Returns the created event. |
+| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). Returns the created event. |
 | `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?)` | Edit an event. Only the fields passed change; the rest are left as-is. Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208). Returns the updated event; raises if absent. |
 | `calendar_delete_event(event_id)` | Delete an event wherever it lives. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
 `calendar_list_events` overlays every enabled calendar (or local); `calendar_create_event`
-writes to the **active** one (or local) unless a `calendar_id` token picks another;
+writes to the **write default** (active, else the first enabled external calendar, else a
+connected provider's primary, else local — #433) unless a `calendar_id` token picks another;
 `calendar_update_event` / `calendar_delete_event` act on whichever enabled calendar holds the
 event (active → other enabled → local, the same search `get_event` uses). The `calendar_id`
 token is decoded by the `CollectionRouter` into a concrete `account:collection` target — the
@@ -84,6 +88,14 @@ one place a per-call calendar override is honoured.
   "provider": "local | google"
 }
 ```
+
+**Timezones (#433, ADR-0039).** A timed `start`/`end` that carries a UTC offset is honoured
+as that instant. A **naive** value (no offset — the common natural-language case, e.g. the
+agent writing the operator's "3 PM" as `2026-07-02T15:00:00`) is read as wall time in the
+**operator's configured timezone**, fetched from the core via
+`PlatformClient.get_timezone()` per write. An unreachable core or an unknown zone name
+degrades to UTC (the pre-#433 behaviour) rather than failing the write. The web create/edit
+forms are unaffected — they always submit offset-carrying instants.
 
 **All-day events** carry `all_day: true` and represent a *floating* date range: internally
 `start`/`end` are UTC-midnight day boundaries with `end` **exclusive** (the day after the last
@@ -110,8 +122,11 @@ via `PlatformClient.get_collections()` (a Postgres-only read at
 
 - **read** (`calendar_list_events`, the page) overlays the **enabled** calendars; with none
   enabled it reads the local default;
-- **write** (`calendar_create_event`) targets the **active** calendar; with none active it
-  writes local.
+- **write** (`calendar_create_event`, `calendar_find_free`) targets the **active** calendar;
+  with none active it prefers a connected external calendar — the first **enabled** one, else
+  a connected provider's default (`primary`) — and uses local only when nothing external is
+  connected (#433). The New-event picker preselects the same default (Google lists the
+  primary calendar first).
 
 If the core is briefly unreachable, the router degrades to the local default rather than
 failing (local-first).

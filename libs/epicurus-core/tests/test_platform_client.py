@@ -235,6 +235,34 @@ async def test_get_module_model_requires_module_name() -> None:
         await client.get_module_model("embedding")
 
 
+# ── get_timezone (ADR-0039 / #433) ────────────────────────────────────────────────
+
+
+async def test_get_timezone_returns_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    resp = _Resp(body={"timezone": "Europe/Belgrade"})
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture=captured),
+    )
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local")
+    assert await client.get_timezone() == "Europe/Belgrade"
+    assert captured["url"] == "/platform/v1/timezone"
+    assert captured["params"] == {"tenant_id": "local"}
+
+
+async def test_get_timezone_raises_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The caller owns the fallback (degrade to UTC) — the client itself must raise.
+    resp = _Resp(body={}, status_code=503)
+    monkeypatch.setattr(
+        "epicurus_core.platform_client.httpx.AsyncClient",
+        lambda *a, **kw: _HttpClient(response=resp, capture={}),
+    )
+    client = PlatformClient(base_url="http://core:8080", tenant_id="local")
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        await client.get_timezone()
+
+
 # ── get_collections (ADR-0030) ────────────────────────────────────────────────────
 
 

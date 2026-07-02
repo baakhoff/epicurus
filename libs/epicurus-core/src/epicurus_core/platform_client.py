@@ -173,6 +173,22 @@ class PlatformClient:
             resp.raise_for_status()
             return bool(resp.json().get("enabled", True))
 
+    async def get_timezone(self) -> str:
+        """The operator's configured IANA timezone (ADR-0039), e.g. ``"Europe/Belgrade"``.
+
+        Modules that accept naive (offset-less) date/time inputs — natural-language
+        event or task times — resolve them in this zone rather than assuming UTC, so
+        "3 PM" means the operator's 3 PM (#433). Raises ``httpx.HTTPStatusError`` /
+        ``httpx.HTTPError`` when the core is unreachable; callers should degrade to UTC.
+        """
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
+            resp = await http.get(
+                "/platform/v1/timezone",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            return str(resp.json()["timezone"])
+
     async def get_collections(self) -> CollectionPrefs:
         """The operator's collection selection for this module (ADR-0030).
 

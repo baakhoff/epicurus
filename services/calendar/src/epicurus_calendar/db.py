@@ -126,8 +126,8 @@ class LocalEventStore:
             tenant=tenant,
             event_id=event_id,
             title=title,
-            start_dt=start,
-            end_dt=end,
+            start_dt=_to_utc(start),
+            end_dt=_to_utc(end),
             description=description,
             location=location,
             all_day=all_day,
@@ -167,9 +167,9 @@ class LocalEventStore:
             if title is not None:
                 row.title = title
             if start is not None:
-                row.start_dt = start
+                row.start_dt = _to_utc(start)
             if end is not None:
-                row.end_dt = end
+                row.end_dt = _to_utc(end)
             if description is not None:
                 row.description = description
             if location is not None:
@@ -218,3 +218,14 @@ def _row_to_event(row: _StoredEvent) -> Event:
 def _ensure_utc(dt: datetime) -> datetime:
     """Attach UTC timezone to a naive datetime (SQLite returns naive values)."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _to_utc(dt: datetime) -> datetime:
+    """Normalize an instant to UTC before storage.
+
+    SQLAlchemy's SQLite ``DateTime`` silently drops a non-UTC offset (keeping the wall
+    time), so a ``+02:00`` instant written as-is reads back shifted; Postgres
+    ``timestamptz`` is unaffected. Converting up front keeps both backends exact now
+    that tool inputs can carry any offset (#433).
+    """
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)

@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core"
-version = "0.20.0"
+version = "0.21.0"
 description = "Shared contract and runtime for epicurus services."
 requires-python = ">=3.11"
 dependencies = [

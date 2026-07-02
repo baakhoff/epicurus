@@ -15,9 +15,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from typing import Literal
 
-from epicurus_calendar.models import DateTimeRange, Event
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_core import Collection
+
+#: Which occurrences an edit/delete on a recurring event applies to (#432): ``"this"`` — the
+#: single instance the caller identified (the default; least blast radius); ``"all"`` — the
+#: whole series (identified by its own id, or resolved from an instance's series). Ignored
+#: for a one-off event. "This and following" is a deliberately deferred follow-up — see
+#: ADR-0074 — since it requires splitting a series in two, a materially harder operation.
+EditScope = Literal["this", "all"]
 
 
 class CalendarProvider(ABC):
@@ -57,12 +65,18 @@ class CalendarProvider(ABC):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
     ) -> Event:
         """Persist a new event and return the created domain object.
 
         When *all_day* is true, *start*/*end* are UTC-midnight day boundaries with *end*
         exclusive (see :attr:`~epicurus_calendar.models.Event.all_day`); a provider stores
         them as a date-only event (Google's ``date`` fields) rather than timed instants.
+
+        *recurrence* (#432) is an RFC 5545 RRULE string (no ``"RRULE:"`` prefix) making this
+        the series' master; ``None`` for a one-off event. *attendees* invites guests
+        (``needsAction`` initially); ``None``/empty means no guests.
         """
 
     @abstractmethod
@@ -78,6 +92,9 @@ class CalendarProvider(ABC):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
         """Apply the given fields to an existing event and return it.
 
@@ -86,16 +103,28 @@ class CalendarProvider(ABC):
         *start*/*end* to match). Returns ``None`` when the event does not exist in this
         provider/collection — the router uses that to try the next source (write where the
         event lives, #208).
+
+        *edit_scope* (#432) matters only when *event_id* names an occurrence of a recurring
+        series: ``"this"`` edits just that occurrence (creating an exception if it wasn't
+        one already); ``"all"`` edits the whole series. *recurrence* changes the series'
+        rule and is only meaningful with ``edit_scope="all"``.
         """
 
     @abstractmethod
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
         """Delete an event. Returns ``True`` if it existed and was removed, else ``False``.
 
         ``False`` lets the router fall through to the next enabled source rather than
-        report a spurious success (#208).
+        report a spurious success (#208). *edit_scope* (#432): ``"this"`` removes just the
+        named occurrence of a recurring series (as an excluded exception); ``"all"``
+        removes the whole series.
         """
 
     @abstractmethod

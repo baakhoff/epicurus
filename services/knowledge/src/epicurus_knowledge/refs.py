@@ -17,7 +17,6 @@ an intermediary's ``%2F`` handling; an opaque, slash-free id sidesteps both.
 from __future__ import annotations
 
 import base64
-import os
 from pathlib import Path, PurePosixPath
 
 from fastapi import HTTPException
@@ -29,12 +28,11 @@ __all__ = [
     "decode_ref",
     "doc_title",
     "encode_ref",
-    "iter_md_files",
-    "iter_projects",
-    "iter_tree_nodes",
     "safe_dir_relative",
     "safe_project",
     "safe_relative",
+    "safe_vault_dir_rel",
+    "safe_vault_rel",
 ]
 
 # Every knowledge entity — a chat attachment (#137) or a cited reference (#143) —
@@ -98,76 +96,34 @@ def safe_relative(root: Path, rel: str) -> Path:
     return target
 
 
-def iter_md_files(root: Path) -> list[str]:
-    """Every ``.md`` file under *root*, as sorted root-relative posix paths."""
-    paths: list[str] = []
-    if root.exists():
-        for dirpath, _dirs, filenames in os.walk(root):
-            base = Path(dirpath)
-            for fname in filenames:
-                if fname.endswith(".md"):
-                    paths.append((base / fname).relative_to(root).as_posix())
-    paths.sort()
-    return paths
+def safe_vault_rel(rel: str) -> str:
+    """Validate *rel* as a vault-relative ``.md`` path; return it as a clean posix string.
 
-
-def iter_tree_nodes(root: Path, subdir: str = "") -> list[dict[str, str]]:
-    """Every ``.md`` file and non-hidden subdirectory under *root*/*subdir*, as dicts.
-
-    When *subdir* is given (e.g. a project/knowledge-base name) the walk is confined to
-    that subtree and the returned ``path`` values are relative to it — so the editor can
-    show one project's contents without the project itself appearing as a node. With no
-    *subdir* the whole *root* is walked (back-compatible).
-
-    The list is depth-first with **directories before files** at every level, both
-    alphabetically sorted within their group. This matches the visual tree the shell
-    renders and is stable regardless of filesystem order. Hidden directories (those
-    whose name starts with ``"."``) are skipped entirely — they are not indexed and
-    are not part of the vault UI.
+    The **read-path** counterpart to :func:`safe_relative`. Where that resolves against a
+    real on-disk root and returns a ``Path``, this is filesystem-independent: the vault is
+    read through the core file API (ADR-0070), which enforces its own containment, so the
+    module holds no ``/data`` mount to resolve against. Rejects empty, absolute,
+    ``..``-traversal, and non-``.md`` paths (400), then hands the :class:`~reader.VaultReader`
+    a clean ``rel`` it maps to the core key.
     """
-    start = (root / subdir) if subdir else root
-    nodes: list[dict[str, str]] = []
-    if not start.exists():
-        return nodes
-
-    def _walk(directory: Path) -> None:
-        try:
-            entries = list(directory.iterdir())
-        except PermissionError:
-            return
-        subdirs = sorted(
-            (e for e in entries if e.is_dir() and not e.name.startswith(".")),
-            key=lambda e: e.name,
-        )
-        files = sorted(
-            (e for e in entries if e.is_file() and e.suffix == ".md"),
-            key=lambda e: e.name,
-        )
-        # Emit dirs before files at this level, then recurse into each dir.
-        for sub in subdirs:
-            nodes.append({"path": sub.relative_to(start).as_posix(), "type": "dir"})
-            _walk(sub)
-        for f in files:
-            nodes.append({"path": f.relative_to(start).as_posix(), "type": "file"})
-
-    _walk(start)
-    return nodes
+    return _clean_vault_rel(rel, require_md=True)
 
 
-def iter_projects(root: Path) -> list[str]:
-    """The knowledge bases ("projects") — the non-hidden top-level folders under *root*.
+def safe_vault_dir_rel(rel: str) -> str:
+    """Like :func:`safe_vault_rel`, but without the ``.md`` requirement (directories)."""
+    return _clean_vault_rel(rel, require_md=False)
 
-    Names starting with ``"."`` or ``"_"`` are skipped: dotted dirs are hidden, and the
-    ``_``-prefix is reserved so a real folder can never collide with a virtual scope id
-    such as the read-only platform-docs view (see :data:`safe_project`).
-    """
-    if not root.exists():
-        return []
-    return sorted(
-        e.name
-        for e in root.iterdir()
-        if e.is_dir() and not e.name.startswith(".") and not e.name.startswith("_")
-    )
+
+def _clean_vault_rel(rel: str, *, require_md: bool) -> str:
+    cleaned = rel.strip().replace("\\", "/")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="path is required")
+    candidate = PurePosixPath(cleaned)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise HTTPException(status_code=400, detail="path escapes the root")
+    if require_md and candidate.suffix != ".md":
+        raise HTTPException(status_code=400, detail="only .md documents are supported")
+    return candidate.as_posix()
 
 
 def safe_project(root: Path, name: str) -> Path:

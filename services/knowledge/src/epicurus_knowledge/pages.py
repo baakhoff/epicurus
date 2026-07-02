@@ -29,13 +29,13 @@ from pydantic import BaseModel, Field
 from epicurus_core import PlatformClient, get_logger
 from epicurus_knowledge.db import VersionStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
+from epicurus_knowledge.reader import ApiVaultReader, DiskVaultReader, VaultReader
 from epicurus_knowledge.refs import (
     doc_title,
-    iter_projects,
-    iter_tree_nodes,
     safe_dir_relative,
     safe_project,
     safe_relative,
+    safe_vault_rel,
 )
 
 log = get_logger("knowledge.pages")
@@ -167,6 +167,7 @@ class VaultPages:
         *,
         platform: PlatformClient,
         core_prefix: str,
+        reader: VaultReader | None = None,
         read_only: bool = False,
         docs_path: Path | None = None,
         versions: VersionStore | None = None,
@@ -174,19 +175,24 @@ class VaultPages:
     ) -> None:
         self._vault = vault_path
         self._indexer = indexer
-        # All vault WRITES go through the core-owned file API (ADR-0064): knowledge mounts
-        # /data read-only for the indexer/reads/watcher and never writes the volume itself.
-        # The core's FileStore root is /data/<tenant>; the vault is /data/<tenant>/knowledge,
-        # so a vault-relative path maps to the core path ``<core_prefix>/<rel>`` where
-        # ``core_prefix`` is the vault dir name (``settings.vault_path.name``).
+        # All vault WRITES go through the core-owned file API (ADR-0064): the core's FileStore
+        # root is /data/<tenant>; the vault is /data/<tenant>/knowledge, so a vault-relative
+        # path maps to the core key ``<core_prefix>/<rel>`` (``core_prefix`` = the vault dir
+        # name, ``settings.vault_path.name``). The writes never touch a local mount.
         self._platform = platform
         self._core_prefix = core_prefix
+        # Vault READS go through the same file API by default (#346): no ``reader`` given ⇒ an
+        # ApiVaultReader, so knowledge holds no ``/data`` mount. Watch mode (#232) injects a
+        # DiskVaultReader over the bind-mounted external vault, where the inotify watcher lives.
+        self._reader = reader if reader is not None else ApiVaultReader(platform, core_prefix)
         # Watch mode (#232): the vault is externally owned, so every write is refused and
         # the file-tree CRUD is hidden (the shell honours read_only / can_manage_files).
         self._read_only = read_only
         # The bundled platform docs (read-only), surfaced under the reserved DOCS scope so a
         # service's documentation is readable inside the knowledge base (#KB-refactor, req 3).
+        # Always a real image-mounted dir (/docs), outside the file space — a disk reader.
         self._docs_path = docs_path
+        self._docs_reader = DiskVaultReader(docs_path) if docs_path is not None else None
         # Version history (#ADR-0046): each editor save snapshots content here; viewing
         # past versions is allowed even when the vault is read-only. ``None`` (tests) just
         # disables snapshotting — the editor still works.
@@ -217,16 +223,17 @@ class VaultPages:
         """
         return f"{self._core_prefix}/{validated.relative_to(self._vault.resolve()).as_posix()}"
 
-    def list_scopes(self) -> list[EditorScope]:
+    async def list_scopes(self) -> list[EditorScope]:
         """The knowledge bases (projects) plus the read-only platform-docs reference scope."""
         scopes = [
-            EditorScope(id=name, title=name, kind="project") for name in iter_projects(self._vault)
+            EditorScope(id=name, title=name, kind="project")
+            for name in await self._reader.projects()
         ]
         if self._docs_path is not None and self._docs_path.exists():
             scopes.append(EditorScope(id=DOCS_SCOPE_ID, title=DOCS_SCOPE_TITLE, kind="reference"))
         return scopes
 
-    def list_docs(self, scope: str = "") -> EditorData:
+    async def list_docs(self, scope: str = "") -> EditorData:
         """The document/folder tree for one *scope* (knowledge base), depth-first sorted.
 
         Paths are scope-relative — the shell prepends the active ``scope`` when reading,
@@ -240,14 +247,14 @@ class VaultPages:
                 return doc_title(node["path"])
             return node["path"].split("/")[-1]
 
-        scopes = self.list_scopes()
+        scopes = await self.list_scopes()
         project_ids = [s.id for s in scopes if s.kind == "project"]
         # Default to the first knowledge base when none is requested.
         active = scope or (project_ids[0] if project_ids else "")
 
         # The read-only platform-docs scope (req 3): list the bundled docs tree.
-        if active == DOCS_SCOPE_ID and self._docs_path is not None:
-            nodes = iter_tree_nodes(self._docs_path)
+        if active == DOCS_SCOPE_ID and self._docs_reader is not None:
+            nodes = await self._docs_reader.tree()
             return EditorData(
                 docs=[
                     EditorDoc(id=n["path"], title=_title(n), path=n["path"], type=n["type"])
@@ -262,7 +269,7 @@ class VaultPages:
             )
 
         # A knowledge-base (project) scope: list just that project's tree, scope-relative.
-        nodes = iter_tree_nodes(self._vault, subdir=active) if active in project_ids else []
+        nodes = await self._reader.tree(subdir=active) if active in project_ids else []
         # File CRUD is offered only when epicurus may write the vault; a watched external
         # vault is read-only here (Obsidian is the author) so the shell hides the controls.
         return EditorData(
@@ -313,21 +320,23 @@ class VaultPages:
         log.info("knowledge base deleted", name=target.name, deindexed=removed)
         return removed
 
-    def read_doc(self, rel: str) -> EditorDocContent:
+    async def read_doc(self, rel: str) -> EditorDocContent:
         """One document's content. 404 if it does not exist.
 
-        A ``__docs__/…`` path reads from the read-only bundled platform docs; any other
-        path is a knowledge-base document under the vault root.
+        A ``__docs__/…`` path reads from the read-only bundled platform docs (a disk reader);
+        any other path is a knowledge-base document read through the file API. ``safe_vault_rel``
+        validates the path (400 on traversal / non-``.md``); a missing file reads as 404.
         """
         if self._is_docs(rel):
-            if self._docs_path is None:
+            if self._docs_reader is None:
                 raise HTTPException(status_code=404, detail="platform docs are not available")
-            target = safe_relative(self._docs_path, rel[len(DOCS_SCOPE_ID) + 1 :])
+            content = await self._docs_reader.read_text(
+                safe_vault_rel(rel[len(DOCS_SCOPE_ID) + 1 :])
+            )
         else:
-            target = safe_relative(self._vault, rel)
-        if not target.is_file():
+            content = await self._reader.read_text(safe_vault_rel(rel))
+        if content is None:
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
-        content = target.read_text(encoding="utf-8", errors="replace")
         return EditorDocContent(path=rel, title=doc_title(rel), content=content)
 
     async def write_doc(self, rel: str, content: str) -> EditorSaveResult:
@@ -516,7 +525,7 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
         # ``scope`` selects the knowledge base (project) to list; empty = the first one,
         # or the reserved ``__docs__`` for the read-only platform docs (#KB-refactor).
         _require_known_page(page_id)
-        return pages.list_docs(scope)
+        return await pages.list_docs(scope)
 
     @router.post("/pages/{page_id}/project", response_model=EditorScope)
     async def post_project(page_id: str, name: str = Query(...)) -> EditorScope:
@@ -528,7 +537,7 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
     @router.get("/pages/{page_id}/doc", response_model=EditorDocContent)
     async def get_doc(page_id: str, path: str = Query(...)) -> EditorDocContent:
         _require_known_page(page_id)
-        return pages.read_doc(path)
+        return await pages.read_doc(path)
 
     @router.put("/pages/{page_id}/doc", response_model=EditorSaveResult)
     async def put_doc(page_id: str, body: DocBody, path: str = Query(...)) -> EditorSaveResult:

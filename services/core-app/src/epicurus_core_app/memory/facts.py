@@ -148,7 +148,7 @@ class UserFactStore:
         )
         if len(records) >= self._rebuild_cap:
             log.warning(
-                "fact re-embed hit the scan cap; some facts were not migrated",
+                "fact re-embed hit the scan cap; facts beyond it are dropped by the rebuild",
                 collection=collection,
                 cap=self._rebuild_cap,
             )

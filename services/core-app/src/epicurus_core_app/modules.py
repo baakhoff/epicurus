@@ -27,7 +27,7 @@ from epicurus_core import (
     SecretStore,
     get_logger,
 )
-from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
 from epicurus_core_app.docker_control import PROTECTED, DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
@@ -524,13 +524,21 @@ class ModuleRegistry:
         await self._prefs.set_tool_enabled(self._tenant, name, tool, enabled)
 
     async def invoke(self, name: str, tool: str, arguments: dict[str, Any]) -> str:
-        """Run a module tool (a manifest-declared UI action) through the MCP host."""
+        """Run a module tool (a manifest-declared UI action) through the MCP host.
+
+        A tool that runs but reports failure surfaces as a **400** carrying the tool's
+        own message — previously the error text returned as a 200 "result" and the
+        shell closed the form as if the action had worked (#435).
+        """
         base, manifest = await self._resolve(name)
         if not await self._prefs.is_enabled(self._tenant, name):
             raise HTTPException(status_code=403, detail=f"module {name!r} is disabled")
         if tool not in {t.name for t in manifest.tools}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no tool {tool!r}")
-        return await self._mcp.call(tool, arguments, f"{base}/mcp", tenant=self._tenant)
+        try:
+            return await self._mcp.call(tool, arguments, f"{base}/mcp", tenant=self._tenant)
+        except ToolCallError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async def get_config(self, name: str) -> dict[str, Any]:
         """The module's stored config values (empty if never saved)."""

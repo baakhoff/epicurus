@@ -61,8 +61,8 @@ hover-cards & attachments* under Contract, below).
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
 | `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). Returns the created event. |
-| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?)` | Edit an event. Only the fields passed change; the rest are left as-is. Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208). Returns the updated event; raises if absent. |
-| `calendar_delete_event(event_id)` | Delete an event wherever it lives. Returns `{deleted: true, id}`; raises if absent. |
+| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?)` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). Returns the updated event; raises if absent. |
+| `calendar_delete_event(event_id, calendar_id?)` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
@@ -70,9 +70,10 @@ All tools are provider-agnostic and route through the operator's selection (ADR-
 writes to the **write default** (active, else the first enabled external calendar, else a
 connected provider's primary, else local — #433) unless a `calendar_id` token picks another;
 `calendar_update_event` / `calendar_delete_event` act on whichever enabled calendar holds the
-event (active → other enabled → local, the same search `get_event` uses). The `calendar_id`
-token is decoded by the `CollectionRouter` into a concrete `account:collection` target — the
-one place a per-call calendar override is honoured.
+event (a supplied home-calendar token first, then active → other enabled → local, the same
+search `get_event` uses). A `calendar_id` token is decoded by the `CollectionRouter` into a
+concrete `account:collection` target; the page's per-event Edit/Delete actions carry the
+event's own token in their `args` (#435), so shell edits go straight to the owning calendar.
 
 ### Event object
 

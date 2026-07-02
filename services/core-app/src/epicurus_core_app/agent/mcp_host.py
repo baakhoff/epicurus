@@ -27,6 +27,16 @@ BuiltinHandler = Callable[[dict[str, Any], str], Awaitable[str]]
 BuiltinTool = tuple[dict[str, Any], BuiltinHandler]
 
 
+class ToolCallError(Exception):
+    """A module tool ran and reported failure — the MCP result carried ``isError``.
+
+    FastMCP wraps a tool exception as an error *result* (not a transport error), so
+    without this check a failed tool read as a successful call whose text happened to
+    be the error message — the web closed the form as if the action worked (#435).
+    ``str(exc)`` is the tool's own message (e.g. ``event 'x' not found``).
+    """
+
+
 def _text(content: list[Any]) -> str:
     """Join the text blocks of an MCP tool result."""
     parts = [text for block in content if (text := getattr(block, "text", None))]
@@ -130,6 +140,10 @@ class McpHost:
 
         ``tenant`` scopes a core built-in's access to per-tenant state; it is unused for a
         module call (the module resolves identity through the platform API).
+
+        Raises:
+            ToolCallError: when the tool ran but reported failure (MCP ``isError``) —
+                the message is the tool's own error text (#435).
         """
         if url == _BUILTIN_URL:
             return await self._builtins[name][1](arguments, tenant)
@@ -139,4 +153,6 @@ class McpHost:
         ):
             await session.initialize()
             result = await session.call_tool(name, arguments)
+            if result.isError:
+                raise ToolCallError(_text(result.content) or f"tool {name!r} failed")
             return _text(result.content)

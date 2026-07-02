@@ -189,7 +189,9 @@ every call; `form: true` opens a [SchemaForm](#) from the tool's own `input_sche
 one-tap call behind a dialog (required when `intent` is `danger`, mirroring `UiAction`).
 `icon_only: true` renders the action as a compact icon button (the `label` moves to a tooltip +
 `aria-label`) — for toolbar affordances that should stay small, e.g. a board's **"+"** Add (#337);
-ignored when the action has no `icon`. After a successful call the shell refetches the page. A form field renders as a `<select>`
+ignored when the action has no `icon`. After a successful call the shell refetches the page. When
+the tool **fails** (its MCP result carries `isError`), the proxy returns **400** with the tool's
+message as `detail`; the shell renders it inline and keeps the form open (ADR-0072). A form field renders as a `<select>`
 when the action supplies options for it: `field_options` (`{field: [value, …]}`) for plain
 string enums, or `field_choices` (`{field: [{value, label}, …]}`) when the submitted value
 isn't human-friendly and needs a separate label — e.g. a list picker whose value is a list
@@ -385,7 +387,8 @@ The `calendar` archetype's data shape is a window of events (the shell renders t
 week / agenda views and re-fetches as the user navigates). Like the `board`, it is
 **read-write**: it carries the same declarative **actions** — page-level (e.g. "New event")
 and per-event (Edit / Delete) — that name MCP tools the shell invokes through the core's tool
-proxy, refetching on success (ADR-0024, #208):
+proxy, refetching on success and surfacing a failed tool's message as a 400 `detail`
+(ADR-0024, #208; ADR-0072):
 
 ```jsonc
 {

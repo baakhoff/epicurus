@@ -21,6 +21,7 @@ from epicurus_core import (
     UiAction,
     UiSection,
 )
+from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.docker_control import DockerError
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
@@ -232,6 +233,22 @@ async def test_invoke_unreachable_module_is_404() -> None:
     with pytest.raises(HTTPException) as err:
         await registry.invoke("echo", "echo", {})
     assert err.value.status_code == 404
+
+
+async def test_invoke_tool_error_is_400_with_the_tools_message() -> None:
+    # A tool that runs but reports failure must surface as an HTTP error carrying the
+    # tool's own message — previously the error text returned as a 200 "result" and the
+    # shell closed the form as if the action had worked (#435).
+    registry, mcp, _ = _registry()
+
+    async def failing_call(name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        raise ToolCallError("Error executing tool echo: event 'e1' not found")
+
+    mcp.call = failing_call  # type: ignore[method-assign]
+    with pytest.raises(HTTPException) as err:
+        await registry.invoke("echo", "echo", {"message": "hi"})
+    assert err.value.status_code == 400
+    assert "event 'e1' not found" in err.value.detail
 
 
 async def test_config_round_trip_and_empty_default() -> None:

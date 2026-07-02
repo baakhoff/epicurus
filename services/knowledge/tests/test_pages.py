@@ -61,6 +61,12 @@ class _FilePlatform:
     async def files_list(self, path: str = "") -> list[FileEntry]:
         return await self._store.list_dir(tenant=TENANT, path=path)
 
+    async def files_read(self, path: str) -> str:
+        try:
+            return await self._store.read_text(tenant=TENANT, path=path)
+        except FileNotFoundError as exc:
+            raise _status_error(404) from exc
+
     async def files_delete(self, path: str) -> bool:
         return await self._store.delete(tenant=TENANT, path=path)
 
@@ -122,10 +128,10 @@ def _vault(tmp_path: Path) -> Path:
     vault = vault_for(tmp_path)
     proj = vault / "kb"
     proj.mkdir(parents=True)
-    (proj / "alpha.md").write_text("# Alpha\n", encoding="utf-8")
+    (proj / "alpha.md").write_text("# Alpha\n", encoding="utf-8", newline="\n")
     sub = proj / "sub"
     sub.mkdir()
-    (sub / "beta.md").write_text("# Beta\n", encoding="utf-8")
+    (sub / "beta.md").write_text("# Beta\n", encoding="utf-8", newline="\n")
     (proj / "notes.txt").write_text("ignored", encoding="utf-8")  # non-md is skipped
     return vault
 
@@ -134,17 +140,19 @@ def _docs(tmp_path: Path) -> Path:
     """A bundled-docs tree (the read-only ``__docs__`` scope)."""
     docs = tmp_path / "docs"
     (docs / "services").mkdir(parents=True)
-    (docs / "index.md").write_text("# Platform\n", encoding="utf-8")
-    (docs / "services" / "knowledge.md").write_text("# Knowledge service\n", encoding="utf-8")
+    (docs / "index.md").write_text("# Platform\n", encoding="utf-8", newline="\n")
+    (docs / "services" / "knowledge.md").write_text(
+        "# Knowledge service\n", encoding="utf-8", newline="\n"
+    )
     return docs
 
 
 # ── list_docs: a project's tree, scope-relative ──────────────────────────────
 
 
-def test_list_docs_returns_sorted_md_only(tmp_path: Path) -> None:
+async def test_list_docs_returns_sorted_md_only(tmp_path: Path) -> None:
     pages = _pages(_vault(tmp_path), _FakeIndexer())
-    data = pages.list_docs()
+    data = await pages.list_docs()
     # Defaults to the first (only) knowledge base; paths are scope-relative.
     assert data.scope == "kb"
     assert data.scope_noun == "knowledge base"
@@ -167,9 +175,9 @@ def test_list_docs_returns_sorted_md_only(tmp_path: Path) -> None:
     assert data.can_create_scope is True
 
 
-def test_list_docs_empty_when_no_vault(tmp_path: Path) -> None:
+async def test_list_docs_empty_when_no_vault(tmp_path: Path) -> None:
     pages = _pages(tmp_path / "absent", _FakeIndexer())
-    data = pages.list_docs()
+    data = await pages.list_docs()
     assert data.docs == []
     assert data.scopes == []  # no projects, no docs scope
 
@@ -177,22 +185,22 @@ def test_list_docs_empty_when_no_vault(tmp_path: Path) -> None:
 # ── scopes (projects) ────────────────────────────────────────────────────────
 
 
-def test_scopes_list_projects_and_default_to_first(tmp_path: Path) -> None:
+async def test_scopes_list_projects_and_default_to_first(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     (vault / "research").mkdir()
-    (vault / "research" / "idea.md").write_text("# Idea\n", encoding="utf-8")
+    (vault / "research" / "idea.md").write_text("# Idea\n", encoding="utf-8", newline="\n")
     pages = _pages(vault, _FakeIndexer())
-    scopes = {s.id: s.kind for s in pages.list_scopes()}
+    scopes = {s.id: s.kind for s in await pages.list_scopes()}
     assert scopes == {"kb": "project", "research": "project"}
     # Default scope is the first project alphabetically.
-    assert pages.list_docs().scope == "kb"
+    assert (await pages.list_docs()).scope == "kb"
 
 
-def test_list_docs_scope_selects_project(tmp_path: Path) -> None:
+async def test_list_docs_scope_selects_project(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     (vault / "research").mkdir()
-    (vault / "research" / "idea.md").write_text("# Idea\n", encoding="utf-8")
-    data = _pages(vault, _FakeIndexer()).list_docs("research")
+    (vault / "research" / "idea.md").write_text("# Idea\n", encoding="utf-8", newline="\n")
+    data = await _pages(vault, _FakeIndexer()).list_docs("research")
     assert data.scope == "research"
     assert [d.path for d in data.docs] == ["idea.md"]
 
@@ -203,7 +211,7 @@ async def test_create_project_makes_top_level_folder(tmp_path: Path) -> None:
     scope = await pages.create_project("Research")
     assert scope.id == "Research"
     assert (vault / "Research").is_dir()
-    assert "Research" in [s.id for s in pages.list_scopes()]
+    assert "Research" in [s.id for s in await pages.list_scopes()]
 
 
 async def test_delete_project_removes_dir_and_deindexes(tmp_path: Path) -> None:
@@ -264,18 +272,18 @@ async def test_create_project_400_on_invalid_name(tmp_path: Path, bad: str) -> N
 # ── read / write (project-relative paths) ────────────────────────────────────
 
 
-def test_read_doc_returns_content(tmp_path: Path) -> None:
+async def test_read_doc_returns_content(tmp_path: Path) -> None:
     pages = _pages(_vault(tmp_path), _FakeIndexer())
-    doc = pages.read_doc("kb/sub/beta.md")
+    doc = await pages.read_doc("kb/sub/beta.md")
     assert doc.content == "# Beta\n"
     assert doc.title == "beta"
     assert doc.path == "kb/sub/beta.md"
 
 
-def test_read_doc_missing_is_404(tmp_path: Path) -> None:
+async def test_read_doc_missing_is_404(tmp_path: Path) -> None:
     pages = _pages(_vault(tmp_path), _FakeIndexer())
     with pytest.raises(HTTPException) as err:
-        pages.read_doc("kb/nope.md")
+        await pages.read_doc("kb/nope.md")
     assert err.value.status_code == 404
 
 
@@ -339,10 +347,10 @@ async def test_write_doc_targets_the_knowledge_core_path(tmp_path: Path) -> None
     "bad",
     ["../escape.md", "/etc/passwd", "..\\windows\\evil.md", "kb/notes.txt", "  "],
 )
-def test_unsafe_paths_are_rejected(tmp_path: Path, bad: str) -> None:
+async def test_unsafe_paths_are_rejected(tmp_path: Path, bad: str) -> None:
     pages = _pages(_vault(tmp_path), _FakeIndexer())
     with pytest.raises(HTTPException) as err:
-        pages.read_doc(bad)
+        await pages.read_doc(bad)
     assert err.value.status_code == 400
 
 
@@ -359,10 +367,10 @@ async def test_write_rejects_traversal_without_writing(tmp_path: Path) -> None:
 # ── docs scope (read-only platform docs, req 3) ──────────────────────────────
 
 
-def test_docs_scope_listed_and_read_only(tmp_path: Path) -> None:
+async def test_docs_scope_listed_and_read_only(tmp_path: Path) -> None:
     pages = _pages(_vault(tmp_path), _FakeIndexer(), docs_path=_docs(tmp_path))
-    assert (DOCS_SCOPE_ID, "reference") in [(s.id, s.kind) for s in pages.list_scopes()]
-    data = pages.list_docs(DOCS_SCOPE_ID)
+    assert (DOCS_SCOPE_ID, "reference") in [(s.id, s.kind) for s in await pages.list_scopes()]
+    data = await pages.list_docs(DOCS_SCOPE_ID)
     assert data.read_only is True
     assert data.can_manage_files is False
     paths = [d.path for d in data.docs]
@@ -370,9 +378,9 @@ def test_docs_scope_listed_and_read_only(tmp_path: Path) -> None:
     assert "services/knowledge.md" in paths
 
 
-def test_docs_scope_read_doc(tmp_path: Path) -> None:
+async def test_docs_scope_read_doc(tmp_path: Path) -> None:
     pages = _pages(_vault(tmp_path), _FakeIndexer(), docs_path=_docs(tmp_path))
-    doc = pages.read_doc(f"{DOCS_SCOPE_ID}/services/knowledge.md")
+    doc = await pages.read_doc(f"{DOCS_SCOPE_ID}/services/knowledge.md")
     assert doc.content == "# Knowledge service\n"
 
 
@@ -469,8 +477,8 @@ def test_router_traversal_is_400(tmp_path: Path) -> None:
 # ── read-only (watched external vault, #232) ─────────────────────────────────
 
 
-def test_read_only_marks_view_only_and_hides_file_crud(tmp_path: Path) -> None:
-    data = _pages(_vault(tmp_path), _FakeIndexer(), read_only=True).list_docs()
+async def test_read_only_marks_view_only_and_hides_file_crud(tmp_path: Path) -> None:
+    data = await _pages(_vault(tmp_path), _FakeIndexer(), read_only=True).list_docs()
     assert data.read_only is True
     assert data.can_manage_files is False
     # The tree is still listed — read-only means view-only, not invisible.

@@ -21,7 +21,10 @@ provider chosen at startup. The operator connects an account (Google), sees ever
 it exposes, toggles which to show, and picks the one new events land on — all from the
 core-rendered connected-accounts section. A `CollectionRouter` (`providers/router.py`) reads
 the stored selection from the core and overlays the **enabled** calendars on read while
-writing to the **active** one; with nothing enabled it falls back to local.
+writing to the **active** one; with nothing enabled it falls back to local. When no active
+calendar is set, writes prefer a **connected external calendar** — the first enabled one,
+else a connected provider's own default (Google's `primary`) — and land in the silent local
+store only when nothing external is connected (#433).
 
 The domain model is provider-neutral: an `Event` is an `Event` regardless of
 backend.  Adding a new provider (CalDAV, Microsoft Exchange, …) requires
@@ -50,6 +53,13 @@ module is a **chat-attachment source** so an event can be attached to a turn. It
 only — the core renders the chip, the hover-card, and the panel (see *Entity references,
 hover-cards & attachments* under Contract, below).
 
+Since **v0.11** (#432, ADR-0075) events support **recurrence** (an RFC 5545 RRULE) and
+**attendees** (a guest list). A recurring event is one stored *series* (the master, carrying
+the rule) plus zero or more *exceptions* overriding a single occurrence (edited or deleted);
+editing/deleting takes an `edit_scope` of `"this"` (one occurrence) or `"all"` (the whole
+series) — see *Recurring events* under Contract, below. Google Meet / conferencing and the
+"this and following" edit scope are deliberately out of scope for now (ADR-0075).
+
 ## Contract
 
 ### MCP tools
@@ -57,18 +67,20 @@ hover-cards & attachments* under Contract, below).
 | Tool | Description |
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
-| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?)` | Create a new event. `start`/`end` are ISO-8601 strings, or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **active** calendar, or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). Returns the created event. |
-| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?)` | Edit an event. Only the fields passed change; the rest are left as-is. Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208). Returns the updated event; raises if absent. |
-| `calendar_delete_event(event_id)` | Delete an event wherever it lives. Returns `{deleted: true, id}`; raises if absent. |
+| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list. Returns the created event. |
+| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` (#432) is `"this"` (default — just the named occurrence) or `"all"` (the whole series); `recurrence` is only honoured with `edit_scope="all"` (raises with `"this"` — an instance can't carry its own rule). Returns the updated event; raises if absent. |
+| `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` (#432) mirrors update: `"this"` removes just the named occurrence, `"all"` removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
 `calendar_list_events` overlays every enabled calendar (or local); `calendar_create_event`
-writes to the **active** one (or local) unless a `calendar_id` token picks another;
+writes to the **write default** (active, else the first enabled external calendar, else a
+connected provider's primary, else local — #433) unless a `calendar_id` token picks another;
 `calendar_update_event` / `calendar_delete_event` act on whichever enabled calendar holds the
-event (active → other enabled → local, the same search `get_event` uses). The `calendar_id`
-token is decoded by the `CollectionRouter` into a concrete `account:collection` target — the
-one place a per-call calendar override is honoured.
+event (a supplied home-calendar token first, then active → other enabled → local, the same
+search `get_event` uses). A `calendar_id` token is decoded by the `CollectionRouter` into a
+concrete `account:collection` target; the page's per-event Edit/Delete actions carry the
+event's own token in their `args` (#435), so shell edits go straight to the owning calendar.
 
 ### Event object
 
@@ -81,9 +93,23 @@ one place a per-call calendar override is honoured.
   "all_day": false,
   "description": "string | null",
   "location":    "string | null",
-  "provider": "local | google"
+  "provider": "local | google",
+  "recurrence": "string | null",
+  "recurring_event_id": "string | null",
+  "attendees": [{"email": "string", "display_name": "string | null", "response_status": "string"}]
 }
 ```
+
+`recurrence`/`recurring_event_id`/`attendees` are new in **v0.11** (#432) — see *Recurring
+events*, below.
+
+**Timezones (#433, ADR-0039).** A timed `start`/`end` that carries a UTC offset is honoured
+as that instant. A **naive** value (no offset — the common natural-language case, e.g. the
+agent writing the operator's "3 PM" as `2026-07-02T15:00:00`) is read as wall time in the
+**operator's configured timezone**, fetched from the core via
+`PlatformClient.get_timezone()` per write. An unreachable core or an unknown zone name
+degrades to UTC (the pre-#433 behaviour) rather than failing the write. The web create/edit
+forms are unaffected — they always submit offset-carrying instants.
 
 **All-day events** carry `all_day: true` and represent a *floating* date range: internally
 `start`/`end` are UTC-midnight day boundaries with `end` **exclusive** (the day after the last
@@ -93,13 +119,56 @@ shell renders them on their calendar date with **no timezone conversion**. Treat
 date as a UTC instant is what made events appear one day early for viewers behind UTC; the
 floating-date contract fixes it end-to-end (ADR-0037, #252).
 
+### Recurring events & attendees (#432, ADR-0075)
+
+A recurring event is one **series** — the *master* row/object, carrying `recurrence` (an
+RFC 5545 RRULE, e.g. `"FREQ=WEEKLY;COUNT=10"`) — plus zero or more **exceptions** overriding
+a single occurrence (edited fields, a moved time, or deleted entirely). Listing/reading
+returns individual **occurrences** (`recurring_event_id` set to the series' id;
+`recurring_event_id` is `null` on the series object itself and on a one-off event).
+
+- **Google** does the RRULE expansion server-side (`events.list(singleEvents=true)`,
+  unchanged since before this feature) — the provider only passes `recurrence`/`attendees`
+  through on writes and maps `recurringEventId` / `originalStartTime` on reads. Patching or
+  deleting an *instance* id natively becomes a per-occurrence exception; no extra work needed.
+- **Local** (no account) stores the master row plus exception rows (keyed by the occurrence's
+  *original* — unmodified — start, encoded in the exception's own id as
+  `<series-id>_<original-start>Z`) and expands the RRULE with `dateutil.rrule` on every read,
+  bounded to the requested window (an unbounded `FREQ=DAILY` never iterates past the window).
+
+**Edit scope.** `calendar_update_event` / `calendar_delete_event` take `edit_scope`:
+`"this"` (default) acts on just the named occurrence — for Google, PATCH/DELETE on its
+instance id; for local, an exception row is created/updated (or a tombstone, for delete).
+`"all"` acts on the whole series — resolved to the series' own id first if an instance id
+was given (a lookup on Google; parsed from the id locally), then edited/deleted directly.
+Setting `recurrence` requires `edit_scope="all"` — a single occurrence can't carry its own
+rule (`edit_scope="this"` with `recurrence` set raises).
+
+**Deliberately out of scope** (ADR-0075): a `"this and following"` edit scope (splitting a
+series into two) and Google Meet / conferencing — both filed as follow-ups, not implemented
+here.
+
+**Known limitation — local provider only** (#446): the local engine anchors a series at its
+stored **UTC instant**, so a *timed* recurring event drifts by the offset delta across a DST
+change (a 9:00 weekly event renders 8:00 after the autumn fall-back) until the series carries
+its own timezone; and a single occurrence moved across a view boundary is windowed by its
+*original* slot, so it can go missing from (or leak into) the adjacent window. Google-backed
+calendars are unaffected (expansion is server-side), as are all-day series (floating dates,
+ADR-0037).
+
+**Attendees** (`attendees`, a comma-separated email list on the tools) invites guests;
+`response_status` (`needsAction` / `accepted` / `declined` / `tentative` — Google's
+vocabulary, which is also iCalendar's PARTSTAT set) reflects live RSVP state on a
+Google-backed event and starts `needsAction` for a newly invited local guest.
+
 ### Connected accounts & collections (ADR-0030)
 
 The module declares `collections = {noun: "calendar", multi: true, providers: ["google"]}`
 in its manifest and serves **`GET /accounts`**: one account per supported external provider,
 each with `connected` (the live OAuth state) and, when connected, its `collections` (every
-Google calendar — `{account, collection, title, writable}`). `local` is never listed — it is
-the silent default.
+Google calendar — `{account, collection, title, writable, color?}`, primary first, with the
+user's own Google calendar colour when set — the shell tints that calendar's events and menu
+dot with it, #431). `local` is never listed — it is the silent default.
 
 The core merges this with the operator's stored selection and serves it to the shell at
 `GET /platform/v1/modules/calendar/collections`; the shell renders per-calendar on/off
@@ -110,8 +179,11 @@ via `PlatformClient.get_collections()` (a Postgres-only read at
 
 - **read** (`calendar_list_events`, the page) overlays the **enabled** calendars; with none
   enabled it reads the local default;
-- **write** (`calendar_create_event`) targets the **active** calendar; with none active it
-  writes local.
+- **write** (`calendar_create_event`, `calendar_find_free`) targets the **active** calendar;
+  with none active it prefers a connected external calendar — the first **enabled** one, else
+  a connected provider's default (`primary`) — and uses local only when nothing external is
+  connected (#433). The New-event picker preselects the same default (Google lists the
+  primary calendar first).
 
 If the core is briefly unreachable, the router degrades to the local default rather than
 failing (local-first).
@@ -143,9 +215,11 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
       "actions": [
         { "tool": "calendar_update_event", "label": "Edit", "icon": "pencil",
           "form": true, "args": { "event_id": "e1" },
-          "fields": ["title", "all_day", "start", "end", "location", "description"],
+          "fields": ["title", "all_day", "start", "end", "location", "description",
+                     "recurrence", "attendees"],
           "form_values": { "title": "Standup", "all_day": false, "start": "…", "end": "…",
-                           "location": "Room 4", "description": "Daily sync" } },
+                           "location": "Room 4", "description": "Daily sync",
+                           "recurrence": "", "attendees": "" } },
         { "tool": "calendar_delete_event", "label": "Delete", "icon": "trash",
           "intent": "danger", "confirm": "Delete 'Standup'? This can't be undone.",
           "args": { "event_id": "e1" } }
@@ -153,7 +227,25 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
     },
     // An all-day event serializes start/end as floating dates (end exclusive), not instants.
     { "id": "e2", "title": "Holiday", "start": "2026-06-18", "end": "2026-06-19",
-      "all_day": true, "provider": "google", "actions": [ /* … */ ] }
+      "all_day": true, "provider": "google", "actions": [ /* … */ ] },
+    // A recurring occurrence (#432): edit/delete actions gain an `edit_scope` picker
+    // ("This event" / "All events"); Delete becomes a form (its choice is the confirmation).
+    { "id": "s1_20260622T090000Z", "title": "Team sync",
+      "start": "2026-06-22T09:00:00+00:00", "end": "2026-06-22T09:30:00+00:00",
+      "recurring_event_id": "s1", "provider": "google",
+      "actions": [
+        { "tool": "calendar_update_event", "label": "Edit", "form": true,
+          "args": { "event_id": "s1_20260622T090000Z" },
+          "fields": ["title", "all_day", "start", "end", "location", "description",
+                     "recurrence", "attendees", "edit_scope"],
+          "field_choices": { "edit_scope": [{ "value": "this", "label": "This event" },
+                                            { "value": "all", "label": "All events" }] } },
+        { "tool": "calendar_delete_event", "label": "Delete", "intent": "danger", "form": true,
+          "fields": ["edit_scope"], "form_values": { "edit_scope": "this" },
+          "args": { "event_id": "s1_20260622T090000Z" },
+          "confirm": "Delete 'Team sync'? This can't be undone." }
+      ]
+    }
   ],
   // Page-level action: "New event" opens a create form (time prefilled to the next hour).
   // The all-day toggle (declared via `date_toggle`) switches start/end to date pickers.

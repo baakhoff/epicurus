@@ -40,14 +40,32 @@ watcher re-indexes incrementally whenever Obsidian Sync lands a change on disk.
    The container runs as uid **10001** — make sure that user can **read** the vault
    directory (write access is not needed: watch mode never writes the vault).
 
-2. **Start the module** and let the initial index run, then keep Obsidian syncing on
+2. **Mount the vault into the `knowledge` container.** In normal mode knowledge holds **no
+   `/data` mount** — it reads the file space through the core file API (#346, ADR-0070). Watch
+   mode is the exception: its inotify watcher and its reads need the vault *on disk*, so add a
+   **compose override** that mounts it. Docker Compose auto-loads a `docker-compose.override.yml`
+   (already gitignored) from the project root — create one with:
+
+   ```yaml
+   # docker-compose.override.yml — watch-mode only; mounts the external vault read-only.
+   services:
+     knowledge:
+       volumes:
+         - ${EPICURUS_FILES_ROOT}:/data:ro
+   ```
+
+   The core mounts the same `EPICURUS_FILES_ROOT` read-write; knowledge mounts it read-only
+   (Obsidian is the sole author). Without this override, `VAULT_WATCH=true` has nothing on disk
+   to watch and the watcher stays idle.
+
+3. **Start the module** and let the initial index run, then keep Obsidian syncing on
    that host:
 
    ```bash
    docker compose up -d knowledge
    ```
 
-3. **Verify.** Edit a note in Obsidian (or on disk); within a couple of seconds
+4. **Verify.** Edit a note in Obsidian (or on disk); within a couple of seconds
    `GET /platform/v1/modules/knowledge/status` shows the counts move, and
    `knowledge_search` returns the new content — no manual re-index.
 
@@ -77,6 +95,9 @@ editor is read-only in watch mode anyway, so there is no push-back to reconcile.
    EPICURUS_FILES_ROOT=/srv/epicurus/files
    VAULT_WATCH=true
    ```
+
+   …and add the same `docker-compose.override.yml` as step 2 of recipe (a) (watch mode reads
+   the vault from a disk mount, which the default no longer provides — #346, ADR-0070).
 
    Store any deploy key the clone/pull needs in **OpenBao**, not in the repo or the
    compose file (constraint #6 — secrets never touch git).

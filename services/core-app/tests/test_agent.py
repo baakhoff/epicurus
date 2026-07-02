@@ -11,6 +11,7 @@ from structlog.testing import capture_logs
 
 from epicurus_core import Attachment, EntityRef, tool_envelope
 from epicurus_core_app.agent.agent import _ANSWER_NUDGE, _EMPTY_ANSWER_FALLBACK, Agent
+from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 
@@ -184,6 +185,28 @@ async def test_agent_handles_tool_error() -> None:
 
     assert turn.content == "recovered"
     assert any(m.role == "tool" and "boom" in (m.content or "") for m in gw.calls[1])
+
+
+async def test_agent_feeds_tool_reported_failure_text_to_the_model() -> None:
+    # A tool that ran but reported failure (MCP isError → ToolCallError, #435) hands the
+    # model the tool's own message — the exact text it received before the host raised —
+    # so the model can react (retry, apologise, ask) without the turn crashing.
+    class _ErrorMcp(_FakeMcp):
+        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+            raise ToolCallError("Error executing tool echo: event 'e1' not found")
+
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="that event does not exist"),
+        ]
+    )
+    mcp = _ErrorMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+
+    assert turn.content == "that event does not exist"
+    fed_back = next(m.content for m in gw.calls[1] if m.role == "tool")
+    assert fed_back == "Error executing tool echo: event 'e1' not found"
 
 
 class _FakeMemory:

@@ -100,7 +100,11 @@ A module declares `pages` in its manifest, each naming a core **archetype** —
 of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`) and
 renders each at `/m/:module/:pageId` via a first-party screen for that archetype
 (`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` (list +
-detail), `calendar` (month / week / agenda — with per-calendar **visibility toggles** and an
+detail), `calendar` (month / week / agenda — with per-calendar **visibility toggles** listing
+every *enabled* calendar (not only those with in-window events), events **tinted with their
+calendar's colour** (the provider's own colour when it supplies one, else a stable derived
+hue — dot and chips always match, #431), a **recurring event's repeat rule + guest list**
+shown in its detail view (#432), and an
 instant-paint **month cache** that revalidates in the background, #378/#379), `editor`
 (Obsidian-like doc), and `board`
 (columns of cards) all ship today. `browser` guards its folder rows against the duplicated

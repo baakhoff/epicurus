@@ -71,6 +71,11 @@ tasks:
     cmds:
       - sh infra/ci/smoke.sh
 
+  reconcile:
+    desc: 'Deploy on the box: pull GHCR images for the tracked tag and restart changed containers (data volumes preserved; EPICURUS_VERSION in .env selects release/pinned/testing)'
+    cmds:
+      - sh infra/cd/reconcile.sh
+
   infra-up:
     desc: Start only the data-plane stack (Postgres, Valkey, NATS, Qdrant, OpenBao)
     cmds:

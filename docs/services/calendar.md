@@ -148,6 +148,14 @@ rule (`edit_scope="this"` with `recurrence` set raises).
 series into two) and Google Meet / conferencing — both filed as follow-ups, not implemented
 here.
 
+**Known limitation — local provider only** (#446): the local engine anchors a series at its
+stored **UTC instant**, so a *timed* recurring event drifts by the offset delta across a DST
+change (a 9:00 weekly event renders 8:00 after the autumn fall-back) until the series carries
+its own timezone; and a single occurrence moved across a view boundary is windowed by its
+*original* slot, so it can go missing from (or leak into) the adjacent window. Google-backed
+calendars are unaffected (expansion is server-side), as are all-day series (floating dates,
+ADR-0037).
+
 **Attendees** (`attendees`, a comma-separated email list on the tools) invites guests;
 `response_status` (`needsAction` / `accepted` / `declined` / `tentative` — Google's
 vocabulary, which is also iCalendar's PARTSTAT set) reflects live RSVP state on a

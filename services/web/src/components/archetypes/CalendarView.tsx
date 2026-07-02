@@ -9,8 +9,8 @@
  * front. Times are read in the viewer's local zone, as a calendar should be.
  */
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Check, ChevronLeft, ChevronRight, Layers, MapPin, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Check, ChevronLeft, ChevronRight, Layers, MapPin, Repeat, Users, X } from "lucide-react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { EmptyState, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -167,39 +167,57 @@ function writeHidden(module: string, pageId: string, hidden: Set<string>): void 
   }
 }
 
-/** A stable, distinct colour per calendar, derived from its id (no backend colour needed). */
+/** A stable, distinct colour per calendar, derived from its id — the fallback when the
+ *  provider supplies no colour of its own (#431). */
 function calendarColor(id: string): string {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
   return `hsl(${h} 55% 58%)`;
 }
 
-/** Map a calendar `account[:collection]` token to a human label — from the connected-accounts
- *  view when available, else a humanised token, so a missing/disconnected list still reads. */
-function buildLabelMap(view: AccountsView | undefined): (id: string) => string {
-  const titles = new Map<string, string>();
+/** What the connected-accounts view knows about one calendar token. */
+interface CalendarMeta {
+  label: string;
+  /** The provider's own colour (the user's Google calendar colour), if it supplies one. */
+  color: string | null;
+  enabled: boolean;
+}
+
+/** Index the connected-accounts view by `account[:collection]` token — labels, the
+ *  provider's own colours, and which calendars are enabled (#431). */
+function buildCalendarMeta(view: AccountsView | undefined): Map<string, CalendarMeta> {
+  const meta = new Map<string, CalendarMeta>();
   for (const account of view?.accounts ?? []) {
     for (const col of account.collections) {
       const token = col.collection ? `${col.account}:${col.collection}` : col.account;
-      titles.set(token, col.title);
+      meta.set(token, {
+        label: col.title,
+        color: col.color ?? null,
+        enabled: col.enabled === true,
+      });
     }
   }
-  return (id: string) => {
-    const title = titles.get(id);
-    if (title) return title;
-    if (id === "local") return "Local";
-    const [account, collection] = id.split(":");
-    const acct = account.charAt(0).toUpperCase() + account.slice(1);
-    return collection ? `${acct} · ${collection}` : acct;
-  };
+  return meta;
 }
 
-/** A calendar contributing events to the current window, for the visibility toggles (#378). */
+/** Humanised fallback label for a token the accounts view doesn't know. */
+function fallbackLabel(id: string): string {
+  if (id === "local") return "Local";
+  const [account, collection] = id.split(":");
+  const acct = account.charAt(0).toUpperCase() + account.slice(1);
+  return collection ? `${acct} · ${collection}` : acct;
+}
+
+/** One calendar in the visibility menu (#378): every enabled calendar, plus any token an
+ *  in-window event carries that the accounts view doesn't list (#431). */
 interface CalendarOption {
   id: string;
   label: string;
   color: string;
 }
+
+/** Resolves an event's calendar token to its display colour. */
+type ColorFor = (id: string | null | undefined) => string;
 
 /* ── view ──────────────────────────────────────────────────────────────────── */
 
@@ -230,23 +248,42 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
     if (query.data && !query.isPlaceholderData) writeWindow(cacheKey, query.data);
   }, [query.data, query.isPlaceholderData, cacheKey]);
 
-  // Calendar names for the toggle labels — best-effort, cached a while; a failure degrades to
-  // humanised tokens (the existing tests, which mock only modulePage, exercise that path).
+  // Calendar names/colours/enabled flags for the menu — best-effort, cached a while; a
+  // failure degrades to humanised tokens + derived colours (the existing tests, which mock
+  // only modulePage, exercise that path).
   const collections = useQuery({
     queryKey: ["module-collections", module],
     queryFn: () => api.getModuleCollections(module),
     staleTime: 5 * 60_000,
   });
-  const labelFor = useMemo(() => buildLabelMap(collections.data), [collections.data]);
+  const meta = useMemo(() => buildCalendarMeta(collections.data), [collections.data]);
 
   const data = query.data ? CalendarData.parse(query.data) : null;
 
-  // The calendars contributing events to this window — the visibility toggles (#378).
+  // The visibility menu lists every *enabled* calendar — not only those with events in
+  // the current window (#431) — plus any token an in-window event carries that the
+  // accounts view doesn't list (e.g. `local`), so nothing visible is untogglable.
   const calendars = useMemo<CalendarOption[]>(() => {
-    const ids = new Set<string>();
-    for (const ev of data?.events ?? []) if (ev.calendar_id) ids.add(ev.calendar_id);
-    return [...ids].sort().map((id) => ({ id, label: labelFor(id), color: calendarColor(id) }));
-  }, [data, labelFor]);
+    const ids: string[] = [];
+    for (const [token, m] of meta) if (m.enabled) ids.push(token);
+    const extras = new Set<string>();
+    for (const ev of data?.events ?? []) {
+      if (ev.calendar_id && !ids.includes(ev.calendar_id)) extras.add(ev.calendar_id);
+    }
+    ids.push(...[...extras].sort());
+    return ids.map((id) => ({
+      id,
+      label: meta.get(id)?.label ?? fallbackLabel(id),
+      color: meta.get(id)?.color ?? calendarColor(id),
+    }));
+  }, [data, meta]);
+
+  // Event chips/rows are tinted with the same colour as their calendar's menu dot (#431):
+  // the provider's own colour when it supplies one, else the stable derived hue.
+  const colorFor = useMemo<ColorFor>(
+    () => (id) => (id ? (meta.get(id)?.color ?? calendarColor(id)) : calendarColor("local")),
+    [meta],
+  );
 
   const visibleEvents = useMemo(
     () => (data?.events ?? []).filter((e) => !(e.calendar_id && hidden.has(e.calendar_id))),
@@ -293,11 +330,11 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
             </EmptyState>
           </div>
         ) : view === "month" ? (
-          <MonthView cursor={cursor} byDay={byDay} onSelect={setSelected} />
+          <MonthView cursor={cursor} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
         ) : view === "week" ? (
-          <WeekView cursor={cursor} byDay={byDay} onSelect={setSelected} />
+          <WeekView cursor={cursor} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
         ) : (
-          <AgendaView range={range} byDay={byDay} onSelect={setSelected} />
+          <AgendaView range={range} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
         )}
       </div>
 
@@ -488,10 +525,12 @@ function CalendarsMenu({
 function MonthView({
   cursor,
   byDay,
+  colorFor,
   onSelect,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
+  colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
 }) {
   const gridStart = startOfWeek(startOfMonth(cursor));
@@ -537,7 +576,7 @@ function MonthView({
               </div>
               <div className="flex min-h-0 flex-col gap-0.5 overflow-hidden">
                 {evs.slice(0, MAX_CHIPS).map((ev) => (
-                  <EventChip key={ev.id} ev={ev} onSelect={onSelect} />
+                  <EventChip key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
                 ))}
                 {evs.length > MAX_CHIPS && (
                   <button
@@ -556,13 +595,22 @@ function MonthView({
   );
 }
 
-/** A compact event pill used inside a day cell. */
-function EventChip({ ev, onSelect }: { ev: CalendarEvent; onSelect: (ev: CalendarEvent) => void }) {
+/** A compact event pill used inside a day cell, tinted with its calendar's colour (#431). */
+function EventChip({
+  ev,
+  color,
+  onSelect,
+}: {
+  ev: CalendarEvent;
+  color: string;
+  onSelect: (ev: CalendarEvent) => void;
+}) {
   return (
     <button
       onClick={() => onSelect(ev)}
       title={ev.title}
-      className="flex items-baseline gap-1 truncate rounded-sm bg-accent-dim px-1 py-0.5 text-left text-[11px] leading-tight text-accent-strong hover:bg-accent hover:text-canvas"
+      style={{ "--cal": color } as CSSProperties}
+      className="flex items-baseline gap-1 truncate rounded-sm bg-[color-mix(in_srgb,var(--cal)_24%,transparent)] px-1 py-0.5 text-left text-[11px] leading-tight text-ink hover:bg-(--cal) hover:text-canvas"
     >
       {!ev.all_day && (
         <span className="shrink-0 tabular-nums opacity-80">{fmtTime(ev.start)}</span>
@@ -577,10 +625,12 @@ function EventChip({ ev, onSelect }: { ev: CalendarEvent; onSelect: (ev: Calenda
 function WeekView({
   cursor,
   byDay,
+  colorFor,
   onSelect,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
+  colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
 }) {
   const wkStart = startOfWeek(cursor);
@@ -614,7 +664,9 @@ function WeekView({
               {evs.length === 0 ? (
                 <span className="px-1 pt-1 text-[11px] text-ink-faint">—</span>
               ) : (
-                evs.map((ev) => <EventRow key={ev.id} ev={ev} onSelect={onSelect} />)
+                evs.map((ev) => (
+                  <EventRow key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
+                ))
               )}
             </div>
           </div>
@@ -624,12 +676,22 @@ function WeekView({
   );
 }
 
-/** A taller event card used in the week column and agenda list. */
-function EventRow({ ev, onSelect }: { ev: CalendarEvent; onSelect: (ev: CalendarEvent) => void }) {
+/** A taller event card used in the week column and agenda list, edged with its
+ *  calendar's colour (#431). */
+function EventRow({
+  ev,
+  color,
+  onSelect,
+}: {
+  ev: CalendarEvent;
+  color: string;
+  onSelect: (ev: CalendarEvent) => void;
+}) {
   return (
     <button
       onClick={() => onSelect(ev)}
-      className="flex flex-col gap-0.5 rounded-(--radius-field) border-l-2 border-accent bg-surface-2 px-2 py-1 text-left hover:bg-accent-dim"
+      style={{ "--cal": color } as CSSProperties}
+      className="flex flex-col gap-0.5 rounded-(--radius-field) border-l-2 border-(--cal) bg-surface-2 px-2 py-1 text-left hover:bg-[color-mix(in_srgb,var(--cal)_16%,transparent)]"
     >
       <span className="truncate text-xs font-medium text-ink">{ev.title}</span>
       <span className="text-[11px] tabular-nums text-ink-dim">
@@ -644,10 +706,12 @@ function EventRow({ ev, onSelect }: { ev: CalendarEvent; onSelect: (ev: Calendar
 function AgendaView({
   range,
   byDay,
+  colorFor,
   onSelect,
 }: {
   range: { start: Date; end: Date };
   byDay: Map<string, CalendarEvent[]>;
+  colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
 }) {
   const today = new Date();
@@ -685,7 +749,7 @@ function AgendaView({
             </div>
             <ul className="flex flex-col gap-1.5 border-l border-edge pl-3">
               {(byDay.get(dayKey(day)) ?? []).map((ev) => (
-                <EventRow key={ev.id} ev={ev} onSelect={onSelect} />
+                <EventRow key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
               ))}
             </ul>
           </li>
@@ -710,6 +774,25 @@ function whenLabel(ev: CalendarEvent): string {
     return `${startDay} · ${fmtTime(ev.start)} – ${fmtTime(ev.end)}`;
   }
   return `${startDay} ${fmtTime(ev.start)} → ${ev.end.toLocaleDateString(undefined, dayFmt)} ${fmtTime(ev.end)}`;
+}
+
+const FREQ_LABELS: Record<string, string> = {
+  DAILY: "Daily",
+  WEEKLY: "Weekly",
+  MONTHLY: "Monthly",
+  YEARLY: "Yearly",
+};
+
+/** A short label for an event's recurrence rule (#432) — mirrors the module's own
+ *  `_humanize_recurrence`, so the hover-card and this detail view agree. */
+function recurrenceLabel(rule: string): string {
+  for (const part of rule.split(";")) {
+    const [key, value] = part.split("=");
+    if (key === "FREQ" && value) {
+      return FREQ_LABELS[value] ?? value[0] + value.slice(1).toLowerCase();
+    }
+  }
+  return "Recurring";
 }
 
 function EventDetail({
@@ -752,6 +835,18 @@ function EventDetail({
           <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-dim">
             <MapPin size={14} className="shrink-0" />
             {ev.location}
+          </p>
+        )}
+        {ev.recurrence && (
+          <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-dim">
+            <Repeat size={14} className="shrink-0" />
+            {recurrenceLabel(ev.recurrence)}
+          </p>
+        )}
+        {ev.attendees.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 text-sm text-ink-dim">
+            <Users size={14} className="mt-0.5 shrink-0" />
+            <span>{ev.attendees.map((a) => a.display_name ?? a.email).join(", ")}</span>
           </p>
         )}
         {ev.description && (

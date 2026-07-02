@@ -7,7 +7,9 @@ and routes per the operator's stored selection (ADR-0030), fetched from the core
 * **reads** (``list_events``) overlay every *enabled* collection — calendar is a
   ``multi`` module — falling back to the local store when nothing is enabled;
 * **writes** (``create_event``) and ``find_free_slots`` target the single *active*
-  collection, falling back to local when none is set;
+  collection; with none set they prefer a connected external calendar (the first
+  enabled one, else a connected provider's default) and fall back to local only
+  when nothing external is connected (#433);
 * ``get_event`` searches the active, then the other enabled, then local — so a
   referenced event resolves wherever it lives.
 
@@ -21,8 +23,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
 
 log = get_logger("epicurus_calendar.router")
@@ -112,13 +114,20 @@ class CollectionRouter(CalendarProvider):
         events.sort(key=lambda e: e.start)
         return events
 
-    def _search_refs(self, prefs: CollectionPrefs) -> list[CollectionRef]:
+    def _search_refs(
+        self, prefs: CollectionPrefs, *, first: CollectionRef | None = None
+    ) -> list[CollectionRef]:
         """Ordered, de-duplicated places to find a single event by id.
 
-        Active collection first, then the rest of the enabled set, then the local store —
-        a referenced event resolves (and is edited/deleted) wherever it lives.
+        *first* — when the caller knows the event's home calendar (the page tags every
+        event with its token, #378) — is tried before anything else, so an edit/delete
+        goes straight to the owning calendar instead of probing the whole enabled set
+        (#435). Then the active collection, the rest of the enabled set, and the local
+        store — a referenced event resolves (and is edited/deleted) wherever it lives.
         """
         refs: list[CollectionRef] = []
+        if first is not None:
+            refs.append(first)
         if prefs.active is not None:
             refs.append(prefs.active)
         refs.extend(prefs.enabled)
@@ -168,12 +177,19 @@ class CollectionRouter(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
     ) -> Event:
         # Unlike a plain provider (where ``calendar_id`` is a bare collection id), the
         # router reads it as an ``account[:collection]`` token the create form supplies so
         # the operator can pick the target calendar; absent a token it falls back to the
-        # active collection. The sub-provider still receives only the bare collection id.
-        ref = decode_collection_token(calendar_id) if calendar_id else await self._active_ref()
+        # write default (see ``_active_ref``). The sub-provider still receives only the
+        # bare collection id.
+        ref = (
+            decode_collection_token(calendar_id)
+            if calendar_id
+            else await self._active_ref(tenant_id=tenant_id)
+        )
         provider = self._provider_for(ref.account) or self._local
         return await provider.create_event(
             tenant_id=tenant_id,
@@ -184,6 +200,8 @@ class CollectionRouter(CalendarProvider):
             location=location,
             calendar_id=ref.collection or None,
             all_day=all_day,
+            recurrence=recurrence,
+            attendees=attendees,
         )
 
     async def update_event(
@@ -198,11 +216,17 @@ class CollectionRouter(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
-        # Edit the event wherever it lives: try the active collection, then the rest of
-        # the enabled set, then local — the first source that has it wins (#208).
+        # Edit the event wherever it lives: the caller-supplied home calendar first
+        # (``calendar_id`` is an ``account[:collection]`` token here, as in create),
+        # then the active collection, the rest of the enabled set, and local — the
+        # first source that has it wins (#208, #435).
+        first = decode_collection_token(calendar_id) if calendar_id else None
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs):
+        for ref in self._search_refs(prefs, first=first):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue
@@ -217,6 +241,9 @@ class CollectionRouter(CalendarProvider):
                     location=location,
                     calendar_id=ref.collection or None,
                     all_day=all_day,
+                    recurrence=recurrence,
+                    attendees=attendees,
+                    edit_scope=edit_scope,
                 )
             except Exception as exc:
                 log.warning(
@@ -231,17 +258,27 @@ class CollectionRouter(CalendarProvider):
         return None
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
-        # Delete the event wherever it lives (#208).
+        # Delete the event wherever it lives (#208); a supplied home-calendar token is
+        # tried first (#435), mirroring update_event.
+        first = decode_collection_token(calendar_id) if calendar_id else None
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs):
+        for ref in self._search_refs(prefs, first=first):
             provider = self._provider_for(ref.account)
             if provider is None:
                 continue
             try:
                 if await provider.delete_event(
-                    tenant_id=tenant_id, event_id=event_id, calendar_id=ref.collection or None
+                    tenant_id=tenant_id,
+                    event_id=event_id,
+                    calendar_id=ref.collection or None,
+                    edit_scope=edit_scope,
                 ):
                     return True
             except Exception as exc:
@@ -262,8 +299,9 @@ class CollectionRouter(CalendarProvider):
         duration_minutes: int,
         calendar_id: str | None = None,
     ) -> list[DateTimeRange]:
-        # Free/busy is computed for the active calendar — the one a new event lands on.
-        ref = await self._active_ref()
+        # Free/busy is computed for the write-default calendar — the one a new event
+        # lands on (see ``_active_ref``).
+        ref = await self._active_ref(tenant_id=tenant_id)
         provider = self._provider_for(ref.account) or self._local
         return await provider.find_free_slots(
             tenant_id=tenant_id,
@@ -281,9 +319,28 @@ class CollectionRouter(CalendarProvider):
         # router itself is not a selectable account.
         return []
 
-    async def _active_ref(self) -> CollectionRef:
+    async def _active_ref(self, *, tenant_id: str) -> CollectionRef:
+        """The calendar new writes land on: the operator's choice, else a connected one.
+
+        With no explicit ``active`` set, connected beats local (#433): the first enabled
+        external calendar wins (it is one the operator is looking at), then a connected
+        external provider's own default calendar (Google resolves an empty collection to
+        ``primary``), and only when nothing external is connected does the silent local
+        store take the write. An explicit ``active`` always wins.
+        """
         prefs = await self._load_prefs()
-        return prefs.active or _LOCAL_REF
+        if prefs.active is not None:
+            return prefs.active
+        for ref in prefs.enabled:
+            if ref.account != LOCAL_ACCOUNT and self._provider_for(ref.account) is not None:
+                return ref
+        for account, provider in self._external.items():
+            try:
+                if await provider.is_available(tenant_id=tenant_id):
+                    return CollectionRef(account=account)
+            except Exception:  # a flaky provider must not break the write — fall through
+                continue
+        return _LOCAL_REF
 
     async def _load_prefs(self) -> CollectionPrefs:
         """The operator's selection, falling back to local-only if the core is unreachable.

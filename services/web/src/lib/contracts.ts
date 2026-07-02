@@ -418,6 +418,9 @@ export const Collection = z.object({
   collection: z.string(),
   title: z.string(),
   writable: z.boolean().default(true),
+  /** Provider-supplied presentation colour (e.g. the Google calendar colour) — the shell
+   *  prefers it over a derived hue so events match the user's own colours (#431). */
+  color: z.string().nullish(),
   enabled: z.boolean().nullish(),
   active: z.boolean().nullish(),
 });
@@ -639,6 +642,15 @@ export function parseEventDate(raw: string, allDay: boolean): Date {
   return new Date(raw);
 }
 
+/** A guest invited to an event (#432); `response_status` mirrors Google/iCalendar's
+ *  vocabulary (`needsAction` / `accepted` / `declined` / `tentative`). */
+export const Attendee = z.object({
+  email: z.string(),
+  display_name: z.string().nullish(),
+  response_status: z.string().default("needsAction"),
+});
+export type Attendee = z.infer<typeof Attendee>;
+
 /** One event in a `calendar` page (provider-neutral; ADR-0018). */
 export const CalendarEvent = z
   .object({
@@ -656,6 +668,14 @@ export const CalendarEvent = z
     // The calendar this event belongs to, as an `account[:collection]` token (#378) — lets the
     // shell group events by calendar and toggle each calendar's visibility. Null on a bare event.
     calendar_id: z.string().nullish(),
+    // Recurrence (#432): an RFC 5545 RRULE string on a series' own event, set only on the
+    // series itself — not on an expanded occurrence (each instance carries its own id and,
+    // when part of a series, `recurring_event_id` instead).
+    recurrence: z.string().nullish(),
+    /** The series' event id, on an occurrence of a recurring event; null otherwise. */
+    recurring_event_id: z.string().nullish(),
+    /** Guests invited to the event (#432); empty for none. */
+    attendees: z.array(Attendee).default([]),
     // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
     // invokes the named MCP tool through the core's tool proxy and refetches on success.
     actions: z.array(BoardAction).default([]),

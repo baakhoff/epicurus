@@ -73,7 +73,11 @@ def create_app() -> FastAPI:
     provider = CollectionRouter(local=local_provider, external=external, prefs=platform)
 
     bus = EventBus.from_settings(settings)
-    module = build_module(provider, tenant_id=settings.default_tenant_id)
+    # Naive (offset-less) start/end inputs are read in the operator's configured
+    # timezone (ADR-0039) rather than UTC, so "3 PM" is the operator's 3 PM (#433).
+    module = build_module(
+        provider, tenant_id=settings.default_tenant_id, timezone=platform.get_timezone
+    )
     mcp_app = module.http_app()
 
     @asynccontextmanager

@@ -21,8 +21,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_calendar.providers.google import _google_item_to_event, _google_when
 from epicurus_calendar.providers.local import LocalCalendarProvider
 from epicurus_calendar.providers.router import (
@@ -224,12 +224,39 @@ def test_event_hover_card_omits_location_when_absent() -> None:
     assert card["description"] == ""
 
 
+def test_event_hover_card_shows_recurrence_and_guests() -> None:
+    card = event_hover_card(
+        _event(
+            recurrence="FREQ=WEEKLY;COUNT=4",
+            attendees=[Attendee(email="alice@example.com"), Attendee(email="bob@example.com")],
+        )
+    )
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Repeats"] == "Weekly"
+    assert labels["Guests"] == "alice@example.com, bob@example.com"
+
+
+def test_event_hover_card_omits_recurrence_and_guests_when_absent() -> None:
+    card = event_hover_card(_event())
+    labels = [d["label"] for d in card["details"]]
+    assert "Repeats" not in labels
+    assert "Guests" not in labels
+
+
 def test_event_excerpt_includes_when_and_description() -> None:
     excerpt = event_excerpt(_event(description="Daily sync", location="Room 4"))
     assert "Standup" in excerpt
     assert "Room 4" in excerpt
     assert "Daily sync" in excerpt
     assert "09:00" in excerpt
+
+
+def test_event_excerpt_includes_recurrence_and_guests() -> None:
+    excerpt = event_excerpt(
+        _event(recurrence="FREQ=DAILY", attendees=[Attendee(email="alice@example.com")])
+    )
+    assert "Repeats: Daily" in excerpt
+    assert "Guests: alice@example.com" in excerpt
 
 
 def test_event_attachment_item_shape() -> None:
@@ -259,6 +286,80 @@ def test_format_when_multi_day_uses_arrow() -> None:
     ref = event_entity_ref(multi)
     assert ref.summary is not None
     assert "→" in ref.summary
+
+
+def test_event_entity_ref_appends_recurrence_label() -> None:
+    ref = event_entity_ref(_event(recurrence="FREQ=MONTHLY"))
+    assert ref.summary is not None
+    assert ref.summary.endswith("Monthly")
+
+
+# ── Recurrence humanizing + attendee parsing helpers (#432) ────────────────────
+
+
+def test_humanize_recurrence_known_frequencies() -> None:
+    from epicurus_calendar.service import _humanize_recurrence
+
+    assert _humanize_recurrence("FREQ=DAILY") == "Daily"
+    assert _humanize_recurrence("FREQ=WEEKLY;COUNT=10") == "Weekly"
+    assert _humanize_recurrence("FREQ=MONTHLY;INTERVAL=2") == "Monthly"
+    assert _humanize_recurrence("FREQ=YEARLY") == "Yearly"
+
+
+def test_humanize_recurrence_unknown_or_missing_freq() -> None:
+    from epicurus_calendar.service import _humanize_recurrence
+
+    assert _humanize_recurrence("FREQ=HOURLY") == "Hourly"
+    assert _humanize_recurrence("COUNT=10") == "Recurring"
+
+
+def test_parse_attendees_splits_and_trims() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    result = _parse_attendees(" alice@example.com ,bob@example.com")
+    assert result is not None
+    assert [a.email for a in result] == ["alice@example.com", "bob@example.com"]
+    assert all(a.response_status == "needsAction" for a in result)
+
+
+def test_parse_attendees_none_means_unchanged() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    assert _parse_attendees(None) is None
+
+
+def test_parse_attendees_blank_string_means_no_guests() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    assert _parse_attendees("   ") == []
+
+
+def test_parse_attendees_rejects_invalid_email() -> None:
+    from epicurus_calendar.service import _parse_attendees
+
+    with pytest.raises(ValueError, match="not an email"):
+        _parse_attendees("not-an-email")
+
+
+def test_format_attendees_round_trips_parse_attendees() -> None:
+    from epicurus_calendar.service import _format_attendees, _parse_attendees
+
+    parsed = _parse_attendees("alice@example.com, bob@example.com")
+    assert parsed is not None
+    assert _format_attendees(parsed) == "alice@example.com, bob@example.com"
+
+
+def test_validate_recurrence_accepts_a_valid_rule() -> None:
+    from epicurus_calendar.service import _validate_recurrence
+
+    _validate_recurrence("FREQ=WEEKLY;COUNT=4", dtstart=_dt(9))  # must not raise
+
+
+def test_validate_recurrence_rejects_garbage() -> None:
+    from epicurus_calendar.service import _validate_recurrence
+
+    with pytest.raises(ValueError, match="invalid recurrence rule"):
+        _validate_recurrence("not an rrule", dtstart=_dt(9))
 
 
 async def test_fetch_event_returns_event(local_provider: LocalCalendarProvider) -> None:
@@ -333,6 +434,8 @@ class _MockGoogleProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
     ) -> Event:
         event = Event(
             id="g-1",
@@ -343,6 +446,8 @@ class _MockGoogleProvider(CalendarProvider):
             location=location,
             provider="google",
             all_day=all_day,
+            recurrence=recurrence,
+            attendees=attendees or [],
         )
         self.events.append(event)
         return event
@@ -359,6 +464,9 @@ class _MockGoogleProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
         for i, e in enumerate(self.events):
             if e.id == event_id:
@@ -372,6 +480,8 @@ class _MockGoogleProvider(CalendarProvider):
                             "description": description,
                             "location": location,
                             "all_day": all_day,
+                            "recurrence": recurrence,
+                            "attendees": attendees,
                         }.items()
                         if v is not None
                     }
@@ -381,7 +491,12 @@ class _MockGoogleProvider(CalendarProvider):
         return None
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
         before = len(self.events)
         self.events = [e for e in self.events if e.id != event_id]
@@ -519,7 +634,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.10.1"
+    assert manifest.version == "0.11.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -645,11 +760,59 @@ async def test_router_writes_to_active_collection() -> None:
     assert google.events[-1].title == "Routed"
 
 
-async def test_router_writes_local_when_no_active() -> None:
-    router, local, _ = await _router(CollectionPrefs())
+async def test_router_write_default_prefers_first_enabled_external() -> None:
+    # No explicit active: the first enabled external calendar takes the write (#433) —
+    # a new event must not silently land in the local store while Google is connected.
+    router, local, google = await _router(CollectionPrefs(enabled=[_google_ref("primary")]))
+    created = await router.create_event(tenant_id="t1", title="Default", start=_dt(14), end=_dt(15))
+    assert created.provider == "google"
+    assert google.events[-1].title == "Default"
+    assert await local.get_event(tenant_id="t1", event_id=created.id) is None
+
+
+async def test_router_write_default_uses_connected_provider_when_nothing_enabled() -> None:
+    # Nothing enabled but Google is connected: the write still prefers Google's own
+    # default calendar (an empty collection → ``primary``) over the local store (#433).
+    router, _local, google = await _router(CollectionPrefs())
+    created = await router.create_event(tenant_id="t1", title="Primary", start=_dt(14), end=_dt(15))
+    assert created.provider == "google"
+    assert google.events[-1].title == "Primary"
+
+
+async def test_router_writes_local_when_nothing_connected() -> None:
+    # Local takes the write only when no external provider is connected (#433).
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    router = CollectionRouter(
+        local=local,
+        external={"google": _DisconnectedGoogle()},
+        prefs=_StaticPrefs(CollectionPrefs()),
+    )
     created = await router.create_event(tenant_id="t1", title="Default", start=_dt(14), end=_dt(15))
     assert created.provider == "local"
     assert await local.get_event(tenant_id="t1", event_id=created.id) is not None
+
+
+async def test_router_write_default_survives_availability_error() -> None:
+    # A provider whose availability check blows up must not break the write — it falls
+    # through to the local default rather than raising.
+    class _FlakyGoogle(_MockGoogleProvider):
+        async def is_available(self, *, tenant_id: str) -> bool:
+            raise RuntimeError("token service down")
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    local = LocalCalendarProvider(store=store)
+    router = CollectionRouter(
+        local=local, external={"google": _FlakyGoogle()}, prefs=_StaticPrefs(CollectionPrefs())
+    )
+    created = await router.create_event(
+        tenant_id="t1", title="Still works", start=_dt(14), end=_dt(15)
+    )
+    assert created.provider == "local"
 
 
 async def test_router_get_event_searches_enabled_and_local() -> None:
@@ -684,6 +847,133 @@ async def test_router_deletes_event_where_it_lives() -> None:
     assert google.events == []
     # A second delete finds nothing anywhere → False.
     assert await router.delete_event(tenant_id="t1", event_id=g.id) is False
+
+
+class _MultiCalGoogle(_MockGoogleProvider):
+    """Calendar-aware mock: events live in named calendars; records which are probed."""
+
+    def __init__(self, calendars: dict[str, list[Event]]) -> None:
+        super().__init__()
+        self.calendars = calendars
+        self.update_probes: list[str] = []
+        self.delete_probes: list[str] = []
+
+    async def update_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str | None = None,
+        all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
+    ) -> Event | None:
+        cal = calendar_id or "primary"
+        self.update_probes.append(cal)
+        for i, e in enumerate(self.calendars.get(cal, [])):
+            if e.id == event_id:
+                updated = e.model_copy(update={"title": title} if title is not None else {})
+                self.calendars[cal][i] = updated
+                return updated
+        return None
+
+    async def delete_event(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
+    ) -> bool:
+        cal = calendar_id or "primary"
+        self.delete_probes.append(cal)
+        events = self.calendars.get(cal, [])
+        remaining = [e for e in events if e.id != event_id]
+        self.calendars[cal] = remaining
+        return len(remaining) < len(events)
+
+
+async def _multi_cal_router() -> tuple[CollectionRouter, _MultiCalGoogle]:
+    """A router over two enabled Google calendars; the event lives on the second."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = LocalEventStore(engine)
+    await store.init()
+    google = _MultiCalGoogle(
+        {"primary": [], "work": [_event(id="w1", title="Old", provider="google")]}
+    )
+    prefs = CollectionPrefs(enabled=[_google_ref("primary"), _google_ref("work")])
+    router = CollectionRouter(
+        local=LocalCalendarProvider(store=store),
+        external={"google": google},
+        prefs=_StaticPrefs(prefs),
+    )
+    return router, google
+
+
+async def test_router_update_targets_the_home_calendar_token_first() -> None:
+    # The page tags every event with its calendar token (#378); passing it routes the
+    # edit straight to the owning calendar instead of probing the enabled set (#435).
+    router, google = await _multi_cal_router()
+    updated = await router.update_event(
+        tenant_id="t1", event_id="w1", title="New", calendar_id="google:work"
+    )
+    assert updated is not None
+    assert updated.title == "New"
+    assert google.update_probes == ["work"]  # went straight there — no probing
+
+
+async def test_router_update_without_token_probes_enabled_in_order() -> None:
+    # Without a home-calendar hint the cascade still finds the event (#208).
+    router, google = await _multi_cal_router()
+    updated = await router.update_event(tenant_id="t1", event_id="w1", title="New")
+    assert updated is not None
+    assert google.update_probes == ["primary", "work"]
+
+
+async def test_router_delete_targets_the_home_calendar_token_first() -> None:
+    router, google = await _multi_cal_router()
+    assert await router.delete_event(tenant_id="t1", event_id="w1", calendar_id="google:work")
+    assert google.delete_probes == ["work"]
+
+
+async def test_update_tool_threads_home_calendar_token() -> None:
+    # The Edit action's args carry the event's token; the tool must pass it through to
+    # the router so the write targets the owning calendar (#435).
+    router, google = await _multi_cal_router()
+    module = build_module(router, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": "w1", "title": "Via tool", "calendar_id": "google:work"},
+    )
+    assert _extract(structured)["title"] == "Via tool"
+    assert google.update_probes == ["work"]
+
+
+async def test_delete_tool_threads_home_calendar_token() -> None:
+    router, google = await _multi_cal_router()
+    module = build_module(router, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_delete_event", {"event_id": "w1", "calendar_id": "google:work"}
+    )
+    assert _extract(structured)["deleted"] is True
+    assert google.delete_probes == ["work"]
+
+
+def test_event_actions_carry_home_calendar_token() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    tagged = _event_with_actions(_event(calendar_id="google:work"))
+    for action in tagged["actions"]:
+        assert action["args"] == {"event_id": "e1", "calendar_id": "google:work"}
+    bare = _event_with_actions(_event())
+    for action in bare["actions"]:
+        assert action["args"] == {"event_id": "e1"}
 
 
 async def test_router_falls_back_to_local_when_prefs_unavailable() -> None:
@@ -908,7 +1198,16 @@ async def test_calendar_page_declares_new_event_action(
     assert [a["tool"] for a in actions] == ["calendar_create_event"]
     new = actions[0]
     assert new["form"] is True
-    assert new["fields"] == ["title", "all_day", "start", "end", "location", "description"]
+    assert new["fields"] == [
+        "title",
+        "all_day",
+        "start",
+        "end",
+        "location",
+        "description",
+        "recurrence",
+        "attendees",
+    ]
     # The default time is prefilled so the picker opens on a sensible slot.
     assert "start" in new["form_values"] and "end" in new["form_values"]
     assert new["form_values"]["all_day"] is False
@@ -1030,6 +1329,207 @@ async def test_update_event_to_all_day(local_provider: LocalCalendarProvider) ->
     assert result["end"] == "2025-06-16"
 
 
+# ── Recurrence + attendees via the MCP tools (#432) ─────────────────────────────
+
+
+async def test_create_event_tool_with_recurrence(local_provider: LocalCalendarProvider) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    result = _extract(structured)
+    assert result["recurrence"] == "FREQ=WEEKLY;COUNT=4"
+    assert result["recurring_event_id"] is None
+
+
+async def test_create_event_tool_with_invalid_recurrence_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    with pytest.raises(ToolError, match="invalid recurrence rule"):
+        await module.mcp.call_tool(
+            "calendar_create_event",
+            {
+                "title": "Standup",
+                "start": "2026-07-06T09:00:00+00:00",
+                "end": "2026-07-06T09:30:00+00:00",
+                "recurrence": "not an rrule",
+            },
+        )
+
+
+async def test_create_event_tool_with_attendees(local_provider: LocalCalendarProvider) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Sync",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "attendees": "alice@example.com, bob@example.com",
+        },
+    )
+    result = _extract(structured)
+    assert [a["email"] for a in result["attendees"]] == ["alice@example.com", "bob@example.com"]
+
+
+async def test_create_event_tool_with_invalid_attendee_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    with pytest.raises(ToolError, match="not an email"):
+        await module.mcp.call_tool(
+            "calendar_create_event",
+            {
+                "title": "Sync",
+                "start": "2026-07-06T09:00:00+00:00",
+                "end": "2026-07-06T09:30:00+00:00",
+                "attendees": "not-an-email",
+            },
+        )
+
+
+async def test_update_event_tool_this_occurrence(local_provider: LocalCalendarProvider) -> None:
+    from epicurus_calendar.db import instance_id
+
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event", {"event_id": iid, "title": "Standup (moved)"}
+    )
+    result = _extract(structured)
+    assert result["title"] == "Standup (moved)"
+    assert result["id"] == iid
+
+
+async def test_update_event_tool_recurrence_with_this_scope_raises(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    from epicurus_calendar.db import instance_id
+
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    with pytest.raises(ToolError, match="single occurrence"):
+        await module.mcp.call_tool(
+            "calendar_update_event",
+            {"event_id": iid, "recurrence": "FREQ=DAILY", "edit_scope": "this"},
+        )
+
+
+async def test_update_event_tool_all_scope_renames_series(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": series_id, "title": "Renamed", "edit_scope": "all"},
+    )
+    assert _extract(structured)["title"] == "Renamed"
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert all("Renamed" in ref.title for ref in envelope.entity_refs)
+
+
+async def test_delete_event_tool_this_scope_removes_one_occurrence(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    from epicurus_calendar.db import instance_id
+
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool("calendar_delete_event", {"event_id": iid})
+    assert _extract(structured)["deleted"] is True
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert len(envelope.entity_refs) == 3  # 4 minus the deleted occurrence
+
+
+# ── _event_with_actions: edit_scope only appears for a recurring event (#432) ───
+
+
+def test_event_with_actions_recurring_gets_edit_scope_field() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    recurring = _event(recurrence="FREQ=WEEKLY;COUNT=4")
+    data = _event_with_actions(recurring)
+    edit, delete = data["actions"]
+    assert "edit_scope" in edit["fields"]
+    assert edit["field_choices"]["edit_scope"] == [
+        {"value": "this", "label": "This event"},
+        {"value": "all", "label": "All events"},
+    ]
+    assert delete["form"] is True
+    assert delete["fields"] == ["edit_scope"]
+    assert delete["form_values"] == {"edit_scope": "this"}
+    assert "confirm" in delete  # still present (schema requires it for a danger action)
+
+
+def test_event_with_actions_non_recurring_keeps_confirm_only_delete() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    data = _event_with_actions(_event())
+    edit, delete = data["actions"]
+    assert "edit_scope" not in edit["fields"]
+    assert "field_choices" not in edit
+    assert "form" not in delete
+    assert "confirm" in delete
+
+
+def test_event_with_actions_recurring_instance_also_gets_edit_scope() -> None:
+    from epicurus_calendar.service import _event_with_actions
+
+    instance = _event(recurring_event_id="series-1", original_start=_dt(9))
+    data = _event_with_actions(instance)
+    edit, _delete = data["actions"]
+    assert "edit_scope" in edit["fields"]
+
+
 def test_new_event_action_includes_all_day_toggle(
     local_provider: LocalCalendarProvider,
 ) -> None:
@@ -1076,7 +1576,8 @@ async def test_build_calendar_choices_lists_writable_calendars() -> None:
     assert values[0] == "local"
     assert "google:primary" in values
     assert "google:team@x.com" not in values
-    assert default == "local"  # no active set → first choice
+    # No active set → the first connected external calendar, not the silent Local (#433).
+    assert default == "google:primary"
 
 
 async def test_build_calendar_choices_default_is_active() -> None:
@@ -1113,17 +1614,130 @@ async def test_new_event_action_adds_calendar_picker_when_choices() -> None:
 
 
 async def test_router_create_honors_calendar_id_token() -> None:
-    # Active is local, but an explicit token routes the create to the Google calendar.
-    router, _local, google = await _router(CollectionPrefs())
+    # An explicit token always wins: the create routes to the named local store even
+    # though the connected Google would otherwise be the write default.
+    router, local, _google = await _router(CollectionPrefs())
     created = await router.create_event(
         tenant_id="t1",
-        title="On Google",
+        title="On Local",
         start=_dt(14),
         end=_dt(15),
-        calendar_id="google:primary",
+        calendar_id="local",
     )
-    assert created.provider == "google"
-    assert google.events[-1].title == "On Google"
+    assert created.provider == "local"
+    assert await local.get_event(tenant_id="t1", event_id=created.id) is not None
+
+
+# ── Operator-timezone handling for naive inputs (#433) ─────────────────────────
+
+
+def _tz(name: str) -> Any:
+    """A TimezoneSource stub returning a fixed IANA zone name."""
+
+    async def source() -> str:
+        return name
+
+    return source
+
+
+async def test_create_event_reads_naive_start_in_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # "15:00" with no offset is the operator's 3 PM — Europe/Belgrade is UTC+2 in July,
+    # so the stored instant is 13:00 UTC, not 15:00 UTC (#433).
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Local time", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
+    )
+    result = _extract(structured)
+    stored = await local_provider.get_event(tenant_id="t1", event_id=result["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 13, 0, tzinfo=UTC)
+    assert stored.end == datetime(2026, 7, 2, 14, 0, tzinfo=UTC)
+
+
+async def test_create_event_late_evening_stays_on_local_date(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # 00:30 "today" in Belgrade is 22:30 *yesterday* in UTC — the instant must reflect
+    # the operator's date, which is how "for today" stopped landing on the wrong day.
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Midnight", "start": "2026-07-02T00:30:00", "end": "2026-07-02T01:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 1, 22, 30, tzinfo=UTC)
+
+
+async def test_create_event_honors_explicit_offset(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # A value that carries its own offset is pinned to it — the operator zone only
+    # applies to naive values.
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Pinned",
+            "start": "2026-07-02T15:00:00+05:00",
+            "end": "2026-07-02T16:00:00+05:00",
+        },
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 10, 0, tzinfo=UTC)
+
+
+async def test_update_event_reads_naive_bounds_in_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Move me", start=_dt(9), end=_dt(10)
+    )
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    await module.mcp.call_tool(
+        "calendar_update_event",
+        {
+            "event_id": created.id,
+            "start": "2026-07-02T15:00:00",
+            "end": "2026-07-02T16:00:00",
+        },
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=created.id)
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 13, 0, tzinfo=UTC)
+
+
+async def test_unknown_operator_timezone_degrades_to_utc(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Neverland/Nowhere"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Fallback", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 15, 0, tzinfo=UTC)
+
+
+async def test_timezone_source_error_degrades_to_utc(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    async def broken() -> str:
+        raise RuntimeError("core down")
+
+    module = build_module(local_provider, tenant_id="t1", timezone=broken)
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Fallback", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 7, 2, 15, 0, tzinfo=UTC)
 
 
 # ── Google provider all-day mapping ────────────────────────────────────────────

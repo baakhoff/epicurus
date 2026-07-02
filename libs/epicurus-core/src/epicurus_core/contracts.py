@@ -192,6 +192,10 @@ class Collection(BaseModel):
     collection: str
     title: str
     writable: bool = True
+    # Optional presentation colour (any CSS colour string — e.g. the calendar's Google
+    # backgroundColor). The shell prefers it over a derived hue so events and toggles
+    # match the user's own colours (#431); None means "derive one".
+    color: str | None = None
     # Filled by the core's merged view (GET …/collections); left unset in module discovery.
     enabled: bool | None = None
     active: bool | None = None

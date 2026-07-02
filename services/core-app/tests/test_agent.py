@@ -209,6 +209,31 @@ async def test_agent_feeds_tool_reported_failure_text_to_the_model() -> None:
     assert fed_back == "Error executing tool echo: event 'e1' not found"
 
 
+async def test_agent_marks_tool_reported_failure_as_an_error_step() -> None:
+    # A tool that ran but reported failure (ToolCallError, #435/#440) must show as a failed
+    # step in the activity timeline — a red "error", not the green "ok" a text-prefix check
+    # gave it. The tool's own message (fed to the model verbatim) need not begin with "error:",
+    # so the status is classified from whether the call raised, not from the returned text.
+    class _ErrorMcp(_FakeMcp):
+        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+            raise ToolCallError("Error executing tool echo: event 'e1' not found")
+
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="that event does not exist"),
+        ]
+    )
+    mcp = _ErrorMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+
+    # The failed call is flagged as an error step (not a green "ok")…
+    assert [s.status for s in turn.activity.steps] == ["error"]
+    # …while the model still receives the tool's raw message, with no "error:" prefix added.
+    fed_back = next(m.content for m in gw.calls[1] if m.role == "tool")
+    assert fed_back == "Error executing tool echo: event 'e1' not found"
+
+
 class _FakeMemory:
     def __init__(
         self,

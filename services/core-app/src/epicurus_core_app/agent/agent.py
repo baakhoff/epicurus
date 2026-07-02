@@ -352,10 +352,10 @@ class Agent:
                     tools_used.append(name)
                     detail = _tool_detail(arguments)
                     yield AgentEvent(type="tool", tool=name, status="running", detail=detail)
-                    output = await self._invoke(name, arguments, route, tenant=tenant)
+                    output, is_error = await self._invoke(name, arguments, route, tenant=tenant)
                     text, found = _extract_entities(output)
                     refs.add(found)
-                    status = "error" if text.startswith("error:") else "ok"
+                    status = "error" if is_error else "ok"
                     yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
                     append_tool(timeline, name, status, detail)
                     convo.append(
@@ -674,10 +674,10 @@ class Agent:
             for call in result.tool_calls:
                 name, arguments, call_id = _parse_tool_call(call)
                 tools_used.append(name)
-                output = await self._invoke(name, arguments, route, tenant=call_tenant)
+                output, is_error = await self._invoke(name, arguments, route, tenant=call_tenant)
                 text, found = _extract_entities(output)
                 refs.add(found)
-                status = "error" if text.startswith("error:") else "ok"
+                status = "error" if is_error else "ok"
                 append_tool(timeline, name, status, _tool_detail(arguments))
                 convo.append(
                     ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
@@ -708,17 +708,26 @@ class Agent:
 
     async def _invoke(
         self, name: str, arguments: dict[str, Any], route: dict[str, str], *, tenant: str
-    ) -> str:
+    ) -> tuple[str, bool]:
+        """Run a tool call, returning ``(text_for_model, is_error)``.
+
+        ``is_error`` is the structural failure signal the activity timeline classifies on:
+        True when the call could not be made (unknown tool) or the tool reported failure — an
+        MCP ``isError`` response the host raises as :class:`ToolCallError` (#435), or an
+        unexpected exception. It is tracked from the catch state, *not* sniffed from the
+        returned text: the ToolCallError path hands the model the tool's own message verbatim,
+        which need not begin with ``error:`` (#440), so a text prefix is not a reliable signal.
+        """
         url = route.get(name)
         if url is None:
-            return f"error: unknown tool {name!r}"
+            return f"error: unknown tool {name!r}", True
         try:
-            return await self._mcp.call(name, arguments, url, tenant=tenant)
+            return await self._mcp.call(name, arguments, url, tenant=tenant), False
         except ToolCallError as exc:
             # The tool ran and reported failure; hand the model the tool's own error
             # text — exactly what it received before the host raised on isError (#435).
             log.warning("tool reported failure", tool=name, error=str(exc))
-            return str(exc)
+            return str(exc), True
         except Exception as exc:  # surface the failure to the model, don't crash the turn
             log.warning("tool call failed", tool=name, error=str(exc))
-            return f"error: tool {name!r} failed: {exc}"
+            return f"error: tool {name!r} failed: {exc}", True

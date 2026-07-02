@@ -16,6 +16,7 @@ from epicurus_core_app.agent.agent import (
     Agent,
     AgentEvent,
 )
+from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
 
@@ -111,6 +112,35 @@ async def test_stream_tool_failure_is_reported_not_fatal() -> None:
     assert tool_events[-1].status == "error"
     assert events[-1].type == "done"
     assert events[-1].turn is not None and events[-1].turn.content == "recovered"
+
+
+async def test_stream_tool_reported_failure_shows_error_status() -> None:
+    # A tool that ran but reported failure (MCP isError → ToolCallError, #435/#440) must stream
+    # an `error` status and persist an `error` step — not the green "ok" a text-prefix check
+    # gave it, since the tool's own message (fed to the model verbatim) need not begin with
+    # "error:". This is the SSE status the web timeline renders (red X vs. green check).
+    class _ErrorMcp(_FakeMcp):
+        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+            raise ToolCallError("Error executing tool echo: event 'e1' not found")
+
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call()])),
+            (["no such event"], ChatResult(model="m", content="no such event")),
+        ]
+    )
+    events = await _collect(Agent(gateway=gw, mcp=_ErrorMcp()), "go")  # type: ignore[arg-type]
+
+    tool_events = [e for e in events if e.type == "tool"]
+    assert [e.status for e in tool_events] == ["running", "error"]
+    turn = events[-1].turn
+    assert turn is not None
+    assert [s.status for s in turn.activity.steps] == ["error"]
+    # the model still received the tool's raw message, with no "error:" prefix added
+    assert any(
+        m.role == "tool" and m.content == "Error executing tool echo: event 'e1' not found"
+        for m in gw.calls[1]
+    )
 
 
 async def test_stream_gateway_error_yields_error_event() -> None:

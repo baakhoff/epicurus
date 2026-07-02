@@ -24,10 +24,11 @@ from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
+from dateutil.rrule import rrulestr
 from pydantic import Field
 
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_calendar.providers.router import encode_collection_token
 from epicurus_core import (
     LOCAL_ACCOUNT,
@@ -63,6 +64,63 @@ _EventDateTime = Annotated[
 ]
 # Label for the silent local store in the create form's calendar picker.
 LOCAL_CALENDAR_LABEL = "Local"
+
+# ── Recurrence & attendees (#432) ──────────────────────────────────────────────
+
+_RECURRENCE_DESCRIPTION = (
+    "Repeat rule (RFC 5545 RRULE, no leading 'RRULE:'), e.g. 'FREQ=WEEKLY;COUNT=10' or"
+    " 'FREQ=DAILY;UNTIL=20261231T000000Z' (UNTIL must be UTC, ending in 'Z'). Omit for a"
+    " one-off event."
+)
+_ATTENDEES_DESCRIPTION = (
+    "Comma-separated guest email addresses to invite, e.g. 'alice@example.com,"
+    " bob@example.com'. Omit for no guests."
+)
+_EDIT_SCOPE_DESCRIPTION = (
+    "For a recurring event: 'this' edits only this occurrence (default); 'all' edits the"
+    " whole series. Ignored for a one-off event."
+)
+# The Edit/Delete form's scope picker (#432) — nicer labels than the bare enum values,
+# mirroring the calendar_id picker's field_choices pattern.
+_EDIT_SCOPE_CHOICES = [
+    {"value": "this", "label": "This event"},
+    {"value": "all", "label": "All events"},
+]
+
+
+def _validate_recurrence(rule: str, *, dtstart: datetime) -> None:
+    """Reject an unparseable RRULE at the tool boundary rather than storing garbage.
+
+    Both providers eventually need this string to be valid RFC 5545 (Google echoes it
+    back; the local provider expands it with ``dateutil.rrule`` on every read), so a
+    write-time check gives the agent/operator an immediate, actionable error instead of a
+    silently broken series or a 500 on the next calendar view.
+    """
+    try:
+        rrulestr(f"RRULE:{rule}", dtstart=dtstart)
+    except Exception as exc:
+        raise ValueError(f"invalid recurrence rule {rule!r}: {exc}") from exc
+
+
+def _parse_attendees(raw: str | None) -> list[Attendee] | None:
+    """Comma-separated emails → guests; ``None`` means "leave attendees unchanged" (update).
+
+    An empty/whitespace-only string is treated as "no guests" (``[]``), letting a create
+    call or a deliberate clear both go through the same plain string parameter.
+    """
+    if raw is None:
+        return None
+    emails = [e.strip() for e in raw.split(",") if e.strip()]
+    for email in emails:
+        if "@" not in email or email.startswith("@") or email.endswith("@"):
+            raise ValueError(f"not an email address: {email!r}")
+    return [Attendee(email=e) for e in emails]
+
+
+def _format_attendees(attendees: list[Attendee]) -> str:
+    """The comma-separated form the create/edit form re-submits (mirrors ``_parse_attendees``)."""
+    return ", ".join(a.email for a in attendees)
+
 
 # One day — all-day bounds are whole days, with an exclusive end (see ``Event.all_day``).
 _DAY = timedelta(days=1)
@@ -128,7 +186,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.4",
+        version="0.11.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -223,6 +281,8 @@ def build_module(
                 )
             ),
         ] = None,
+        recurrence: Annotated[str | None, Field(description=_RECURRENCE_DESCRIPTION)] = None,
+        attendees: Annotated[str | None, Field(description=_ATTENDEES_DESCRIPTION)] = None,
     ) -> dict[str, Any]:
         """Create a calendar event and return the created event.
 
@@ -243,11 +303,16 @@ def build_module(
             description: Optional description or agenda.
             calendar_id: Optional target calendar (account:collection token); omit for the
                 active calendar.
+            recurrence: Optional RFC 5545 RRULE (e.g. ``"FREQ=WEEKLY;COUNT=10"``) to make
+                this a recurring series; omit for a one-off event.
+            attendees: Optional comma-separated guest emails to invite.
 
         Returns the created event dict with all fields populated.
         """
         tz = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
+        if recurrence:
+            _validate_recurrence(recurrence, dtstart=start_dt)
         event = await provider.create_event(
             tenant_id=tenant_id,
             title=title,
@@ -257,6 +322,8 @@ def build_module(
             location=location,
             calendar_id=calendar_id,
             all_day=all_day,
+            recurrence=recurrence or None,
+            attendees=_parse_attendees(attendees),
         )
         return _event_payload(event)
 
@@ -281,6 +348,17 @@ def build_module(
                 )
             ),
         ] = None,
+        recurrence: Annotated[
+            str | None,
+            Field(
+                description=(
+                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all'; setting"
+                    " it with edit_scope='this' (a single occurrence) raises an error."
+                )
+            ),
+        ] = None,
+        attendees: Annotated[str | None, Field(description=_ATTENDEES_DESCRIPTION)] = None,
+        edit_scope: Annotated[EditScope, Field(description=_EDIT_SCOPE_DESCRIPTION)] = "this",
     ) -> dict[str, Any]:
         """Edit an existing event and return the updated event.
 
@@ -303,11 +381,16 @@ def build_module(
             description: New description, if changing it.
             calendar_id: Optional home-calendar token (account:collection) to target
                 directly; omit to search the enabled calendars.
+            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all' only).
+            attendees: New comma-separated guest list, replacing the current one.
+            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
 
         Returns the updated event dict. Raises if no such event exists.
         """
         tz = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
+        if recurrence and start_dt is not None:
+            _validate_recurrence(recurrence, dtstart=start_dt)
         event = await provider.update_event(
             tenant_id=tenant_id,
             event_id=event_id,
@@ -318,6 +401,9 @@ def build_module(
             location=location,
             calendar_id=calendar_id,
             all_day=all_day,
+            recurrence=recurrence,
+            attendees=_parse_attendees(attendees),
+            edit_scope=edit_scope,
         )
         if event is None:
             raise ValueError(f"event {event_id!r} not found")
@@ -335,6 +421,7 @@ def build_module(
                 )
             ),
         ] = None,
+        edit_scope: Annotated[EditScope, Field(description=_EDIT_SCOPE_DESCRIPTION)] = "this",
     ) -> dict[str, Any]:
         """Delete a calendar event by its id.
 
@@ -345,12 +432,16 @@ def build_module(
             event_id: The id of the event to delete.
             calendar_id: Optional home-calendar token (account:collection); omit to
                 search the enabled calendars.
+            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
 
         Returns ``{"deleted": true, "id": ...}`` on success; raises if no such event
         exists.
         """
         deleted = await provider.delete_event(
-            tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id
+            tenant_id=tenant_id,
+            event_id=event_id,
+            calendar_id=calendar_id,
+            edit_scope=edit_scope,
         )
         if not deleted:
             raise ValueError(f"event {event_id!r} not found")
@@ -482,11 +573,34 @@ def _event_payload(event: Event) -> dict[str, Any]:
     return data
 
 
+_FREQ_LABELS = {"DAILY": "Daily", "WEEKLY": "Weekly", "MONTHLY": "Monthly", "YEARLY": "Yearly"}
+
+
+def _humanize_recurrence(rule: str) -> str:
+    """A short label for an RRULE's frequency (#432) — ``"FREQ=WEEKLY;COUNT=10"`` → ``"Weekly"``.
+
+    Deliberately coarse: it ignores ``INTERVAL``/``BYDAY``/``UNTIL``/``COUNT`` nuance, since
+    this only labels a chip/hover-card, not a full human-readable rule description.
+    """
+    for part in rule.split(";"):
+        key, _, value = part.partition("=")
+        if key == "FREQ":
+            return _FREQ_LABELS.get(value, value.title())
+    return "Recurring"
+
+
+def _is_recurring(event: Event) -> bool:
+    """Whether *event* is part of a recurring series — a master or an occurrence (#432)."""
+    return bool(event.recurrence or event.recurring_event_id)
+
+
 def event_entity_ref(event: Event) -> EntityRef:
     """The chip an agent turn carries for a listed event (ADR-0019)."""
     summary = _format_when(event)
     if event.location:
         summary = f"{summary} · {event.location}"
+    if event.recurrence:
+        summary = f"{summary} · {_humanize_recurrence(event.recurrence)}"
     return EntityRef(
         ref_id=event.id,
         module=MODULE_NAME,
@@ -506,6 +620,11 @@ def event_hover_card(event: Event) -> dict[str, Any]:
     if event.location:
         details.append(HoverCardDetail(label="Location", value=event.location))
     details.append(HoverCardDetail(label="Calendar", value=event.provider))
+    if event.recurrence:
+        repeats = _humanize_recurrence(event.recurrence)
+        details.append(HoverCardDetail(label="Repeats", value=repeats))
+    if event.attendees:
+        details.append(HoverCardDetail(label="Guests", value=_format_attendees(event.attendees)))
     return HoverCard(
         title=event.title,
         description=event.description or "",
@@ -518,6 +637,10 @@ def event_excerpt(event: Event) -> str:
     lines = [event.title, _format_when(event)]
     if event.location:
         lines.append(f"Location: {event.location}")
+    if event.recurrence:
+        lines.append(f"Repeats: {_humanize_recurrence(event.recurrence)}")
+    if event.attendees:
+        lines.append(f"Guests: {_format_attendees(event.attendees)}")
     if event.description:
         lines.extend(["", event.description])
     return "\n".join(lines)
@@ -623,7 +746,17 @@ async def calendar_page(
 
 # Form fields for the create/edit forms, in display order — the all-day toggle sits above
 # the start/end row (as in Google Calendar) so flipping it switches them to date pickers.
-_EVENT_FIELDS = ["title", "all_day", "start", "end", "location", "description"]
+# recurrence/attendees (#432) are optional and sit last, after the other event details.
+_EVENT_FIELDS = [
+    "title",
+    "all_day",
+    "start",
+    "end",
+    "location",
+    "description",
+    "recurrence",
+    "attendees",
+]
 
 
 def _event_form_values(event: Event) -> dict[str, Any]:
@@ -646,6 +779,8 @@ def _event_form_values(event: Event) -> dict[str, Any]:
         "end": end_value,
         "location": event.location or "",
         "description": event.description or "",
+        "recurrence": event.recurrence or "",
+        "attendees": _format_attendees(event.attendees),
     }
 
 
@@ -654,31 +789,44 @@ def _event_with_actions(event: Event) -> dict[str, Any]:
 
     The args carry the event's home-calendar token (when the router tagged it, #378)
     so the write goes straight to the owning calendar instead of probing the whole
-    enabled set (#435).
+    enabled set (#435). A recurring event (#432) gets an ``edit_scope`` picker on both
+    actions — "This event" (default) vs "All events" — so the operator chooses before
+    the write; Delete becomes a form (instead of a plain confirm) only in that case, since
+    the scope choice already doubles as the confirmation gesture.
     """
     data = _event_payload(event)
     args: dict[str, Any] = {"event_id": event.id}
     if event.calendar_id:
         args["calendar_id"] = event.calendar_id
-    data["actions"] = [
-        {
-            "tool": "calendar_update_event",
-            "label": "Edit",
-            "icon": "pencil",
-            "form": True,
-            "args": args,
-            "fields": _EVENT_FIELDS,
-            "form_values": _event_form_values(event),
-        },
-        {
-            "tool": "calendar_delete_event",
-            "label": "Delete",
-            "icon": "trash",
-            "intent": "danger",
-            "confirm": f"Delete {event.title!r}? This can't be undone.",
-            "args": args,
-        },
-    ]
+    recurring = _is_recurring(event)
+    edit_fields = [*_EVENT_FIELDS, "edit_scope"] if recurring else _EVENT_FIELDS
+    edit_action: dict[str, Any] = {
+        "tool": "calendar_update_event",
+        "label": "Edit",
+        "icon": "pencil",
+        "form": True,
+        "args": args,
+        "fields": edit_fields,
+        "form_values": _event_form_values(event),
+    }
+    delete_action: dict[str, Any] = {
+        "tool": "calendar_delete_event",
+        "label": "Delete",
+        "icon": "trash",
+        "intent": "danger",
+        "args": args,
+        # A danger action must carry a confirm prompt (the shared BoardAction contract);
+        # the sheet takes over as the confirmation gesture on a recurring event, where
+        # `form: True` below means this text is validated but never actually shown.
+        "confirm": f"Delete {event.title!r}? This can't be undone.",
+    }
+    if recurring:
+        edit_action["field_choices"] = {"edit_scope": _EDIT_SCOPE_CHOICES}
+        delete_action["form"] = True
+        delete_action["fields"] = ["edit_scope"]
+        delete_action["field_choices"] = {"edit_scope": _EDIT_SCOPE_CHOICES}
+        delete_action["form_values"] = {"edit_scope": "this"}
+    data["actions"] = [edit_action, delete_action]
     return data
 
 

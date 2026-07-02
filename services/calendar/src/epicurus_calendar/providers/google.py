@@ -16,8 +16,8 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_core import Collection, PlatformClient
 
 _CALENDAR_API = "https://www.googleapis.com/calendar/v3"
@@ -117,6 +117,8 @@ class GoogleCalendarProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
     ) -> Event:
         cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
@@ -129,6 +131,10 @@ class GoogleCalendarProvider(CalendarProvider):
             body["description"] = description
         if location:
             body["location"] = location
+        if recurrence:
+            body["recurrence"] = [f"RRULE:{recurrence}"]
+        if attendees:
+            body["attendees"] = [{"email": a.email} for a in attendees]
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.post(
                 f"{_CALENDAR_API}/calendars/{cal}/events",
@@ -137,6 +143,23 @@ class GoogleCalendarProvider(CalendarProvider):
             )
             resp.raise_for_status()
         return _google_item_to_event(resp.json())
+
+    async def _resolve_series_id(self, *, tenant_id: str, event_id: str, calendar_id: str) -> str:
+        """The series' own id for *event_id* — itself, or its series if it's an instance.
+
+        ``edit_scope="all"`` must act on the series master, but the caller may have only
+        an instance id (from a listing). Best-effort: a lookup failure falls back to
+        *event_id* as given rather than blocking the edit (#432).
+        """
+        try:
+            current = await self.get_event(
+                tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id
+            )
+        except Exception:
+            return event_id
+        if current is not None and current.recurring_event_id:
+            return current.recurring_event_id
+        return event_id
 
     async def update_event(
         self,
@@ -150,6 +173,9 @@ class GoogleCalendarProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:
         """Patch an event via the Calendar API; ``None`` when Google reports it gone (404).
 
@@ -157,8 +183,18 @@ class GoogleCalendarProvider(CalendarProvider):
         edit that changes just the time leaves the title and description untouched. When
         *all_day* is given, the supplied ``start``/``end`` are written as ``date`` (all-day)
         or ``dateTime`` (timed) fields to match.
+
+        ``edit_scope="this"`` (#432) patches *event_id* as given — Google natively turns
+        patching an expanded instance id into a per-occurrence exception, no extra work
+        needed. ``edit_scope="all"`` resolves to the series' own id first (in case
+        *event_id* names one instance) and patches that, changing every occurrence.
         """
         cal = calendar_id or self._calendar_id
+        target_id = (
+            await self._resolve_series_id(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)
+            if edit_scope == "all"
+            else event_id
+        )
         headers = await self._auth_headers()
         # An edit that only flips all-day still has to resend both endpoints, since
         # Google rejects a ``start`` with ``date`` against an existing ``end`` with
@@ -175,12 +211,16 @@ class GoogleCalendarProvider(CalendarProvider):
             body["description"] = description
         if location is not None:
             body["location"] = location
+        if recurrence is not None:
+            body["recurrence"] = [f"RRULE:{recurrence}"]
+        if attendees is not None:
+            body["attendees"] = [{"email": a.email} for a in attendees]
         if not body:
             # Nothing to change — return the event as-is rather than issue an empty patch.
-            return await self.get_event(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)
+            return await self.get_event(tenant_id=tenant_id, event_id=target_id, calendar_id=cal)
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.patch(
-                f"{_CALENDAR_API}/calendars/{cal}/events/{event_id}",
+                f"{_CALENDAR_API}/calendars/{cal}/events/{target_id}",
                 headers=headers,
                 json=body,
             )
@@ -190,18 +230,31 @@ class GoogleCalendarProvider(CalendarProvider):
         return _google_item_to_event(resp.json())
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:
         """Delete an event via the Calendar API.
 
         Returns ``True`` on success; ``False`` when Google reports the event already
         gone (404/410), so the router can try the next enabled calendar (#208).
+        ``edit_scope`` (#432) mirrors :meth:`update_event`: ``"this"`` deletes just the
+        named occurrence (Google turns it into a cancelled exception); ``"all"`` resolves
+        to the series id first and deletes the whole series.
         """
         cal = calendar_id or self._calendar_id
+        target_id = (
+            await self._resolve_series_id(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)
+            if edit_scope == "all"
+            else event_id
+        )
         headers = await self._auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.delete(
-                f"{_CALENDAR_API}/calendars/{cal}/events/{event_id}",
+                f"{_CALENDAR_API}/calendars/{cal}/events/{target_id}",
                 headers=headers,
             )
         if resp.status_code in (httpx.codes.NOT_FOUND, httpx.codes.GONE):
@@ -314,6 +367,48 @@ def _parse_rfc3339(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def _google_recurrence_rule(item: dict[str, object]) -> str | None:
+    """The bare RRULE (no ``"RRULE:"`` prefix) from a series master's ``recurrence`` list.
+
+    Google's ``recurrence`` can carry ``RRULE``/``EXDATE``/``RDATE`` lines together; only
+    the first ``RRULE:`` entry is mapped (#432) — a per-instance EXDATE Google already
+    applies server-side to what ``events.list(singleEvents=true)`` returns, so it never
+    needs to round-trip through our domain model.
+    """
+    raw = item.get("recurrence")
+    if not isinstance(raw, list):
+        return None
+    rrule_lines = (line for line in raw if isinstance(line, str) and line.startswith("RRULE:"))
+    return next((line[len("RRULE:") :] for line in rrule_lines), None)
+
+
+def _google_original_start(item: dict[str, object]) -> datetime | None:
+    """An exception instance's ``originalStartTime`` — the slot it overrides, if present."""
+    raw = item.get("originalStartTime")
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("dateTime") or raw.get("date")
+    return datetime.fromisoformat(str(value)) if value else None
+
+
+def _google_attendees(item: dict[str, object]) -> list[Attendee]:
+    raw = item.get("attendees")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if not isinstance(entry, dict) or not entry.get("email"):
+            continue
+        out.append(
+            Attendee(
+                email=str(entry["email"]),
+                display_name=str(entry["displayName"]) if entry.get("displayName") else None,
+                response_status=str(entry.get("responseStatus") or "needsAction"),
+            )
+        )
+    return out
+
+
 def _google_item_to_event(item: dict[str, object]) -> Event:
     """Map one Google Calendar event item to the domain ``Event`` model.
 
@@ -338,4 +433,8 @@ def _google_item_to_event(item: dict[str, object]) -> Event:
         location=str(item["location"]) if item.get("location") else None,
         provider="google",
         all_day=all_day,
+        recurrence=_google_recurrence_rule(item),
+        recurring_event_id=str(item["recurringEventId"]) if item.get("recurringEventId") else None,
+        original_start=_google_original_start(item),
+        attendees=_google_attendees(item),
     )

@@ -9,7 +9,7 @@
  * front. Times are read in the viewer's local zone, as a calendar should be.
  */
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Check, ChevronLeft, ChevronRight, Layers, MapPin, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Layers, MapPin, Repeat, Users, X } from "lucide-react";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { EmptyState, Spinner, cn } from "@/components/ui";
@@ -776,6 +776,25 @@ function whenLabel(ev: CalendarEvent): string {
   return `${startDay} ${fmtTime(ev.start)} → ${ev.end.toLocaleDateString(undefined, dayFmt)} ${fmtTime(ev.end)}`;
 }
 
+const FREQ_LABELS: Record<string, string> = {
+  DAILY: "Daily",
+  WEEKLY: "Weekly",
+  MONTHLY: "Monthly",
+  YEARLY: "Yearly",
+};
+
+/** A short label for an event's recurrence rule (#432) — mirrors the module's own
+ *  `_humanize_recurrence`, so the hover-card and this detail view agree. */
+function recurrenceLabel(rule: string): string {
+  for (const part of rule.split(";")) {
+    const [key, value] = part.split("=");
+    if (key === "FREQ" && value) {
+      return FREQ_LABELS[value] ?? value[0] + value.slice(1).toLowerCase();
+    }
+  }
+  return "Recurring";
+}
+
 function EventDetail({
   ev,
   module,
@@ -816,6 +835,18 @@ function EventDetail({
           <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-dim">
             <MapPin size={14} className="shrink-0" />
             {ev.location}
+          </p>
+        )}
+        {ev.recurrence && (
+          <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-dim">
+            <Repeat size={14} className="shrink-0" />
+            {recurrenceLabel(ev.recurrence)}
+          </p>
+        )}
+        {ev.attendees.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 text-sm text-ink-dim">
+            <Users size={14} className="mt-0.5 shrink-0" />
+            <span>{ev.attendees.map((a) => a.display_name ?? a.email).join(", ")}</span>
           </p>
         )}
         {ev.description && (

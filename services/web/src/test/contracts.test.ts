@@ -296,6 +296,36 @@ describe("contracts", () => {
     expect(ev.start.getHours()).toBe(0); // local midnight, not a UTC instant
   });
 
+  it("defaults a calendar event's recurrence/attendees to empty (#432)", () => {
+    const ev = CalendarEvent.parse({
+      id: "e1",
+      title: "One-off",
+      start: "2026-06-15T09:00:00Z",
+      end: "2026-06-15T09:30:00Z",
+    });
+    expect(ev.recurrence).toBeFalsy();
+    expect(ev.recurring_event_id).toBeFalsy();
+    expect(ev.attendees).toEqual([]);
+  });
+
+  it("parses a recurring event's rule, series id, and guest list (#432)", () => {
+    const ev = CalendarEvent.parse({
+      id: "s1_20260622T090000Z",
+      title: "Standup",
+      start: "2026-06-22T09:00:00Z",
+      end: "2026-06-22T09:30:00Z",
+      recurring_event_id: "s1",
+      attendees: [
+        { email: "alice@example.com", response_status: "accepted" },
+        { email: "bob@example.com" },
+      ],
+    });
+    expect(ev.recurring_event_id).toBe("s1");
+    expect(ev.attendees).toHaveLength(2);
+    expect(ev.attendees[0].response_status).toBe("accepted");
+    expect(ev.attendees[1].response_status).toBe("needsAction"); // default when omitted
+  });
+
   it("parseEventDate keeps a timed instant but floats an all-day date", () => {
     // Timed: a real instant (UTC here) — read in local zone like any calendar.
     expect(parseEventDate("2026-06-15T09:00:00Z", false).getTime()).toBe(

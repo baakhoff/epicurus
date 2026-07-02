@@ -202,6 +202,26 @@ export default function App() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
+  // Mirror the true visual viewport into --app-height (index.css #root): on Android
+  // PWA, 100dvh can misreport for a moment right after a reload, pushing the fixed
+  // shell — and the bottom nav pinned to it — below the fold (#429).
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const setAppHeight = () => {
+      document.documentElement.style.setProperty(
+        "--app-height",
+        `${vv?.height ?? window.innerHeight}px`,
+      );
+    };
+    setAppHeight();
+    vv?.addEventListener("resize", setAppHeight);
+    window.addEventListener("resize", setAppHeight);
+    return () => {
+      vv?.removeEventListener("resize", setAppHeight);
+      window.removeEventListener("resize", setAppHeight);
+    };
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>

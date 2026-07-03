@@ -50,8 +50,9 @@ SOURCE_AUTO = "auto"
 # fact phrased two ways from auto-extraction collapses to one.
 _DEDUP_THRESHOLD = 0.92
 
-# A rebuild (dimension-drift heal / re-embed) scans the collection in a single pass; a personal
-# fact corpus is comfortably bounded, so this cap is generous. Hitting it is logged, never silent.
+# A rebuild (dimension-drift heal / re-embed) pages through the collection this many points at
+# a time. This bounds memory per page, not the total corpus — the scroll loops on Qdrant's
+# offset until every point has been visited, however many pages that takes (#450).
 _REBUILD_CAP = 10_000
 
 
@@ -132,26 +133,44 @@ class UserFactStore:
         Preserves each fact's id and metadata and replaces only the vector — contrast the
         knowledge module's drop-and-recrawl reconcile (ADR-0032/#332), which is safe there
         because a doc is cheaply re-read from its source file; a fact has no such source to
-        recrawl. A single scroll pass up to ``_REBUILD_CAP``; hitting the cap is logged, never
-        silent. When *dim* is given, the collection is always recreated at that size even with
-        zero facts, so a caller with a known target dimension (:meth:`_ensure`'s drift-heal) is
-        guaranteed a matching collection afterward; when it isn't (the manual :meth:`reembed_all`
-        fan-out has no dim to hand until it sees a fact to embed), an empty collection is left
-        untouched for :meth:`_ensure` to fix lazily on the next real save/search.
+        recrawl. Pages through the *entire* collection ``_rebuild_cap`` points at a time,
+        following Qdrant's returned offset until exhausted — however many facts are stored,
+        every one is preserved; ``_rebuild_cap`` bounds only how many points sit in memory per
+        page (#450; a single-pass scroll used to silently drop anything past the cap). When
+        *dim* is given, the collection is always recreated at that size even with zero facts,
+        so a caller with a known target dimension (:meth:`_ensure`'s drift-heal) is guaranteed a
+        matching collection afterward; when it isn't (the manual :meth:`reembed_all` fan-out has
+        no dim to hand until it sees a fact to embed), an empty collection is left untouched for
+        :meth:`_ensure` to fix lazily on the next real save/search.
         """
-        records: list[Record]
-        records, _ = await self._client.scroll(
+        records: list[Record] = []
+        pages = 0
+        page, offset = await self._client.scroll(
             collection_name=collection,
             with_payload=True,
             with_vectors=False,
             limit=self._rebuild_cap,
         )
-        if len(records) >= self._rebuild_cap:
-            log.warning(
-                "fact re-embed hit the scan cap; facts beyond it are dropped by the rebuild",
-                collection=collection,
-                cap=self._rebuild_cap,
+        records.extend(page)
+        pages += 1
+        while offset is not None:
+            page, offset = await self._client.scroll(
+                collection_name=collection,
+                with_payload=True,
+                with_vectors=False,
+                limit=self._rebuild_cap,
+                offset=offset,
             )
+            records.extend(page)
+            pages += 1
+        if pages > 1:
+            log.info(
+                "facts re-embed paginated the full collection",
+                collection=collection,
+                pages=pages,
+                facts=len(records),
+            )
+
         vectors: list[list[float]] = []
         if records:
             texts = [str((record.payload or {}).get("text", "")) for record in records]

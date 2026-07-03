@@ -487,6 +487,14 @@ images to GHCR.
   fan-out this never drops data). Also folded into the manual "Re-embed everything" action
   (ADR-0054) via a new **memory facts re-embed** maintenance job, so an operator-triggered
   re-embed refreshes memory the same way it refreshes knowledge/notes. core-app 0.53.0→0.54.0.
+- **Facts reconcile no longer drops facts beyond a scan cap** (#450, amends ADR-0074) — the
+  #436 dimension-drift reconcile scrolled the collection in a **single, capped pass**
+  (`_REBUILD_CAP`, 10,000) and rebuilt the collection from only what that pass returned; any
+  fact stored beyond the cap was silently deleted with no source to recover it from, so the
+  "never drops data" claim held only below the cap. `UserFactStore._reembed_existing` now
+  **pages through the entire collection** following Qdrant's scroll offset until exhausted, so
+  every stored fact survives a reconcile regardless of corpus size; the cap now bounds only how
+  many points are held in memory per page. core-app 0.54.1→0.54.3.
 - **Uninstalling a module no longer hard-fails when the core can't reach Docker** (#382, amends
   ADR-0028) — "Remove module" returned a **503** ("the core has no Docker access") whenever the
   Docker socket wasn't mounted, leaving no way to remove a module. Removal is now **decoupled from

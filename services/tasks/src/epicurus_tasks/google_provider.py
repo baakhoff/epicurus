@@ -82,6 +82,28 @@ class GoogleTasksProvider:
             for item in items
         ]
 
+    async def create_list(self, tenant_id: str, title: str) -> Collection:
+        """Create a new Google task list (``tasklists.insert``) and return it (#474)."""
+        token = await self._access_token()
+        async with httpx.AsyncClient(base_url=_TASKS_BASE, timeout=15.0) as client:
+            resp = await client.post(
+                "/users/@me/lists",
+                headers=self._auth_headers(token),
+                json={"title": title},
+            )
+            if resp.status_code == 401:
+                raise GoogleTasksError(
+                    "Google token is invalid or revoked — reconnect via Settings"
+                )
+            resp.raise_for_status()
+            item: dict[str, Any] = resp.json()
+        return Collection(
+            account="google",
+            collection=str(item.get("id", "")),
+            title=str(item.get("title") or title),
+            writable=True,
+        )
+
     async def _access_token(self) -> str:
         """Fetch a valid Google access token from the core via PlatformClient."""
         try:

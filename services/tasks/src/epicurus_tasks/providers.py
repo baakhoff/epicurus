@@ -166,3 +166,17 @@ class TasksProvider(Protocol):
         is the silent default, never a selectable account.
         """
         ...
+
+    async def create_list(self, tenant_id: str, title: str) -> Collection:
+        """Create a new list and return it as a :class:`Collection` (#474).
+
+        Args:
+            tenant_id: Tenant scope.
+            title: The new list's display name.
+
+        Raises:
+            NotImplementedError: A provider with no concept of multiple lists (the local
+                store — a single implicit list, never a selectable account, ADR-0030) has
+                no list to create; connect an external account instead.
+        """
+        ...

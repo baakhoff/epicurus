@@ -119,7 +119,12 @@ class GoogleCalendarProvider(CalendarProvider):
         all_day: bool = False,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
     ) -> Event:
+        # recurrence_timezone (#446) is unused here: Google expands recurrence server-side
+        # and always returns each occurrence as a correct absolute instant, so it needs no
+        # wall-clock anchor to counter DST drift the way the local provider does.
+        del recurrence_timezone
         cal = calendar_id or self._calendar_id
         headers = await self._auth_headers()
         body: dict[str, object] = {
@@ -175,6 +180,7 @@ class GoogleCalendarProvider(CalendarProvider):
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
         """Patch an event via the Calendar API; ``None`` when Google reports it gone (404).
@@ -188,7 +194,9 @@ class GoogleCalendarProvider(CalendarProvider):
         patching an expanded instance id into a per-occurrence exception, no extra work
         needed. ``edit_scope="all"`` resolves to the series' own id first (in case
         *event_id* names one instance) and patches that, changing every occurrence.
+        *recurrence_timezone* (#446) is unused (see :meth:`create_event`).
         """
+        del recurrence_timezone
         cal = calendar_id or self._calendar_id
         target_id = (
             await self._resolve_series_id(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)

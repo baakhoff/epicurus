@@ -95,6 +95,11 @@
 
 html {
   background: var(--ep-canvas);
+  /* Belt-and-braces (#476): the document itself must never be a scrollable — only the
+     regions inside the shell are. #root being taken out of flow (below) already achieves
+     this in practice; this is the explicit, defensive statement of that invariant. */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 html,
@@ -122,7 +127,17 @@ body,
 
    On Android PWA, dvh itself can still misreport for a moment right after a reload
    (#429) — App.tsx mirrors the live `visualViewport` height into --app-height on
-   mount/resize, which wins over the raw dvh value below once set. */
+   mount/resize, which wins over the raw dvh value below once set.
+
+   The on-screen keyboard (#476): the viewport meta's `interactive-widget=resizes-content`
+   is the real fix on engines that honor it (Chromium 108+) — the keyboard resizes the
+   layout viewport itself, so the visual viewport never pans and --app-height's own resize
+   listener already keeps up. On an engine that ignores the directive (older WebViews),
+   Android instead *pans* the visual viewport within an unchanged layout viewport — panning
+   a `position: fixed` element (anchored to the layout viewport) out from under the visible
+   area. --app-offset-top mirrors that pan (App.tsx, `visualViewport.offsetTop`) so this
+   translateY can counteract it, keeping #root visually pinned either way. Zero on any
+   engine where the primary fix already prevents the pan from happening. */
 #root {
   position: fixed;
   top: 0;
@@ -132,6 +147,7 @@ body,
   height: 100dvh;
   height: var(--app-height, 100dvh);
   overflow: hidden;
+  transform: translateY(calc(-1 * var(--app-offset-top, 0px)));
 }
 
 body {

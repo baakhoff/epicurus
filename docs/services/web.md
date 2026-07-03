@@ -47,9 +47,24 @@ the fixed root to the *large* viewport (`inset: 0`) while the shell independentl
 i.e. right after a **refresh** — so the bottom tab bar, anchored to the bottom of the
 `overflow-hidden` shell, was clipped out of view until you scrolled and the bar retracted.
 On **Android PWA**, `dvh` itself can still misreport for a moment right after a reload (#429):
-`App.tsx` mirrors the live `visualViewport` height into a `--app-height` custom property on
-mount/resize, and `#root` prefers that over the raw `dvh` value once it's set. Notch /
-home-indicator insets are handled with `pt-safe` / `pb-safe` (`env(safe-area-inset-*)`).
+`useViewportMirror` (`src/lib/viewport.ts`) mirrors the live `visualViewport` height into a
+`--app-height` custom property on mount/resize, and `#root` prefers that over the raw `dvh`
+value once it's set. Notch / home-indicator insets are handled with `pt-safe` / `pb-safe`
+(`env(safe-area-inset-*)`).
+
+**On-screen keyboard (#476).** The viewport meta declares
+`interactive-widget=resizes-content` (Chromium 108+): opening the keyboard resizes the
+*layout* viewport itself, so `dvh`/`--app-height` shrink to match and the fixed shell (bottom
+nav included) never moves. Without it, Android's default `resizes-visual` instead *pans* the
+visual viewport within an unchanged layout viewport — dragging everything anchored to that
+layout viewport, tab bar included, along with the gesture. iOS Safari and pre-108 engines
+ignore the directive harmlessly (today's behavior, unchanged there); `useViewportMirror` also
+mirrors `visualViewport.offsetTop` into `--app-offset-top`, which `#root`'s `translateY`
+cancels out as a fallback on any engine where the pan still happens — zero-cost (offset stays
+0) wherever the primary fix already prevents it. `html`/`body` additionally declare an
+explicit `overflow: hidden` + `overscroll-behavior: none` as a defensive statement of the
+"the document itself is never a scrollable" invariant `#root`'s fixed positioning already
+enforces in practice.
 
 ### Models — per-model rows (#328)
 

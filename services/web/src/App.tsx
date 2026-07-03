@@ -10,6 +10,7 @@ import { PanelHost } from "@/components/Panel";
 import { Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
+import { useViewportMirror } from "@/lib/viewport";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { ChatScreen } from "@/screens/ChatScreen";
@@ -202,25 +203,9 @@ export default function App() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Mirror the true visual viewport into --app-height (index.css #root): on Android
-  // PWA, 100dvh can misreport for a moment right after a reload, pushing the fixed
-  // shell — and the bottom nav pinned to it — below the fold (#429).
-  useEffect(() => {
-    const vv = window.visualViewport;
-    const setAppHeight = () => {
-      document.documentElement.style.setProperty(
-        "--app-height",
-        `${vv?.height ?? window.innerHeight}px`,
-      );
-    };
-    setAppHeight();
-    vv?.addEventListener("resize", setAppHeight);
-    window.addEventListener("resize", setAppHeight);
-    return () => {
-      vv?.removeEventListener("resize", setAppHeight);
-      window.removeEventListener("resize", setAppHeight);
-    };
-  }, []);
+  // Mirror the true visual viewport into --app-height/--app-offset-top (index.css #root,
+  // #429/#476) — see useViewportMirror for why.
+  useViewportMirror();
 
   return (
     <QueryClientProvider client={queryClient}>

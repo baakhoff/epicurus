@@ -5,10 +5,16 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <!-- maximum-scale + user-scalable=no disable pinch-zoom so the installed PWA feels native
-         and the layout can't be shifted by a stray pinch (#342). -->
+         and the layout can't be shifted by a stray pinch (#342). interactive-widget=
+         resizes-content (Chromium 108+, #476) makes the on-screen keyboard resize the
+         *layout* viewport itself instead of the default resizes-visual, which merely pans
+         the visual viewport within an unchanged layout viewport — that pan is what dragged
+         the whole fixed shell (bottom nav included) along with it. Ignored harmlessly by
+         engines that predate it (older Samsung Internet) and by iOS Safari (never supported
+         it) — both fall back to today's behavior, compensated for in App.tsx/index.css. -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="theme-color" content="#121411" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#F6F5EF" media="(prefers-color-scheme: light)" />

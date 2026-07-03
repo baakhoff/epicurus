@@ -15,9 +15,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from dateutil.rrule import rrule, rrulestr
 
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider, EditScope
+from epicurus_calendar.recurrence import continue_from, truncate_before
 from epicurus_core import Collection, PlatformClient
 
 _CALENDAR_API = "https://www.googleapis.com/calendar/v3"
@@ -194,10 +196,26 @@ class GoogleCalendarProvider(CalendarProvider):
         patching an expanded instance id into a per-occurrence exception, no extra work
         needed. ``edit_scope="all"`` resolves to the series' own id first (in case
         *event_id* names one instance) and patches that, changing every occurrence.
-        *recurrence_timezone* (#446) is unused (see :meth:`create_event`).
+        ``edit_scope="following"`` (#445) splits the series in two — see
+        :meth:`_update_following`. *recurrence_timezone* (#446) is unused (see
+        :meth:`create_event`).
         """
         del recurrence_timezone
         cal = calendar_id or self._calendar_id
+        if edit_scope == "following":
+            return await self._update_following(
+                tenant_id=tenant_id,
+                event_id=event_id,
+                calendar_id=cal,
+                title=title,
+                start=start,
+                end=end,
+                description=description,
+                location=location,
+                all_day=all_day,
+                recurrence=recurrence,
+                attendees=attendees,
+            )
         target_id = (
             await self._resolve_series_id(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)
             if edit_scope == "all"
@@ -237,6 +255,103 @@ class GoogleCalendarProvider(CalendarProvider):
         resp.raise_for_status()
         return _google_item_to_event(resp.json())
 
+    async def _update_following(
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str,
+        title: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        description: str | None,
+        location: str | None,
+        all_day: bool | None,
+        recurrence: str | None,
+        attendees: list[Attendee] | None,
+    ) -> Event | None:
+        """Split the series *event_id* belongs to in two (#445, ``edit_scope="following"``).
+
+        Google has no single-call support for this: PATCH the original master's RRULE to end
+        just before *event_id*'s occurrence, then ``events.insert`` a new series starting
+        there carrying the edited fields (defaulting to the occurrence's current ones).
+        Best-effort — the two writes are not atomic (no cross-event transaction).
+        """
+        current = await self.get_event(
+            tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id
+        )
+        if current is None:
+            return None
+        series_id = current.recurring_event_id
+        if series_id is None:
+            # event_id already names the series (or a one-off event) directly — nothing to
+            # split; "following" degrades to editing it in place, same as "all".
+            return await self.update_event(
+                tenant_id=tenant_id,
+                event_id=event_id,
+                title=title,
+                start=start,
+                end=end,
+                description=description,
+                location=location,
+                calendar_id=calendar_id,
+                all_day=all_day,
+                recurrence=recurrence,
+                attendees=attendees,
+                edit_scope="all",
+            )
+        master = await self.get_event(
+            tenant_id=tenant_id, event_id=series_id, calendar_id=calendar_id
+        )
+        if master is None or master.recurrence is None:
+            return None
+        original_start = current.original_start or current.start
+        parsed_rule = rrulestr(f"RRULE:{master.recurrence}", dtstart=master.start)
+        if not isinstance(parsed_rule, rrule):
+            return None  # a corrupt/legacy rule — degrade rather than crash
+        truncated = truncate_before(master.recurrence, parsed_rule, original_start)
+        if truncated is None:
+            # No occurrence precedes the split point — splitting at the series' own first
+            # occurrence is just editing the whole series.
+            return await self.update_event(
+                tenant_id=tenant_id,
+                event_id=series_id,
+                title=title,
+                start=start,
+                end=end,
+                description=description,
+                location=location,
+                calendar_id=calendar_id,
+                all_day=all_day,
+                recurrence=recurrence,
+                attendees=attendees,
+                edit_scope="all",
+            )
+        new_recurrence = (
+            recurrence
+            if recurrence is not None
+            else continue_from(master.recurrence, parsed_rule, original_start)
+        )
+        await self.update_event(
+            tenant_id=tenant_id,
+            event_id=series_id,
+            recurrence=truncated,
+            calendar_id=calendar_id,
+            edit_scope="all",
+        )
+        return await self.create_event(
+            tenant_id=tenant_id,
+            title=title if title is not None else current.title,
+            start=start if start is not None else current.start,
+            end=end if end is not None else current.end,
+            description=description if description is not None else current.description,
+            location=location if location is not None else current.location,
+            calendar_id=calendar_id,
+            all_day=all_day if all_day is not None else current.all_day,
+            recurrence=new_recurrence,
+            attendees=attendees if attendees is not None else current.attendees,
+        )
+
     async def delete_event(
         self,
         *,
@@ -249,11 +364,17 @@ class GoogleCalendarProvider(CalendarProvider):
 
         Returns ``True`` on success; ``False`` when Google reports the event already
         gone (404/410), so the router can try the next enabled calendar (#208).
-        ``edit_scope`` (#432) mirrors :meth:`update_event`: ``"this"`` deletes just the
-        named occurrence (Google turns it into a cancelled exception); ``"all"`` resolves
-        to the series id first and deletes the whole series.
+        ``edit_scope`` mirrors :meth:`update_event`: ``"this"`` (#432) deletes just the
+        named occurrence (Google turns it into a cancelled exception); ``"following"``
+        (#445) truncates the series so it ends just before that occurrence, removing it and
+        every later one; ``"all"`` (#432) resolves to the series id first and deletes the
+        whole series.
         """
         cal = calendar_id or self._calendar_id
+        if edit_scope == "following":
+            return await self._delete_following(
+                tenant_id=tenant_id, event_id=event_id, calendar_id=cal
+            )
         target_id = (
             await self._resolve_series_id(tenant_id=tenant_id, event_id=event_id, calendar_id=cal)
             if edit_scope == "all"
@@ -269,6 +390,44 @@ class GoogleCalendarProvider(CalendarProvider):
             return False
         resp.raise_for_status()
         return True
+
+    async def _delete_following(self, *, tenant_id: str, event_id: str, calendar_id: str) -> bool:
+        """Truncate the series *event_id* belongs to so it ends just before its occurrence,
+        removing it and every later occurrence (#445). Best-effort, mirroring
+        :meth:`_update_following` — no cross-event transaction on Google's side.
+        """
+        current = await self.get_event(
+            tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id
+        )
+        if current is None:
+            return False
+        series_id = current.recurring_event_id
+        if series_id is None:
+            return await self.delete_event(
+                tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id, edit_scope="all"
+            )
+        master = await self.get_event(
+            tenant_id=tenant_id, event_id=series_id, calendar_id=calendar_id
+        )
+        if master is None or master.recurrence is None:
+            return False
+        original_start = current.original_start or current.start
+        parsed_rule = rrulestr(f"RRULE:{master.recurrence}", dtstart=master.start)
+        if not isinstance(parsed_rule, rrule):
+            return False
+        truncated = truncate_before(master.recurrence, parsed_rule, original_start)
+        if truncated is None:
+            return await self.delete_event(
+                tenant_id=tenant_id, event_id=series_id, calendar_id=calendar_id, edit_scope="all"
+            )
+        updated = await self.update_event(
+            tenant_id=tenant_id,
+            event_id=series_id,
+            recurrence=truncated,
+            calendar_id=calendar_id,
+            edit_scope="all",
+        )
+        return updated is not None
 
     async def find_free_slots(
         self,

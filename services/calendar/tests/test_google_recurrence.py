@@ -42,6 +42,34 @@ def _client_cm(*responses: MagicMock) -> tuple[MagicMock, MagicMock]:
     return cm, client
 
 
+def _client_cm_verbs(
+    *,
+    get: list[MagicMock],
+    patch: MagicMock | None = None,
+    post: MagicMock | None = None,
+    delete: MagicMock | None = None,
+) -> tuple[MagicMock, MagicMock]:
+    """Like :func:`_client_cm`, but with an independent sequence/response per HTTP verb.
+
+    ``edit_scope="following"`` (#445) issues several GETs (the target occurrence, its
+    master, and ``_resolve_series_id``'s own lookup inside the nested ``edit_scope="all"``
+    call) plus a PATCH *and* a POST with distinct bodies — more than the single shared
+    sequence :func:`_client_cm` models.
+    """
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=get)
+    if patch is not None:
+        client.patch = AsyncMock(return_value=patch)
+    if post is not None:
+        client.post = AsyncMock(return_value=post)
+    if delete is not None:
+        client.delete = AsyncMock(return_value=delete)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm, client
+
+
 # ── _google_item_to_event: recurrence / attendees / originalStartTime ──────────
 
 
@@ -309,3 +337,180 @@ async def test_delete_all_resolves_an_instance_id_to_its_series() -> None:
         )
     url = client.delete.call_args.args[0]
     assert url.endswith("/events/s1")
+
+
+# ── edit_scope="following": splitting a series in two (#445) ────────────────────
+
+_INSTANCE = {
+    "id": "s1_20260713T090000Z",
+    "summary": "Standup",
+    "start": {"dateTime": "2026-07-13T09:00:00+00:00"},
+    "end": {"dateTime": "2026-07-13T09:30:00+00:00"},
+    "recurringEventId": "s1",
+    "originalStartTime": {"dateTime": "2026-07-13T09:00:00+00:00"},
+}
+_MASTER = {
+    "id": "s1",
+    "summary": "Standup",
+    "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
+    "end": {"dateTime": "2026-07-06T09:30:00+00:00"},
+    "recurrence": ["RRULE:FREQ=WEEKLY;COUNT=4"],
+}
+_FIRST_INSTANCE = {
+    "id": "s1_20260706T090000Z",
+    "summary": "Standup",
+    "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
+    "end": {"dateTime": "2026-07-06T09:30:00+00:00"},
+    "recurringEventId": "s1",
+    "originalStartTime": {"dateTime": "2026-07-06T09:00:00+00:00"},
+}
+
+
+async def test_update_following_truncates_the_master_and_creates_a_new_series() -> None:
+    # Splitting at July 13 (the 2nd of 4 weekly occurrences): the original truncates to
+    # UNTIL=July 6 (the one prior occurrence, COUNT dropped); the new series continues
+    # with the renumbered COUNT=3 (the 3 occurrences from July 13 on).
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    patch_resp = _resp({**_MASTER, "recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20260706T090000Z"]})
+    post_resp = _resp(
+        {
+            "id": "s2",
+            "summary": "Renamed",
+            "start": {"dateTime": "2026-07-13T09:00:00+00:00"},
+            "end": {"dateTime": "2026-07-13T09:30:00+00:00"},
+            "recurrence": ["RRULE:FREQ=WEEKLY;COUNT=3"],
+        }
+    )
+    # GETs, in call order: the target instance, its master, then _resolve_series_id's own
+    # lookup inside the nested edit_scope="all" truncation call.
+    cm, client = _client_cm_verbs(
+        get=[_resp(_INSTANCE), _resp(_MASTER), _resp(_MASTER)],
+        patch=patch_resp,
+        post=post_resp,
+    )
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        result = await prov.update_event(
+            tenant_id="t1",
+            event_id="s1_20260713T090000Z",
+            title="Renamed",
+            edit_scope="following",
+        )
+    assert result is not None
+    assert result.id == "s2"
+
+    patch_url = client.patch.call_args.args[0]
+    assert patch_url.endswith("/events/s1")
+    assert client.patch.call_args.kwargs["json"]["recurrence"] == [
+        "RRULE:FREQ=WEEKLY;UNTIL=20260706T090000Z"
+    ]
+
+    post_body = client.post.call_args.kwargs["json"]
+    assert post_body["summary"] == "Renamed"
+    assert post_body["recurrence"] == ["RRULE:FREQ=WEEKLY;COUNT=3"]
+    assert post_body["start"] == {"dateTime": "2026-07-13T09:00:00+00:00"}  # unmoved
+
+
+async def test_update_following_can_override_the_continuation_recurrence() -> None:
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    patch_resp = _resp({**_MASTER, "recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20260706T090000Z"]})
+    post_resp = _resp(
+        {
+            "id": "s2",
+            "summary": "Standup",
+            "start": {"dateTime": "2026-07-13T09:00:00+00:00"},
+            "end": {"dateTime": "2026-07-13T09:30:00+00:00"},
+            "recurrence": ["RRULE:FREQ=DAILY;COUNT=2"],
+        }
+    )
+    cm, client = _client_cm_verbs(
+        get=[_resp(_INSTANCE), _resp(_MASTER), _resp(_MASTER)],
+        patch=patch_resp,
+        post=post_resp,
+    )
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        await prov.update_event(
+            tenant_id="t1",
+            event_id="s1_20260713T090000Z",
+            recurrence="FREQ=DAILY;COUNT=2",
+            edit_scope="following",
+        )
+    post_body = client.post.call_args.kwargs["json"]
+    assert post_body["recurrence"] == ["RRULE:FREQ=DAILY;COUNT=2"]  # caller's rule, not derived
+
+
+async def test_update_following_at_the_first_occurrence_edits_in_place_no_split() -> None:
+    # Splitting at the series' own first occurrence has nothing "before" to keep separate
+    # — it degrades to editing the whole series, with no new series created.
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    patch_resp = _resp({**_MASTER, "summary": "Renamed"})
+    cm, client = _client_cm_verbs(
+        get=[_resp(_FIRST_INSTANCE), _resp(_MASTER), _resp(_MASTER)],
+        patch=patch_resp,
+    )
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        result = await prov.update_event(
+            tenant_id="t1",
+            event_id="s1_20260706T090000Z",
+            title="Renamed",
+            edit_scope="following",
+        )
+    assert result is not None
+    assert result.id == "s1"  # the same series — no split
+    assert client.post.called is False
+    patch_url = client.patch.call_args.args[0]
+    assert patch_url.endswith("/events/s1")
+    assert client.patch.call_args.kwargs["json"]["summary"] == "Renamed"
+
+
+async def test_update_following_given_the_series_id_directly_edits_in_place() -> None:
+    # event_id already names the series (no recurringEventId) — nothing to split.
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    patch_resp = _resp({**_MASTER, "summary": "Renamed"})
+    cm, client = _client_cm_verbs(get=[_resp(_MASTER), _resp(_MASTER)], patch=patch_resp)
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        result = await prov.update_event(
+            tenant_id="t1", event_id="s1", title="Renamed", edit_scope="following"
+        )
+    assert result is not None
+    assert client.post.called is False
+    assert client.patch.call_args.args[0].endswith("/events/s1")
+
+
+async def test_delete_following_truncates_the_master_only() -> None:
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    patch_resp = _resp({**_MASTER, "recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20260706T090000Z"]})
+    cm, client = _client_cm_verbs(
+        get=[_resp(_INSTANCE), _resp(_MASTER), _resp(_MASTER)], patch=patch_resp
+    )
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        assert (
+            await prov.delete_event(
+                tenant_id="t1", event_id="s1_20260713T090000Z", edit_scope="following"
+            )
+            is True
+        )
+    assert client.delete.called is False  # the series survives, just truncated
+    patch_url = client.patch.call_args.args[0]
+    assert patch_url.endswith("/events/s1")
+    assert client.patch.call_args.kwargs["json"]["recurrence"] == [
+        "RRULE:FREQ=WEEKLY;UNTIL=20260706T090000Z"
+    ]
+
+
+async def test_delete_following_at_the_first_occurrence_deletes_the_whole_series() -> None:
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    delete_resp = MagicMock()
+    delete_resp.status_code = 200
+    delete_resp.raise_for_status = MagicMock()
+    cm, client = _client_cm_verbs(
+        get=[_resp(_FIRST_INSTANCE), _resp(_MASTER), _resp(_MASTER)], delete=delete_resp
+    )
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        assert (
+            await prov.delete_event(
+                tenant_id="t1", event_id="s1_20260706T090000Z", edit_scope="following"
+            )
+            is True
+        )
+    assert client.patch.called is False
+    assert client.delete.call_args.args[0].endswith("/events/s1")

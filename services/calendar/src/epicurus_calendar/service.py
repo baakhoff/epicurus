@@ -77,13 +77,15 @@ _ATTENDEES_DESCRIPTION = (
     " bob@example.com'. Omit for no guests."
 )
 _EDIT_SCOPE_DESCRIPTION = (
-    "For a recurring event: 'this' edits only this occurrence (default); 'all' edits the"
+    "For a recurring event: 'this' edits only this occurrence (default); 'following' edits"
+    " this occurrence and every later one (splitting the series in two); 'all' edits the"
     " whole series. Ignored for a one-off event."
 )
-# The Edit/Delete form's scope picker (#432) — nicer labels than the bare enum values,
+# The Edit/Delete form's scope picker (#432, #445) — nicer labels than the bare enum values,
 # mirroring the calendar_id picker's field_choices pattern.
 _EDIT_SCOPE_CHOICES = [
     {"value": "this", "label": "This event"},
+    {"value": "following", "label": "This and following events"},
     {"value": "all", "label": "All events"},
 ]
 
@@ -188,7 +190,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.1",
+        version="0.12.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -355,8 +357,10 @@ def build_module(
             str | None,
             Field(
                 description=(
-                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all'; setting"
-                    " it with edit_scope='this' (a single occurrence) raises an error."
+                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all' or"
+                    " 'following' (omitted there, the new tail series just continues the"
+                    " existing pattern); setting it with edit_scope='this' (a single"
+                    " occurrence) raises an error."
                 )
             ),
         ] = None,
@@ -384,16 +388,20 @@ def build_module(
             description: New description, if changing it.
             calendar_id: Optional home-calendar token (account:collection) to target
                 directly; omit to search the enabled calendars.
-            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all' only).
+            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all') or the
+                new tail series from this point on (edit_scope='following'); omit the
+                latter to keep the existing pattern.
             attendees: New comma-separated guest list, replacing the current one.
-            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
+            edit_scope: For a recurring event, 'this' occurrence (default), 'following'
+                (this occurrence and every later one, splitting the series in two), or
+                'all'.
 
         Returns the updated event dict. Raises if no such event exists.
         """
         tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
-        if recurrence and start_dt is not None:
-            _validate_recurrence(recurrence, dtstart=start_dt)
+        if recurrence:
+            _validate_recurrence(recurrence, dtstart=start_dt or datetime.now(tz=UTC))
         event = await provider.update_event(
             tenant_id=tenant_id,
             event_id=event_id,
@@ -436,7 +444,8 @@ def build_module(
             event_id: The id of the event to delete.
             calendar_id: Optional home-calendar token (account:collection); omit to
                 search the enabled calendars.
-            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
+            edit_scope: For a recurring event, 'this' occurrence (default), 'following'
+                (this occurrence and every later one), or 'all'.
 
         Returns ``{"deleted": true, "id": ...}`` on success; raises if no such event
         exists.

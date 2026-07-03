@@ -7,7 +7,8 @@ calculation is done in-process by scanning the stored events.
 Recurring events (#432) are expanded in Python: a series is one stored row (the
 *master*, carrying an RRULE) plus zero or more *exception* rows overriding a single
 occurrence (edited or deleted). See ``db.py`` for the storage model and
-``epicurus_calendar.providers.base.EditScope`` for what ``"this"``/``"all"`` mean.
+``epicurus_calendar.providers.base.EditScope`` for what ``"this"``/``"following"``/``"all"``
+mean; ``"following"`` (#445) splits a series in two via ``epicurus_calendar.recurrence``.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from dateutil.rrule import rrule, rrulestr
 from epicurus_calendar.db import LocalEventStore, instance_id, parse_instance_id
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider, EditScope
+from epicurus_calendar.recurrence import continue_from, truncate_before
 from epicurus_core import Collection, get_logger
 
 log = get_logger("epicurus_calendar.local")
@@ -241,11 +243,27 @@ class LocalCalendarProvider(CalendarProvider):
                 attendees=attendees,
                 timezone=recurrence_timezone,
             )
+        if edit_scope == "following":
+            return await self._update_following(
+                tenant_id=tenant_id,
+                series_id=parsed[0],
+                original_start=parsed[1],
+                title=title,
+                start=start,
+                end=end,
+                description=description,
+                location=location,
+                all_day=all_day,
+                recurrence=recurrence,
+                attendees=attendees,
+                recurrence_timezone=recurrence_timezone,
+            )
         # edit_scope == "this" on an instance id: override just that occurrence.
         if recurrence is not None:
             raise ValueError(
                 "cannot set a recurrence rule on a single occurrence (edit_scope='this'); "
-                "use edit_scope='all' to change the whole series"
+                "use edit_scope='all' to change the whole series, or 'following' to change "
+                "this occurrence and every later one"
             )
         series_id, original_start = parsed
         master_row = await self._store.get_master(tenant=tenant_id, event_id=series_id)
@@ -276,6 +294,122 @@ class LocalCalendarProvider(CalendarProvider):
             attendees=attendees if attendees is not None else base.attendees,
         )
 
+    async def _update_following(
+        self,
+        *,
+        tenant_id: str,
+        series_id: str,
+        original_start: datetime,
+        title: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        description: str | None,
+        location: str | None,
+        all_day: bool | None,
+        recurrence: str | None,
+        attendees: list[Attendee] | None,
+        recurrence_timezone: str | None,
+    ) -> Event | None:
+        """Split *series_id* in two at *original_start* (#445, ``edit_scope="following"``).
+
+        The original series is truncated to end just before *original_start*; a new series
+        starts there carrying the edited fields (defaulting to the split occurrence's current
+        ones), continuing the original pattern unless *recurrence* overrides it. Every later
+        exception is re-pointed to the new series; the split occurrence's own pre-existing
+        exception (if any) is dropped, since its fields now live on the new series' master.
+        """
+        master_row = await self._store.get_master(tenant=tenant_id, event_id=series_id)
+        if master_row is None:
+            return None
+        master = master_row.event
+        if master.recurrence is None:
+            return None
+        rule = _safe_rrule(master, master_row.timezone)
+        if rule is None or not _occurrence_exists(rule, original_start):
+            return None
+        truncated = truncate_before(master.recurrence, rule, original_start)
+        if truncated is None:
+            # No occurrence precedes the split point — nothing "before" to keep separate;
+            # splitting at the series' own first occurrence is just editing the whole series.
+            return await self._store.update_event(
+                tenant=tenant_id,
+                event_id=series_id,
+                title=title,
+                start=start,
+                end=end,
+                description=description,
+                location=location,
+                all_day=all_day,
+                recurrence=recurrence,
+                attendees=attendees,
+                timezone=recurrence_timezone,
+            )
+        exceptions = await self._store.list_exceptions(tenant=tenant_id, series_id=series_id)
+        existing = next((e for e in exceptions if e.original_start == original_start), None)
+        base = (
+            existing.event
+            if existing is not None
+            else _synthesize_instance(master, original_start, master.end - master.start)
+        )
+        new_recurrence = (
+            recurrence
+            if recurrence is not None
+            else continue_from(master.recurrence, rule, original_start)
+        )
+        new_timezone = (
+            recurrence_timezone if recurrence_timezone is not None else master_row.timezone
+        )
+        await self._store.update_event(tenant=tenant_id, event_id=series_id, recurrence=truncated)
+        new_master = await self._store.create_event(
+            tenant=tenant_id,
+            title=title if title is not None else base.title,
+            start=start if start is not None else base.start,
+            end=end if end is not None else base.end,
+            description=description if description is not None else base.description,
+            location=location if location is not None else base.location,
+            all_day=all_day if all_day is not None else base.all_day,
+            recurrence=new_recurrence,
+            attendees=attendees if attendees is not None else base.attendees,
+            timezone=new_timezone,
+        )
+        await self._store.repoint_exceptions(
+            tenant=tenant_id, series_id=series_id, new_series_id=new_master.id, after=original_start
+        )
+        if existing is not None:
+            await self._store.delete_event(
+                tenant=tenant_id, event_id=instance_id(series_id, original_start)
+            )
+        return new_master
+
+    async def _delete_following(
+        self, *, tenant_id: str, series_id: str, original_start: datetime
+    ) -> bool:
+        """Truncate *series_id* to end just before *original_start*, removing it and every
+        later occurrence — including their own per-occurrence overrides (#445).
+        """
+        master_row = await self._store.get_master(tenant=tenant_id, event_id=series_id)
+        if master_row is None:
+            return False
+        master = master_row.event
+        if master.recurrence is None:
+            return False
+        rule = _safe_rrule(master, master_row.timezone)
+        if rule is None or not _occurrence_exists(rule, original_start):
+            return False
+        truncated = truncate_before(master.recurrence, rule, original_start)
+        if truncated is None:
+            # Nothing precedes the split point — deleting "this and following" from the
+            # series' own first occurrence deletes the whole series.
+            deleted = await self._store.delete_event(tenant=tenant_id, event_id=series_id)
+            if deleted:
+                await self._store.delete_exceptions_for(tenant=tenant_id, series_id=series_id)
+            return deleted
+        await self._store.update_event(tenant=tenant_id, event_id=series_id, recurrence=truncated)
+        await self._store.delete_exceptions_on_or_after(
+            tenant=tenant_id, series_id=series_id, on_or_after=original_start
+        )
+        return True
+
     async def delete_event(
         self,
         *,
@@ -291,6 +425,10 @@ class LocalCalendarProvider(CalendarProvider):
             if deleted:
                 await self._store.delete_exceptions_for(tenant=tenant_id, series_id=target_id)
             return deleted
+        if edit_scope == "following":
+            return await self._delete_following(
+                tenant_id=tenant_id, series_id=parsed[0], original_start=parsed[1]
+            )
         series_id, original_start = parsed
         master_row = await self._store.get_master(tenant=tenant_id, event_id=series_id)
         if master_row is None or not master_row.event.recurrence:

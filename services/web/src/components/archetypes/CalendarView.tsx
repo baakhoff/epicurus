@@ -9,9 +9,20 @@
  * front. Times are read in the viewer's local zone, as a calendar should be.
  */
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Check, ChevronLeft, ChevronRight, Layers, MapPin, Repeat, Users, X } from "lucide-react";
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Layers,
+  MapPin,
+  Repeat,
+  Users,
+  Video,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
+import { isExternalHref } from "@/components/CardLink";
 import { EmptyState, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import {
@@ -849,6 +860,21 @@ function EventDetail({
           <p className="mt-2 flex items-start gap-1.5 text-sm text-ink-dim">
             <Users size={14} className="mt-0.5 shrink-0" />
             <span>{ev.attendees.map((a) => a.display_name ?? a.email).join(", ")}</span>
+          </p>
+        )}
+        {/* provider-supplied URL — same trust rule as CardLink: http(s) only */}
+        {ev.meet_url && isExternalHref(ev.meet_url) && (
+          <p className="mt-2 flex items-center gap-1.5 text-sm">
+            <Video size={14} className="shrink-0 text-ink-dim" />
+            <a
+              href={ev.meet_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent hover:underline"
+              onClick={(e) => e.stopPropagation()}
+            >
+              Join with Google Meet
+            </a>
           </p>
         )}
         {ev.description && (

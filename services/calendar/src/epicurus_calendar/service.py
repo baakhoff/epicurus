@@ -89,6 +89,13 @@ _EDIT_SCOPE_CHOICES = [
     {"value": "all", "label": "All events"},
 ]
 
+# ── Google Meet (#444) ───────────────────────────────────────────────────────────
+
+_ADD_MEET_DESCRIPTION = (
+    "Attach a Google Meet video-call link. Google-only — a no-op on the local store, which"
+    " has no conferencing backend to attach one against."
+)
+
 
 def _validate_recurrence(rule: str, *, dtstart: datetime) -> None:
     """Reject an unparseable RRULE at the tool boundary rather than storing garbage.
@@ -190,7 +197,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.12.0",
+        version="0.13.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -287,6 +294,7 @@ def build_module(
         ] = None,
         recurrence: Annotated[str | None, Field(description=_RECURRENCE_DESCRIPTION)] = None,
         attendees: Annotated[str | None, Field(description=_ATTENDEES_DESCRIPTION)] = None,
+        add_meet: Annotated[bool, Field(description=_ADD_MEET_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
         """Create a calendar event and return the created event.
 
@@ -310,8 +318,12 @@ def build_module(
             recurrence: Optional RFC 5545 RRULE (e.g. ``"FREQ=WEEKLY;COUNT=10"``) to make
                 this a recurring series; omit for a one-off event.
             attendees: Optional comma-separated guest emails to invite.
+            add_meet: Attach a Google Meet video-call link (#444). Only takes effect on a
+                Google calendar — the local store has no conferencing backend, so this is
+                silently a no-op there.
 
-        Returns the created event dict with all fields populated.
+        Returns the created event dict with all fields populated (``meet_url`` set when a
+        Meet link was attached).
         """
         tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
@@ -329,6 +341,7 @@ def build_module(
             recurrence=recurrence or None,
             attendees=_parse_attendees(attendees),
             recurrence_timezone=tz_name if recurrence else None,
+            add_meet=add_meet,
         )
         return _event_payload(event)
 
@@ -638,6 +651,8 @@ def event_hover_card(event: Event) -> dict[str, Any]:
         details.append(HoverCardDetail(label="Repeats", value=repeats))
     if event.attendees:
         details.append(HoverCardDetail(label="Guests", value=_format_attendees(event.attendees)))
+    if event.meet_url:
+        details.append(HoverCardDetail(label="Meet", value=event.meet_url))
     return HoverCard(
         title=event.title,
         description=event.description or "",
@@ -654,6 +669,8 @@ def event_excerpt(event: Event) -> str:
         lines.append(f"Repeats: {_humanize_recurrence(event.recurrence)}")
     if event.attendees:
         lines.append(f"Guests: {_format_attendees(event.attendees)}")
+    if event.meet_url:
+        lines.append(f"Join: {event.meet_url}")
     if event.description:
         lines.extend(["", event.description])
     return "\n".join(lines)
@@ -852,15 +869,18 @@ def _new_event_action(
     """The page-level "New event" action, prefilled with a sensible default time.
 
     When more than one writable calendar exists a ``calendar_id`` picker is added so the
-    operator chooses where the event lands (the active calendar is preselected).
+    operator chooses where the event lands (the active calendar is preselected). ``add_meet``
+    (#444) is create-only — there's no edit-time equivalent — so it's added here rather than
+    to the shared ``_EVENT_FIELDS`` the Edit form also uses.
     """
     start = (now.astimezone(UTC) + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
     end = start + timedelta(hours=1)
-    fields = [*_EVENT_FIELDS]
+    fields = [*_EVENT_FIELDS, "add_meet"]
     form_values: dict[str, Any] = {
         "start": start.isoformat(),
         "end": end.isoformat(),
         "all_day": False,
+        "add_meet": False,
     }
     action: dict[str, Any] = {
         "tool": "calendar_create_event",

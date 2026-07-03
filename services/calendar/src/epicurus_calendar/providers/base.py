@@ -68,6 +68,7 @@ class CalendarProvider(ABC):
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
         recurrence_timezone: str | None = None,
+        add_meet: bool = False,
     ) -> Event:
         """Persist a new event and return the created domain object.
 
@@ -81,7 +82,9 @@ class CalendarProvider(ABC):
         (#446) is the IANA zone *recurrence* anchors its wall-clock expansion in (the
         operator's configured timezone at creation) — meaningful only alongside
         *recurrence*; a provider that expands recurrence itself (Google) ignores it, since
-        it always returns correct per-occurrence instants without help.
+        it always returns correct per-occurrence instants without help. *add_meet* (#444)
+        requests a Google Meet conference link (:attr:`~epicurus_calendar.models.Event.meet_url`)
+        be attached; a provider with no conferencing backend (local) silently ignores it.
         """
 
     @abstractmethod

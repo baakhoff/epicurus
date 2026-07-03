@@ -12,6 +12,7 @@ service manages the token lifecycle.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -122,6 +123,7 @@ class GoogleCalendarProvider(CalendarProvider):
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
         recurrence_timezone: str | None = None,
+        add_meet: bool = False,
     ) -> Event:
         # recurrence_timezone (#446) is unused here: Google expands recurrence server-side
         # and always returns each occurrence as a correct absolute instant, so it needs no
@@ -142,10 +144,23 @@ class GoogleCalendarProvider(CalendarProvider):
             body["recurrence"] = [f"RRULE:{recurrence}"]
         if attendees:
             body["attendees"] = [{"email": a.email} for a in attendees]
+        params: dict[str, int] = {}
+        if add_meet:
+            # conferenceDataVersion=1 (#444) is required for Google to act on
+            # conferenceData at all; requestId is a client-chosen idempotency key for the
+            # conference creation, not a lookup id we need to remember afterwards.
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": str(uuid.uuid4()),
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+            params["conferenceDataVersion"] = 1
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.post(
                 f"{_CALENDAR_API}/calendars/{cal}/events",
                 headers=headers,
+                params=params,
                 json=body,
             )
             resp.raise_for_status()
@@ -558,6 +573,27 @@ def _google_original_start(item: dict[str, object]) -> datetime | None:
     return datetime.fromisoformat(str(value)) if value else None
 
 
+def _google_meet_url(item: dict[str, object]) -> str | None:
+    """The Google Meet join link from ``conferenceData.entryPoints`` (#444), if any.
+
+    A conference has one entry point per join method (video/phone/sip/more); the video
+    one's ``uri`` is the ``meet.google.com/...`` link. ``None`` when the event carries no
+    conference, or (rarely) the conference is still being provisioned and the response
+    doesn't have entry points yet — best-effort, not retried.
+    """
+    conference = item.get("conferenceData")
+    if not isinstance(conference, dict):
+        return None
+    entry_points = conference.get("entryPoints")
+    if not isinstance(entry_points, list):
+        return None
+    for entry in entry_points:
+        if isinstance(entry, dict) and entry.get("entryPointType") == "video":
+            uri = entry.get("uri")
+            return str(uri) if uri else None
+    return None
+
+
 def _google_attendees(item: dict[str, object]) -> list[Attendee]:
     raw = item.get("attendees")
     if not isinstance(raw, list):
@@ -604,4 +640,5 @@ def _google_item_to_event(item: dict[str, object]) -> Event:
         recurring_event_id=str(item["recurringEventId"]) if item.get("recurringEventId") else None,
         original_start=_google_original_start(item),
         attendees=_google_attendees(item),
+        meet_url=_google_meet_url(item),
     )

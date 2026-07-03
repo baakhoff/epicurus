@@ -50,7 +50,10 @@ function wrapper({ children }: { children: ReactNode }) {
   );
 }
 
-const row = (text: string): HTMLElement => screen.getByText(text).closest(".group") as HTMLElement;
+// Scoped to the sheet: the chat header now names the open conversation too (#480), so an
+// unscoped title lookup would match twice when the current session is in the list.
+const row = (text: string): HTMLElement =>
+  within(screen.getByRole("dialog")).getByText(text).closest(".group") as HTMLElement;
 
 beforeEach(() => {
   mockActiveRuns.mockReset().mockResolvedValue({ session_ids: ["s1"] });
@@ -96,7 +99,7 @@ describe("Conversations list running indicator (#396)", () => {
     render(<ChatScreen />, { wrapper });
     fireEvent.click(screen.getByLabelText("Conversations"));
 
-    await screen.findByText("Beta");
+    await within(await screen.findByRole("dialog")).findByText("Beta");
     expect(within(row("Beta")).getByLabelText("Generating")).toBeInTheDocument();
   });
 });

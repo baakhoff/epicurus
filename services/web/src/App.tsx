@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
-import { SURFACES, modulePageNavs } from "@/app/registry";
+import { SURFACES, modulePageNavs, type ModulePageNav } from "@/app/registry";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
 import { PanelHost } from "@/components/Panel";
@@ -34,6 +34,70 @@ const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
     "flex min-w-16 flex-1 flex-col items-center gap-0.5 py-2 text-[10px]",
     isActive ? "text-accent-strong" : "text-ink-faint",
   );
+
+/**
+ * The phone bottom nav. With the module pages aboard there are more destinations than a
+ * narrow viewport can show, and a bare `overflow-x-auto` hides the rest invisibly — nothing
+ * is cut off mid-tab at rest, so nothing *looks* scrollable (#480). Gradient edge fades
+ * (canvas-coloured, theme-correct for free) appear on whichever side still has content.
+ */
+export function MobileTabBar({ modulePages }: { modulePages: ModulePageNav[] }) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [fades, setFades] = useState({ left: false, right: false });
+
+  const update = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const next = {
+      left: el.scrollLeft > 4,
+      right: el.scrollLeft < el.scrollWidth - el.clientWidth - 4,
+    };
+    setFades((prev) => (prev.left === next.left && prev.right === next.right ? prev : next));
+  }, []);
+
+  // Re-measure when the tab set changes (modules load in) and on viewport resize.
+  useEffect(() => {
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [update, modulePages.length]);
+
+  return (
+    <nav className="relative border-t border-edge sm:hidden">
+      {fades.left && (
+        <div
+          aria-hidden="true"
+          data-fade="left"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-8 bg-gradient-to-r from-canvas to-transparent"
+        />
+      )}
+      {fades.right && (
+        <div
+          aria-hidden="true"
+          data-fade="right"
+          className="pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l from-canvas to-transparent"
+        />
+      )}
+      <div ref={scrollerRef} onScroll={update} className="flex overflow-x-auto pb-safe">
+        {SURFACES.map(({ path, label, icon: Icon }) => (
+          <NavLink key={path} to={path} end={path === "/"} className={tabLinkClass}>
+            <Icon size={20} />
+            {label}
+          </NavLink>
+        ))}
+        {modulePages.map(({ path, label, icon }) => {
+          const Icon = moduleIcon(icon);
+          return (
+            <NavLink key={path} to={path} className={tabLinkClass}>
+              <Icon size={20} />
+              {label}
+            </NavLink>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -167,23 +231,7 @@ export function Shell() {
         </main>
 
         {/* bottom tab bar (phones) */}
-        <nav className="flex overflow-x-auto border-t border-edge pb-safe sm:hidden">
-          {SURFACES.map(({ path, label, icon: Icon }) => (
-            <NavLink key={path} to={path} end={path === "/"} className={tabLinkClass}>
-              <Icon size={20} />
-              {label}
-            </NavLink>
-          ))}
-          {modulePages.map(({ path, label, icon }) => {
-            const Icon = moduleIcon(icon);
-            return (
-              <NavLink key={path} to={path} className={tabLinkClass}>
-                <Icon size={20} />
-                {label}
-              </NavLink>
-            );
-          })}
-        </nav>
+        <MobileTabBar modulePages={modulePages} />
       </div>
 
       <PanelHost />

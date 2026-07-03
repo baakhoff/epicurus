@@ -152,6 +152,27 @@ describe("CalendarView", () => {
     expect(screen.queryByRole("link", { name: "Join with Google Meet" })).toBeNull();
   });
 
+  it("drops a Meet link with a non-http(s) scheme", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00",
+          end: "2026-06-15T09:30:00",
+          description: "Daily sync",
+          meet_url: "javascript:alert(1)",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    await screen.findByText("Daily sync");
+    expect(screen.queryByRole("link", { name: "Join with Google Meet" })).toBeNull();
+  });
+
   it("re-fetches a new window when navigating", async () => {
     mockModulePage.mockResolvedValue(sample);
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });

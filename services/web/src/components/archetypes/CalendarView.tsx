@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
+import { isExternalHref } from "@/components/CardLink";
 import { EmptyState, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import {
@@ -861,7 +862,8 @@ function EventDetail({
             <span>{ev.attendees.map((a) => a.display_name ?? a.email).join(", ")}</span>
           </p>
         )}
-        {ev.meet_url && (
+        {/* provider-supplied URL — same trust rule as CardLink: http(s) only */}
+        {ev.meet_url && isExternalHref(ev.meet_url) && (
           <p className="mt-2 flex items-center gap-1.5 text-sm">
             <Video size={14} className="shrink-0 text-ink-dim" />
             <a

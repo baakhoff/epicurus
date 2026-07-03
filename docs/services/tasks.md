@@ -68,6 +68,19 @@ delete path, validated against the manifest. The bulky **Add task** toolbar butt
 compact icon-only **"+"** via a new `icon_only` board-action hint the shell renders (the label
 moves to a tooltip + `aria-label`).
 
+**v0.12.0** fixes `tasks_update` phantom updates (#475): an agent asked to clear a task's due
+date could call `tasks_update` repeatedly, see success every time, and change nothing. Three
+fixes. **Clear sentinel** — `due=""` and `notes=""` now explicitly unset the field (Google
+receives a PATCH `null`; the local store writes `NULL`), distinct from omitting the field
+(`None`), which still means "leave unchanged." **No-op rejection** — `tasks_update` with no
+mutable field and no `to_list_id` raises an actionable error instead of silently succeeding (the
+Google provider still GETs-and-returns on a field-less call at the provider layer — a safe
+low-level fallback — but the tool the agent and board actually call never reaches it emptyhanded
+now). **Cross-list resolution** — `complete_task` / `update_task` / `delete_task` with no
+`list_id` now search the operator's lists (active → other enabled → local, the same order
+`get_task` already used) via `TasksRouter._locate_task` instead of assuming the default write
+target, so a mutation reaches a task that lives in a non-default list instead of 404ing there.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -77,18 +90,22 @@ moves to a tooltip + `aria-label`).
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
 | `tasks_lists()` | none | The available lists (categories) as `- <title> — id: <id>` text, so the agent can pick one (or report only the default list exists). |
 | `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`) | The created `Task`. |
-| `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | The updated `Task` with `completed=True`. |
-| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?)` | `task_id`: provider task ID; only the fields passed change. `to_list_id`: **move** the task to this list | The updated `Task` (the moved task on a move). |
-| `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
+| `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. |
+| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` **clears** that field (`None`/omitted leaves it unchanged). `to_list_id`: **move** the task to this list | The updated `Task` (the moved task on a move). |
+| `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
 
 All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
 **aggregates open tasks across every enabled list**; with a `list_id` it reads just that
-list. `tasks_add` / `tasks_complete` / `tasks_update` route to the list named by `list_id`,
-or — with none — to the default target (the active list, else the first enabled, else local).
-Before adding from chat the agent should call **`tasks_lists`** and ask which list when more
-than one exists. `tasks_update` edits content (title/notes/due); passing **`to_list_id`**
-moves the task (recreate+delete on Google — ADR-0038); `tasks_complete` flips the done flag —
-distinct operations. The `Task` domain model is:
+list. `tasks_add` (a create) routes to the list named by `list_id`, or — with none — to the
+default target (the active list, else the first enabled, else local). `tasks_complete` /
+`tasks_update` / `tasks_delete` (mutations on an *existing* task) route to `list_id` when
+given; with none, they **search** the same lists `get_task` does (active → other enabled →
+local, #475) instead of assuming the default target, so a mutation still reaches a task that
+lives in a different enabled list. Before adding from chat the agent should call
+**`tasks_lists`** and ask which list when more than one exists. `tasks_update` edits content
+(title/notes/due — `due=""` / `notes=""` clears one, #475) and rejects a call with nothing to
+change; passing **`to_list_id`** moves the task (recreate+delete on Google — ADR-0038);
+`tasks_complete` flips the done flag — distinct operations. The `Task` domain model is:
 
 ```python
 class Task(BaseModel):
@@ -305,7 +322,7 @@ Package `epicurus_tasks`:
 | `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default). |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete). |
-| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475). |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
 | `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls** and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
 | `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |

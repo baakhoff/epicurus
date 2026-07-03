@@ -134,6 +134,31 @@ async def test_update_unknown_raises(provider: LocalTasksProvider) -> None:
         await provider.update_task(TENANT, "nonexistent-id", title="x")
 
 
+# ── Clear sentinel: due="" / notes="" unsets the field (#475) ─────────────────
+
+
+async def test_update_task_clears_due_with_empty_string(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Has a date", due="2025-01-01")
+    updated = await provider.update_task(TENANT, task.id, due="")
+    assert updated.due is None
+
+
+async def test_update_task_clears_notes_with_empty_string(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Has notes", notes="some notes")
+    updated = await provider.update_task(TENANT, task.id, notes="")
+    assert updated.notes is None
+
+
+async def test_update_task_clear_due_leaves_other_fields_untouched(
+    provider: LocalTasksProvider,
+) -> None:
+    task = await provider.add_task(TENANT, "Keep title", notes="keep", due="2025-01-01")
+    updated = await provider.update_task(TENANT, task.id, due="")
+    assert updated.title == "Keep title"
+    assert updated.notes == "keep"
+    assert updated.due is None
+
+
 async def test_get_task_returns_task(provider: LocalTasksProvider) -> None:
     """get_task backs the resolver / attachment source (ADR-0019)."""
     task = await provider.add_task(TENANT, "Find me", notes="here")

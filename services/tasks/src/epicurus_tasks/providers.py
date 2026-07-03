@@ -113,7 +113,9 @@ class TasksProvider(Protocol):
         """Edit a task's content and return the updated task.
 
         Only the fields passed (non-``None``) are changed; omitted fields keep
-        their current value. Distinct from :meth:`complete_task`, which flips the
+        their current value. **An empty string clears** ``due`` or ``notes``
+        (``""`` means "unset", distinct from ``None`` which means "leave
+        unchanged") — #475. Distinct from :meth:`complete_task`, which flips the
         done flag — this edits content. Google Tasks silently ignores priority/tags;
         ``"in_progress"`` status is mapped to ``"open"`` by Google on read-back.
 
@@ -121,8 +123,8 @@ class TasksProvider(Protocol):
             tenant_id: Tenant scope.
             task_id: Provider-specific task identifier.
             title: New title; ``None`` leaves it unchanged.
-            notes: New notes; ``None`` leaves them unchanged.
-            due: New ISO date string; ``None`` leaves it unchanged.
+            notes: New notes; ``None`` leaves them unchanged, ``""`` clears them.
+            due: New ISO date string; ``None`` leaves it unchanged, ``""`` clears it.
             status: New status (``"open"``/``"in_progress"``/``"done"``); ``None``
                 leaves it unchanged.
             priority: New priority; ``None`` leaves it unchanged.

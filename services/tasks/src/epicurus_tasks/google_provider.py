@@ -276,10 +276,12 @@ class GoogleTasksProvider:
     ) -> Task:
         """Edit a task's title/notes/due/status via a PATCH to the Google Tasks API.
 
-        ``priority`` and ``tags`` are silently ignored. ``"in_progress"`` status is
-        sent as ``"needsAction"`` and will read back as ``"open"``. With nothing
-        Google-mappable to change, GETs and returns the current task. ``to_list_id`` is
-        ignored — the router performs cross-list moves (recreate+delete, ADR-0038).
+        An empty string clears ``due`` or ``notes``; ``None`` leaves them unchanged
+        (#475). ``priority`` and ``tags`` are silently ignored. ``"in_progress"``
+        status is sent as ``"needsAction"`` and will read back as ``"open"``. With
+        nothing Google-mappable to change, GETs and returns the current task.
+        ``to_list_id`` is ignored — the router performs cross-list moves
+        (recreate+delete, ADR-0038).
         """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
@@ -288,7 +290,9 @@ class GoogleTasksProvider:
             body["title"] = title
         if notes is not None:
             body["notes"] = notes
-        if due:
+        if due == "":
+            body["due"] = None  # explicit clear — Google Tasks accepts a null due (#475)
+        elif due:
             # Google Tasks expects RFC 3339 UTC midnight for due dates.
             body["due"] = f"{due[:10]}T00:00:00.000Z"
         if status is not None:

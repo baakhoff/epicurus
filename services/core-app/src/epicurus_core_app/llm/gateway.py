@@ -62,8 +62,12 @@ _TRIM_NOTE = "(Earlier messages in this conversation were trimmed to fit the con
 _CONNECT_TIMEOUT_S = 30.0
 
 # Effective "no inter-chunk limit" — a very large but finite read timeout used when the operator
-# sets LLM_TIMEOUT=0. It must be finite, not None: LiteLLM's ollama_chat path coerces a None read
-# back to its 600s fallback (#453), so "disable the bound" is expressed as a read that never
+# sets LLM_TIMEOUT=0. It must be finite, not None: ``ollama_chat`` is not in LiteLLM's
+# ``supports_httpx_timeout()`` allowlist, so ``CompletionTimeout.resolve()``
+# (litellm_core_utils/completion_timeout.py) collapses our httpx.Timeout to its ``.read``
+# component and substitutes its own ``COMPLETION_HTTP_FALLBACK_SECONDS`` (600s) whenever
+# that component is ``None`` — verified by calling ``resolve()`` directly against the pinned
+# litellm 1.89.3 (#453, #466). So "disable the bound" is expressed as a read that never
 # realistically elapses rather than as no timeout at all.
 _UNBOUNDED_READ_S = 365 * 24 * 60 * 60.0  # 1 year
 
@@ -606,6 +610,16 @@ class LlmGateway:
         operator has set a context window or keep-alive for it, those are passed as Ollama
         runtime options (LiteLLM drops them if the runtime doesn't take them). With nothing
         set, the call is unchanged — embeddings stay opt-in, never silently retuned.
+
+        Time-boxed to the same ``LLM_TIMEOUT``-derived bound the chat/stream call sites carry
+        (#453) — but enforced with :func:`asyncio.wait_for` rather than litellm's own
+        ``timeout=`` kwarg. LiteLLM 1.89.3's ``ollama`` embeddings dispatch
+        (``llms/ollama/completion/handler.py``'s ``ollama_aembeddings``) never threads
+        ``timeout`` through to its HTTP call — unlike the chat path, where it reaches
+        aiohttp's ``sock_read`` — so passing it as a kwarg here would be silently inert.
+        Cross-chat recall wraps its own, much shorter, gracefully-degrading budget on top of
+        this (``agent._recall_within_budget``); this guard covers the direct/module paths
+        that had no bound at all (#466).
         """
         if self._power.paused:
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
@@ -622,11 +636,14 @@ class LlmGateway:
         elif settings.device == "gpu":
             options["num_gpu"] = 999
         start = time.monotonic()
-        response = await litellm.aembedding(
-            model=embed_model,
-            input=texts,
-            api_base=self._ollama_url,
-            **options,
+        response = await asyncio.wait_for(
+            litellm.aembedding(
+                model=embed_model,
+                input=texts,
+                api_base=self._ollama_url,
+                **options,
+            ),
+            timeout=self._timeout.read,
         )
         self._power.mark_active()
         await self._emit_usage(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -411,6 +412,37 @@ async def test_embed_refuses_when_paused() -> None:
     power.pause()
     with pytest.raises(GatewayPausedError):
         await _gateway(power).embed(["text"])
+
+
+async def test_embed_times_out_via_asyncio_wait_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    # LiteLLM's ollama embeddings dispatch (llms/ollama/completion/handler.py's
+    # ollama_aembeddings) never threads a timeout= kwarg through to its HTTP call — unlike the
+    # chat sites, where it reaches aiohttp's sock_read — so embed() enforces the same
+    # LLM_TIMEOUT-derived bound with asyncio.wait_for instead (#466). Verify it actually fires.
+    async def slow_aembedding(**kwargs: Any) -> _Response:
+        await asyncio.sleep(10)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", slow_aembedding)
+    with pytest.raises(TimeoutError):
+        await _gateway(timeout=0.05).embed(["hello"])
+
+
+async def test_embed_never_passes_the_inert_timeout_kwarg_to_litellm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LiteLLM silently drops a timeout= kwarg on the ollama embeddings path (verified against
+    # the pinned 1.89.3) — passing one would look protective while doing nothing. Pin the
+    # omission so a future "fix" doesn't reintroduce a no-op kwarg in place of the real guard.
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    await _gateway().embed(["hello"])
+    assert "timeout" not in captured
 
 
 async def test_paused_gateway_refuses() -> None:

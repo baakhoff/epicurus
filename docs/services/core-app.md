@@ -270,8 +270,11 @@ first long generation after tool/embed activity forces a model swap — legitima
 flow for minutes; too low a read timeout aborts a valid generation mid-stream with
 `Timeout on reading data from socket`. The default is generous so a long knowledge-doc generation
 completes; lower it for faster failure, or set `LLM_TIMEOUT=0` to remove the inter-chunk bound
-entirely (mapped to a large finite read, since LiteLLM's `ollama_chat` path coerces a `None` read
-back to its own 600s default). The **connect** stays short so a down runtime still fails fast.
+entirely (mapped to a large finite read, never `None`: `ollama_chat` is outside LiteLLM's
+`supports_httpx_timeout()` allowlist, so `CompletionTimeout.resolve()` collapses our
+`httpx.Timeout` to its `.read` component and substitutes its own 600s fallback whenever that
+component is `None` — verified against the pinned litellm 1.89.3 by calling `resolve()` directly,
+#453/#466). The **connect** stays short so a down runtime still fails fast.
 
 If a stream still dies part-way, the agent loop **degrades gracefully** instead of dumping the raw
 litellm/aiohttp exception into chat: it keeps whatever answer + activity streamed so far, appends a
@@ -279,6 +282,15 @@ short friendly note ("the model stopped responding before the answer was finishe
 that partial turn, and ends the stream with `done` — so a reopen still shows it. Only a failure
 that produced *nothing* yet ends with `error` (a friendly banner; a non-connection error like
 `paused` passes its own text through, which the web keys on for its paused state).
+
+**`embed()` carries the same bound, but enforced differently (#466).** LiteLLM's `ollama`
+embeddings dispatch never threads a `timeout=` kwarg through to its HTTP call (unlike the chat
+path), so `LlmGateway.embed()` wraps the `litellm.aembedding` call in `asyncio.wait_for(...,
+timeout=self._timeout.read)` instead — the same `LLM_TIMEOUT`-derived duration, enforced at the
+asyncio level rather than relying on litellm to honor it. Cross-chat recall (ADR-0051) still
+layers its own, much shorter (`MEMORY_RECALL_TIMEOUT_S`, default 4s), gracefully-degrading budget
+on top via its own `asyncio.wait_for`; this gateway-level guard exists for the direct/module paths
+that previously had no bound at all.
 
 ### Power (ADR-0005)
 

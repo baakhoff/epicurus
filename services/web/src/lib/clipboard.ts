@@ -20,7 +20,7 @@ export async function copyText(text: string): Promise<boolean> {
   scratch.style.opacity = "0";
   document.body.appendChild(scratch);
   scratch.select();
-  let copied = false;
+  let copied: boolean;
   try {
     copied = document.execCommand("copy");
   } catch {

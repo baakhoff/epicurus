@@ -193,7 +193,11 @@ class LocalCalendarProvider(CalendarProvider):
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
         recurrence_timezone: str | None = None,
+        add_meet: bool = False,
     ) -> Event:
+        # add_meet (#444) is unused here: there is no local conferencing backend to
+        # attach a Meet link against, so the event is created normally without one.
+        del add_meet
         return await self._store.create_event(
             tenant=tenant_id,
             title=title,

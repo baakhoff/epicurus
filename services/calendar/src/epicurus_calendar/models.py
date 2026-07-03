@@ -69,6 +69,10 @@ class Event(BaseModel):
     # Guests invited to the event (#432); empty for none. Google-backed events reflect the
     # live RSVP status per guest; a newly invited local guest starts ``needsAction``.
     attendees: list[Attendee] = Field(default_factory=list)
+    # A Google Meet join link (#444), set only when the event was created with a Meet
+    # conference attached. Google-only — the local provider has no conferencing backend to
+    # mirror it against, so a local event's ``meet_url`` is always ``None``.
+    meet_url: str | None = None
 
     @field_validator("start", "end")
     @classmethod

@@ -244,6 +244,17 @@ def test_event_hover_card_omits_recurrence_and_guests_when_absent() -> None:
     assert "Guests" not in labels
 
 
+def test_event_hover_card_shows_meet_link() -> None:
+    card = event_hover_card(_event(meet_url="https://meet.google.com/abc-defg-hij"))
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Meet"] == "https://meet.google.com/abc-defg-hij"
+
+
+def test_event_hover_card_omits_meet_when_absent() -> None:
+    card = event_hover_card(_event())
+    assert "Meet" not in [d["label"] for d in card["details"]]
+
+
 def test_event_excerpt_includes_when_and_description() -> None:
     excerpt = event_excerpt(_event(description="Daily sync", location="Room 4"))
     assert "Standup" in excerpt
@@ -258,6 +269,11 @@ def test_event_excerpt_includes_recurrence_and_guests() -> None:
     )
     assert "Repeats: Daily" in excerpt
     assert "Guests: alice@example.com" in excerpt
+
+
+def test_event_excerpt_includes_meet_link() -> None:
+    excerpt = event_excerpt(_event(meet_url="https://meet.google.com/abc-defg-hij"))
+    assert "Join: https://meet.google.com/abc-defg-hij" in excerpt
 
 
 def test_event_attachment_item_shape() -> None:
@@ -438,6 +454,7 @@ class _MockGoogleProvider(CalendarProvider):
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
         recurrence_timezone: str | None = None,
+        add_meet: bool = False,
     ) -> Event:
         event = Event(
             id="g-1",
@@ -450,6 +467,7 @@ class _MockGoogleProvider(CalendarProvider):
             all_day=all_day,
             recurrence=recurrence,
             attendees=attendees or [],
+            meet_url="https://meet.google.com/abc-defg-hij" if add_meet else None,
         )
         self.events.append(event)
         return event
@@ -539,6 +557,36 @@ async def test_google_mock_provider_creates_event() -> None:
     result = _extract(structured)
     assert result["title"] == "Video call"
     assert result["provider"] == "google"
+
+
+async def test_calendar_create_event_tool_threads_add_meet_to_the_provider() -> None:
+    mock_provider = _MockGoogleProvider()
+    module = build_module(mock_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2025-06-15T15:00:00+00:00",
+            "end": "2025-06-15T16:00:00+00:00",
+            "add_meet": True,
+        },
+    )
+    assert _extract(structured)["meet_url"] == "https://meet.google.com/abc-defg-hij"
+
+
+async def test_calendar_create_event_tool_omits_meet_link_by_default(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2025-06-15T15:00:00+00:00",
+            "end": "2025-06-15T16:00:00+00:00",
+        },
+    )
+    assert _extract(structured)["meet_url"] is None
 
 
 async def test_google_mock_provider_lists_events() -> None:
@@ -637,7 +685,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.12.0"
+    assert manifest.version == "0.13.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -1272,10 +1320,12 @@ async def test_calendar_page_declares_new_event_action(
         "description",
         "recurrence",
         "attendees",
+        "add_meet",
     ]
     # The default time is prefilled so the picker opens on a sensible slot.
     assert "start" in new["form_values"] and "end" in new["form_values"]
     assert new["form_values"]["all_day"] is False
+    assert new["form_values"]["add_meet"] is False
 
 
 async def test_calendar_page_events_carry_edit_and_delete_actions(

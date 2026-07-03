@@ -676,6 +676,8 @@ export const CalendarEvent = z
     recurring_event_id: z.string().nullish(),
     /** Guests invited to the event (#432); empty for none. */
     attendees: z.array(Attendee).default([]),
+    /** A Google Meet join link (#444); null unless attached at create time (Google-only). */
+    meet_url: z.string().nullish(),
     // Per-event Edit/Delete actions (#208) — same vocabulary as board actions; the shell
     // invokes the named MCP tool through the core's tool proxy and refetches on success.
     actions: z.array(BoardAction).default([]),

@@ -59,7 +59,8 @@ the rule) plus zero or more *exceptions* overriding a single occurrence (edited 
 editing/deleting takes an `edit_scope` of `"this"` (one occurrence) or `"all"` (the whole
 series) — see *Recurring events* under Contract, below. Since **v0.12** (#445) `edit_scope`
 also takes `"following"` — this occurrence and every later one, splitting the series in two.
-Google Meet / conferencing remains deliberately out of scope for now (ADR-0075).
+Since **v0.13** (#444) event creation can attach a **Google Meet** video-call link — see
+*Google Meet*, below.
 
 ## Contract
 
@@ -68,7 +69,7 @@ Google Meet / conferencing remains deliberately out of scope for now (ADR-0075).
 | Tool | Description |
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
-| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list. Returns the created event. |
+| `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?, add_meet=false)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list; `add_meet` (#444) attaches a Google Meet link — Google-only, a no-op on the local store. Returns the created event (`meet_url` set when a Meet link was attached). |
 | `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` is `"this"` (#432, default — just the named occurrence), `"following"` (#445 — this occurrence and every later one, splitting the series in two), or `"all"` (#432 — the whole series); `recurrence` is only honoured with `edit_scope="all"` or `"following"` (raises with `"this"` — an instance can't carry its own rule; omitted with `"following"`, the new tail series just continues the existing pattern). Returns the updated event; raises if absent. |
 | `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` mirrors update: `"this"` (#432) removes just the named occurrence, `"following"` (#445) removes it and every later occurrence (truncating the series), `"all"` (#432) removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
@@ -97,12 +98,13 @@ event's own token in their `args` (#435), so shell edits go straight to the owni
   "provider": "local | google",
   "recurrence": "string | null",
   "recurring_event_id": "string | null",
-  "attendees": [{"email": "string", "display_name": "string | null", "response_status": "string"}]
+  "attendees": [{"email": "string", "display_name": "string | null", "response_status": "string"}],
+  "meet_url": "string | null"
 }
 ```
 
 `recurrence`/`recurring_event_id`/`attendees` are new in **v0.11** (#432) — see *Recurring
-events*, below.
+events*, below. `meet_url` is new in **v0.13** (#444) — see *Google Meet*, below.
 
 **Timezones (#433, ADR-0039).** A timed `start`/`end` that carries a UTC offset is honoured
 as that instant. A **naive** value (no offset — the common natural-language case, e.g. the
@@ -173,6 +175,25 @@ cross-event transaction.
 `response_status` (`needsAction` / `accepted` / `declined` / `tentative` — Google's
 vocabulary, which is also iCalendar's PARTSTAT set) reflects live RSVP state on a
 Google-backed event and starts `needsAction` for a newly invited local guest.
+
+### Google Meet (#444)
+
+`calendar_create_event`'s `add_meet` flag attaches a Google Meet video-call link at creation
+time — **Google-only**; the local store has no conferencing backend to mirror it against, so
+`add_meet` is silently a no-op there (the event is still created, just without a link). On
+Google, the provider sends `conferenceData.createRequest` (a client-generated `requestId`,
+Google's idempotency key for the conference sub-request, plus
+`conferenceSolutionKey: {"type": "hangoutsMeet"}`) with `conferenceDataVersion=1` on the
+`events.insert` call; Google provisions the conference and returns it inline in the same
+response in the overwhelming majority of cases. The event's `meet_url` is read from
+`conferenceData.entryPoints`, the one whose `entryPointType` is `"video"` — best-effort: on
+the rare occasion a conference is still provisioning when the response comes back (no entry
+points yet), `meet_url` reads `null` rather than retrying. There is no edit-time equivalent
+(no `edit_scope` variant adds/removes a Meet link from an existing event) and no `add_meet`
+field on `calendar_update_event`. The web create form always offers the toggle regardless of
+which calendar is targeted (no cross-field conditional visibility) — its own description
+notes it only takes effect on Google; `EventDetail` shows a "Join with Google Meet" link
+when `meet_url` is set.
 
 ### Connected accounts & collections (ADR-0030)
 

@@ -180,6 +180,7 @@ class CollectionRouter(CalendarProvider):
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
         recurrence_timezone: str | None = None,
+        add_meet: bool = False,
     ) -> Event:
         # Unlike a plain provider (where ``calendar_id`` is a bare collection id), the
         # router reads it as an ``account[:collection]`` token the create form supplies so
@@ -203,6 +204,7 @@ class CollectionRouter(CalendarProvider):
             all_day=all_day,
             recurrence=recurrence,
             attendees=attendees,
+            add_meet=add_meet,
             recurrence_timezone=recurrence_timezone,
         )
 

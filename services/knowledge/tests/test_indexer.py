@@ -6,6 +6,8 @@ client and PlatformClient, so no Docker infra is needed.
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -127,6 +129,58 @@ async def test_second_run_skips_unchanged_notes(note_index: NoteIndex, vault: Pa
     result = await indexer.run()
     assert result["unchanged"] == 2
     assert result["indexed"] == 0
+
+
+async def test_mtime_ns_reconciles_from_a_raw_seeded_value(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """A ledger row seeded with a raw ``st_mtime_ns`` (pre-ADR-0070) self-heals in one pass.
+
+    Since ADR-0070 moved reads behind the file API, ``mtime_ns`` is *derived* from a float
+    ``mtime`` (seconds), not the filesystem's raw ``st_mtime_ns`` some rows may have been
+    seeded with before that migration. Seed a record whose ``mtime_ns`` deliberately does not
+    match what the indexer derives for the file's real on-disk mtime (but whose content hash
+    *does* match): the first pass must re-read the file (mtime looks changed) but, because the
+    content hash matches, treat it as ``unchanged`` — no re-embed — and converge the ledger's
+    ``mtime_ns`` to the derived value so every subsequent run is a clean, stable skip.
+    """
+    note_path = "note_a.md"
+    # Read bytes (no universal-newline translation), exactly like DiskVaultReader.read_text —
+    # a plain text-mode read would round-trip CRLF -> LF on Windows and hash a different string
+    # than what the indexer's byte-preserving read actually sees.
+    raw_bytes = (vault / note_path).read_bytes()
+    content_hash = hashlib.sha256(raw_bytes).hexdigest()
+    # The raw filesystem nanosecond mtime — generically different from the indexer's derived
+    # `round(mtime * 1_000_000_000)` after the float round-trip (mirrors a pre-ADR-0070 row).
+    raw_mtime_ns = os.stat(vault / note_path).st_mtime_ns
+    derived_mtime_ns = round(os.stat(vault / note_path).st_mtime * 1_000_000_000)
+    assert raw_mtime_ns != derived_mtime_ns, "fixture assumption: raw and derived ns must differ"
+
+    await note_index.upsert(
+        tenant=TENANT,
+        note_path=note_path,
+        mtime_ns=raw_mtime_ns,
+        content_hash=content_hash,
+        chunk_count=1,
+    )
+
+    indexer = _make_indexer(note_index, vault)
+    result = await indexer.run()
+
+    # (a) Despite the mtime mismatch, the content hash matched — no re-embed.
+    assert result["unchanged"] == 1  # note_a.md: mtime looked changed, content didn't
+    assert result["indexed"] == 1  # note_b.md only (never seeded, so it's genuinely new)
+
+    # (b) The ledger converged: mtime_ns now reflects the freshly-derived value.
+    rec = await note_index.get(tenant=TENANT, note_path=note_path)
+    assert rec is not None
+    assert rec.mtime_ns == derived_mtime_ns
+    assert rec.content_hash == content_hash
+
+    # (c) Stable from here on — a second run reports it (and everything) unchanged.
+    second = await indexer.run()
+    assert second["indexed"] == 0
+    assert second["unchanged"] == 2
 
 
 async def test_reset_drops_collection_and_clears_ledger(note_index: NoteIndex, vault: Path) -> None:

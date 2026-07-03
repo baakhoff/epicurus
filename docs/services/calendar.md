@@ -135,6 +135,14 @@ returns individual **occurrences** (`recurring_event_id` set to the series' id;
   *original* — unmodified — start, encoded in the exception's own id as
   `<series-id>_<original-start>Z`) and expands the RRULE with `dateutil.rrule` on every read,
   bounded to the requested window (an unbounded `FREQ=DAILY` never iterates past the window).
+  A *timed* series also stores the operator's configured **IANA timezone** at the moment
+  `recurrence` is written (create, or an `edit_scope="all"` update that sets/redefines it) and
+  expands the rule in that zone (#446, ADR-0077) — so a "9:00 AM" weekly event keeps its
+  wall-clock hour across a DST change instead of drifting by the UTC-offset delta. All-day
+  series ignore it (floating dates, ADR-0037); a legacy series with no stored zone falls back
+  to the pre-fix UTC anchor. A moved occurrence is windowed by its *actual* (possibly moved)
+  time, not its original slot, so rescheduling one across a view boundary can't make it go
+  missing from, or leak into, the adjacent window.
 
 **Edit scope.** `calendar_update_event` / `calendar_delete_event` take `edit_scope`:
 `"this"` (default) acts on just the named occurrence — for Google, PATCH/DELETE on its
@@ -147,14 +155,6 @@ rule (`edit_scope="this"` with `recurrence` set raises).
 **Deliberately out of scope** (ADR-0075): a `"this and following"` edit scope (splitting a
 series into two) and Google Meet / conferencing — both filed as follow-ups, not implemented
 here.
-
-**Known limitation — local provider only** (#446): the local engine anchors a series at its
-stored **UTC instant**, so a *timed* recurring event drifts by the offset delta across a DST
-change (a 9:00 weekly event renders 8:00 after the autumn fall-back) until the series carries
-its own timezone; and a single occurrence moved across a view boundary is windowed by its
-*original* slot, so it can go missing from (or leak into) the adjacent window. Google-backed
-calendars are unaffected (expansion is server-side), as are all-day series (floating dates,
-ADR-0037).
 
 **Attendees** (`attendees`, a comma-separated email list on the tools) invites guests;
 `response_status` (`needsAction` / `accepted` / `declined` / `tentative` — Google's
@@ -369,14 +369,20 @@ database.
 | `description` | `text` | Optional description. |
 | `location` | `varchar(512)` | Optional location. |
 | `all_day` | `boolean` | All-day (date-only) event flag. |
+| `recurrence` | `text`, nullable | RFC 5545 RRULE on a series master; `NULL` on a plain event or an exception row (#432). |
+| `recurring_event_id` | `varchar(64)`, nullable, indexed | The master's `event_id`, on an exception row only; `NULL` on a plain event or a master itself (#432). |
+| `excluded` | `boolean` | Tombstones a single deleted occurrence; meaningless outside an exception row (#432). |
+| `attendees` | `text`, nullable | JSON-encoded guest list (see `Attendee`); `NULL`/blank means no guests (#432). |
+| `timezone` | `varchar(64)`, nullable | On a series master only: the IANA zone its RRULE expands in, captured from the operator's configured timezone whenever `recurrence` is written; `NULL` on a plain event, an exception, or a master written before this column existed (falls back to UTC expansion, #446). |
 | `created_at` | `timestamptz` | Row insertion timestamp. |
 
 Unique constraint: `(tenant, event_id)`.
 
-`all_day` was added after the table's first release. There is no migration framework, so
-`LocalEventStore.init` runs an additive `_ensure_columns` step that adds the column in place
-on an existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before it
-existed read `NULL`, coerced to `false`.
+`all_day`, `recurrence`, `recurring_event_id`, `excluded`, `attendees`, and `timezone` were all
+added after the table's first release. There is no migration framework, so
+`LocalEventStore.init` runs an additive `_ensure_columns` step that adds each in place on an
+existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before a given
+column existed read `NULL`, coerced to the documented fallback above.
 
 The **Google provider** stores no data locally; all state lives in Google
 Calendar and in the core's OAuth vault. An all-day Google event uses `start.date`/`end.date`

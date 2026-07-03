@@ -135,6 +135,7 @@ model.  (The gateway's former `POST /platform/v1/llm/chat` was removed in
 The operator's IANA timezone, used by the agent's built-in `now` tool (ADR-0039). `GET`
 returns `{timezone}` (the stored value, else `DEFAULT_TIMEZONE`). `PUT {timezone}` validates
 it as a real IANA zone (**400** otherwise) and persists it; edited in the web Settings screen.
+Both take an optional `tenant_id` query param, falling back to the default tenant when omitted.
 
 ---
 

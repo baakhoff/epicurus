@@ -147,24 +147,26 @@ _ATTACH_LIMIT = 50
 TimezoneSource = Callable[[], Awaitable[str]]
 
 
-async def _resolve_timezone(source: TimezoneSource | None) -> tzinfo:
-    """The zone naive tool inputs are read in: the operator's timezone, else UTC (#433).
+async def _resolve_timezone(source: TimezoneSource | None) -> tuple[tzinfo, str]:
+    """The zone naive tool inputs are read in — the operator's timezone, else UTC (#433) —
+    paired with its IANA name, persisted on a new recurring series as its RRULE expansion
+    anchor (#446).
 
     Best-effort by design — an unreachable core or an unknown zone name degrades to UTC
     (the pre-#433 behaviour) rather than failing the write.
     """
     if source is None:
-        return UTC
+        return UTC, "UTC"
     try:
         name = await source()
     except Exception as exc:
         log.warning("operator timezone unavailable; reading naive times as UTC", error=str(exc))
-        return UTC
+        return UTC, "UTC"
     try:
-        return ZoneInfo(name)
+        return ZoneInfo(name), name
     except Exception:
         log.warning("unknown operator timezone; reading naive times as UTC", timezone=name)
-        return UTC
+        return UTC, "UTC"
 
 
 def build_module(
@@ -186,7 +188,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.11.1",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -309,7 +311,7 @@ def build_module(
 
         Returns the created event dict with all fields populated.
         """
-        tz = await _resolve_timezone(timezone)
+        tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
         if recurrence:
             _validate_recurrence(recurrence, dtstart=start_dt)
@@ -324,6 +326,7 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence or None,
             attendees=_parse_attendees(attendees),
+            recurrence_timezone=tz_name if recurrence else None,
         )
         return _event_payload(event)
 
@@ -387,7 +390,7 @@ def build_module(
 
         Returns the updated event dict. Raises if no such event exists.
         """
-        tz = await _resolve_timezone(timezone)
+        tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
         if recurrence and start_dt is not None:
             _validate_recurrence(recurrence, dtstart=start_dt)
@@ -403,6 +406,7 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence,
             attendees=_parse_attendees(attendees),
+            recurrence_timezone=tz_name if recurrence is not None else None,
             edit_scope=edit_scope,
         )
         if event is None:

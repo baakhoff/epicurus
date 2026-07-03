@@ -179,6 +179,7 @@ class CollectionRouter(CalendarProvider):
         all_day: bool = False,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
     ) -> Event:
         # Unlike a plain provider (where ``calendar_id`` is a bare collection id), the
         # router reads it as an ``account[:collection]`` token the create form supplies so
@@ -202,6 +203,7 @@ class CollectionRouter(CalendarProvider):
             all_day=all_day,
             recurrence=recurrence,
             attendees=attendees,
+            recurrence_timezone=recurrence_timezone,
         )
 
     async def update_event(
@@ -218,6 +220,7 @@ class CollectionRouter(CalendarProvider):
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
         # Edit the event wherever it lives: the caller-supplied home calendar first
@@ -243,6 +246,7 @@ class CollectionRouter(CalendarProvider):
                     all_day=all_day,
                     recurrence=recurrence,
                     attendees=attendees,
+                    recurrence_timezone=recurrence_timezone,
                     edit_scope=edit_scope,
                 )
             except Exception as exc:

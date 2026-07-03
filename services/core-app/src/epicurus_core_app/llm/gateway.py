@@ -55,6 +55,30 @@ USAGE_SUBJECT = "llm.usage"
 # model knows earlier messages were cut rather than never said.
 _TRIM_NOTE = "(Earlier messages in this conversation were trimmed to fit the context window.)"
 
+# Connect timeout (seconds) for every LLM call — bounds only the TCP/TLS handshake, so a down
+# runtime or unreachable hosted endpoint fails fast regardless of how generous the read timeout is.
+# (For a local ``ollama_chat`` call LiteLLM collapses our httpx.Timeout to its read component, so
+# this connect only actually governs hosted providers; a down localhost Ollama refuses instantly.)
+_CONNECT_TIMEOUT_S = 30.0
+
+# Effective "no inter-chunk limit" — a very large but finite read timeout used when the operator
+# sets LLM_TIMEOUT=0. It must be finite, not None: LiteLLM's ollama_chat path coerces a None read
+# back to its 600s fallback (#453), so "disable the bound" is expressed as a read that never
+# realistically elapses rather than as no timeout at all.
+_UNBOUNDED_READ_S = 365 * 24 * 60 * 60.0  # 1 year
+
+
+def _build_stream_timeout(read_timeout_s: float) -> httpx.Timeout:
+    """The httpx timeout for LLM calls: a generous read, a short connect (#453).
+
+    ``read_timeout_s`` is the inter-chunk read deadline (``LLM_TIMEOUT``); ``0`` (or negative)
+    means "no inter-chunk bound" and maps to :data:`_UNBOUNDED_READ_S`. LiteLLM threads the read
+    component down to aiohttp's ``sock_read`` (which fires on the gap *between* stream chunks),
+    so this is what keeps a legitimate cold-model-load / prompt-eval stall from aborting the turn.
+    """
+    read = read_timeout_s if read_timeout_s and read_timeout_s > 0 else _UNBOUNDED_READ_S
+    return httpx.Timeout(read, connect=_CONNECT_TIMEOUT_S)
+
 
 def _normalize_arguments(raw: Any) -> str:
     """Coerce a tool call's ``arguments`` to exactly one valid JSON string.
@@ -123,6 +147,7 @@ class LlmGateway:
         bus: EventBus,
         fallbacks: list[str],
         num_retries: int = 2,
+        timeout: float = 600.0,
         temperature: float | None = None,
         top_p: float | None = None,
         num_ctx: int | None = None,
@@ -139,6 +164,10 @@ class LlmGateway:
         self._bus = bus
         self._fallbacks = list(fallbacks)
         self._num_retries = num_retries
+        # Inter-chunk read timeout for every LLM call, sized for local inference (#453). Built once
+        # here (constant per gateway) and passed to each ``litellm.acompletion`` so a legitimate
+        # cold-load / prompt-eval stall does not abort the stream at aiohttp's ``sock_read``.
+        self._timeout = _build_stream_timeout(timeout)
         self._temperature = temperature
         self._top_p = top_p
         self._num_ctx = num_ctx
@@ -352,6 +381,7 @@ class LlmGateway:
             messages=[m.provider_dump() for m in messages],
             tools=tools,
             num_retries=self._num_retries,
+            timeout=self._timeout,
             **config,
         )
         latency_ms = (time.monotonic() - start) * 1000
@@ -423,6 +453,7 @@ class LlmGateway:
             messages=[m.provider_dump() for m in messages],
             stream=True,
             num_retries=self._num_retries,
+            timeout=self._timeout,
             **config,
         )
         self._power.mark_active()
@@ -464,6 +495,7 @@ class LlmGateway:
             tools=tools,
             stream=True,
             num_retries=self._num_retries,
+            timeout=self._timeout,
             **config,
         )
         self._power.mark_active()

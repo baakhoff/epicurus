@@ -29,6 +29,15 @@ class CoreAppSettings(CoreSettings):
     llm_fallbacks: str = ""
     # Per-model retries on 429 / 5xx (exponential backoff), handled by LiteLLM.
     llm_num_retries: int = 2
+    # Inter-chunk read timeout (seconds) for LLM calls — the max gap between tokens before the
+    # socket read aborts (#453). Sized for LOCAL inference: on a single GPU the pre-first-token
+    # window (a cold model load + prompt-eval, possibly with an embed↔chat model swap) legitimately
+    # stalls token flow for minutes; too low a value aborts a valid generation mid-stream with
+    # "Timeout on reading data from socket". Default is generous (30 min) so a long knowledge-doc
+    # generation runs to completion; lower it for faster failure, or set `0` to remove the
+    # inter-chunk bound entirely (wait as long as the runtime needs). Governs the read timeout;
+    # the connect timeout stays short (LLM_CONNECT_TIMEOUT_S) so a down runtime still fails fast.
+    llm_timeout: float = 1800.0
     # ── LLM tuning (optional; None = use the provider/runtime default) ──────────
     # These pass straight through to the LiteLLM call, so tuning needs no code
     # edit — set the env var and restart (extend this block to wire more knobs).
@@ -178,6 +187,18 @@ class CoreAppSettings(CoreSettings):
         """
         if isinstance(value, str) and value.strip() == "":
             return None
+        return value
+
+    @field_validator("llm_timeout", mode="before")
+    @classmethod
+    def _blank_timeout_to_default(cls, value: object) -> object:
+        """Treat a blank ``LLM_TIMEOUT=`` as the default rather than failing float parsing.
+
+        Unlike the tuning knobs above, this is a non-optional float, so a blank env value must
+        fall back to the class default instead of ``None``.
+        """
+        if isinstance(value, str) and value.strip() == "":
+            return cls.model_fields["llm_timeout"].default
         return value
 
     @property

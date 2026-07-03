@@ -78,6 +78,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_keep_alive` | `LLM_KEEP_ALIVE` | `str` | `5m` | How long Ollama keeps a model loaded after use (ADR-0005). |
 | `llm_fallbacks` | `LLM_FALLBACKS` | `str` | `""` | Comma-separated fallback models, tried in order (e.g. `claude/claude-3-5-sonnet-latest,gpt/gpt-4o`). |
 | `llm_num_retries` | `LLM_NUM_RETRIES` | `int` | `2` | Per-model retries on 429/5xx (LiteLLM backoff). |
+| `llm_timeout` | `LLM_TIMEOUT` | `float` | `1800.0` (30 min) | Inter-chunk read timeout (seconds) for LLM calls — the max gap between tokens before the socket read aborts (#453). Sized for local inference: a cold model-load / prompt-eval stall (worst on the first long generation after tool/embed activity) can pause token flow for minutes; too low a value aborts a valid generation mid-stream with `Timeout on reading data from socket`. Lower it for faster failure, or set `0` to remove the inter-chunk bound entirely. The connect timeout stays short (30s) so a down runtime still fails fast. |
 | `llm_temperature` | `LLM_TEMPERATURE` | `float \| None` | `None` | Sampling temperature passed to each chat completion (local + hosted). A blank env value means unset. |
 | `llm_top_p` | `LLM_TOP_P` | `float \| None` | `None` | Nucleus-sampling `top_p` passed to each chat completion (local + hosted). |
 | `llm_num_ctx` | `LLM_NUM_CTX` | `int \| None` | `None` | Ollama context-window size (`num_ctx`); applied to local models only. |

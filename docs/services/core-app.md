@@ -251,6 +251,27 @@ to exactly one valid JSON string before it is stored or replayed — a dict is s
 leading JSON value is salvaged from any trailing junk, and anything unparseable degrades to
 `{}` — so a malformed stream can never poison a later turn.
 
+### Stream timeouts & mid-stream failures (#453)
+
+Every `litellm.acompletion` call carries an explicit timeout (`LLM_TIMEOUT`, default **1800s**),
+built once as `httpx.Timeout(read=LLM_TIMEOUT, connect=30s)` and passed at all three call sites
+(`_complete`, `stream`, `stream_chat`). The **read** component is what matters for streaming:
+LiteLLM threads it down to aiohttp's `sock_read`, which fires on the gap *between* stream chunks.
+On a single-GPU box the pre-first-token window — a cold model load plus prompt-eval, worst on the
+first long generation after tool/embed activity forces a model swap — legitimately stalls token
+flow for minutes; too low a read timeout aborts a valid generation mid-stream with
+`Timeout on reading data from socket`. The default is generous so a long knowledge-doc generation
+completes; lower it for faster failure, or set `LLM_TIMEOUT=0` to remove the inter-chunk bound
+entirely (mapped to a large finite read, since LiteLLM's `ollama_chat` path coerces a `None` read
+back to its own 600s default). The **connect** stays short so a down runtime still fails fast.
+
+If a stream still dies part-way, the agent loop **degrades gracefully** instead of dumping the raw
+litellm/aiohttp exception into chat: it keeps whatever answer + activity streamed so far, appends a
+short friendly note ("the model stopped responding before the answer was finished…"), **persists**
+that partial turn, and ends the stream with `done` — so a reopen still shows it. Only a failure
+that produced *nothing* yet ends with `error` (a friendly banner; a non-connection error like
+`paused` passes its own text through, which the web keys on for its paused state).
+
 ### Power (ADR-0005)
 
 | Method · Path | Purpose |

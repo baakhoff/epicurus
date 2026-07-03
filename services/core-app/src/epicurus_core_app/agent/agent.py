@@ -63,6 +63,43 @@ _EMPTY_ANSWER_FALLBACK = (
     "I wasn't able to produce an answer that time — please try again or rephrase your request."
 )
 
+# Mid-stream failure handling (#453). When a streaming turn dies part-way — most often the local
+# model stopping mid-answer as it loads another model / evaluates a long prompt and the socket
+# read aborts — we keep the partial answer + activity instead of discarding the turn, and show a
+# friendly note rather than the raw litellm/aiohttp exception chain. Markers identify that
+# connection/stall class loosely (by exception type + message) so the agent needn't import
+# litellm's exception types; anything else keeps its own short text (e.g. "paused", which the web
+# keys on for its paused state).
+_STREAM_CONNECTION_MARKERS = (
+    "timeout",
+    "timed out",
+    "socket",
+    "apiconnection",
+    "connection",
+    "midstreamfallback",
+    "read error",
+    "econnreset",
+)
+_STREAM_STALLED_MESSAGE = (
+    "The model stopped responding before the answer was finished — it may have been busy loading "
+    "another model. Please try again."
+)
+_STREAM_INTERRUPTED_MESSAGE = "The answer was interrupted before it finished. Please try again."
+
+
+def _stream_failure_messages(exc: Exception) -> tuple[str, str]:
+    """Return ``(banner_detail, retained_note)`` for a mid-stream failure (#453).
+
+    For the connection/stall class both are the friendly "model stopped responding" message, so
+    the raw exception text never reaches the UI. For any other error the banner passes the
+    exception's own (short) text through — so signals the web relies on, like "paused", survive —
+    while a *retained* partial turn still gets a generic interrupted note rather than raw text.
+    """
+    blob = f"{type(exc).__name__}: {exc}".lower()
+    if any(marker in blob for marker in _STREAM_CONNECTION_MARKERS):
+        return _STREAM_STALLED_MESSAGE, _STREAM_STALLED_MESSAGE
+    return str(exc), _STREAM_INTERRUPTED_MESSAGE
+
 
 def _tool_detail(arguments: dict[str, Any]) -> str | None:
     """Compact JSON of a tool call's arguments for the step's expandable detail (or None)."""
@@ -396,9 +433,33 @@ class Agent:
                         reasoned = True
                         append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
-        except Exception as exc:  # the response already started — finish with an error event
+        except Exception as exc:  # the response already started — degrade gracefully (#453)
             log.warning("streaming turn failed", error=str(exc))
-            yield AgentEvent(type="error", detail=str(exc))
+            banner, note = _stream_failure_messages(exc)
+            partial = "".join(parts)
+            if not (partial.strip() or timeline):
+                # Nothing was produced before the failure — no partial worth keeping. Surface a
+                # friendly banner (or the error's own short text, e.g. "paused"), then stop.
+                yield AgentEvent(type="error", detail=banner)
+                return
+            # Keep the partial answer + activity rather than discarding the turn: stream the note
+            # (the in-chat "friendly error"), persist the partial so a reopen still shows it, and
+            # finish the stream cleanly. The raw exception stays in the log only. `stopped=error`
+            # marks the turn incomplete without leaking internals (it is not surfaced to the user).
+            lead = "\n\n" if partial.strip() else ""
+            yield AgentEvent(type="delta", text=f"{lead}{note}")
+            turn = AgentTurn(
+                content=f"{partial}{lead}{note}",
+                tools_used=tools_used,
+                stopped="error",
+                entity_refs=refs.refs,
+                activity=activity_from_timeline(timeline, thinking_cap=_THINKING_CAP),
+            )
+            # Shield the write like the normal path (#376): a shutdown cancellation now must still
+            # flush the partial we chose to keep. Extraction is skipped — an interrupted turn is
+            # not something to learn durable facts from.
+            await asyncio.shield(self._persist_answer(turn, tenant=tenant, session_id=session_id))
+            yield AgentEvent(type="done", turn=turn)
             return
         content = "".join(parts)
         if not content.strip():

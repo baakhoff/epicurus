@@ -67,6 +67,7 @@ class CalendarProvider(ABC):
         all_day: bool = False,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
     ) -> Event:
         """Persist a new event and return the created domain object.
 
@@ -76,7 +77,11 @@ class CalendarProvider(ABC):
 
         *recurrence* (#432) is an RFC 5545 RRULE string (no ``"RRULE:"`` prefix) making this
         the series' master; ``None`` for a one-off event. *attendees* invites guests
-        (``needsAction`` initially); ``None``/empty means no guests.
+        (``needsAction`` initially); ``None``/empty means no guests. *recurrence_timezone*
+        (#446) is the IANA zone *recurrence* anchors its wall-clock expansion in (the
+        operator's configured timezone at creation) — meaningful only alongside
+        *recurrence*; a provider that expands recurrence itself (Google) ignores it, since
+        it always returns correct per-occurrence instants without help.
         """
 
     @abstractmethod
@@ -94,6 +99,7 @@ class CalendarProvider(ABC):
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
         """Apply the given fields to an existing event and return it.
@@ -107,7 +113,8 @@ class CalendarProvider(ABC):
         *edit_scope* (#432) matters only when *event_id* names an occurrence of a recurring
         series: ``"this"`` edits just that occurrence (creating an exception if it wasn't
         one already); ``"all"`` edits the whole series. *recurrence* changes the series'
-        rule and is only meaningful with ``edit_scope="all"``.
+        rule and is only meaningful with ``edit_scope="all"``; *recurrence_timezone* (#446)
+        re-anchors its wall-clock expansion zone alongside it (see :meth:`create_event`).
         """
 
     @abstractmethod

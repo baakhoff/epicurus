@@ -59,6 +59,14 @@ capable) and, for a tool-less local model, calls without tools so the turn falls
 plain text answer instead of the runtime erroring. The web shell surfaces the same fact as a
 "can't use tools" hint in the composer.
 
+**Tool results that carry entity refs also teach the model the ids** (ADR-0079). When a module
+tool returns an envelope (`tool_envelope(text, [EntityRef…])`), the loop lifts the refs onto the
+turn for UI chips — and appends a compact `title → id` listing to the tool result the **model**
+sees, so a "list, then act on one" flow (list events → `calendar_update_event`) has a real id to
+pass back. The block is model-only context: never rendered in chat, never part of the display
+text. The module-author side of this contract is in
+[the modules reference](../reference/modules.md).
+
 A turn **never ends silently empty.** A reasoning model sometimes emits its `<think>` block and
 then stops — no answer text, no tool call — which would persist as an empty turn and render as a
 silent "stop". The loop nudges such a step once to commit to an answer, then (if it still says

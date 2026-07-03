@@ -347,8 +347,50 @@ async def test_agent_lifts_entity_refs_from_a_tool_envelope() -> None:
     turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="schedule it")])
 
     assert [r.ref_id for r in turn.entity_refs] == ["e1"]
-    # the envelope's *text* — not its JSON — is fed back to the model
-    assert any(m.role == "tool" and m.content == "Created the event." for m in gw.calls[1])
+    # the envelope's *text* — not its JSON — is fed back to the model, now with the refs' ids
+    # appended so the model can act on the entities (#449)
+    tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
+    assert tool_msg.content is not None
+    assert tool_msg.content.startswith("Created the event.")
+    assert "e1" in tool_msg.content  # the ref id now reaches the model
+
+
+async def test_agent_feeds_entity_ref_ids_to_the_model() -> None:
+    # A module lists entities with an envelope whose text names them without ids, but whose refs
+    # carry the ids (the calendar_list_events shape). The agent appends each ref's id to the text
+    # the model sees, so a "list then edit that one" flow has an id to pass — the #449 fix, applied
+    # once in the core for every module with refs rather than per-module.
+    listing = tool_envelope(
+        "Found 2 event(s):\n- Standup (Mon 9am)\n- Retro (Fri 3pm)",
+        [
+            EntityRef(ref_id="evt_1", module="calendar", kind="event", title="Standup"),
+            EntityRef(ref_id="evt_2", module="calendar", kind="event", title="Retro"),
+        ],
+    )
+    gw = _FakeGateway(
+        [
+            ChatResult(
+                model="m", content="", tool_calls=[_tool_call("calendar_list_events", "{}")]
+            ),
+            ChatResult(model="m", content="here they are"),
+        ]
+    )
+    mcp = _FakeMcp(
+        specs=[_echo_spec()],
+        route={"calendar_list_events": "u"},
+        outputs={"calendar_list_events": listing},
+    )
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="my events?")])
+
+    tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
+    assert tool_msg.content is not None
+    # the original listing text is preserved…
+    assert tool_msg.content.startswith("Found 2 event(s):")
+    # …and each event's id is now available to the model, paired with its title
+    assert "evt_1" in tool_msg.content and "evt_2" in tool_msg.content
+    assert "Standup" in tool_msg.content and "Retro" in tool_msg.content
+    # the UI still receives the refs as chips (unchanged)
+    assert [r.ref_id for r in turn.entity_refs] == ["evt_1", "evt_2"]
 
 
 async def test_agent_dedupes_entity_refs_across_tool_calls() -> None:

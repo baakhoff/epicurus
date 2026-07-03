@@ -435,6 +435,11 @@ The assistant can mention a module entity (an event, task, email, doc…) as an
   string — use `epicurus_core.tool_envelope(text, [EntityRef(...)])`. The agent feeds
   `text` back to the model and lifts the refs onto the turn (persisted on the message).
   Tools that return plain strings are unaffected.
+- **The model also learns each ref's `ref_id`** (ADR-0079): the agent appends a compact
+  `title → id` listing of the envelope's refs to the tool result the model sees, so a
+  "list then act on that one" flow (list events → `calendar_update_event`) has an id to
+  pass — no need to print ids in your `text`. The block is model-only context, never
+  rendered in chat. So set `ref_id` to the id your own edit/delete/get tools accept.
 - **`EntityRef`** = `ref_id` · `module` · `kind` · `title` · `summary?` — enough to
   render the chip immediately.
 - **The hover-card** is fetched on demand from the module's **resolver**: declare

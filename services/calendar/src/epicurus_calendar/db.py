@@ -33,7 +33,14 @@ from epicurus_core.db import ensure_columns
 
 # Columns added after the table's first release; reconciled in place at startup by
 # ``LocalEventStore._ensure_columns`` (the store has no migration framework).
-_ADDED_COLUMNS = ("all_day", "recurrence", "recurring_event_id", "excluded", "attendees")
+_ADDED_COLUMNS = (
+    "all_day",
+    "recurrence",
+    "recurring_event_id",
+    "excluded",
+    "attendees",
+    "timezone",
+)
 
 # Separates a recurring series' event id from an occurrence's original-start suffix in an
 # instance id, e.g. ``<series-uuid>_20260710T150000Z`` — the same convention Google's own
@@ -116,6 +123,12 @@ class _StoredEvent(_Base):
     excluded: Mapped[bool] = mapped_column(Boolean, default=False)
     # JSON-encoded list of attendee dicts (see Attendee); NULL/blank means no guests (#432).
     attendees: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The IANA zone (e.g. "America/New_York") a series master's RRULE expands in, on a
+    # master row only; NULL elsewhere. Captured from the operator's configured timezone
+    # whenever ``recurrence`` is written, so a recurring series ticks at a fixed *wall-clock*
+    # time rather than a fixed UTC offset across a DST change (#446). A master written before
+    # this column existed reads NULL and falls back to UTC — the pre-#446 behaviour.
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -126,6 +139,17 @@ class ExceptionRow(NamedTuple):
     original_start: datetime
     excluded: bool
     event: Event
+
+
+class MasterRow(NamedTuple):
+    """A recurring series master plus its stored RRULE-expansion anchor timezone (#446).
+
+    ``timezone`` is ``None`` for a master written before the column existed (or a plain,
+    non-recurring event) — expansion then falls back to UTC, the pre-#446 behaviour.
+    """
+
+    event: Event
+    timezone: str | None
 
 
 class LocalEventStore:
@@ -177,7 +201,7 @@ class LocalEventStore:
 
     async def list_master_events(
         self, *, tenant: str, start: datetime, end: datetime
-    ) -> list[Event]:
+    ) -> list[MasterRow]:
         """Recurring series masters that *might* occur in ``[start, end)`` (#432).
 
         A coarse pre-filter (``start_dt <= end`` — a master's own start is its first
@@ -194,7 +218,23 @@ class LocalEventStore:
                     _StoredEvent.start_dt < end,
                 )
             )
-            return [_row_to_event(row) for row in rows]
+            return [MasterRow(_row_to_event(row), row.timezone) for row in rows]
+
+    async def get_master(self, *, tenant: str, event_id: str) -> MasterRow | None:
+        """Like :meth:`get_event`, but also returns the stored expansion timezone (#446).
+
+        Used wherever a series master is fetched to expand or validate against its RRULE
+        (:func:`~epicurus_calendar.providers.local._safe_rrule` needs the anchor zone);
+        plain single-event lookups that never touch an RRULE keep using :meth:`get_event`.
+        """
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.event_id == event_id,
+                )
+            )
+            return MasterRow(_row_to_event(row), row.timezone) if row is not None else None
 
     async def list_exceptions(self, *, tenant: str, series_id: str) -> list[ExceptionRow]:
         """Every exception row (edited or tombstoned occurrence) for one series (#432)."""
@@ -257,6 +297,59 @@ class LocalEventStore:
             await session.refresh(row)
             return _row_to_event(row)
 
+    async def repoint_exceptions(
+        self, *, tenant: str, series_id: str, new_series_id: str, after: datetime
+    ) -> None:
+        """Re-home every exception of *series_id* dated strictly after *after* to
+        *new_series_id* (#445, splitting a series at ``edit_scope="following"``).
+
+        Rewrites both the ``recurring_event_id`` column and the exception's own
+        ``event_id`` — which encodes its series in the id string itself (:func:`instance_id`)
+        — so it round-trips correctly through :func:`parse_instance_id` under its new series.
+        The split occurrence's own exception (if any), dated exactly *after*, is handled
+        separately by the caller (its fields are folded into the new series' master instead).
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.recurring_event_id == series_id,
+                )
+            )
+            for row in rows:
+                parsed = parse_instance_id(row.event_id)
+                if parsed is None:
+                    continue  # a corrupt/foreign event_id — leave it alone
+                _old_series, original_start = parsed
+                if original_start <= after:
+                    continue
+                row.event_id = instance_id(new_series_id, original_start)
+                row.recurring_event_id = new_series_id
+            await session.commit()
+
+    async def delete_exceptions_on_or_after(
+        self, *, tenant: str, series_id: str, on_or_after: datetime
+    ) -> None:
+        """Remove every exception of *series_id* dated on/after *on_or_after* (#445) — a
+        "this and following" delete removes the truncated tail's own per-occurrence
+        overrides too, not just the master's future occurrences.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.recurring_event_id == series_id,
+                )
+            )
+            to_delete: list[int] = []
+            for row in rows:
+                parsed = parse_instance_id(row.event_id)
+                if parsed is not None and parsed[1] >= on_or_after:
+                    to_delete.append(row.id)
+            if to_delete:
+                await session.execute(delete(_StoredEvent).where(_StoredEvent.id.in_(to_delete)))
+                await session.commit()
+
     async def delete_exceptions_for(self, *, tenant: str, series_id: str) -> None:
         """Remove every exception row of a series — called when the series itself is deleted."""
         async with self._session() as session:
@@ -294,8 +387,13 @@ class LocalEventStore:
         all_day: bool = False,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        timezone: str | None = None,
     ) -> Event:
-        """Insert a new event (optionally a recurring series master) and return it (#432)."""
+        """Insert a new event (optionally a recurring series master) and return it (#432).
+
+        *timezone* (#446) is the IANA zone to anchor *recurrence*'s wall-clock expansion in;
+        meaningless without *recurrence* but stored as given either way.
+        """
         event_id = str(uuid.uuid4())
         row = _StoredEvent(
             tenant=tenant,
@@ -308,6 +406,7 @@ class LocalEventStore:
             all_day=all_day,
             recurrence=recurrence,
             attendees=_dump_attendees(attendees),
+            timezone=timezone,
         )
         async with self._session() as session:
             session.add(row)
@@ -328,6 +427,7 @@ class LocalEventStore:
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        timezone: str | None = None,
     ) -> Event | None:
         """Apply non-``None`` fields to an event; return it, or ``None`` if absent.
 
@@ -335,6 +435,7 @@ class LocalEventStore:
         ``None`` when no such event exists for *tenant* (#208). Always acts on the row
         named by *event_id* directly (a plain event or a series master) — recurring
         instance/scope resolution is the provider's job, not this store's (#432).
+        *timezone* (#446) re-anchors a master's RRULE expansion zone.
         """
         async with self._session() as session:
             row = await session.scalar(
@@ -361,6 +462,8 @@ class LocalEventStore:
                 row.recurrence = recurrence
             if attendees is not None:
                 row.attendees = _dump_attendees(attendees)
+            if timezone is not None:
+                row.timezone = timezone
             await session.commit()
             await session.refresh(row)
             return _row_to_event(row)

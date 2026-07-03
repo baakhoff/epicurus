@@ -12,7 +12,12 @@ from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
 from epicurus_core import SecretError
-from epicurus_core_app.llm.gateway import LlmGateway, _normalize_tool_calls
+from epicurus_core_app.llm.gateway import (
+    _CONNECT_TIMEOUT_S,
+    _UNBOUNDED_READ_S,
+    LlmGateway,
+    _normalize_tool_calls,
+)
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
@@ -68,6 +73,7 @@ def _gateway(
     secrets: Any = None,
     bus: Any = None,
     fallbacks: list[str] | None = None,
+    timeout: float = 600.0,
     temperature: float | None = None,
     top_p: float | None = None,
     num_ctx: int | None = None,
@@ -84,6 +90,7 @@ def _gateway(
         bus=bus or _FakeBus(),
         fallbacks=fallbacks or [],
         num_retries=2,
+        timeout=timeout,
         temperature=temperature,
         top_p=top_p,
         num_ctx=num_ctx,
@@ -266,6 +273,65 @@ async def test_num_retries_passed_to_litellm(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
     await _gateway().chat([ChatMessage(role="user", content="hi")])
     assert captured["num_retries"] == 2
+
+
+async def test_timeout_passed_to_litellm(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The gateway passes an explicit read timeout to litellm so a legitimate cold-load /
+    # prompt-eval stall does not abort the stream at aiohttp's sock_read (#453). The read
+    # component is the inter-chunk deadline; connect stays short so a down runtime fails fast.
+    import httpx
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    await _gateway(timeout=123.0).chat([ChatMessage(role="user", content="hi")])
+    timeout = captured["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.read == 123.0
+    assert timeout.connect == _CONNECT_TIMEOUT_S
+
+
+async def test_timeout_zero_disables_the_inter_chunk_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LLM_TIMEOUT=0 means "no inter-chunk limit" — expressed as a very large finite read, because a
+    # None read is coerced back to litellm's 600s default on the ollama_chat path (#453).
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response(
+            {"model": "ollama_chat/llama3.2", "choices": [{"message": {"content": "ok"}}]}
+        )
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    await _gateway(timeout=0.0).chat([ChatMessage(role="user", content="hi")])
+    assert captured["timeout"].read == _UNBOUNDED_READ_S
+
+
+async def test_stream_chat_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The streaming site — the one #453 was reported on — also carries the read timeout.
+    captured: dict[str, Any] = {}
+
+    async def empty_stream() -> AsyncIterator[Any]:
+        return
+        yield  # pragma: no cover - makes this an (empty) async generator
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        captured.update(kwargs)
+        return empty_stream()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    async for _ in _gateway(timeout=321.0).stream_chat([ChatMessage(role="user", content="hi")]):
+        pass
+    assert captured["stream"] is True
+    assert captured["timeout"].read == 321.0
 
 
 async def test_embed_emits_usage_event(monkeypatch: pytest.MonkeyPatch) -> None:

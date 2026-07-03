@@ -308,6 +308,25 @@ describe("contracts", () => {
     expect(ev.attendees).toEqual([]);
   });
 
+  it("defaults a calendar event's meet_url to null, parses one when present (#444)", () => {
+    const withoutMeet = CalendarEvent.parse({
+      id: "e1",
+      title: "One-off",
+      start: "2026-06-15T09:00:00Z",
+      end: "2026-06-15T09:30:00Z",
+    });
+    expect(withoutMeet.meet_url).toBeFalsy();
+
+    const withMeet = CalendarEvent.parse({
+      id: "e2",
+      title: "Standup",
+      start: "2026-06-15T09:00:00Z",
+      end: "2026-06-15T09:30:00Z",
+      meet_url: "https://meet.google.com/abc-defg-hij",
+    });
+    expect(withMeet.meet_url).toBe("https://meet.google.com/abc-defg-hij");
+  });
+
   it("parses a recurring event's rule, series id, and guest list (#432)", () => {
     const ev = CalendarEvent.parse({
       id: "s1_20260622T090000Z",

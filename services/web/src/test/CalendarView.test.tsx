@@ -123,6 +123,56 @@ describe("CalendarView", () => {
     expect(screen.queryByText(/^(Weekly|Daily|Monthly|Yearly)$/)).toBeNull();
   });
 
+  it("shows a Join with Google Meet link when the event has one (#444)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00",
+          end: "2026-06-15T09:30:00",
+          meet_url: "https://meet.google.com/abc-defg-hij",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    const link = await screen.findByRole("link", { name: "Join with Google Meet" });
+    expect(link).toHaveAttribute("href", "https://meet.google.com/abc-defg-hij");
+  });
+
+  it("omits the Meet link for an event without one", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    await screen.findByText("Daily sync");
+    expect(screen.queryByRole("link", { name: "Join with Google Meet" })).toBeNull();
+  });
+
+  it("drops a Meet link with a non-http(s) scheme", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00",
+          end: "2026-06-15T09:30:00",
+          description: "Daily sync",
+          meet_url: "javascript:alert(1)",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    await screen.findByText("Daily sync");
+    expect(screen.queryByRole("link", { name: "Join with Google Meet" })).toBeNull();
+  });
+
   it("re-fetches a new window when navigating", async () => {
     mockModulePage.mockResolvedValue(sample);
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });

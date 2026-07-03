@@ -219,18 +219,20 @@ async def test_reembed_all_on_a_tenant_with_no_facts_is_a_noop() -> None:
         await client.close()
 
 
-async def test_rebuild_cap_still_migrates_partially_instead_of_crashing() -> None:
-    """Hitting the scan cap during a reconcile is a logged, bounded degrade — never a crash."""
+async def test_rebuild_cap_paginates_and_preserves_all_facts_beyond_cap() -> None:
+    """A small rebuild_cap bounds page size only — the reconcile must never drop a fact (#450)."""
     client = AsyncQdrantClient(location=":memory:")
     try:
         store = UserFactStore(client, _embedder(16), rebuild_cap=2)
-        for text in ("one", "two", "three"):
+        texts = ("one", "two", "three", "four", "five")
+        for text in texts:
             assert await store.save(tenant="t1", text=text) is not None
-        assert await store.count(tenant="t1") == 3
+        assert await store.count(tenant="t1") == 5
 
         migrated = await store.reembed_all(tenant="t1")
-        assert migrated == 2  # the capped scroll only sees 2 of the 3 stored facts
+        assert migrated == 5  # every fact survives even though the scroll page size is 2
 
-        assert await store.count(tenant="t1") == 2
+        assert await store.count(tenant="t1") == 5
+        assert {f.text for f in await store.list_facts(tenant="t1")} == set(texts)
     finally:
         await client.close()

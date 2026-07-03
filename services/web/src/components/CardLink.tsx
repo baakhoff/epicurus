@@ -17,7 +17,8 @@ function isInAppHref(url: string): boolean {
   return url.startsWith("/") && !url.startsWith("//");
 }
 
-function isExternalHref(url: string): boolean {
+/** The shared scheme guard for any module-supplied URL rendered as a link. */
+export function isExternalHref(url: string): boolean {
   return /^https?:\/\//i.test(url);
 }
 

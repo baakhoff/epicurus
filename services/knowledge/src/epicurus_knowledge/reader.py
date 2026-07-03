@@ -173,8 +173,16 @@ class DiskVaultReader(VaultReader):
         entries: list[FileEntry] = []
         for child in base.iterdir():
             child_rel = f"{rel}/{child.name}" if rel else child.name
-            is_dir = child.is_dir()
-            st = child.stat()
+            try:
+                is_dir = child.is_dir()
+                st = child.stat()
+            except OSError as exc:
+                # A broken symlink or a permission-denied entry in a watched external vault
+                # (#437): skip it rather than failing the whole listing — the pre-#434 walk
+                # (os.walk, iter_tree_nodes) was tolerant of exactly this, and one unreadable
+                # entry must not 500 a tree listing or fail an entire index pass.
+                log.warning("skipping unreadable vault entry", path=child_rel, error=str(exc))
+                continue
             entries.append(
                 FileEntry(
                     path=child_rel,
@@ -189,19 +197,35 @@ class DiskVaultReader(VaultReader):
 
     async def read_text(self, rel: str) -> str | None:
         target = self._resolve(rel)
-        if not target.is_file():
+        try:
+            if not target.is_file():
+                return None
+            # Bytes + decode (no universal-newline translation) to match the core file API's
+            # byte-preserving read, so both backends return identical content — and identical
+            # content hashes — for the same file.
+            return target.read_bytes().decode("utf-8", errors="replace")
+        except OSError as exc:
+            # A permission-denied or vanished-between-check-and-read target (#437):
+            # ``Path.is_file()`` only swallows ENOENT/ENOTDIR, not EACCES, so a genuinely
+            # unreadable file still raises here. Treat it like "not readable text", per
+            # this method's contract, rather than failing the caller (the indexer walk).
+            log.warning("skipping unreadable vault file", path=rel, error=str(exc))
             return None
-        # Bytes + decode (no universal-newline translation) to match the core file API's
-        # byte-preserving read, so both backends return identical content — and identical
-        # content hashes — for the same file.
-        return target.read_bytes().decode("utf-8", errors="replace")
 
     async def stat(self, rel: str) -> FileEntry | None:
         target = self._resolve(rel)
-        if not target.exists():
+        try:
+            if not target.exists():
+                return None
+            is_dir = target.is_dir()
+            st = target.stat()
+        except OSError as exc:
+            # Same permission/TOCTOU class as list_dir/read_text (#437): ``Path.exists()``
+            # does not swallow EACCES, so a permission-denied target still raises. Report it
+            # as absent rather than raising, matching this method's "None when it does not
+            # exist" contract.
+            log.warning("skipping unreadable vault path", path=rel, error=str(exc))
             return None
-        is_dir = target.is_dir()
-        st = target.stat()
         return FileEntry(
             path=rel,
             name=target.name,

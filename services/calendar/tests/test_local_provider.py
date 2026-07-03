@@ -213,6 +213,15 @@ async def test_provider_get_event(provider: LocalCalendarProvider) -> None:
     assert await provider.get_event(tenant_id="t1", event_id="nope") is None
 
 
+async def test_add_meet_is_a_silent_no_op(provider: LocalCalendarProvider) -> None:
+    # No local conferencing backend to attach a Meet link against (#444) — the event is
+    # created normally, just without one, rather than erroring.
+    created = await provider.create_event(
+        tenant_id="t1", title="Standup", start=_dt(9), end=_dt(10), add_meet=True
+    )
+    assert created.meet_url is None
+
+
 # ── Free-slot algorithm ──────────────────────────────────────────────────────
 
 

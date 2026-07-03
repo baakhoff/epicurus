@@ -77,15 +77,24 @@ _ATTENDEES_DESCRIPTION = (
     " bob@example.com'. Omit for no guests."
 )
 _EDIT_SCOPE_DESCRIPTION = (
-    "For a recurring event: 'this' edits only this occurrence (default); 'all' edits the"
+    "For a recurring event: 'this' edits only this occurrence (default); 'following' edits"
+    " this occurrence and every later one (splitting the series in two); 'all' edits the"
     " whole series. Ignored for a one-off event."
 )
-# The Edit/Delete form's scope picker (#432) — nicer labels than the bare enum values,
+# The Edit/Delete form's scope picker (#432, #445) — nicer labels than the bare enum values,
 # mirroring the calendar_id picker's field_choices pattern.
 _EDIT_SCOPE_CHOICES = [
     {"value": "this", "label": "This event"},
+    {"value": "following", "label": "This and following events"},
     {"value": "all", "label": "All events"},
 ]
+
+# ── Google Meet (#444) ───────────────────────────────────────────────────────────
+
+_ADD_MEET_DESCRIPTION = (
+    "Attach a Google Meet video-call link. Google-only — a no-op on the local store, which"
+    " has no conferencing backend to attach one against."
+)
 
 
 def _validate_recurrence(rule: str, *, dtstart: datetime) -> None:
@@ -147,24 +156,26 @@ _ATTACH_LIMIT = 50
 TimezoneSource = Callable[[], Awaitable[str]]
 
 
-async def _resolve_timezone(source: TimezoneSource | None) -> tzinfo:
-    """The zone naive tool inputs are read in: the operator's timezone, else UTC (#433).
+async def _resolve_timezone(source: TimezoneSource | None) -> tuple[tzinfo, str]:
+    """The zone naive tool inputs are read in — the operator's timezone, else UTC (#433) —
+    paired with its IANA name, persisted on a new recurring series as its RRULE expansion
+    anchor (#446).
 
     Best-effort by design — an unreachable core or an unknown zone name degrades to UTC
     (the pre-#433 behaviour) rather than failing the write.
     """
     if source is None:
-        return UTC
+        return UTC, "UTC"
     try:
         name = await source()
     except Exception as exc:
         log.warning("operator timezone unavailable; reading naive times as UTC", error=str(exc))
-        return UTC
+        return UTC, "UTC"
     try:
-        return ZoneInfo(name)
+        return ZoneInfo(name), name
     except Exception:
         log.warning("unknown operator timezone; reading naive times as UTC", timezone=name)
-        return UTC
+        return UTC, "UTC"
 
 
 def build_module(
@@ -186,7 +197,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.13.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -283,6 +294,7 @@ def build_module(
         ] = None,
         recurrence: Annotated[str | None, Field(description=_RECURRENCE_DESCRIPTION)] = None,
         attendees: Annotated[str | None, Field(description=_ATTENDEES_DESCRIPTION)] = None,
+        add_meet: Annotated[bool, Field(description=_ADD_MEET_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
         """Create a calendar event and return the created event.
 
@@ -306,10 +318,14 @@ def build_module(
             recurrence: Optional RFC 5545 RRULE (e.g. ``"FREQ=WEEKLY;COUNT=10"``) to make
                 this a recurring series; omit for a one-off event.
             attendees: Optional comma-separated guest emails to invite.
+            add_meet: Attach a Google Meet video-call link (#444). Only takes effect on a
+                Google calendar — the local store has no conferencing backend, so this is
+                silently a no-op there.
 
-        Returns the created event dict with all fields populated.
+        Returns the created event dict with all fields populated (``meet_url`` set when a
+        Meet link was attached).
         """
-        tz = await _resolve_timezone(timezone)
+        tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
         if recurrence:
             _validate_recurrence(recurrence, dtstart=start_dt)
@@ -324,6 +340,8 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence or None,
             attendees=_parse_attendees(attendees),
+            recurrence_timezone=tz_name if recurrence else None,
+            add_meet=add_meet,
         )
         return _event_payload(event)
 
@@ -352,8 +370,10 @@ def build_module(
             str | None,
             Field(
                 description=(
-                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all'; setting"
-                    " it with edit_scope='this' (a single occurrence) raises an error."
+                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all' or"
+                    " 'following' (omitted there, the new tail series just continues the"
+                    " existing pattern); setting it with edit_scope='this' (a single"
+                    " occurrence) raises an error."
                 )
             ),
         ] = None,
@@ -381,16 +401,20 @@ def build_module(
             description: New description, if changing it.
             calendar_id: Optional home-calendar token (account:collection) to target
                 directly; omit to search the enabled calendars.
-            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all' only).
+            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all') or the
+                new tail series from this point on (edit_scope='following'); omit the
+                latter to keep the existing pattern.
             attendees: New comma-separated guest list, replacing the current one.
-            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
+            edit_scope: For a recurring event, 'this' occurrence (default), 'following'
+                (this occurrence and every later one, splitting the series in two), or
+                'all'.
 
         Returns the updated event dict. Raises if no such event exists.
         """
-        tz = await _resolve_timezone(timezone)
+        tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
-        if recurrence and start_dt is not None:
-            _validate_recurrence(recurrence, dtstart=start_dt)
+        if recurrence:
+            _validate_recurrence(recurrence, dtstart=start_dt or datetime.now(tz=UTC))
         event = await provider.update_event(
             tenant_id=tenant_id,
             event_id=event_id,
@@ -403,6 +427,7 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence,
             attendees=_parse_attendees(attendees),
+            recurrence_timezone=tz_name if recurrence is not None else None,
             edit_scope=edit_scope,
         )
         if event is None:
@@ -432,7 +457,8 @@ def build_module(
             event_id: The id of the event to delete.
             calendar_id: Optional home-calendar token (account:collection); omit to
                 search the enabled calendars.
-            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
+            edit_scope: For a recurring event, 'this' occurrence (default), 'following'
+                (this occurrence and every later one), or 'all'.
 
         Returns ``{"deleted": true, "id": ...}`` on success; raises if no such event
         exists.
@@ -625,6 +651,8 @@ def event_hover_card(event: Event) -> dict[str, Any]:
         details.append(HoverCardDetail(label="Repeats", value=repeats))
     if event.attendees:
         details.append(HoverCardDetail(label="Guests", value=_format_attendees(event.attendees)))
+    if event.meet_url:
+        details.append(HoverCardDetail(label="Meet", value=event.meet_url))
     return HoverCard(
         title=event.title,
         description=event.description or "",
@@ -641,6 +669,8 @@ def event_excerpt(event: Event) -> str:
         lines.append(f"Repeats: {_humanize_recurrence(event.recurrence)}")
     if event.attendees:
         lines.append(f"Guests: {_format_attendees(event.attendees)}")
+    if event.meet_url:
+        lines.append(f"Join: {event.meet_url}")
     if event.description:
         lines.extend(["", event.description])
     return "\n".join(lines)
@@ -839,15 +869,18 @@ def _new_event_action(
     """The page-level "New event" action, prefilled with a sensible default time.
 
     When more than one writable calendar exists a ``calendar_id`` picker is added so the
-    operator chooses where the event lands (the active calendar is preselected).
+    operator chooses where the event lands (the active calendar is preselected). ``add_meet``
+    (#444) is create-only — there's no edit-time equivalent — so it's added here rather than
+    to the shared ``_EVENT_FIELDS`` the Edit form also uses.
     """
     start = (now.astimezone(UTC) + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
     end = start + timedelta(hours=1)
-    fields = [*_EVENT_FIELDS]
+    fields = [*_EVENT_FIELDS, "add_meet"]
     form_values: dict[str, Any] = {
         "start": start.isoformat(),
         "end": end.isoformat(),
         "all_day": False,
+        "add_meet": False,
     }
     action: dict[str, Any] = {
         "tool": "calendar_create_event",

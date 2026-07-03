@@ -105,8 +105,8 @@ per-tool disable filter as module tools.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`). |
-| `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise). Edited in the web **Settings → Timezone** card. |
+| `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`); tenant-scoped via an optional `tenant_id` query param, falling back to the default tenant. |
+| `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise); same `tenant_id` scoping. Edited in the web **Settings → Timezone** card. |
 
 - **`remember(fact)`** — save a durable fact about the user to long-term memory (ADR-0045).
   The agent's explicit, *hot-path* way to remember: it calls this when the user says
@@ -199,6 +199,8 @@ model-dependent, so they're folded into the same action a different way (#436, A
 directly (core-resident, no HTTP hop) as part of the manual "run everything" trigger. Unlike a
 module's drop-and-recrawl, this **preserves each fact's id and text and only replaces the
 vector** — a fact has no source document to cheaply recrawl the way a knowledge doc does. The
+reconcile pages through the *entire* collection rather than scanning a single bounded batch, so
+every fact is preserved regardless of how large the corpus has grown (#450, ADR-0076). The
 same reconcile also runs **lazily and automatically**: `UserFactStore._ensure` compares a
 collection's actual vector size against the current embedder's on first use each process
 lifetime, and self-heals a mismatch on the spot — so recall/save survive a model swap even
@@ -256,6 +258,27 @@ tool now starts a fresh slot. As a backstop, every assembled call's `arguments` 
 to exactly one valid JSON string before it is stored or replayed — a dict is serialized, a
 leading JSON value is salvaged from any trailing junk, and anything unparseable degrades to
 `{}` — so a malformed stream can never poison a later turn.
+
+### Stream timeouts & mid-stream failures (#453)
+
+Every `litellm.acompletion` call carries an explicit timeout (`LLM_TIMEOUT`, default **1800s**),
+built once as `httpx.Timeout(read=LLM_TIMEOUT, connect=30s)` and passed at all three call sites
+(`_complete`, `stream`, `stream_chat`). The **read** component is what matters for streaming:
+LiteLLM threads it down to aiohttp's `sock_read`, which fires on the gap *between* stream chunks.
+On a single-GPU box the pre-first-token window — a cold model load plus prompt-eval, worst on the
+first long generation after tool/embed activity forces a model swap — legitimately stalls token
+flow for minutes; too low a read timeout aborts a valid generation mid-stream with
+`Timeout on reading data from socket`. The default is generous so a long knowledge-doc generation
+completes; lower it for faster failure, or set `LLM_TIMEOUT=0` to remove the inter-chunk bound
+entirely (mapped to a large finite read, since LiteLLM's `ollama_chat` path coerces a `None` read
+back to its own 600s default). The **connect** stays short so a down runtime still fails fast.
+
+If a stream still dies part-way, the agent loop **degrades gracefully** instead of dumping the raw
+litellm/aiohttp exception into chat: it keeps whatever answer + activity streamed so far, appends a
+short friendly note ("the model stopped responding before the answer was finished…"), **persists**
+that partial turn, and ends the stream with `done` — so a reopen still shows it. Only a failure
+that produced *nothing* yet ends with `error` (a friendly banner; a non-connection error like
+`paused` passes its own text through, which the web keys on for its paused state).
 
 ### Power (ADR-0005)
 
@@ -454,7 +477,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   against the current embedder on each process's first touch and **reconciles a mismatch**
   in place — re-embedding every stored fact's text and recreating the collection at the new
   size, preserving each fact's id and metadata — rather than silently 400ing on every
-  recall/save the way it did before #436.
+  recall/save the way it did before #436. The reconcile pages through the collection (via
+  Qdrant's scroll offset) until every point has been visited, so it never drops facts beyond
+  a bounded scan window regardless of corpus size (#450, ADR-0076).
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
   extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`. In the
   default **nightly** mode the agent enqueues each exchange here instead of distilling it inline;

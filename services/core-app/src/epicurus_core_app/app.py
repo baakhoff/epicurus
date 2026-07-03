@@ -133,6 +133,7 @@ def create_app() -> FastAPI:
         bus=bus,
         fallbacks=settings.fallback_models,
         num_retries=settings.llm_num_retries,
+        timeout=settings.llm_timeout,
         temperature=settings.llm_temperature,
         top_p=settings.llm_top_p,
         num_ctx=settings.llm_num_ctx,

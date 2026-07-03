@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
     _EMPTY_ANSWER_FALLBACK,
+    _STREAM_STALLED_MESSAGE,
     Agent,
     AgentEvent,
 )
@@ -154,7 +155,88 @@ async def test_stream_gateway_error_yields_error_event() -> None:
 
     events = await _collect(Agent(gateway=_Exploding(), mcp=_FakeMcp()), "hi")  # type: ignore[arg-type]
     assert [e.type for e in events] == ["error"]
+    # A non-connection error with no partial output passes its own short text through — the web
+    # keys on "paused" for its paused-state UI, so it must not be rewritten (#453).
     assert events[0].detail == "paused"
+
+
+class _StallingGateway:
+    """Streams some deltas, then raises mid-stream — e.g. the local model going silent and the
+    socket read aborting (#453)."""
+
+    def __init__(self, deltas: list[str], exc: Exception) -> None:
+        self._deltas = deltas
+        self._exc = exc
+
+    async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
+        return True
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        tools: Any = None,
+        tenant_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        for delta in self._deltas:
+            yield StreamEvent(delta=delta)
+        raise self._exc
+
+
+class _RecordingMem:
+    def __init__(self) -> None:
+        self.remembered: list[tuple[str, str]] = []
+
+    async def history(self, *, tenant: str, session_id: str) -> list[ChatMessage]:
+        return []
+
+    async def recall(self, *, tenant: str, query: str, limit: int = 8) -> list[str]:
+        return []
+
+    async def remember(
+        self, *, tenant: str, session_id: str, role: str, content: str, **_kw: Any
+    ) -> None:
+        self.remembered.append((role, content))
+
+
+async def test_stream_socket_timeout_keeps_partial_and_finishes_friendly() -> None:
+    # A streaming turn that dies part-way (the litellm/aiohttp socket-read timeout) keeps the
+    # partial answer + a friendly note, persists it, and finishes cleanly (#453) — never dumping
+    # the raw exception chain into chat or throwing the partial away.
+    mem = _RecordingMem()
+    exc = RuntimeError(
+        "litellm.APIConnectionError: Ollama_chatException - Timeout on reading data from socket"
+    )
+    gw = _StallingGateway(["Here is ", "the plan"], exc)
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=mem)  # type: ignore[arg-type]
+    events = [
+        e async for e in agent.run_stream([ChatMessage(role="user", content="hi")], session_id="s1")
+    ]
+
+    assert events[-1].type == "done"  # a clean finish, not a raw error bubble
+    assert not any(e.type == "error" for e in events)
+    # the friendly note streamed; the raw litellm text never did
+    assert any(e.type == "delta" and _STREAM_STALLED_MESSAGE in (e.text or "") for e in events)
+    assert not any("APIConnectionError" in (e.text or "") for e in events)
+    turn = events[-1].turn
+    assert turn is not None
+    assert turn.content.startswith("Here is the plan")
+    assert _STREAM_STALLED_MESSAGE in turn.content
+    # persisted, so a reopen still shows the partial (not discarded)
+    assert ("assistant", turn.content) in mem.remembered
+
+
+async def test_stream_failure_before_any_output_yields_friendly_error() -> None:
+    # The same failure class with nothing produced yet has no partial to keep: it surfaces a
+    # friendly error banner (not the raw litellm text) and stops — no empty persisted turn.
+    exc = RuntimeError("APIConnectionError - Timeout on reading data from socket")
+    gw = _StallingGateway([], exc)
+    events = await _collect(Agent(gateway=gw, mcp=_FakeMcp()), "hi")  # type: ignore[arg-type]
+
+    assert [e.type for e in events] == ["error"]
+    assert events[0].detail == _STREAM_STALLED_MESSAGE
+    assert "APIConnectionError" not in (events[0].detail or "")
 
 
 async def test_stream_emits_thinking_events_and_persists_them() -> None:

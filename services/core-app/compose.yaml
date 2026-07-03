@@ -18,6 +18,10 @@ services:
       LLM_KEEP_ALIVE: ${LLM_KEEP_ALIVE:-5m}
       LLM_FALLBACKS: ${LLM_FALLBACKS:-}
       LLM_NUM_RETRIES: ${LLM_NUM_RETRIES:-2}
+      # Inter-chunk read timeout (seconds) for streaming responses — sized for local inference so a
+      # cold model-load / prompt-eval stall does not abort a long generation mid-stream (#453).
+      # Raise on very slow hardware, or set 0 to remove the inter-chunk bound entirely.
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-1800}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-}
       LLM_TOP_P: ${LLM_TOP_P:-}
       LLM_NUM_CTX: ${LLM_NUM_CTX:-}

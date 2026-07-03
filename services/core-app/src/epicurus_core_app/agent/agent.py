@@ -88,13 +88,33 @@ class AgentTurn(BaseModel):
     activity: MessageActivity = Field(default_factory=MessageActivity)
 
 
+def _entity_refs_for_model(refs: list[EntityRef]) -> str:
+    """A compact, model-facing listing of a tool result's entity refs and their ids (#449).
+
+    Modules return entity refs on an envelope for the UI to render as chips, but their text
+    typically names entities *without* an id (``calendar_list_events`` prints
+    ``- {title} ({when})``) — so a model that lists, then wants to act on one ("edit that event"),
+    has no id to pass to the edit/delete tool. Each ref carries ``ref_id`` (the id the owning
+    module's tools accept), so we append them to the text the model sees. This fixes the class of
+    bug for **every** module with refs (ADR-0079), not via a per-module workaround. The block is
+    part of the tool *result* — model-only context, never rendered in chat — so unlike an inline
+    marker in displayed text it needs no display-stripping.
+    """
+    lines = [f"- {ref.title} — id: {ref.ref_id} ({ref.module} {ref.kind})" for ref in refs]
+    return (
+        "\n\nReferenced items (pass an item's id to a tool that needs one — e.g. to open, edit, "
+        "or delete it):\n" + "\n".join(lines)
+    )
+
+
 def _extract_entities(output: str) -> tuple[str, list[EntityRef]]:
     """Split a tool's output into (text for the model, entity references).
 
-    A tool may return a JSON :class:`ToolEnvelope` (``{text, entity_refs}``); if so the
-    text is fed back to the model and the refs are lifted onto the turn. Anything else —
-    plain text, an ``error:`` string, or unrelated JSON — is returned unchanged with no
-    refs, so existing tools keep working.
+    A tool may return a JSON :class:`ToolEnvelope` (``{text, entity_refs}``); if so the text is
+    fed back to the model — with a compact listing of the refs' ids appended so the model can act
+    on them (:func:`_entity_refs_for_model`, #449) — and the refs are lifted onto the turn for the
+    UI's chips. Anything else — plain text, an ``error:`` string, or unrelated JSON — is returned
+    unchanged with no refs, so existing tools keep working.
     """
     try:
         data = json.loads(output)
@@ -110,7 +130,9 @@ def _extract_entities(output: str) -> tuple[str, list[EntityRef]]:
         envelope = ToolEnvelope.model_validate(data)
     except ValidationError:
         return output, []
-    return envelope.text, envelope.entity_refs
+    if not envelope.entity_refs:
+        return envelope.text, envelope.entity_refs
+    return envelope.text + _entity_refs_for_model(envelope.entity_refs), envelope.entity_refs
 
 
 class _RefCollector:

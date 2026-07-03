@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from epicurus_core_app.timezone_prefs import TimezonePrefsStore
@@ -34,15 +34,18 @@ def create_timezone_router(
     router = APIRouter(prefix="/platform/v1/timezone", tags=["timezone"])
 
     @router.get("", response_model=TimezoneResponse)
-    async def get_timezone() -> TimezoneResponse:
-        """Return the tenant's effective timezone."""
+    async def get_timezone(tenant_id: str | None = Query(None)) -> TimezoneResponse:
+        """Return the caller's effective timezone (falls back to the default tenant)."""
         if timezone_prefs is None:
             return TimezoneResponse(timezone="UTC")
-        return TimezoneResponse(timezone=await timezone_prefs.get_timezone(default_tenant))
+        tenant = tenant_id or default_tenant
+        return TimezoneResponse(timezone=await timezone_prefs.get_timezone(tenant))
 
     @router.put("")
-    async def set_timezone(request: SetTimezoneRequest) -> dict[str, str]:
-        """Set the operator's timezone (validated as a real IANA zone; 400 otherwise)."""
+    async def set_timezone(
+        request: SetTimezoneRequest, tenant_id: str | None = Query(None)
+    ) -> dict[str, str]:
+        """Set the caller's timezone (validated as a real IANA zone; 400 otherwise)."""
         if timezone_prefs is None:
             raise HTTPException(status_code=503, detail="timezone store not available")
         try:
@@ -51,7 +54,8 @@ def create_timezone_router(
             raise HTTPException(
                 status_code=400, detail=f"unknown timezone {request.timezone!r}"
             ) from exc
-        await timezone_prefs.set_timezone(default_tenant, request.timezone)
+        tenant = tenant_id or default_tenant
+        await timezone_prefs.set_timezone(tenant, request.timezone)
         return {"status": "ok", "timezone": request.timezone}
 
     return router

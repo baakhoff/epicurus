@@ -97,8 +97,8 @@ per-tool disable filter as module tools.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`). |
-| `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise). Edited in the web **Settings → Timezone** card. |
+| `GET /platform/v1/timezone` | The operator's effective IANA timezone (stored value, else `DEFAULT_TIMEZONE`); tenant-scoped via an optional `tenant_id` query param, falling back to the default tenant. |
+| `PUT /platform/v1/timezone` | Set the timezone (`{timezone}`; validated as a real IANA zone, **400** otherwise); same `tenant_id` scoping. Edited in the web **Settings → Timezone** card. |
 
 - **`remember(fact)`** — save a durable fact about the user to long-term memory (ADR-0045).
   The agent's explicit, *hot-path* way to remember: it calls this when the user says

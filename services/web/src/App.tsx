@@ -156,7 +156,7 @@ function DownloadTray() {
 export function Shell() {
   // Module-contributed pages join the nav at runtime (ADR-0018): the shell renders
   // them, the modules only declare which archetype + supply data.
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
   // Review pages are aggregated into the top-level Suggestions inbox (#KB-refactor), so they
   // no longer get their own per-module rail entry.
   const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");

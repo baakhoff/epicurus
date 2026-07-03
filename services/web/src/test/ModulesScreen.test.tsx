@@ -12,7 +12,7 @@ const mockRemoveModule = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
-    modules: () => mockModules(),
+    modules: (opts?: { refresh?: boolean }) => mockModules(opts),
     moduleConfig: (name: string) => mockModuleConfig(name),
     removeModule: (name: string) => mockRemoveModule(name),
   },
@@ -84,5 +84,17 @@ describe("ModulesScreen removal", () => {
     await waitFor(() =>
       expect(screen.queryByText(/its container is still running/i)).toBeNull(),
     );
+  });
+});
+
+describe("ModulesScreen refresh (#478)", () => {
+  it("bypasses the probe cache when the operator clicks refresh", async () => {
+    render(<ModulesScreen />, { wrapper });
+    await screen.findByText("echo");
+    mockModules.mockClear(); // drop the initial (cache-served) load call
+
+    fireEvent.click(screen.getByRole("button", { name: /refresh module health/i }));
+
+    await waitFor(() => expect(mockModules).toHaveBeenCalledWith({ refresh: true }));
   });
 });

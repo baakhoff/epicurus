@@ -28,7 +28,7 @@ function ComingSoon({ archetype }: { archetype: PageArchetype }) {
 
 export function ModulePageScreen() {
   const { moduleName = "", pageId = "" } = useParams();
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules() });
 
   if (modules.isLoading) {
     return (

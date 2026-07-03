@@ -253,7 +253,10 @@ export const api = {
       method: "DELETE",
     }),
 
-  modules: () => request(z.array(ModuleSnapshot), "/platform/v1/modules"),
+  // `refresh: true` bypasses the core's short-TTL probe cache for a fleet-wide re-probe —
+  // the Modules page's manual refresh (#478); the default read serves from cache.
+  modules: (opts?: { refresh?: boolean }) =>
+    request(z.array(ModuleSnapshot), `/platform/v1/modules${opts?.refresh ? "?refresh=true" : ""}`),
   moduleConfig: (name: string) =>
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/config`),
   saveModuleConfig: (name: string, values: Record<string, unknown>) =>

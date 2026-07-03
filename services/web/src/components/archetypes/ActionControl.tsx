@@ -20,7 +20,7 @@ import { moduleIcon } from "@/lib/icons";
 
 /** The argument schema a module tool declares, read from the cached manifest. */
 function useToolSchema(module: string, tool: string): ObjectSchema | undefined {
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules() });
   const spec = modules.data
     ?.find((m) => m.manifest.name === module)
     ?.manifest.tools.find((t) => t.name === tool);

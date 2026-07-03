@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from fastapi import HTTPException
+from structlog.testing import capture_logs
 
 from epicurus_core import (
     CollectionPrefs,
@@ -1175,3 +1177,262 @@ async def test_set_suggestions_enabled_unknown_module_is_404() -> None:
     with pytest.raises(HTTPException) as err:
         await registry.set_suggestions_enabled("ghost", False)
     assert err.value.status_code == 404
+
+
+# ── Probe cache: TTL, single-flight, targeted resolve (#478) ──────────────────
+
+
+def _snap(name: str, *, healthy: bool = True) -> ModuleSnapshot:
+    return ModuleSnapshot(
+        manifest=ModuleManifest(name=name, version="0.1.0"), status=ModuleStatus(healthy=healthy)
+    )
+
+
+class _CountingRegistry(ModuleRegistry):
+    """A registry whose network probe is a canned per-base response with call counts
+    recorded — exercises the probe cache's TTL/single-flight/targeting (#478), independent
+    of the health-transition logging (covered separately against the real ``_probe``)."""
+
+    def __init__(self, responses: dict[str, ModuleSnapshot], **kwargs: Any) -> None:
+        super().__init__(list(responses.keys()), **kwargs)
+        self._responses = responses
+        self.probe_calls: list[str] = []
+
+    async def _probe(self, base: str) -> ModuleSnapshot:
+        self.probe_calls.append(base)
+        return self._responses[base]
+
+
+def _multi_registry(
+    names: list[str], *, unhealthy: frozenset[str] = frozenset()
+) -> _CountingRegistry:
+    responses = {f"http://{n}:8080": _snap(n, healthy=n not in unhealthy) for n in names}
+    return _CountingRegistry(
+        responses,
+        mcp=_FakeMcp(),
+        secrets=_FakeSecrets(),
+        tenant="local",
+        prefs=_FakeModulePrefs(),
+        docker=None,
+    )
+
+
+async def test_snapshot_probes_each_base_once_when_called_twice() -> None:
+    # Two calls inside the same TTL window must not double the network cost — the whole
+    # point of #478 (steady state used to re-probe the fleet on every routed call).
+    registry = _multi_registry(["calendar", "tasks"])
+    await registry.snapshot()
+    await registry.snapshot()
+    assert registry.probe_calls == ["http://calendar:8080", "http://tasks:8080"]
+
+
+async def test_resolve_reuses_a_fresh_cache_entry() -> None:
+    registry = _multi_registry(["calendar"])
+    await registry._resolve("calendar")
+    await registry._resolve("calendar")
+    assert registry.probe_calls == ["http://calendar:8080"]
+
+
+async def test_resolve_never_probes_a_different_modules_base() -> None:
+    # Steady state (the fleet is already known): resolving one module must not fan out to
+    # the rest — the core complaint in #478 ("a hung unrelated module no longer delays
+    # other modules' calls"). The very first resolve ever is a documented exception (below):
+    # it still has to learn the name→base map, so it legitimately probes the whole fleet once.
+    registry = _multi_registry(["calendar", "tasks", "mail"])
+    await registry.snapshot()  # warm the registry up first
+    registry.probe_calls.clear()
+    await registry._resolve("calendar")
+    # Everything is fresh, so this costs zero network calls — a fortiori it never touches
+    # tasks/mail's bases.
+    assert registry.probe_calls == []
+
+
+async def test_first_ever_resolve_learns_the_whole_fleet_once() -> None:
+    # Documented cold-start exception: nothing is known yet, so resolving even one module
+    # must probe every base to learn which is which — but only this once.
+    registry = _multi_registry(["calendar", "tasks", "mail"])
+    await registry._resolve("calendar")
+    assert sorted(registry.probe_calls) == [
+        "http://calendar:8080",
+        "http://mail:8080",
+        "http://tasks:8080",
+    ]
+    registry.probe_calls.clear()
+    await registry._resolve("tasks")  # now warm — costs nothing beyond its own cache TTL
+    assert registry.probe_calls == []
+
+
+async def test_resolve_concurrent_calls_for_the_same_module_single_flight() -> None:
+    registry = _multi_registry(["calendar"])
+    await asyncio.gather(*(registry._resolve("calendar") for _ in range(8)))
+    assert registry.probe_calls == ["http://calendar:8080"]
+
+
+async def test_resolve_unknown_name_probes_only_the_unprobed_fleet_then_404s() -> None:
+    registry = _multi_registry(["calendar", "tasks"])
+    with pytest.raises(HTTPException) as err:
+        await registry._resolve("ghost")
+    assert err.value.status_code == 404
+    assert sorted(registry.probe_calls) == ["http://calendar:8080", "http://tasks:8080"]
+
+
+async def test_resolve_a_second_unknown_name_is_free_once_the_fleet_is_known() -> None:
+    registry = _multi_registry(["calendar", "tasks"])
+    await registry._resolve("calendar")  # learns tasks' base too as a side effect
+    registry.probe_calls.clear()
+    with pytest.raises(HTTPException):
+        await registry._resolve("ghost")
+    assert registry.probe_calls == []  # warm registry: a bad name costs zero network calls
+
+
+async def test_snapshot_force_bypasses_the_cache() -> None:
+    registry = _multi_registry(["calendar"])
+    await registry.snapshot()
+    await registry.snapshot(force=True)
+    assert registry.probe_calls == ["http://calendar:8080", "http://calendar:8080"]
+
+
+async def test_cache_expires_after_the_healthy_ttl() -> None:
+    registry = _multi_registry(["calendar"])
+    with patch("epicurus_core_app.modules.time.monotonic", return_value=1_000.0):
+        await registry.snapshot()
+    stale_at = 1_000.0 + ModuleRegistry._HEALTHY_PROBE_TTL_S + 0.1
+    with patch("epicurus_core_app.modules.time.monotonic", return_value=stale_at):
+        await registry.snapshot()
+    assert registry.probe_calls == ["http://calendar:8080", "http://calendar:8080"]
+
+
+async def test_unhealthy_cache_expires_sooner_than_healthy() -> None:
+    registry = _multi_registry(["calendar"], unhealthy=frozenset({"calendar"}))
+    assert ModuleRegistry._UNHEALTHY_PROBE_TTL_S < ModuleRegistry._HEALTHY_PROBE_TTL_S
+    with patch("epicurus_core_app.modules.time.monotonic", return_value=1_000.0):
+        await registry.snapshot()
+    # Past the short unhealthy TTL but still inside the long healthy one — an unhealthy
+    # entry must already be stale here so recovery is checked promptly (#478).
+    past_unhealthy_ttl = 1_000.0 + ModuleRegistry._UNHEALTHY_PROBE_TTL_S + 0.1
+    with patch("epicurus_core_app.modules.time.monotonic", return_value=past_unhealthy_ttl):
+        await registry.snapshot()
+    assert registry.probe_calls == ["http://calendar:8080", "http://calendar:8080"]
+
+
+async def test_prefs_overlay_is_never_stale_even_when_the_probe_cache_is_fresh() -> None:
+    """The enabled/removed/disabled_tools overlay must reflect current prefs on every call,
+    even when the underlying network probe is served from cache — only the probe itself
+    is time-cached, never the operator's settings (#478)."""
+    registry = _multi_registry(["calendar"])
+    await registry.snapshot()  # populates + caches the probe
+    await registry.set_enabled("calendar", False)
+    snaps = await registry.snapshot()  # same TTL window — probe cache still fresh
+    assert registry.probe_calls == ["http://calendar:8080"]  # no re-probe...
+    assert snaps[0].enabled is False  # ...but the prefs flag is still live
+
+
+# ── Health-transition logging (#478): WARN/INFO on change, DEBUG at boot, no repeats ──
+
+
+def _real_probe_registry(base: str = "http://echo:8080") -> ModuleRegistry:
+    """A plain registry with the real (unstubbed) ``_probe`` — the HTTP layer is mocked
+    per test instead, so transition logging genuinely runs."""
+    return ModuleRegistry(
+        [base], mcp=_FakeMcp(), secrets=_FakeSecrets(), tenant="local", prefs=_FakeModulePrefs()
+    )
+
+
+def _probe_client(manifest: ModuleManifest, *, health_status: int = 200) -> tuple[Any, AsyncMock]:
+    """A mocked ``httpx.AsyncClient`` answering ``/manifest`` then ``/health`` in order."""
+    manifest_resp = MagicMock()
+    manifest_resp.raise_for_status = MagicMock()
+    manifest_resp.json.return_value = manifest.model_dump(mode="json")
+    health_resp = MagicMock()
+    health_resp.status_code = health_status
+    health_resp.json.return_value = {"version": manifest.version}
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[manifest_resp, health_resp])
+    return patch("epicurus_core_app.modules.httpx.AsyncClient"), client
+
+
+async def test_probe_failure_logs_debug_while_never_yet_healthy() -> None:
+    # The startup grace window: a module that has never come up yet must not WARN.
+    registry = _real_probe_registry()
+    cls, client = _patch_get(error=httpx.ConnectError("boom"))
+    with cls as mock_cls, capture_logs() as logs:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await registry._probe("http://echo:8080")
+    failures = [entry for entry in logs if entry["event"] == "module probe failed"]
+    assert len(failures) == 1
+    assert failures[0]["log_level"] == "debug"
+    assert failures[0]["error"]  # non-empty — the #478 bug was str(exc) == "" for TimeoutError
+
+
+async def test_probe_transition_healthy_to_unreachable_logs_warn() -> None:
+    registry = _real_probe_registry()
+    ok_cls, ok_client = _probe_client(_echo_manifest())
+    with ok_cls as mock_cls:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=ok_client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        first = await registry._probe("http://echo:8080")
+    assert first.status.healthy is True
+
+    fail_cls, fail_client = _patch_get(error=httpx.ConnectError("boom"))
+    with fail_cls as mock_cls, capture_logs() as logs:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=fail_client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        second = await registry._probe("http://echo:8080")
+    assert second.status.healthy is False
+    failures = [entry for entry in logs if entry["event"] == "module probe failed"]
+    assert len(failures) == 1
+    assert failures[0]["log_level"] == "warning"
+    assert failures[0]["error"]
+
+
+async def test_probe_transition_unreachable_to_healthy_logs_info() -> None:
+    registry = _real_probe_registry()
+    fail_cls, fail_client = _patch_get(error=httpx.ConnectError("boom"))
+    with fail_cls as mock_cls:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=fail_client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await registry._probe("http://echo:8080")  # never-healthy yet: debug, sets prev=False
+
+    ok_cls, ok_client = _probe_client(_echo_manifest())
+    with ok_cls as mock_cls, capture_logs() as logs:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=ok_client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        recovered = await registry._probe("http://echo:8080")
+    assert recovered.status.healthy is True
+    recoveries = [entry for entry in logs if entry["event"] == "module recovered"]
+    assert len(recoveries) == 1
+    assert recoveries[0]["log_level"] == "info"
+    assert recoveries[0]["module"] == "echo"
+
+
+async def test_probe_steady_state_unreachable_does_not_repeat_the_warning() -> None:
+    registry = _real_probe_registry()
+    cls1, client1 = _patch_get(error=httpx.ConnectError("boom"))
+    with cls1 as mock_cls:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client1)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await registry._probe("http://echo:8080")  # 1st: never-healthy → debug
+
+    cls2, client2 = _patch_get(error=httpx.ConnectError("boom"))
+    with cls2 as mock_cls, capture_logs() as logs:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client2)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await registry._probe("http://echo:8080")  # 2nd: still down, steady-state → silent
+
+    assert [entry for entry in logs if entry["event"] == "module probe failed"] == []
+
+
+async def test_probe_unhealthy_status_without_exception_has_a_real_reason() -> None:
+    # Manifest fetch succeeds but /health reports non-200 — no exception, but still an
+    # unhealthy transition that deserves a meaningful (not empty) reason.
+    registry = _real_probe_registry()
+    cls, client = _probe_client(_echo_manifest(), health_status=503)
+    with cls as mock_cls, capture_logs() as logs:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        snap = await registry._probe("http://echo:8080")
+    assert snap.status.healthy is False
+    assert snap.status.version is None
+    failures = [entry for entry in logs if entry["event"] == "module probe failed"]
+    assert failures[0]["error"] == "health check returned 503"

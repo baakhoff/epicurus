@@ -57,8 +57,9 @@ Since **v0.11** (#432, ADR-0075) events support **recurrence** (an RFC 5545 RRUL
 **attendees** (a guest list). A recurring event is one stored *series* (the master, carrying
 the rule) plus zero or more *exceptions* overriding a single occurrence (edited or deleted);
 editing/deleting takes an `edit_scope` of `"this"` (one occurrence) or `"all"` (the whole
-series) — see *Recurring events* under Contract, below. Google Meet / conferencing and the
-"this and following" edit scope are deliberately out of scope for now (ADR-0075).
+series) — see *Recurring events* under Contract, below. Since **v0.12** (#445) `edit_scope`
+also takes `"following"` — this occurrence and every later one, splitting the series in two.
+Google Meet / conferencing remains deliberately out of scope for now (ADR-0075).
 
 ## Contract
 
@@ -68,8 +69,8 @@ series) — see *Recurring events* under Contract, below. Google Meet / conferen
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
 | `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list. Returns the created event. |
-| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` (#432) is `"this"` (default — just the named occurrence) or `"all"` (the whole series); `recurrence` is only honoured with `edit_scope="all"` (raises with `"this"` — an instance can't carry its own rule). Returns the updated event; raises if absent. |
-| `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` (#432) mirrors update: `"this"` removes just the named occurrence, `"all"` removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
+| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` is `"this"` (#432, default — just the named occurrence), `"following"` (#445 — this occurrence and every later one, splitting the series in two), or `"all"` (#432 — the whole series); `recurrence` is only honoured with `edit_scope="all"` or `"following"` (raises with `"this"` — an instance can't carry its own rule; omitted with `"following"`, the new tail series just continues the existing pattern). Returns the updated event; raises if absent. |
+| `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` mirrors update: `"this"` (#432) removes just the named occurrence, `"following"` (#445) removes it and every later occurrence (truncating the series), `"all"` (#432) removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
@@ -149,12 +150,24 @@ returns individual **occurrences** (`recurring_event_id` set to the series' id;
 instance id; for local, an exception row is created/updated (or a tombstone, for delete).
 `"all"` acts on the whole series — resolved to the series' own id first if an instance id
 was given (a lookup on Google; parsed from the id locally), then edited/deleted directly.
-Setting `recurrence` requires `edit_scope="all"` — a single occurrence can't carry its own
-rule (`edit_scope="this"` with `recurrence` set raises).
+Setting `recurrence` requires `edit_scope="all"` or `"following"` — a single occurrence
+can't carry its own rule (`edit_scope="this"` with `recurrence` set raises).
 
-**Deliberately out of scope** (ADR-0075): a `"this and following"` edit scope (splitting a
-series into two) and Google Meet / conferencing — both filed as follow-ups, not implemented
-here.
+**"This and following"** (`edit_scope="following"`, #445) splits the series in two at the
+named occurrence: the original series is truncated (an `UNTIL` set to the prior occurrence,
+any `COUNT` dropped — it alone fully captures the new stopping point) so it ends just before
+it, and that occurrence plus every later one move to a **new series** carrying the edit —
+continuing the original cadence (a `COUNT`-bound rule is renumbered to just the remaining
+occurrences; an `UNTIL`-bound or unbounded rule is unchanged) unless `recurrence` overrides
+it outright. An occurrence already individually edited (`edit_scope="this"`) later in the
+series keeps its own fields through the split — only the split point and genuinely
+*unmodified* later occurrences take the new baseline. Splitting at a series' own **first**
+occurrence has nothing "before" to keep separate, so it degrades to `"all"` — editing/deleting
+the whole series in place, no split. Deleting `"following"` truncates the series the same way
+and drops every occurrence from the split point on, including their own per-occurrence
+overrides. On Google this is two calls — a PATCH truncating the original master's `recurrence`
+plus (for an edit) a new `events.insert` for the tail — best-effort, since Google has no
+cross-event transaction.
 
 **Attendees** (`attendees`, a comma-separated email list on the tools) invites guests;
 `response_status` (`needsAction` / `accepted` / `declined` / `tentative` — Google's
@@ -229,7 +242,8 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
     { "id": "e2", "title": "Holiday", "start": "2026-06-18", "end": "2026-06-19",
       "all_day": true, "provider": "google", "actions": [ /* … */ ] },
     // A recurring occurrence (#432): edit/delete actions gain an `edit_scope` picker
-    // ("This event" / "All events"); Delete becomes a form (its choice is the confirmation).
+    // ("This event" / "This and following events" / "All events", #445); Delete becomes a
+    // form (its choice is the confirmation).
     { "id": "s1_20260622T090000Z", "title": "Team sync",
       "start": "2026-06-22T09:00:00+00:00", "end": "2026-06-22T09:30:00+00:00",
       "recurring_event_id": "s1", "provider": "google",
@@ -239,6 +253,7 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
           "fields": ["title", "all_day", "start", "end", "location", "description",
                      "recurrence", "attendees", "edit_scope"],
           "field_choices": { "edit_scope": [{ "value": "this", "label": "This event" },
+                                            { "value": "following", "label": "This and following events" },
                                             { "value": "all", "label": "All events" }] } },
         { "tool": "calendar_delete_event", "label": "Delete", "intent": "danger", "form": true,
           "fields": ["edit_scope"], "form_values": { "edit_scope": "this" },

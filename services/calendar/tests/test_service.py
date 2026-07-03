@@ -637,7 +637,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.11.1"
+    assert manifest.version == "0.12.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -1174,6 +1174,67 @@ async def test_calendar_delete_event_tool_removes(local_provider: LocalCalendarP
     assert await local_provider.get_event(tenant_id="t1", event_id=created.id) is None
 
 
+# ── edit_scope="following" via the tools (#445) ─────────────────────────────────
+
+
+async def test_calendar_update_event_tool_following_splits_the_series(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",  # 6, 13, 20, 27
+        },
+    )
+    from epicurus_calendar.db import instance_id
+
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 20, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": iid, "title": "Standup (async)", "edit_scope": "following"},
+    )
+    result = _extract(structured)
+    assert result["id"] != series_id  # a genuinely new series was created
+    assert result["title"] == "Standup (async)"
+    assert result["recurring_event_id"] is None  # it's a master, not an instance
+
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert len(envelope.entity_refs) == 4  # same total occurrence count, just split
+    assert "Standup (async)" in envelope.text
+
+
+async def test_calendar_delete_event_tool_following_removes_tail(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    from epicurus_calendar.db import instance_id
+
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 20, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_delete_event", {"event_id": iid, "edit_scope": "following"}
+    )
+    assert _extract(structured)["deleted"] is True
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert len(envelope.entity_refs) == 2  # only the two occurrences before the split remain
+
+
 async def test_calendar_delete_event_tool_unknown_raises(
     local_provider: LocalCalendarProvider,
 ) -> None:
@@ -1506,6 +1567,7 @@ def test_event_with_actions_recurring_gets_edit_scope_field() -> None:
     assert "edit_scope" in edit["fields"]
     assert edit["field_choices"]["edit_scope"] == [
         {"value": "this", "label": "This event"},
+        {"value": "following", "label": "This and following events"},
         {"value": "all", "label": "All events"},
     ]
     assert delete["form"] is True

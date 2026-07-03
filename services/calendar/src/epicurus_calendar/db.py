@@ -297,6 +297,59 @@ class LocalEventStore:
             await session.refresh(row)
             return _row_to_event(row)
 
+    async def repoint_exceptions(
+        self, *, tenant: str, series_id: str, new_series_id: str, after: datetime
+    ) -> None:
+        """Re-home every exception of *series_id* dated strictly after *after* to
+        *new_series_id* (#445, splitting a series at ``edit_scope="following"``).
+
+        Rewrites both the ``recurring_event_id`` column and the exception's own
+        ``event_id`` — which encodes its series in the id string itself (:func:`instance_id`)
+        — so it round-trips correctly through :func:`parse_instance_id` under its new series.
+        The split occurrence's own exception (if any), dated exactly *after*, is handled
+        separately by the caller (its fields are folded into the new series' master instead).
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.recurring_event_id == series_id,
+                )
+            )
+            for row in rows:
+                parsed = parse_instance_id(row.event_id)
+                if parsed is None:
+                    continue  # a corrupt/foreign event_id — leave it alone
+                _old_series, original_start = parsed
+                if original_start <= after:
+                    continue
+                row.event_id = instance_id(new_series_id, original_start)
+                row.recurring_event_id = new_series_id
+            await session.commit()
+
+    async def delete_exceptions_on_or_after(
+        self, *, tenant: str, series_id: str, on_or_after: datetime
+    ) -> None:
+        """Remove every exception of *series_id* dated on/after *on_or_after* (#445) — a
+        "this and following" delete removes the truncated tail's own per-occurrence
+        overrides too, not just the master's future occurrences.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredEvent).where(
+                    _StoredEvent.tenant == tenant,
+                    _StoredEvent.recurring_event_id == series_id,
+                )
+            )
+            to_delete: list[int] = []
+            for row in rows:
+                parsed = parse_instance_id(row.event_id)
+                if parsed is not None and parsed[1] >= on_or_after:
+                    to_delete.append(row.id)
+            if to_delete:
+                await session.execute(delete(_StoredEvent).where(_StoredEvent.id.in_(to_delete)))
+                await session.commit()
+
     async def delete_exceptions_for(self, *, tenant: str, series_id: str) -> None:
         """Remove every exception row of a series — called when the series itself is deleted."""
         async with self._session() as session:

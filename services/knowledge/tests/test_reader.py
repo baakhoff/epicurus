@@ -233,3 +233,101 @@ async def test_api_prefix_mapping_round_trips(tmp_path: Path) -> None:
     assert entry.path == "kb/note.md"  # not "knowledge/kb/note.md"
     stat = await reader.stat("kb/note.md")
     assert stat is not None and stat.path == "kb/note.md"
+
+
+# ── DiskVaultReader: skip-and-log on an unreadable entry (#437) ──────────────
+#
+# A broken symlink or a permission-denied subdirectory in a watched external vault must not
+# fail the whole call — it must be skipped (and logged) while sibling entries still come back.
+# CI runs Linux, so a monkeypatch stands in for a real permission-denied/broken-symlink entry.
+
+
+async def test_list_dir_skips_entry_whose_stat_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _w(vault / "good_a.md", "# A")
+    _w(vault / "good_b.md", "# B")
+    (vault / "bad").mkdir()  # a dir whose .stat() will be made to fail below
+
+    real_stat = Path.stat
+
+    def _flaky_stat(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "bad":
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _flaky_stat)
+    reader = DiskVaultReader(vault)
+    entries = await reader.list_dir()
+
+    names = {e.name for e in entries}
+    # The unreadable entry is skipped, not raised; its readable siblings still come back.
+    assert names == {"good_a.md", "good_b.md"}
+
+
+async def test_list_dir_skips_entry_whose_is_dir_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _w(vault / "good.md", "# Good")
+    (vault / "ghost").mkdir()  # a dir whose .is_dir() will be made to fail below
+
+    real_is_dir = Path.is_dir
+
+    def _flaky_is_dir(self: Path, *args: object, **kwargs: object) -> bool:
+        if self.name == "ghost":
+            raise PermissionError(13, "Permission denied")
+        return real_is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", _flaky_is_dir)
+    reader = DiskVaultReader(vault)
+    entries = await reader.list_dir()
+
+    names = {e.name for e in entries}
+    assert names == {"good.md"}
+    assert "ghost" not in names
+
+
+async def test_read_text_returns_none_when_read_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A file that passes is_file() but raises on the actual read (permission revoked, or
+    # vanished, between the check and the read) must degrade to None, not propagate.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _w(vault / "locked.md", "secret")
+    reader = DiskVaultReader(vault)
+
+    real_read_bytes = Path.read_bytes
+
+    def _flaky_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+        if self.name == "locked.md":
+            raise PermissionError(13, "Permission denied")
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", _flaky_read_bytes)
+    assert await reader.read_text("locked.md") is None
+
+
+async def test_stat_returns_none_when_exists_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A permission-denied target raises out of Path.exists() (it only swallows ENOENT/ENOTDIR,
+    # not EACCES) — stat() must report it as absent rather than propagating the OSError.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _w(vault / "locked.md", "secret")
+    reader = DiskVaultReader(vault)
+
+    real_exists = Path.exists
+
+    def _flaky_exists(self: Path, *args: object, **kwargs: object) -> bool:
+        if self.name == "locked.md":
+            raise PermissionError(13, "Permission denied")
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", _flaky_exists)
+    assert await reader.stat("locked.md") is None

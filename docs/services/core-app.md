@@ -191,6 +191,8 @@ model-dependent, so they're folded into the same action a different way (#436, A
 directly (core-resident, no HTTP hop) as part of the manual "run everything" trigger. Unlike a
 module's drop-and-recrawl, this **preserves each fact's id and text and only replaces the
 vector** — a fact has no source document to cheaply recrawl the way a knowledge doc does. The
+reconcile pages through the *entire* collection rather than scanning a single bounded batch, so
+every fact is preserved regardless of how large the corpus has grown (#450, ADR-0076). The
 same reconcile also runs **lazily and automatically**: `UserFactStore._ensure` compares a
 collection's actual vector size against the current embedder's on first use each process
 lifetime, and self-heals a mismatch on the spot — so recall/save survive a model swap even
@@ -446,7 +448,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   against the current embedder on each process's first touch and **reconciles a mismatch**
   in place — re-embedding every stored fact's text and recreating the collection at the new
   size, preserving each fact's id and metadata — rather than silently 400ing on every
-  recall/save the way it did before #436.
+  recall/save the way it did before #436. The reconcile pages through the collection (via
+  Qdrant's scroll offset) until every point has been visited, so it never drops facts beyond
+  a bounded scan window regardless of corpus size (#450, ADR-0076).
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
   extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`. In the
   default **nightly** mode the agent enqueues each exchange here instead of distilling it inline;

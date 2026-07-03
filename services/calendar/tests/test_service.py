@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
@@ -436,6 +437,7 @@ class _MockGoogleProvider(CalendarProvider):
         all_day: bool = False,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
     ) -> Event:
         event = Event(
             id="g-1",
@@ -466,6 +468,7 @@ class _MockGoogleProvider(CalendarProvider):
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
         for i, e in enumerate(self.events):
@@ -634,7 +637,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.11.0"
+    assert manifest.version == "0.12.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -872,6 +875,7 @@ class _MultiCalGoogle(_MockGoogleProvider):
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
         cal = calendar_id or "primary"
@@ -1168,6 +1172,67 @@ async def test_calendar_delete_event_tool_removes(local_provider: LocalCalendarP
     result = _extract(structured)
     assert result["deleted"] is True
     assert await local_provider.get_event(tenant_id="t1", event_id=created.id) is None
+
+
+# ── edit_scope="following" via the tools (#445) ─────────────────────────────────
+
+
+async def test_calendar_update_event_tool_following_splits_the_series(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",  # 6, 13, 20, 27
+        },
+    )
+    from epicurus_calendar.db import instance_id
+
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 20, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": iid, "title": "Standup (async)", "edit_scope": "following"},
+    )
+    result = _extract(structured)
+    assert result["id"] != series_id  # a genuinely new series was created
+    assert result["title"] == "Standup (async)"
+    assert result["recurring_event_id"] is None  # it's a master, not an instance
+
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert len(envelope.entity_refs) == 4  # same total occurrence count, just split
+    assert "Standup (async)" in envelope.text
+
+
+async def test_calendar_delete_event_tool_following_removes_tail(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    from epicurus_calendar.db import instance_id
+
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, datetime(2026, 7, 20, 9, 0, tzinfo=UTC))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_delete_event", {"event_id": iid, "edit_scope": "following"}
+    )
+    assert _extract(structured)["deleted"] is True
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    assert len(envelope.entity_refs) == 2  # only the two occurrences before the split remain
 
 
 async def test_calendar_delete_event_tool_unknown_raises(
@@ -1502,6 +1567,7 @@ def test_event_with_actions_recurring_gets_edit_scope_field() -> None:
     assert "edit_scope" in edit["fields"]
     assert edit["field_choices"]["edit_scope"] == [
         {"value": "this", "label": "This event"},
+        {"value": "following", "label": "This and following events"},
         {"value": "all", "label": "All events"},
     ]
     assert delete["form"] is True
@@ -1738,6 +1804,80 @@ async def test_timezone_source_error_degrades_to_utc(
     stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
     assert stored is not None
     assert stored.start == datetime(2026, 7, 2, 15, 0, tzinfo=UTC)
+
+
+async def test_create_event_reads_naive_start_in_operator_timezone_in_winter(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # Same as the July test above, but in January — Europe/Belgrade is UTC+1 (CET) in
+    # winter, not UTC+2 (CEST) as in July — so a test suite confined to one season can't
+    # hide a hardcoded/cached-offset bug in the wall-time parsing (#446 test nit, #438).
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {"title": "Winter", "start": "2026-01-15T15:00:00", "end": "2026-01-15T16:00:00"},
+    )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=_extract(structured)["id"])
+    assert stored is not None
+    assert stored.start == datetime(2026, 1, 15, 14, 0, tzinfo=UTC)
+    assert stored.end == datetime(2026, 1, 15, 15, 0, tzinfo=UTC)
+
+
+# ── Recurring series timezone anchor threaded through the tools (#446) ─────────
+
+
+async def test_create_event_tool_persists_the_operator_timezone_on_a_recurring_series(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # The operator's configured zone at creation becomes the series' RRULE expansion
+    # anchor, so a "9:00 AM" weekly meeting keeps its wall-clock hour across a DST change
+    # instead of drifting by the offset delta (#446) — see test_recurrence.py for the
+    # provider-level version of this assertion; this proves the tool wires it end to end.
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("America/New_York"))
+    await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-10-26T09:00:00",
+            "end": "2026-10-26T09:30:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    events = await local_provider.list_events(
+        tenant_id="t1",
+        time_range=DateTimeRange(
+            start=datetime(2026, 10, 1, tzinfo=UTC), end=datetime(2026, 12, 1, tzinfo=UTC)
+        ),
+    )
+    assert len(events) == 4
+    ny = ZoneInfo("America/New_York")
+    assert all(e.start.astimezone(ny).strftime("%H:%M") == "09:00" for e in events)
+
+
+async def test_update_event_tool_setting_recurrence_persists_the_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # Promoting a plain event to a recurring series via update (edit_scope="all" — the
+    # only route to set `recurrence` outside create) anchors the new RRULE to the
+    # operator's zone too (#446), not just a series created with `recurrence` from the start.
+    start = datetime(2026, 10, 26, 13, 0, tzinfo=UTC)  # Mon Oct 26, 09:00 EDT
+    created = await local_provider.create_event(
+        tenant_id="t1", title="Standup", start=start, end=start + timedelta(minutes=30)
+    )
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("America/New_York"))
+    await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": created.id, "recurrence": "FREQ=WEEKLY;COUNT=4", "edit_scope": "all"},
+    )
+    events = await local_provider.list_events(
+        tenant_id="t1",
+        time_range=DateTimeRange(
+            start=datetime(2026, 10, 1, tzinfo=UTC), end=datetime(2026, 12, 1, tzinfo=UTC)
+        ),
+    )
+    assert len(events) == 4
+    ny = ZoneInfo("America/New_York")
+    assert all(e.start.astimezone(ny).strftime("%H:%M") == "09:00" for e in events)
 
 
 # ── Google provider all-day mapping ────────────────────────────────────────────

@@ -20,12 +20,12 @@ from typing import Literal
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_core import Collection
 
-#: Which occurrences an edit/delete on a recurring event applies to (#432): ``"this"`` — the
-#: single instance the caller identified (the default; least blast radius); ``"all"`` — the
-#: whole series (identified by its own id, or resolved from an instance's series). Ignored
-#: for a one-off event. "This and following" is a deliberately deferred follow-up — see
-#: ADR-0075 — since it requires splitting a series in two, a materially harder operation.
-EditScope = Literal["this", "all"]
+#: Which occurrences an edit/delete on a recurring event applies to: ``"this"`` (#432) — the
+#: single instance the caller identified (the default; least blast radius); ``"following"``
+#: (#445) — this occurrence and every later one, splitting the series in two (see
+#: ``epicurus_calendar.recurrence``); ``"all"`` (#432) — the whole series (identified by its
+#: own id, or resolved from an instance's series). Ignored for a one-off event.
+EditScope = Literal["this", "following", "all"]
 
 
 class CalendarProvider(ABC):
@@ -67,6 +67,7 @@ class CalendarProvider(ABC):
         all_day: bool = False,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
     ) -> Event:
         """Persist a new event and return the created domain object.
 
@@ -76,7 +77,11 @@ class CalendarProvider(ABC):
 
         *recurrence* (#432) is an RFC 5545 RRULE string (no ``"RRULE:"`` prefix) making this
         the series' master; ``None`` for a one-off event. *attendees* invites guests
-        (``needsAction`` initially); ``None``/empty means no guests.
+        (``needsAction`` initially); ``None``/empty means no guests. *recurrence_timezone*
+        (#446) is the IANA zone *recurrence* anchors its wall-clock expansion in (the
+        operator's configured timezone at creation) — meaningful only alongside
+        *recurrence*; a provider that expands recurrence itself (Google) ignores it, since
+        it always returns correct per-occurrence instants without help.
         """
 
     @abstractmethod
@@ -94,6 +99,7 @@ class CalendarProvider(ABC):
         all_day: bool | None = None,
         recurrence: str | None = None,
         attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
         """Apply the given fields to an existing event and return it.
@@ -104,10 +110,15 @@ class CalendarProvider(ABC):
         provider/collection — the router uses that to try the next source (write where the
         event lives, #208).
 
-        *edit_scope* (#432) matters only when *event_id* names an occurrence of a recurring
-        series: ``"this"`` edits just that occurrence (creating an exception if it wasn't
-        one already); ``"all"`` edits the whole series. *recurrence* changes the series'
-        rule and is only meaningful with ``edit_scope="all"``.
+        *edit_scope* matters only when *event_id* names an occurrence of a recurring series:
+        ``"this"`` (#432) edits just that occurrence (creating an exception if it wasn't one
+        already); ``"following"`` (#445) splits the series in two at that occurrence — the
+        original series ends just before it, and it plus every later occurrence move to a new
+        series carrying the edit; ``"all"`` (#432) edits the whole series in place.
+        *recurrence* changes the series' rule and is only meaningful with
+        ``edit_scope="all"`` or ``"following"`` (omitted, it continues the original pattern
+        for the new tail series); *recurrence_timezone* (#446) re-anchors its wall-clock
+        expansion zone alongside it (see :meth:`create_event`).
         """
 
     @abstractmethod
@@ -122,9 +133,10 @@ class CalendarProvider(ABC):
         """Delete an event. Returns ``True`` if it existed and was removed, else ``False``.
 
         ``False`` lets the router fall through to the next enabled source rather than
-        report a spurious success (#208). *edit_scope* (#432): ``"this"`` removes just the
-        named occurrence of a recurring series (as an excluded exception); ``"all"``
-        removes the whole series.
+        report a spurious success (#208). *edit_scope*: ``"this"`` (#432) removes just the
+        named occurrence of a recurring series (as an excluded exception); ``"following"``
+        (#445) truncates the series so it ends just before that occurrence, removing it and
+        every later one; ``"all"`` (#432) removes the whole series.
         """
 
     @abstractmethod

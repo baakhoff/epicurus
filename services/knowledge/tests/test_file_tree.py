@@ -68,7 +68,10 @@ class _FilePlatform:
         return await self._store.list_dir(tenant=TENANT, path=path)
 
     async def files_read(self, path: str) -> str:
-        return await self._store.read_text(tenant=TENANT, path=path)
+        try:
+            return await self._store.read_text(tenant=TENANT, path=path)
+        except FileNotFoundError as exc:
+            raise _status_error(404) from exc
 
     async def files_delete(self, path: str) -> bool:
         return await self._store.delete(tenant=TENANT, path=path)

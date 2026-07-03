@@ -77,13 +77,15 @@ _ATTENDEES_DESCRIPTION = (
     " bob@example.com'. Omit for no guests."
 )
 _EDIT_SCOPE_DESCRIPTION = (
-    "For a recurring event: 'this' edits only this occurrence (default); 'all' edits the"
+    "For a recurring event: 'this' edits only this occurrence (default); 'following' edits"
+    " this occurrence and every later one (splitting the series in two); 'all' edits the"
     " whole series. Ignored for a one-off event."
 )
-# The Edit/Delete form's scope picker (#432) — nicer labels than the bare enum values,
+# The Edit/Delete form's scope picker (#432, #445) — nicer labels than the bare enum values,
 # mirroring the calendar_id picker's field_choices pattern.
 _EDIT_SCOPE_CHOICES = [
     {"value": "this", "label": "This event"},
+    {"value": "following", "label": "This and following events"},
     {"value": "all", "label": "All events"},
 ]
 
@@ -147,24 +149,26 @@ _ATTACH_LIMIT = 50
 TimezoneSource = Callable[[], Awaitable[str]]
 
 
-async def _resolve_timezone(source: TimezoneSource | None) -> tzinfo:
-    """The zone naive tool inputs are read in: the operator's timezone, else UTC (#433).
+async def _resolve_timezone(source: TimezoneSource | None) -> tuple[tzinfo, str]:
+    """The zone naive tool inputs are read in — the operator's timezone, else UTC (#433) —
+    paired with its IANA name, persisted on a new recurring series as its RRULE expansion
+    anchor (#446).
 
     Best-effort by design — an unreachable core or an unknown zone name degrades to UTC
     (the pre-#433 behaviour) rather than failing the write.
     """
     if source is None:
-        return UTC
+        return UTC, "UTC"
     try:
         name = await source()
     except Exception as exc:
         log.warning("operator timezone unavailable; reading naive times as UTC", error=str(exc))
-        return UTC
+        return UTC, "UTC"
     try:
-        return ZoneInfo(name)
+        return ZoneInfo(name), name
     except Exception:
         log.warning("unknown operator timezone; reading naive times as UTC", timezone=name)
-        return UTC
+        return UTC, "UTC"
 
 
 def build_module(
@@ -186,7 +190,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.12.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -309,7 +313,7 @@ def build_module(
 
         Returns the created event dict with all fields populated.
         """
-        tz = await _resolve_timezone(timezone)
+        tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
         if recurrence:
             _validate_recurrence(recurrence, dtstart=start_dt)
@@ -324,6 +328,7 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence or None,
             attendees=_parse_attendees(attendees),
+            recurrence_timezone=tz_name if recurrence else None,
         )
         return _event_payload(event)
 
@@ -352,8 +357,10 @@ def build_module(
             str | None,
             Field(
                 description=(
-                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all'; setting"
-                    " it with edit_scope='this' (a single occurrence) raises an error."
+                    _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all' or"
+                    " 'following' (omitted there, the new tail series just continues the"
+                    " existing pattern); setting it with edit_scope='this' (a single"
+                    " occurrence) raises an error."
                 )
             ),
         ] = None,
@@ -381,16 +388,20 @@ def build_module(
             description: New description, if changing it.
             calendar_id: Optional home-calendar token (account:collection) to target
                 directly; omit to search the enabled calendars.
-            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all' only).
+            recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all') or the
+                new tail series from this point on (edit_scope='following'); omit the
+                latter to keep the existing pattern.
             attendees: New comma-separated guest list, replacing the current one.
-            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
+            edit_scope: For a recurring event, 'this' occurrence (default), 'following'
+                (this occurrence and every later one, splitting the series in two), or
+                'all'.
 
         Returns the updated event dict. Raises if no such event exists.
         """
-        tz = await _resolve_timezone(timezone)
+        tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
-        if recurrence and start_dt is not None:
-            _validate_recurrence(recurrence, dtstart=start_dt)
+        if recurrence:
+            _validate_recurrence(recurrence, dtstart=start_dt or datetime.now(tz=UTC))
         event = await provider.update_event(
             tenant_id=tenant_id,
             event_id=event_id,
@@ -403,6 +414,7 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence,
             attendees=_parse_attendees(attendees),
+            recurrence_timezone=tz_name if recurrence is not None else None,
             edit_scope=edit_scope,
         )
         if event is None:
@@ -432,7 +444,8 @@ def build_module(
             event_id: The id of the event to delete.
             calendar_id: Optional home-calendar token (account:collection); omit to
                 search the enabled calendars.
-            edit_scope: For a recurring event, 'this' occurrence (default) or 'all'.
+            edit_scope: For a recurring event, 'this' occurrence (default), 'following'
+                (this occurrence and every later one), or 'all'.
 
         Returns ``{"deleted": true, "id": ...}`` on success; raises if no such event
         exists.

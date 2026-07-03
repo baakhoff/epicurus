@@ -57,8 +57,9 @@ Since **v0.11** (#432, ADR-0075) events support **recurrence** (an RFC 5545 RRUL
 **attendees** (a guest list). A recurring event is one stored *series* (the master, carrying
 the rule) plus zero or more *exceptions* overriding a single occurrence (edited or deleted);
 editing/deleting takes an `edit_scope` of `"this"` (one occurrence) or `"all"` (the whole
-series) — see *Recurring events* under Contract, below. Google Meet / conferencing and the
-"this and following" edit scope are deliberately out of scope for now (ADR-0075).
+series) — see *Recurring events* under Contract, below. Since **v0.12** (#445) `edit_scope`
+also takes `"following"` — this occurrence and every later one, splitting the series in two.
+Google Meet / conferencing remains deliberately out of scope for now (ADR-0075).
 
 ## Contract
 
@@ -68,8 +69,8 @@ series) — see *Recurring events* under Contract, below. Google Meet / conferen
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time. |
 | `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list. Returns the created event. |
-| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` (#432) is `"this"` (default — just the named occurrence) or `"all"` (the whole series); `recurrence` is only honoured with `edit_scope="all"` (raises with `"this"` — an instance can't carry its own rule). Returns the updated event; raises if absent. |
-| `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` (#432) mirrors update: `"this"` removes just the named occurrence, `"all"` removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
+| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` is `"this"` (#432, default — just the named occurrence), `"following"` (#445 — this occurrence and every later one, splitting the series in two), or `"all"` (#432 — the whole series); `recurrence` is only honoured with `edit_scope="all"` or `"following"` (raises with `"this"` — an instance can't carry its own rule; omitted with `"following"`, the new tail series just continues the existing pattern). Returns the updated event; raises if absent. |
+| `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` mirrors update: `"this"` (#432) removes just the named occurrence, `"following"` (#445) removes it and every later occurrence (truncating the series), `"all"` (#432) removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
@@ -135,26 +136,38 @@ returns individual **occurrences** (`recurring_event_id` set to the series' id;
   *original* — unmodified — start, encoded in the exception's own id as
   `<series-id>_<original-start>Z`) and expands the RRULE with `dateutil.rrule` on every read,
   bounded to the requested window (an unbounded `FREQ=DAILY` never iterates past the window).
+  A *timed* series also stores the operator's configured **IANA timezone** at the moment
+  `recurrence` is written (create, or an `edit_scope="all"` update that sets/redefines it) and
+  expands the rule in that zone (#446, ADR-0077) — so a "9:00 AM" weekly event keeps its
+  wall-clock hour across a DST change instead of drifting by the UTC-offset delta. All-day
+  series ignore it (floating dates, ADR-0037); a legacy series with no stored zone falls back
+  to the pre-fix UTC anchor. A moved occurrence is windowed by its *actual* (possibly moved)
+  time, not its original slot, so rescheduling one across a view boundary can't make it go
+  missing from, or leak into, the adjacent window.
 
 **Edit scope.** `calendar_update_event` / `calendar_delete_event` take `edit_scope`:
 `"this"` (default) acts on just the named occurrence — for Google, PATCH/DELETE on its
 instance id; for local, an exception row is created/updated (or a tombstone, for delete).
 `"all"` acts on the whole series — resolved to the series' own id first if an instance id
 was given (a lookup on Google; parsed from the id locally), then edited/deleted directly.
-Setting `recurrence` requires `edit_scope="all"` — a single occurrence can't carry its own
-rule (`edit_scope="this"` with `recurrence` set raises).
+Setting `recurrence` requires `edit_scope="all"` or `"following"` — a single occurrence
+can't carry its own rule (`edit_scope="this"` with `recurrence` set raises).
 
-**Deliberately out of scope** (ADR-0075): a `"this and following"` edit scope (splitting a
-series into two) and Google Meet / conferencing — both filed as follow-ups, not implemented
-here.
-
-**Known limitation — local provider only** (#446): the local engine anchors a series at its
-stored **UTC instant**, so a *timed* recurring event drifts by the offset delta across a DST
-change (a 9:00 weekly event renders 8:00 after the autumn fall-back) until the series carries
-its own timezone; and a single occurrence moved across a view boundary is windowed by its
-*original* slot, so it can go missing from (or leak into) the adjacent window. Google-backed
-calendars are unaffected (expansion is server-side), as are all-day series (floating dates,
-ADR-0037).
+**"This and following"** (`edit_scope="following"`, #445) splits the series in two at the
+named occurrence: the original series is truncated (an `UNTIL` set to the prior occurrence,
+any `COUNT` dropped — it alone fully captures the new stopping point) so it ends just before
+it, and that occurrence plus every later one move to a **new series** carrying the edit —
+continuing the original cadence (a `COUNT`-bound rule is renumbered to just the remaining
+occurrences; an `UNTIL`-bound or unbounded rule is unchanged) unless `recurrence` overrides
+it outright. An occurrence already individually edited (`edit_scope="this"`) later in the
+series keeps its own fields through the split — only the split point and genuinely
+*unmodified* later occurrences take the new baseline. Splitting at a series' own **first**
+occurrence has nothing "before" to keep separate, so it degrades to `"all"` — editing/deleting
+the whole series in place, no split. Deleting `"following"` truncates the series the same way
+and drops every occurrence from the split point on, including their own per-occurrence
+overrides. On Google this is two calls — a PATCH truncating the original master's `recurrence`
+plus (for an edit) a new `events.insert` for the tail — best-effort, since Google has no
+cross-event transaction.
 
 **Attendees** (`attendees`, a comma-separated email list on the tools) invites guests;
 `response_status` (`needsAction` / `accepted` / `declined` / `tentative` — Google's
@@ -229,7 +242,8 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
     { "id": "e2", "title": "Holiday", "start": "2026-06-18", "end": "2026-06-19",
       "all_day": true, "provider": "google", "actions": [ /* … */ ] },
     // A recurring occurrence (#432): edit/delete actions gain an `edit_scope` picker
-    // ("This event" / "All events"); Delete becomes a form (its choice is the confirmation).
+    // ("This event" / "This and following events" / "All events", #445); Delete becomes a
+    // form (its choice is the confirmation).
     { "id": "s1_20260622T090000Z", "title": "Team sync",
       "start": "2026-06-22T09:00:00+00:00", "end": "2026-06-22T09:30:00+00:00",
       "recurring_event_id": "s1", "provider": "google",
@@ -239,6 +253,7 @@ is clamped (≤ 92 days); `end ≤ start` or an unparseable bound returns `400`.
           "fields": ["title", "all_day", "start", "end", "location", "description",
                      "recurrence", "attendees", "edit_scope"],
           "field_choices": { "edit_scope": [{ "value": "this", "label": "This event" },
+                                            { "value": "following", "label": "This and following events" },
                                             { "value": "all", "label": "All events" }] } },
         { "tool": "calendar_delete_event", "label": "Delete", "intent": "danger", "form": true,
           "fields": ["edit_scope"], "form_values": { "edit_scope": "this" },
@@ -369,14 +384,20 @@ database.
 | `description` | `text` | Optional description. |
 | `location` | `varchar(512)` | Optional location. |
 | `all_day` | `boolean` | All-day (date-only) event flag. |
+| `recurrence` | `text`, nullable | RFC 5545 RRULE on a series master; `NULL` on a plain event or an exception row (#432). |
+| `recurring_event_id` | `varchar(64)`, nullable, indexed | The master's `event_id`, on an exception row only; `NULL` on a plain event or a master itself (#432). |
+| `excluded` | `boolean` | Tombstones a single deleted occurrence; meaningless outside an exception row (#432). |
+| `attendees` | `text`, nullable | JSON-encoded guest list (see `Attendee`); `NULL`/blank means no guests (#432). |
+| `timezone` | `varchar(64)`, nullable | On a series master only: the IANA zone its RRULE expands in, captured from the operator's configured timezone whenever `recurrence` is written; `NULL` on a plain event, an exception, or a master written before this column existed (falls back to UTC expansion, #446). |
 | `created_at` | `timestamptz` | Row insertion timestamp. |
 
 Unique constraint: `(tenant, event_id)`.
 
-`all_day` was added after the table's first release. There is no migration framework, so
-`LocalEventStore.init` runs an additive `_ensure_columns` step that adds the column in place
-on an existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before it
-existed read `NULL`, coerced to `false`.
+`all_day`, `recurrence`, `recurring_event_id`, `excluded`, `attendees`, and `timezone` were all
+added after the table's first release. There is no migration framework, so
+`LocalEventStore.init` runs an additive `_ensure_columns` step that adds each in place on an
+existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before a given
+column existed read `NULL`, coerced to the documented fallback above.
 
 The **Google provider** stores no data locally; all state lives in Google
 Calendar and in the core's OAuth vault. An all-day Google event uses `start.date`/`end.date`

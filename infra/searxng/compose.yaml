@@ -29,6 +29,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    # Bounded json-file logging (#462) — unbounded default otherwise fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks: [epicurus]
     labels:
       - traefik.enable=true

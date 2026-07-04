@@ -37,4 +37,10 @@ services:
       - traefik.http.services.web.loadbalancer.server.port=8080
       # Flush streamed responses (SSE) immediately through the gateway.
       - traefik.http.services.web.loadbalancer.responseforwarding.flushinterval=1ms
+    # Bounded json-file logging (#462) — unbounded default otherwise fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks: [epicurus]

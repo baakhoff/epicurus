@@ -52,6 +52,18 @@ docker compose down -v    # also remove volumes
 # or: task down  (append `-- -v` to drop volumes)
 ```
 
+## Container logs
+
+Every container's logs are capped by compose itself (`json-file` driver, `max-size: "10m",
+max-file: "3"` per container — #462), so a chatty service or a stuck retry loop can't fill
+the disk. `docker logs <service>` still works as normal; only the retained history is
+bounded. If you'd rather set one policy for every container on the box regardless of what
+any compose file says (e.g. a shared host running more than epicurus), configure
+`log-driver`/`log-opts` in Docker's own `/etc/docker/daemon.json` instead — see the
+[Docker docs](https://docs.docker.com/engine/logging/drivers/json-file/#usage) — and
+restart the daemon. A daemon-level default only applies to containers created *after* the
+change; recreate existing ones (`docker compose up -d --force-recreate`) to pick it up.
+
 ## Default ports
 
 All host ports bind to **127.0.0.1** by default — nothing is reachable from

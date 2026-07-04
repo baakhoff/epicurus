@@ -108,6 +108,42 @@ class GmailProvider(MailProvider):
             resp.raise_for_status()
             return str(resp.json()["id"])
 
+    @staticmethod
+    async def _fetch_reply_headers(
+        client: httpx.AsyncClient, message_id: str
+    ) -> tuple[dict[str, str], str]:
+        """The lowercased headers needed to build a reply, plus the Gmail ``threadId``.
+
+        A metadata-only fetch (no body) — a reply doesn't quote the original by default,
+        so there's nothing here beyond the headers this needs.
+        """
+        resp = await client.get(
+            f"/users/me/messages/{message_id}",
+            params={
+                "format": "metadata",
+                "metadataHeaders": ["Message-ID", "References", "Subject", "From"],
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        headers = {
+            h["name"].lower(): h["value"] for h in data.get("payload", {}).get("headers", [])
+        }
+        return headers, str(data.get("threadId", ""))
+
+    async def reply(self, message_id: str, body: str) -> str:
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            headers, thread_id = await self._fetch_reply_headers(client, message_id)
+            msg = _build_reply_mime(headers, body)
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            payload: dict[str, Any] = {"raw": raw}
+            if thread_id:
+                payload["threadId"] = thread_id
+            resp = await client.post("/users/me/messages/send", json=payload)
+            resp.raise_for_status()
+            return str(resp.json()["id"])
+
     async def set_unread(self, message_id: str, unread: bool) -> None:
         # Gmail tracks read state with the system ``UNREAD`` label: add it to mark unread,
         # remove it to mark read. ``messages.modify`` requires the ``gmail.modify`` scope.
@@ -163,6 +199,36 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         body=body,
         unread=unread,
     )
+
+
+def _reply_subject(original_subject: str) -> str:
+    """``Re: <subject>`` — unless *original_subject* is already a reply (avoids ``Re: Re: …``).
+
+    A missing subject reads as ``(no subject)``, mirroring ``_parse_message``'s own fallback,
+    rather than producing a bare ``Re:`` with nothing after it.
+    """
+    subject = original_subject or "(no subject)"
+    return subject if subject.strip().lower().startswith("re:") else f"Re: {subject}"
+
+
+def _build_reply_mime(headers: dict[str, str], body: str) -> MIMEText:
+    """The outgoing MIME message for a reply to a message with the given lowercased *headers*.
+
+    Threads via RFC-2822 headers (#461): ``In-Reply-To`` is the original's ``Message-ID``;
+    ``References`` is the original's own reference chain plus that same ``Message-ID`` (RFC
+    2822 recommends the full chain, not just the immediate parent), so the reply threads
+    correctly even in mail clients that ignore Gmail's own ``threadId``.
+    """
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["To"] = headers.get("from", "")
+    msg["Subject"] = _reply_subject(headers.get("subject", ""))
+    original_message_id = headers.get("message-id", "")
+    if original_message_id:
+        msg["In-Reply-To"] = original_message_id
+    references = " ".join(filter(None, [headers.get("references", ""), original_message_id]))
+    if references:
+        msg["References"] = references
+    return msg
 
 
 def _extract_body(payload: dict[str, Any]) -> str | None:

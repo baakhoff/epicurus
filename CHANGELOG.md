@@ -25,6 +25,16 @@ images to GHCR.
   route through the shared `<Confirm>` primitive with the danger treatment. An ESLint
   `no-restricted-syntax` + `no-restricted-globals` guard (the #394 pattern) bans
   `window.alert`/`window.confirm` so native dialogs can't come back. `web` 0.71.1→0.72.0.
+- **Mail: thread-aware reply** (#461) — `mail_send` only ever composed fresh messages, so
+  the agent's "reply" started a new conversation on both ends: no `In-Reply-To`/`References`
+  headers, no Gmail thread association. A new **`mail_reply(message_id, body)`** tool fetches
+  the original message's threading headers (a lightweight metadata-only Gmail call — no body
+  fetch), then sends with RFC-2822 `In-Reply-To`/`References` (the full reference chain, not
+  just the immediate parent) and the Gmail `threadId` in the send payload. The recipient (the
+  original sender) and subject (`Re: <original>`, not doubled if already a reply) are derived
+  from the original message, so the caller supplies only the new body. Declared a **danger
+  action** (ADR-0007) exactly like `mail_send`; `MailProvider` gains the `reply` seam so a
+  future non-Gmail provider mirrors it. `mail` 0.7.0→0.8.0.
 
 - **Tasks: create a task list from the UI or the agent** (#474) — previously the only way to
   get a new Google task list was outside epicurus, in Google Tasks' own UI, and the local store

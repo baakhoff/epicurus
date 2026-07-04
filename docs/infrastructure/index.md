@@ -101,6 +101,20 @@ hit `PermissionError` and the choice would save but never apply (#392). `ollama-
 only**: the core's write is lazy — it happens when the operator changes the KV-cache type, long
 after boot — so there is no startup race regardless.
 
+## Log retention
+
+Every service in every compose fragment sets a bounded `json-file` logging driver
+(`max-size: "10m", max-file: "3"` — #462): Docker's own default is **unbounded**, so a
+chatty service or one stuck in a retry loop can otherwise fill the disk on an always-on
+box. YAML anchors don't cross `include:` boundaries, so a fragment that defines more than
+one service (the data plane, observability, Ollama) declares its own `x-logging` anchor;
+single-service module fragments inline the same block. `task new-module` scaffolds new
+modules with it already wired in. To change the cap repo-wide, edit the literal block (or
+anchor) in each fragment — there is no single shared source, by the same `include:`
+constraint. An operator who wants one override for *every* container regardless of compose
+edits can instead set `log-opts` in the box's Docker daemon config — see
+[Installation](../user/installation.md).
+
 ## How it's assembled
 
 The root `compose.yaml` `include`s the infra fragment and each module fragment (ADR-0006):

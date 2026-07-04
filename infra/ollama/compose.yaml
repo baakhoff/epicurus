@@ -6,6 +6,14 @@
 #
 # Internal-only: the core reaches it at http://ollama:11434 on the epicurus network;
 # it is not published to the host (private-by-default — the core is the front door).
+
+# Bounded json-file logging (#462) — see infra/compose/docker-compose.yml for the rationale.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # One-shot: makes the shared ollama-runtime volume writable by the core before anything
   # mounts it. A fresh named volume is created **root-owned**, but core-app runs as uid 10001
@@ -29,6 +37,7 @@ services:
         chown 10001:10001 /data
         chmod 755 /data
         echo "ollama-init: ensured ollama-runtime volume root owned by uid 10001"
+    logging: *default-logging
     networks: [epicurus]
 
   ollama:
@@ -69,6 +78,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging: *default-logging
     networks: [epicurus]
 
 volumes:

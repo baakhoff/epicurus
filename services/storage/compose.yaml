@@ -42,6 +42,12 @@ services:
       - traefik.http.routers.storage.entrypoints=web
       - traefik.http.services.storage.loadbalancer.server.port=8080
       - epicurus.metrics.port=8080
+    # Bounded json-file logging (#462) — unbounded default otherwise fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks: [epicurus]
 
 # Storage no longer mounts the shared `epicurus-files` volume (ADR-0063): the core owns the

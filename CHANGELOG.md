@@ -412,6 +412,22 @@ images to GHCR.
 
 ### Changed
 
+- **Bound container log growth — logging caps on every compose service** (#462) — no service
+  set a Docker `logging:` policy, so every container ran the default `json-file` driver
+  **unbounded**; a chatty service, or one stuck in a retry loop, could fill the disk on the
+  always-on box. Every service in every compose fragment (the data plane, edge, observability,
+  Ollama, SearXNG, every module, and the service template) now sets `driver: json-file` with
+  `max-size: "10m", max-file: "3"`. YAML anchors don't cross `include:` boundaries, so a fragment
+  defining more than one service (data plane, observability, Ollama) declares its own
+  `x-logging` anchor; single-service module fragments inline the block. Verified against the
+  merged `docker compose config` (all 24 default-profile services, and all 32 with
+  `--profile observability`, resolve the option) and a live `task smoke` run — `docker inspect`
+  on running `postgres`/`calendar`/`core-app` containers confirms the driver actually applies at
+  the runtime level, not just in the rendered YAML. An operator who wants one override for every
+  container regardless of compose edits can instead set `log-opts` in the box's Docker daemon
+  config — see [Installation](docs/user/installation.md#container-logs). Infra-only; no
+  component version bump.
+
 - **Knowledge reads the vault through the core file API — its `/data` mount is gone** (#346) —
   the read-path tail of the file-space migration. A new `VaultReader` seam (ADR-0070) puts every
   read site — the incremental indexer, the editor's `read_doc`/`list_docs`, the attachment picker,

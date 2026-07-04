@@ -15,6 +15,16 @@
 
 name: epicurus
 
+# Every service below gets a bounded json-file log (#462) — the default driver is otherwise
+# unbounded, so a chatty service or one stuck in a retry loop can fill the disk. YAML anchors
+# don't cross `include:` boundaries, so each compose file that defines more than one service
+# needs its own copy of this anchor; single-service module fragments inline the block instead.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 networks:
   epicurus:
     name: epicurus
@@ -49,6 +59,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    logging: *default-logging
     networks: [epicurus]
 
   valkey:
@@ -64,6 +75,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    logging: *default-logging
     networks: [epicurus]
 
   nats:
@@ -86,6 +98,7 @@ services:
     volumes:
       - nats-data:/data
       - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+    logging: *default-logging
     networks: [epicurus]
 
   # Guards the qdrant data volume across server upgrades (#229). qdrant panics on
@@ -124,6 +137,7 @@ services:
           echo "qdrant-init: no version marker; stamping '$$QDRANT_TAG' (no reset)"
           printf '%s' "$$QDRANT_TAG" > "$$MARKER"
         fi
+    logging: *default-logging
     networks: [epicurus]
 
   qdrant:
@@ -148,6 +162,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+    logging: *default-logging
     networks: [epicurus]
 
   openbao:
@@ -178,6 +193,7 @@ services:
       timeout: 3s
       retries: 12
       start_period: 5s
+    logging: *default-logging
     networks: [epicurus]
 
   # Watches for a sealed vault and unseals it automatically on every stack start.
@@ -209,6 +225,7 @@ services:
           esac
           sleep 30
         done
+    logging: *default-logging
     networks: [epicurus]
 
   minio:
@@ -229,6 +246,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+    logging: *default-logging
     networks: [epicurus]
 
   # One-shot: waits for MinIO to be healthy then creates the default bucket.
@@ -247,4 +265,5 @@ services:
       MC_HOST_local: "http://${MINIO_ROOT_USER:-epicurus}:${MINIO_ROOT_PASSWORD:-epicurus-dev}@minio:9000"
     entrypoint: >
       /bin/sh -c "mc mb --ignore-existing local/${MINIO_DEFAULT_BUCKET:-epicurus}"
+    logging: *default-logging
     networks: [epicurus]

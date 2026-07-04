@@ -17,6 +17,14 @@
 # Published ports bind to BIND_ADDRESS (default 127.0.0.1) — Grafana runs with
 # anonymous admin for local dev, so keep it on this machine unless you put your
 # own perimeter in front.
+
+# Bounded json-file logging (#462) — see infra/compose/docker-compose.yml for the rationale.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   prometheus:
     image: prom/prometheus:v3.1.0
@@ -37,6 +45,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    logging: *default-logging
     networks: [epicurus]
 
   # Blackbox exporter: HTTP/TCP probes for external health checks.
@@ -50,6 +59,7 @@ services:
     command: ["--config.file=/etc/blackbox_exporter/config.yml"]
     volumes:
       - ./blackbox/config.yml:/etc/blackbox_exporter/config.yml:ro
+    logging: *default-logging
     networks: [epicurus]
 
   # Node exporter: host-level disk, CPU, and memory metrics from the WSL2 VM
@@ -70,6 +80,7 @@ services:
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     pid: host
+    logging: *default-logging
     networks: [epicurus]
 
   # Alertmanager: receives firing alerts from Prometheus and routes them to
@@ -86,6 +97,7 @@ services:
       - alertmanager-data:/alertmanager
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${ALERTMANAGER_PORT:-9093}:9093"
+    logging: *default-logging
     networks: [epicurus]
 
   loki:
@@ -99,6 +111,7 @@ services:
       - loki-data:/loki
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
+    logging: *default-logging
     networks: [epicurus]
 
   tempo:
@@ -114,6 +127,7 @@ services:
       # OTLP — services send traces straight to Tempo's built-in receiver.
       - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_GRPC_PORT:-4317}:4317"
       - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_HTTP_PORT:-4318}:4318"
+    logging: *default-logging
     networks: [epicurus]
 
   alloy:
@@ -129,6 +143,7 @@ services:
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on: [loki]
+    logging: *default-logging
     networks: [epicurus]
 
   grafana:
@@ -154,6 +169,7 @@ services:
       - traefik.http.routers.grafana.rule=Host(`grafana.localhost`)
       - traefik.http.routers.grafana.entrypoints=web
       - traefik.http.services.grafana.loadbalancer.server.port=3000
+    logging: *default-logging
     networks: [epicurus]
 
 volumes:

@@ -43,6 +43,54 @@ const MAX_REATTACH_ATTEMPTS = 6;
 const backoffMs = (attempt: number): number => Math.min(500 * 2 ** attempt, 8_000);
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Why a `reattachLoop` run was entered (#477): a "probe" is an opportunistic check with no
+ * prior evidence a turn is running (mount / `visibilitychange` / `online`) — the loop may
+ * find nothing, and that's a perfectly normal idle chat. A "recovery" is entered already
+ * knowing a turn exists (a 409 from a fresh send, or our own stream dropping mid-turn) — the
+ * user has real, in-flight state to reconcile with.
+ */
+type ReattachMode = "probe" | "recovery";
+
+/**
+ * Decide what happens when `reattachLoop` exhausts every retry attempt without reaching a
+ * terminal outcome (`done` / `gone` / a confirmed absence of a run).
+ *
+ * TODO(you): this is the actual reliability/UX call the rest of the loop's plumbing serves.
+ * A pure probe that never found anything real should give up quietly — the user never saw a
+ * turn start, so a scary "lost connection" banner would be reporting a problem that doesn't
+ * exist (the #477 bug). But a probe *can* turn into a real recovery mid-flight: if it found
+ * an active run (`sawActiveRun`) and then lost the stream again, the user now has a genuine
+ * in-flight turn to reconcile — silently dropping that would strand them with a stale
+ * spinner and no explanation.
+ *
+ * @param mode - how this loop was entered (see {@link ReattachMode}).
+ * @param sawActiveRun - whether `api.activeRun` ever confirmed a live run during *this*
+ *   loop's attempts, even if a later attempt then failed to attach to it.
+ * @returns the store patch to apply. Setting `error` (+ `reconnectable: true`) surfaces the
+ *   banner with an in-place Reconnect action; `error: null` gives up silently — the next
+ *   mount/`visibilitychange`/`online` re-arms for free, since it's a brand-new call with its
+ *   own fresh attempt budget.
+ */
+function classifyExhaustion(
+  mode: ReattachMode,
+  sawActiveRun: boolean,
+): { streaming: false; abort: null; error: string | null; reconnectable: boolean } {
+  // A confirmed run at any point this loop makes it a recovery from that point on, even if
+  // it was entered as a probe — the user now has real in-flight state to reconcile with,
+  // regardless of how we first noticed it.
+  const isRecovery = mode === "recovery" || sawActiveRun;
+  if (!isRecovery) {
+    return { streaming: false, abort: null, error: null, reconnectable: false };
+  }
+  return {
+    streaming: false,
+    abort: null,
+    error: "lost connection to the running turn",
+    reconnectable: true,
+  };
+}
+
 interface ChatState {
   sessionId: string;
   /** Unsent composer text. Persisted so it survives a reload, not just navigation. */
@@ -61,6 +109,10 @@ interface ChatState {
   /** Warming progress emitted before the first token (ADR-0027); null once answered. */
   readiness: Readiness | null;
   error: string | null;
+  /** Whether `error` can be retried in place via {@link reconnect} rather than needing a
+   *  reload (#477) — true only for a reattach loop that exhausted its budget in recovery
+   *  mode; any other error (a genuine stream/tool failure) leaves this false. */
+  reconnectable: boolean;
   paused: boolean;
   abort: AbortController | null;
   /** The last live-run seq seen this turn — the re-attach offset (#376). Not persisted: a
@@ -93,8 +145,15 @@ interface ChatState {
     onDone: () => Promise<void>,
   ) => Promise<void>;
   /** Re-attach to this session's in-flight turn if one exists (#376). Called on mount,
-   *  `visibilitychange`→visible, and `online`; a no-op when a stream is already live. */
-  resumeIfActive: (onDone: () => Promise<void>) => Promise<void>;
+   *  `visibilitychange`→visible, and `online`; a no-op when a stream is already live.
+   *  `isConnectivitySignal` (#477) marks the `online` listener specifically — a signal that
+   *  connectivity just returned, which resets an already-in-flight loop's attempt budget
+   *  rather than merely being ignored while one is running. */
+  resumeIfActive: (onDone: () => Promise<void>, isConnectivitySignal?: boolean) => Promise<void>;
+  /** Retry an exhausted reattach in place after the user taps "Reconnect" (#477) — a no-op
+   *  unless `reconnectable` is set. Always runs in recovery mode: the user asked for this
+   *  explicitly, so a second exhaustion should surface the banner again, not go quiet. */
+  reconnect: (onDone: () => Promise<void>) => Promise<void>;
   /** Answer the pending `ask_user` question (ADR-0053): POST the answer to resume the
    *  suspended run, then stream the continuation like any turn. A no-op if nothing is pending. */
   resume: (answer: string, onDone: () => Promise<void>) => Promise<void>;
@@ -112,6 +171,14 @@ export const useChat = create<ChatState>()(
       // Guards a single re-attach loop at a time (it spans awaits; a second trigger — a
       // visibilitychange landing mid-reconnect — must not open a competing stream).
       let reattaching = false;
+      // Set by a fresh `online` event landing while a loop is already sleeping in backoff
+      // (#477): connectivity just came back, so the in-flight loop should get a full new
+      // attempt budget instead of burning through its remaining quota as if nothing changed.
+      let resetRequested = false;
+      // The in-flight loop's current mode (#477) — starts as whatever it was entered with,
+      // but can only ever escalate probe→recovery (a confirmed run, or a fresh recovery
+      // signal arriving mid-loop), never the reverse.
+      let reattachMode: ReattachMode = "probe";
 
       const push = (segment: ChatSegment): void => {
         set({ segments: [...get().segments, segment] });
@@ -173,7 +240,7 @@ export const useChat = create<ChatState>()(
               setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
             else if (event.type === "error") {
               const detail = event.detail ?? "the stream failed";
-              set({ error: detail, paused: /paused/i.test(detail) });
+              set({ error: detail, paused: /paused/i.test(detail), reconnectable: false });
               return "error";
             } else if (event.type === "gone") return "gone";
             else if (event.type === "awaiting_input") {
@@ -211,6 +278,7 @@ export const useChat = create<ChatState>()(
             segments: [],
             readiness: null,
             lastSeq: 0,
+            reconnectable: false,
           });
         } else if (status === "awaiting_input") {
           // Paused for a clarifying question (ask_user, ADR-0053): keep the partial turn (any
@@ -224,6 +292,7 @@ export const useChat = create<ChatState>()(
             pendingUser: null,
             pendingAttachments: [],
             readiness: null,
+            reconnectable: false,
           });
         } else {
           // "error" (detail already set) or "aborted" (user stop): keep the partial answer.
@@ -231,15 +300,37 @@ export const useChat = create<ChatState>()(
         }
       };
 
-      // The turn is running server-side but our stream dropped (or we just reloaded): find the
-      // live run for this session and re-attach, replaying from `lastSeq`. Retries with backoff;
-      // falls back to history if the run finished while we were away.
-      const reattachLoop = async (onDone: () => Promise<void>): Promise<void> => {
-        if (reattaching) return;
+      // The turn is running server-side but our stream dropped (or we just reloaded, or
+      // we're merely checking in): find the live run for this session and re-attach,
+      // replaying from `lastSeq`. Retries with backoff; falls back to history if the run
+      // finished while we were away. `mode` (#477) governs only what happens if every
+      // attempt fails — see `classifyExhaustion`.
+      const reattachLoop = async (
+        onDone: () => Promise<void>,
+        mode: ReattachMode,
+        isConnectivitySignal = false,
+      ): Promise<void> => {
+        if (reattaching) {
+          // A loop is already in flight (most likely sleeping in backoff). A confirmed
+          // recovery always upgrades the running loop's mode. A connectivity signal
+          // specifically (`online` — not every `visibilitychange`) means the network may
+          // have just returned, so ask the loop to reset its attempt budget rather than
+          // burn through its remaining quota as if nothing changed.
+          if (mode === "recovery") reattachMode = "recovery";
+          if (isConnectivitySignal) resetRequested = true;
+          return;
+        }
         reattaching = true;
+        reattachMode = mode;
+        let sawActiveRun = false;
         const sessionId = get().sessionId;
         try {
-          for (let attempt = 0; attempt < MAX_REATTACH_ATTEMPTS; attempt++) {
+          let attempt = 0;
+          while (attempt < MAX_REATTACH_ATTEMPTS) {
+            if (resetRequested) {
+              resetRequested = false;
+              attempt = 0; // a connectivity signal arrived mid-loop — full budget again
+            }
             if (get().sessionId !== sessionId) return; // switched session — abandon
             if (get().abort?.signal.aborted) return; // user stopped
             let active;
@@ -262,14 +353,17 @@ export const useChat = create<ChatState>()(
                   segments: [],
                   readiness: null,
                   lastSeq: 0,
+                  reconnectable: false,
                 });
               }
               return;
             }
             if (active) {
+              sawActiveRun = true;
+              reattachMode = "recovery"; // confirmed a real turn — exhaustion now matters
               const abort = new AbortController();
               // Keep `segments` — re-attach continues the turn from `lastSeq`, doesn't restart.
-              set({ streaming: true, abort, error: null, paused: false });
+              set({ streaming: true, abort, error: null, paused: false, reconnectable: false });
               let status: StreamEnd;
               try {
                 status = await consume(
@@ -290,14 +384,12 @@ export const useChat = create<ChatState>()(
               }
             }
             await sleep(backoffMs(attempt));
+            attempt++;
           }
-          set({
-            streaming: false,
-            abort: null,
-            error: "lost connection to the running turn — reload to see the result",
-          });
+          set(classifyExhaustion(reattachMode, sawActiveRun));
         } finally {
           reattaching = false;
+          reattachMode = "probe";
         }
       };
 
@@ -315,6 +407,7 @@ export const useChat = create<ChatState>()(
           streaming: true,
           readiness: null,
           error: null,
+          reconnectable: false,
           paused: false,
           abort,
           lastSeq: 0,
@@ -326,7 +419,7 @@ export const useChat = create<ChatState>()(
           const httpStatus = (err as { status?: number }).status;
           if (httpStatus === 409) {
             // A turn is already running for this session — attach to it, don't error.
-            await reattachLoop(onDone);
+            await reattachLoop(onDone, "recovery");
             return;
           }
           const detail = err instanceof Error ? err.message : "the request failed";
@@ -334,12 +427,13 @@ export const useChat = create<ChatState>()(
             streaming: false,
             abort: null,
             error: detail,
+            reconnectable: false,
             paused: httpStatus === 503 || /paused/i.test(detail),
           });
           return;
         }
         if (status === "dropped") {
-          await reattachLoop(onDone);
+          await reattachLoop(onDone, "recovery");
           return;
         }
         await finishTerminal(status, onDone);
@@ -354,6 +448,7 @@ export const useChat = create<ChatState>()(
         streaming: false,
         readiness: null,
         error: null,
+        reconnectable: false,
         paused: false,
         abort: null,
         lastSeq: 0,
@@ -372,6 +467,7 @@ export const useChat = create<ChatState>()(
             streaming: false,
             readiness: null,
             error: null,
+            reconnectable: false,
             paused: false,
             abort: null,
             lastSeq: 0,
@@ -389,6 +485,7 @@ export const useChat = create<ChatState>()(
             streaming: false,
             readiness: null,
             error: null,
+            reconnectable: false,
             paused: false,
             abort: null,
             lastSeq: 0,
@@ -453,11 +550,18 @@ export const useChat = create<ChatState>()(
           );
         },
 
-        resumeIfActive: async (onDone) => {
+        resumeIfActive: async (onDone, isConnectivitySignal) => {
           const abort = get().abort;
           // A live stream is already running (a fresh send) — don't open a competing one.
           if (get().streaming && abort && !abort.signal.aborted && !reattaching) return;
-          await reattachLoop(onDone);
+          await reattachLoop(onDone, "probe", isConnectivitySignal);
+        },
+
+        reconnect: async (onDone) => {
+          if (!get().reconnectable) return;
+          // The user explicitly asked for this — unlike an automatic probe, a second
+          // exhaustion should surface the banner again rather than go quiet.
+          await reattachLoop(onDone, "recovery");
         },
 
         stop: () => {
@@ -467,7 +571,7 @@ export const useChat = create<ChatState>()(
           // send. Best-effort; if it fails the turn simply completes and lands in history.
           void api.cancelActiveRun(get().sessionId).catch(() => undefined);
         },
-        clearError: () => set({ error: null, paused: false }),
+        clearError: () => set({ error: null, paused: false, reconnectable: false }),
       };
     },
     {

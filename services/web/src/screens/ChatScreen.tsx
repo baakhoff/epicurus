@@ -22,7 +22,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { AttachButton, AttachmentPill } from "@/components/AttachMenu";
@@ -849,24 +849,28 @@ export function ChatScreen() {
   // Re-attach to an in-flight turn after a reload / reconnect / app-resume (#376): the turn
   // keeps running server-side, so recover it instead of leaving a stale spinner or showing a
   // network error. Fires on mount, when the tab becomes visible again, and when the network
-  // returns; `resumeIfActive` is a no-op when a stream is already live.
+  // returns; `resumeIfActive` is a no-op when a stream is already live. An idle probe that
+  // never confirms a run gives up silently (#477) — it never reaches the banner below.
+  const onSessionSynced = useCallback(async () => {
+    await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
+    void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }, [chat.sessionId, queryClient]);
   const resumeIfActive = chat.resumeIfActive;
   useEffect(() => {
-    const onDone = async () => {
-      await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    };
     const resume = () => {
-      if (document.visibilityState === "visible") void resumeIfActive(onDone);
+      if (document.visibilityState === "visible") void resumeIfActive(onSessionSynced);
     };
+    // `online` specifically is a connectivity signal (#477): if a probe is already
+    // sleeping in backoff, this resets its attempt budget instead of just being ignored.
+    const onOnline = () => void resumeIfActive(onSessionSynced, true);
     resume();
     document.addEventListener("visibilitychange", resume);
-    window.addEventListener("online", resume);
+    window.addEventListener("online", onOnline);
     return () => {
       document.removeEventListener("visibilitychange", resume);
-      window.removeEventListener("online", resume);
+      window.removeEventListener("online", onOnline);
     };
-  }, [resumeIfActive, chat.sessionId, queryClient]);
+  }, [resumeIfActive, onSessionSynced]);
 
   const send = () => {
     const text = chat.draft.trim();
@@ -1128,7 +1132,19 @@ export function ChatScreen() {
                   </div>
                 </div>
               ) : (
-                <p className="text-danger">{chat.error}</p>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-danger">{chat.error}</p>
+                  {chat.reconnectable && (
+                    <Button
+                      variant="ghost"
+                      className="shrink-0 gap-1.5 text-xs"
+                      onClick={() => void chat.reconnect(onSessionSynced)}
+                    >
+                      <RefreshCw size={13} />
+                      Reconnect
+                    </Button>
+                  )}
+                </div>
               )}
             </Card>
           )}

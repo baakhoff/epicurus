@@ -157,6 +157,13 @@ class MoveBody(BaseModel):
     to_path: str
 
 
+class MoveResult(BaseModel):
+    """The outcome of a move: the new path, and whether the re-index succeeded (#470)."""
+
+    path: str
+    indexed: bool
+
+
 class VaultPages:
     """Serves the editor page's data from the operator's Obsidian vault."""
 
@@ -432,14 +439,21 @@ class VaultPages:
         await self._platform.files_delete(core)
         log.info("folder deleted", path=rel)
 
-    async def move_item(self, from_rel: str, to_rel: str) -> dict[str, str]:
-        """Move or rename a file or folder within the vault.
+    async def move_item(self, from_rel: str, to_rel: str) -> MoveResult:
+        """Move or rename a file or folder within the vault, then re-index it (#470).
 
         Both paths are resolved via :func:`~epicurus_knowledge.refs.safe_dir_relative` (no
         ``.md`` requirement, because both files and directories land here). The core file API
         owns the move and its conflict checks (ADR-0064): 404 if the source does not exist,
         409 if the destination already exists, 400 for any path-safety violation, 409 when the
         vault is externally owned (watch mode, #232).
+
+        The file move is the source of truth and happens first; re-indexing via
+        :meth:`~epicurus_knowledge.indexer.KnowledgeIndexer.move_path` is best-effort after
+        that, mirroring :meth:`write_doc` — a re-index failure never undoes an already-applied
+        move (the old path would otherwise strand undeleted vectors behind a 500). Without
+        this the old path's ledger row and Qdrant vectors used to linger indefinitely (until
+        the next full re-index), showing up as a phantom search hit at the stale path.
         """
         self._ensure_writable()
         self._reject_docs_write(from_rel)
@@ -462,7 +476,8 @@ class VaultPages:
                 ) from exc
             raise HTTPException(status_code=status, detail=str(exc)) from exc
         log.info("item moved", from_path=from_rel, to_path=to_rel)
-        return {"path": to_rel}
+        indexed = await self._indexer.move_path(from_rel, to_rel)
+        return MoveResult(path=to_rel, indexed=indexed)
 
     async def list_versions(self, rel: str) -> EditorVersionList:
         """The save-snapshot history for *rel*, newest first (#ADR-0046).
@@ -580,8 +595,8 @@ def create_pages_router(pages: VaultPages) -> APIRouter:
         _require_known_page(page_id)
         await pages.delete_project(name)
 
-    @router.post("/pages/{page_id}/move")
-    async def post_move(page_id: str, body: MoveBody) -> dict[str, str]:
+    @router.post("/pages/{page_id}/move", response_model=MoveResult)
+    async def post_move(page_id: str, body: MoveBody) -> MoveResult:
         _require_known_page(page_id)
         return await pages.move_item(body.from_path, body.to_path)
 

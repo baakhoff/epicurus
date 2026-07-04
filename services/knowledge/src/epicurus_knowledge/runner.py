@@ -86,16 +86,20 @@ class IndexRunner:
     async def run_once(self) -> Counts:
         """Run every indexer once and return the summed ``{indexed, deleted, unchanged}``.
 
-        A reconcile pre-pass runs across *all* sources first (#229), so any that share a
+        A reconcile pre-pass runs across *all* sources first (#229, #470), so any that share a
         Qdrant collection (the vault/platform-docs/module-docs all touch ``<tenant>__docs``)
-        clear their stale ledgers before the first ``run`` recreates the collection.
+        clear their stale ledgers before the first ``run`` recreates the collection, and any
+        with a ledger row for a path that no longer exists gets it GC'd before the walk.
         """
         reconciled = 0
         for indexer in self._indexers:
             if await indexer.reconcile():
                 reconciled += 1
         if reconciled:
-            _log.warning("reconciled sources after a qdrant reset; re-indexing", sources=reconciled)
+            _log.warning(
+                "reconcile changed source state (qdrant-reset recovery or stale-path GC)",
+                sources=reconciled,
+            )
 
         total: Counts = dict.fromkeys(_COUNT_KEYS, 0)
         for indexer in self._indexers:

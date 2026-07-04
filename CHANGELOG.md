@@ -530,6 +530,19 @@ images to GHCR.
   (which parses the event's own RFC3339 offset via normal construction). Also adds the
   explicit test that attendees survive a "this and following" split — already correct by
   inspection, just unasserted until now. `calendar` 0.13.0→0.13.1.
+- **Knowledge: a direct move/rename no longer strands a stale search hit** (#470) — the
+  editor's move endpoint (`POST /pages/{page_id}/move`, drag-and-drop / rename in the UI)
+  relocated the file but never told the indexer, unlike the agent-suggestion approval path,
+  which already paired a move with a re-index. The old path's ledger row and Qdrant vectors
+  lingered indefinitely — showing up as a phantom duplicate in `knowledge_search` — and the
+  new path stayed unindexed until the next full re-index. A new `KnowledgeIndexer.move_path()`
+  (a single file swaps its vectors directly; a folder move reconciles via a full run) is now
+  the one shared implementation both the editor's `move_item()` and the suggestion-approval
+  path call, and the move response gains an `indexed` field (mirroring the save endpoint) so
+  a failed re-index is visible rather than silent. `reconcile()` also now GCs any ledger row
+  whose path the live vault no longer has whenever its Qdrant collection is intact — a cheap,
+  no-re-embed safety net that self-heals a stray stale entry on the next startup or retry
+  pass, independent of the move fix. `knowledge` 0.20.1→0.21.0.
 - **Module tombstone-reconcile and autoconnect warnings no longer log an empty error**
   (#498) — both handlers logged `error=str(exc)` around a bare `except Exception`; for a
   timeout or cancellation (`str(TimeoutError()) == ""`), the warning recorded an empty

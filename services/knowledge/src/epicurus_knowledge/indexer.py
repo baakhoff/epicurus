@@ -341,32 +341,93 @@ class KnowledgeIndexer:
         log.debug("re-indexed single note", path=rel, chunks=chunk_count)
         return chunk_count
 
+    async def move_path(self, from_rel: str, to_rel: str) -> bool:
+        """Re-key the index after *from_rel* was already renamed/moved to *to_rel* on disk.
+
+        The move itself (the file write) is the caller's job — the editor's move endpoint
+        and an approved move suggestion (ADR-0033) both rename via the platform file API
+        first, then call this to keep the ledger + Qdrant in step. Without it the old
+        identity lingers as a phantom search hit indefinitely: nothing else notices a moved
+        path until the next full ``run`` (#470).
+
+        A single ``.md`` file swaps its vectors directly: drop the old path, then re-embed
+        under the new one (point ids are derived from ``note_path``, so they must be
+        recomputed even though the content is unchanged). A folder move renames many notes
+        at once, so the incremental walk in :meth:`run` reconciles the whole subtree in one
+        pass instead. Best-effort like :meth:`index_path`: a failure here must never undo an
+        already-successful move, so it is logged rather than raised. Returns whether the
+        re-index succeeded.
+        """
+        if from_rel.endswith(".md"):
+            await self.remove_path(from_rel)
+            try:
+                await self.index_path(to_rel)
+                return True
+            except Exception as exc:
+                log.warning("move applied but re-index failed", path=to_rel, error=str(exc))
+                return False
+        try:
+            await self.run()
+            return True
+        except Exception as exc:
+            log.warning("folder move applied but re-index failed", path=to_rel, error=str(exc))
+            return False
+
     async def reconcile(self) -> bool:
-        """Self-heal after a Qdrant reset (#229): drop a stale ledger so ``run`` re-indexes.
+        """Self-heal after a Qdrant reset (#229), or GC ledger rows the vault no longer has.
 
         qdrant vectors are derived data and may be wiped on a server upgrade (see the
         ``qdrant-init`` guard). If our collection is gone but the Postgres ledger still
         lists files as indexed, the incremental walk would skip every file and leave the
         collection empty. Detect that drift and clear the ledger so the next ``run``
-        re-embeds from scratch. Returns ``True`` when it cleared the ledger.
+        re-embeds from scratch.
 
         Must run for *all* sources before any ``run`` recreates a collection — the vault
         and module-docs share ``<tenant>__docs`` with the platform docs, so the runner
         reconciles every source up front (see :class:`runner.IndexRunner`).
+
+        When the collection is intact, GC instead (#470): drop any ledger row whose path the
+        live vault no longer has. A cheap, no-re-embed safety net for anything that orphans a
+        path without going through :meth:`move_path` / :meth:`remove_path`, so a stale entry
+        is never more than one reconcile pass (every startup and retry) from clearing itself.
+
+        Returns ``True`` when it changed anything (cleared the ledger, or GC'd stale rows).
         """
-        if await self._qdrant.collection_exists(self._collection):
-            return False
-        known = await self._notes.count(tenant=self._tenant)
-        if known == 0:
-            return False
-        log.warning(
-            "qdrant collection missing but ledger non-empty; clearing ledger to re-index",
-            collection=self._collection,
-            ledger_rows=known,
-        )
-        await self._notes.clear(tenant=self._tenant)
-        self._ensured = False
-        return True
+        if not await self._qdrant.collection_exists(self._collection):
+            known = await self._notes.count(tenant=self._tenant)
+            if known == 0:
+                return False
+            log.warning(
+                "qdrant collection missing but ledger non-empty; clearing ledger to re-index",
+                collection=self._collection,
+                ledger_rows=known,
+            )
+            await self._notes.clear(tenant=self._tenant)
+            self._ensured = False
+            return True
+        return await self._gc_stale()
+
+    async def _gc_stale(self) -> bool:
+        """Drop ledger rows (+ their vectors) whose path no longer exists in the live vault.
+
+        One ``stat`` per ledger row and no content reads or re-embeds, so this is cheap
+        relative to a full :meth:`run` — a reconcile-time complement to it rather than a
+        replacement. Returns ``True`` if anything was removed.
+        """
+        removed = 0
+        for rel in await self._notes.list_paths(tenant=self._tenant):
+            if await self._reader.stat(rel) is not None:
+                continue
+            await self._delete_note_vectors(rel)
+            await self._notes.delete(tenant=self._tenant, note_path=rel)
+            removed += 1
+        if removed:
+            log.warning(
+                "gc: removed ledger rows for paths no longer in the vault",
+                collection=self._collection,
+                count=removed,
+            )
+        return removed > 0
 
     async def reset(self) -> None:
         """Drop this source's vectors **and** ledger so the next ``run`` re-embeds from scratch.

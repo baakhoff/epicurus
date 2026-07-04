@@ -353,24 +353,6 @@ class SuggestionReview:
             )
         return ReviewData(suggestions=items)
 
-    async def _reindex_move(self, from_rel: str, to_rel: str) -> bool:
-        """Re-index after a move: a single file swaps its vectors; a folder reconciles fully."""
-        if from_rel.endswith(".md"):
-            await self._indexer.remove_path(from_rel)
-            try:
-                await self._indexer.index_path(to_rel)
-                return True
-            except Exception as exc:
-                log.warning("move applied but re-index failed", path=to_rel, error=str(exc))
-                return False
-        # A folder move renames many note paths — let the incremental indexer reconcile.
-        try:
-            await self._indexer.run()
-            return True
-        except Exception as exc:
-            log.warning("folder move applied but re-index failed", path=to_rel, error=str(exc))
-            return False
-
     async def approve(self, sid: str, content: str | None = None) -> ApplyResult:
         """Apply a suggestion to the vault (and index it), then drop it from the queue.
 
@@ -408,8 +390,10 @@ class SuggestionReview:
                     raise
             await self._indexer.remove_path(s.path)
         elif s.operation == "move":
-            await self._pages.move_item(s.path, s.to_path)
-            indexed = await self._reindex_move(s.path, s.to_path)
+            # move_item re-indexes internally now (#470) — mirror the create/update branch
+            # above rather than re-indexing a second time.
+            move_result = await self._pages.move_item(s.path, s.to_path)
+            indexed = move_result.indexed
         elif s.operation == "mkdir":
             await self._pages.create_folder(s.path)
         elif s.operation == "mkproject":

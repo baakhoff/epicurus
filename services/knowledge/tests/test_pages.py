@@ -90,11 +90,12 @@ def _status_error(code: int) -> httpx.HTTPStatusError:
 
 
 class _FakeIndexer:
-    """Records index_path / remove_under calls; optionally raises to simulate a failure."""
+    """Records index_path / remove_under / move_path calls; can simulate a re-index failure."""
 
     def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[str] = []
         self.removed_prefixes: list[str] = []
+        self.moves: list[tuple[str, str]] = []
         self._fail = fail
 
     async def index_path(self, rel: str) -> int:
@@ -106,6 +107,10 @@ class _FakeIndexer:
     async def remove_under(self, prefix: str) -> int:
         self.removed_prefixes.append(prefix)
         return 0
+
+    async def move_path(self, from_rel: str, to_rel: str) -> bool:
+        self.moves.append((from_rel, to_rel))
+        return not self._fail
 
 
 def _pages(vault: Path, indexer: object, **kw: object) -> VaultPages:
@@ -362,6 +367,58 @@ async def test_write_rejects_traversal_without_writing(tmp_path: Path) -> None:
         await pages.write_doc("../outside.md", "nope")
     assert not (vault.parent / "outside.md").exists()
     assert indexer.calls == []
+
+
+# ── move / rename (#470: the direct editor move must re-index like write_doc does) ──
+
+
+async def test_move_item_relocates_file_and_reindexes(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    indexer = _FakeIndexer()
+    pages = _pages(vault, indexer)
+    result = await pages.move_item("kb/alpha.md", "kb/renamed.md")
+    assert result.path == "kb/renamed.md"
+    assert result.indexed is True
+    assert not (vault / "kb" / "alpha.md").exists()
+    assert (vault / "kb" / "renamed.md").is_file()
+    # Before #470 this never happened: the old identity's ledger row + Qdrant vectors would
+    # linger indefinitely (a phantom search hit) and the new path stayed unindexed until the
+    # next full re-index.
+    assert indexer.moves == [("kb/alpha.md", "kb/renamed.md")]
+
+
+async def test_move_item_reports_indexed_false_when_reindex_fails(tmp_path: Path) -> None:
+    """The move itself is the source of truth — a re-index failure must not undo it."""
+    vault = _vault(tmp_path)
+    indexer = _FakeIndexer(fail=True)
+    pages = _pages(vault, indexer)
+    result = await pages.move_item("kb/alpha.md", "kb/renamed.md")
+    assert (vault / "kb" / "renamed.md").is_file()
+    assert result.indexed is False
+
+
+async def test_move_item_folder_reindexes_too(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    indexer = _FakeIndexer()
+    pages = _pages(vault, indexer)
+    result = await pages.move_item("kb/sub", "kb/moved_sub")
+    assert result.indexed is True
+    assert (vault / "kb" / "moved_sub" / "beta.md").is_file()
+    assert indexer.moves == [("kb/sub", "kb/moved_sub")]
+
+
+def test_router_moves_a_document(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    indexer = _FakeIndexer()
+    app = FastAPI()
+    app.include_router(create_pages_router(_pages(vault, indexer)))
+    resp = TestClient(app).post(
+        "/pages/vault/move", json={"from_path": "kb/alpha.md", "to_path": "kb/renamed.md"}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "kb/renamed.md", "indexed": True}
+    assert (vault / "kb" / "renamed.md").is_file()
+    assert indexer.moves == [("kb/alpha.md", "kb/renamed.md")]
 
 
 # ── docs scope (read-only platform docs, req 3) ──────────────────────────────

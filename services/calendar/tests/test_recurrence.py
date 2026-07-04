@@ -632,6 +632,37 @@ async def test_recurring_series_keeps_wall_clock_time_across_dst_fallback(
     assert [e.start.astimezone(UTC).hour for e in events] == [13, 14, 14, 14]
 
 
+async def test_dst_anchored_occurrences_serialize_start_in_utc(
+    provider: LocalCalendarProvider,
+) -> None:
+    """A DST-anchored occurrence's raw ``start``/``end`` carry a UTC offset, not the
+    series' stored zone offset (#467).
+
+    The wall-clock assertions above go through ``.astimezone(ny)``/``.astimezone(UTC)``,
+    which normalize *in the assertion* and would pass even if the field itself still
+    carried a ``-04:00``/``-05:00`` offset — ``model_copy`` bypasses ``Event._ensure_aware``,
+    so ``_synthesize_instance`` must normalize explicitly before this is a real guarantee.
+    """
+    start = datetime(2026, 10, 26, 13, 0, tzinfo=UTC)  # Mon Oct 26, 09:00 EDT
+    await provider.create_event(
+        tenant_id="t1",
+        title="Standup",
+        start=start,
+        end=start + timedelta(minutes=30),
+        recurrence="FREQ=WEEKLY;COUNT=4",
+        recurrence_timezone="America/New_York",
+    )
+    events = await provider.list_events(
+        tenant_id="t1",
+        time_range=DateTimeRange(
+            start=datetime(2026, 10, 1, tzinfo=UTC), end=datetime(2026, 12, 1, tzinfo=UTC)
+        ),
+    )
+    assert len(events) == 4
+    assert all(e.start.utcoffset() == timedelta(0) for e in events)
+    assert all(e.end.utcoffset() == timedelta(0) for e in events)
+
+
 async def test_recurring_series_without_a_stored_timezone_expands_in_utc(
     provider: LocalCalendarProvider,
 ) -> None:
@@ -1071,3 +1102,40 @@ async def test_update_following_carries_over_the_original_series_timezone(
     assert len(events) == 4
     # Every occurrence — both series — still reads 09:00 America/New_York wall time.
     assert all(e.start.astimezone(ny).strftime("%H:%M") == "09:00" for e in events)
+
+
+async def test_update_following_pins_attendees_across_the_split(
+    provider: LocalCalendarProvider,
+) -> None:
+    """The split occurrence and its continuation carry the series' attendees forward
+    (#467).
+
+    ``_synthesize_instance``'s ``model_copy`` doesn't strip ``attendees``, and
+    ``_update_following`` falls back to ``base.attendees`` when the caller doesn't
+    override them — but nothing asserted either, unlike the DST-anchor carryover above,
+    so a future refactor could silently drop guests at a split.
+    """
+    guests = [Attendee(email="alice@example.com"), Attendee(email="bob@example.com")]
+    master = await provider.create_event(
+        tenant_id="t1",
+        title="Standup",
+        start=_dt(6),
+        end=_dt(6) + timedelta(minutes=30),
+        recurrence="FREQ=WEEKLY;COUNT=4",  # 6, 13, 20, 27
+        attendees=guests,
+    )
+    iid = instance_id(master.id, _dt(20))
+    new_series = await provider.update_event(
+        tenant_id="t1", event_id=iid, title="Standup (async)", edit_scope="following"
+    )
+    assert new_series is not None
+    assert [a.email for a in new_series.attendees] == ["alice@example.com", "bob@example.com"]
+
+    events = await provider.list_events(
+        tenant_id="t1", time_range=DateTimeRange(start=_dt(1), end=_dt(31))
+    )
+    # Every occurrence — both the untouched original series and the new tail — keeps the
+    # same guest list; the split changes which series owns the occurrence, not its guests.
+    assert all(
+        [a.email for a in e.attendees] == ["alice@example.com", "bob@example.com"] for e in events
+    )

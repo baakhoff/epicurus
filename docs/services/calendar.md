@@ -145,7 +145,10 @@ returns individual **occurrences** (`recurring_event_id` set to the series' id;
   series ignore it (floating dates, ADR-0037); a legacy series with no stored zone falls back
   to the pre-fix UTC anchor. A moved occurrence is windowed by its *actual* (possibly moved)
   time, not its original slot, so rescheduling one across a view boundary can't make it go
-  missing from, or leak into, the adjacent window.
+  missing from, or leak into, the adjacent window. Every returned occurrence's `start`/`end`
+  normalize to a UTC offset regardless of the series' anchor zone (#467) — the anchor zone
+  governs *which* wall-clock slots the RRULE produces, not the wire representation of the
+  result.
 
 **Edit scope.** `calendar_update_event` / `calendar_delete_event` take `edit_scope`:
 `"this"` (default) acts on just the named occurrence — for Google, PATCH/DELETE on its

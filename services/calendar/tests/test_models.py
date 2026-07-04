@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from epicurus_calendar.models import DateTimeRange, Event
 
@@ -55,6 +56,28 @@ def test_naive_event_datetimes_are_coerced_to_utc() -> None:
     assert event.start.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
     # Wall-clock instant is preserved (naive value read as UTC, not shifted).
     assert event.start.hour == 15
+
+
+def test_aware_non_utc_event_datetimes_are_normalized_to_utc() -> None:
+    """A non-UTC aware start/end/original_start normalizes to a UTC offset (#467).
+
+    Google's RFC3339 timestamps carry the event's own zone offset (e.g. ``-04:00`` for an
+    America/New_York meeting), not necessarily ``+00:00`` — construction must re-normalize
+    it rather than passing the foreign offset straight through, or a timed field drifts from
+    the codebase's ``+00:00``/``Z`` convention on serialization.
+    """
+    ny = ZoneInfo("America/New_York")
+    start = datetime(2025, 6, 15, 9, 0, 0, tzinfo=ny)  # 09:00 EDT == 13:00 UTC
+    end = datetime(2025, 6, 15, 10, 0, 0, tzinfo=ny)
+    event = Event(
+        id="z2", title="Zoned", start=start, end=end, provider="google", original_start=start
+    )
+    assert event.start.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
+    assert event.end.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
+    assert event.original_start is not None
+    assert event.original_start.utcoffset().total_seconds() == 0
+    # The instant is preserved, just re-labeled as UTC rather than shifted.
+    assert (event.start.hour, event.end.hour, event.original_start.hour) == (13, 14, 13)
 
 
 def test_mixed_naive_and_aware_events_sort_without_typeerror() -> None:

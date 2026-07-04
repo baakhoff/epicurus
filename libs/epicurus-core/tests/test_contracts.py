@@ -6,6 +6,7 @@ import json
 
 import epicurus_core
 from epicurus_core import (
+    LIST_CAP,
     LOCAL_ACCOUNT,
     Account,
     AccountsView,
@@ -20,6 +21,7 @@ from epicurus_core import (
     PlatformChatResponse,
     PlatformMessage,
     ToolEnvelope,
+    capped_listing,
     tool_envelope,
 )
 
@@ -91,6 +93,40 @@ def test_tool_envelope_round_trips() -> None:
     restored = ToolEnvelope.model_validate(data)
     assert restored.entity_refs[0].ref_id == "e1"
     assert restored.entity_refs[0].summary == "9am"
+
+
+# ── capped_listing (#468) ──────────────────────────────────────────────────────
+
+
+def test_list_cap_helpers_are_exported() -> None:
+    assert {"LIST_CAP", "capped_listing"} <= set(epicurus_core.__all__)
+
+
+def test_capped_listing_under_the_limit_has_no_truncation_note() -> None:
+    text = capped_listing(["- a", "- b"], noun="thing")
+    assert text == "Found 2 thing(s):\n- a\n- b"
+
+
+def test_capped_listing_exactly_at_the_limit_has_no_truncation_note() -> None:
+    items = [f"- item {i}" for i in range(5)]
+    text = capped_listing(items, limit=5, noun="thing")
+    assert "more" not in text
+    assert text.count("\n- item") == 5
+
+
+def test_capped_listing_past_the_limit_truncates_with_a_count() -> None:
+    items = [f"- item {i}" for i in range(7)]
+    text = capped_listing(items, limit=5, noun="thing")
+    assert text.startswith("Found 7 thing(s):")
+    assert text.count("\n- item") == 5  # only the first 5 lines are shown
+    assert "and 2 more" in text
+
+
+def test_capped_listing_default_limit_is_list_cap() -> None:
+    items = [f"- item {i}" for i in range(LIST_CAP + 1)]
+    text = capped_listing(items, noun="thing")
+    assert "and 1 more" in text
+    assert text.count("\n- item") == LIST_CAP
 
 
 def test_hover_card_defaults() -> None:

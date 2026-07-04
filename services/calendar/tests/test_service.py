@@ -47,7 +47,7 @@ from epicurus_calendar.service import (
     event_hover_card,
     fetch_event,
 )
-from epicurus_core import Collection, CollectionPrefs, CollectionRef
+from epicurus_core import LIST_CAP, Collection, CollectionPrefs, CollectionRef
 from epicurus_core.contracts import ToolEnvelope
 
 
@@ -130,6 +130,30 @@ async def test_list_events_clamps_range(local_provider: LocalCalendarProvider) -
     content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 200})
     envelope = _parse_envelope(content)
     assert isinstance(envelope.entity_refs, list)
+
+
+async def test_list_events_text_truncates_past_the_cap_but_chips_stay_full(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # A busy window (RRULE expansion, #443, makes this bite harder in practice) shouldn't
+    # inflate the envelope text with hundreds of lines (#468) — but the chips (entity_refs)
+    # are a UI concern and stay uncapped; the id block's own cap is core-side (agent.py).
+    total = LIST_CAP + 5
+    base = datetime.now(tz=UTC) + timedelta(hours=1)
+    for i in range(total):
+        await local_provider.create_event(
+            tenant_id="t1",
+            title=f"Event {i}",
+            start=base + timedelta(minutes=10 * i),
+            end=base + timedelta(minutes=10 * i + 5),
+        )
+    module = build_module(local_provider, tenant_id="t1")
+    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == total  # chips: every event, uncapped
+    assert envelope.text.startswith(f"Found {total} event(s):")
+    assert envelope.text.count("- Event ") == LIST_CAP  # only the first LIST_CAP lines shown
+    assert "more" in envelope.text
 
 
 # ── calendar_create_event ────────────────────────────────────────────────────
@@ -685,7 +709,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.14.0"
+    assert manifest.version == "0.14.1"
 
 
 async def test_manifest_declares_calendar_oauth_scope(

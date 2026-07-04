@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
-from epicurus_core import Attachment, EntityRef, tool_envelope
+from epicurus_core import LIST_CAP, Attachment, EntityRef, tool_envelope
 from epicurus_core_app.agent.agent import _ANSWER_NUDGE, _EMPTY_ANSWER_FALLBACK, Agent
 from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
@@ -406,6 +406,52 @@ async def test_agent_feeds_entity_ref_ids_to_the_model() -> None:
     assert "Standup" in tool_msg.content and "Retro" in tool_msg.content
     # the UI still receives the refs as chips (unchanged)
     assert [r.ref_id for r in turn.entity_refs] == ["evt_1", "evt_2"]
+
+
+async def test_agent_caps_the_entity_ref_id_block_but_not_the_ui_chips() -> None:
+    # A large ref list (RRULE-expanded calendar events, a wide search) roughly doubles its
+    # context cost once every id is echoed into the model-facing block too — so the block
+    # itself is capped at LIST_CAP (#468), independent of the full ref list the UI's chips
+    # still get.
+    total = LIST_CAP + 7
+    refs = [
+        EntityRef(ref_id=f"evt_{i}", module="calendar", kind="event", title=f"Event {i}")
+        for i in range(total)
+    ]
+    listing = tool_envelope(f"Found {total} event(s):\n...", refs)
+    gw = _FakeGateway(
+        [
+            ChatResult(
+                model="m", content="", tool_calls=[_tool_call("calendar_list_events", "{}")]
+            ),
+            ChatResult(model="m", content="here they are"),
+        ]
+    )
+    mcp = _FakeMcp(
+        specs=[_echo_spec()],
+        route={"calendar_list_events": "u"},
+        outputs={"calendar_list_events": listing},
+    )
+    with capture_logs() as logs:
+        turn = await Agent(gateway=gw, mcp=mcp).run(
+            [ChatMessage(role="user", content="my events?")], tenant_id="tenant-a"
+        )
+
+    tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
+    assert tool_msg.content is not None
+    # Only the first LIST_CAP ids reach the model...
+    assert f"evt_{LIST_CAP - 1}" in tool_msg.content
+    assert f"evt_{LIST_CAP}" not in tool_msg.content
+    assert f"showing {LIST_CAP} of {total}" in tool_msg.content
+    # ...but the UI's chips still carry every ref, uncapped.
+    assert len(turn.entity_refs) == total
+
+    truncated_event = "entity-ref id block truncated for the model"
+    truncation_logs = [e for e in logs if e["event"] == truncated_event]
+    assert truncation_logs
+    assert truncation_logs[0]["total"] == total
+    assert truncation_logs[0]["shown"] == LIST_CAP
+    assert truncation_logs[0]["tenant_id"] == "tenant-a"
 
 
 async def test_agent_dedupes_entity_refs_across_tool_calls() -> None:

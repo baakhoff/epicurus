@@ -10,6 +10,7 @@ from __future__ import annotations
 from epicurus_core._version import __version__
 from epicurus_core.config import CoreSettings, Environment, LogLevel
 from epicurus_core.contracts import (
+    LIST_CAP,
     LOCAL_ACCOUNT,
     Account,
     AccountsView,
@@ -28,6 +29,7 @@ from epicurus_core.contracts import (
     PlatformMessage,
     Role,
     ToolEnvelope,
+    capped_listing,
     tool_envelope,
 )
 from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
@@ -82,6 +84,7 @@ from epicurus_core.tracing import get_tracer, setup_tracing
 
 __all__ = [
     "CONTRACT_VERSION",
+    "LIST_CAP",
     "LOCAL_ACCOUNT",
     "MESSAGING_INBOUND",
     "MESSAGING_OUTBOUND",
@@ -138,6 +141,7 @@ __all__ = [
     "add_manifest_route",
     "add_ops_routes",
     "build_file_store",
+    "capped_listing",
     "configure_logging",
     "create_ops_router",
     "current_tenant",

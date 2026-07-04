@@ -14,6 +14,18 @@ images to GHCR.
 
 ### Added
 
+- **Bound the entity-ref id block and a module's list text for large results** (#468,
+  ADR-0084) — a large ref list (a wide search, RRULE-expanded calendar events over a long
+  window, #443) previously echoed every ref's id into the model's context uncapped, roughly
+  doubling an already-large listing's cost (ADR-0079). The core's entity-ref id block now
+  truncates past `LIST_CAP` (50) refs with a "showing 50 of N — narrow the query/range or
+  ask for more" note, logged with the tenant id — the full ref list still reaches the UI's
+  chips unchanged. A new shared `epicurus_core.capped_listing` helper lets a module cap its
+  own hand-built "Found N ...:" text the same way; `calendar_list_events` adopts it as the
+  first caller. `epicurus-core` 0.22.0→0.23.0, `core-app` 0.59.0→0.60.0 (both MINOR — flag
+  a version-line collision at merge time against other in-flight core-app PRs), `calendar`
+  0.14.0→0.14.1 (PATCH).
+
 - **Editable assistant system prompt — and a real base prompt at last** (#497, ADR-0083) — the
   agent ran with **no** base system prompt: its identity and behaviour were emergent from the tool
   schemas and the model's own defaults. This introduces the mechanism *and* the editor. A

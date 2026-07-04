@@ -6,10 +6,12 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type Ref,
+  type RefObject,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
@@ -39,15 +41,18 @@ export function Button({
   className,
   children,
   disabled,
+  ref,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: ButtonVariant;
   /** `sm` matches a denser toolbar's hand-rolled controls (#427); `md` (default) is the form/CTA size. */
   size?: "sm" | "md";
   busy?: boolean;
+  ref?: Ref<HTMLButtonElement>;
 }) {
   return (
     <button
+      ref={ref}
       className={cn(
         "inline-flex items-center justify-center gap-2 rounded-(--radius-field)",
         "transition-colors disabled:cursor-not-allowed disabled:opacity-50",
@@ -243,6 +248,63 @@ export function Label({ children, hint }: { children: ReactNode; hint?: string }
   );
 }
 
+/* ── Modal focus (#487) ─────────────────────────────────────────────────── */
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * The keyboard contract of a modal overlay (#487): on open, move focus inside — the
+ * dialog container by default, `initialFocus` when given, and neither if a child's
+ * `autoFocus` already claimed it (React applies autoFocus at commit, before effects;
+ * stealing from a search/rename field would pop the phone keyboard shut). While open,
+ * Tab/Shift+Tab wrap inside the dialog. On close, hand focus back to the element that
+ * had it at open. Hand-rolled over querySelectorAll — the kit stays dependency-free.
+ */
+function useModalFocus(
+  container: RefObject<HTMLDivElement | null>,
+  open: boolean,
+  initialFocus?: RefObject<HTMLElement | null>,
+) {
+  useEffect(() => {
+    if (!open) return;
+    const dialog = container.current;
+    if (!dialog) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!dialog.contains(document.activeElement)) {
+      (initialFocus?.current ?? dialog).focus();
+    }
+    const onKeydown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
+      if (focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !dialog.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && (active === first || active === dialog)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    dialog.addEventListener("keydown", onKeydown);
+    return () => {
+      dialog.removeEventListener("keydown", onKeydown);
+      // Hand focus back to the trigger — a harmless no-op if it left the DOM meanwhile.
+      opener?.focus();
+    };
+  }, [container, open, initialFocus]);
+}
+
 /* ── Sheet (bottom drawer on phones, side panel on wide screens) ────────── */
 
 const SheetContext = createContext<(() => void) | null>(null);
@@ -260,6 +322,9 @@ export function Sheet({
   children: ReactNode;
   side?: "bottom" | "left";
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useModalFocus(dialogRef, open);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -270,7 +335,14 @@ export function Sheet({
   if (!open) return null;
   return (
     <SheetContext.Provider value={onClose}>
-      <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label={title}>
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        className="fixed inset-0 z-50 outline-none"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
         <div className="absolute inset-0 bg-black/55" onClick={onClose} />
         <div
           className={cn(
@@ -318,14 +390,40 @@ export function Confirm({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Initial focus lands on Cancel — the safe default under a destructive prompt (#487).
+  useModalFocus(dialogRef, open, cancelRef);
+
+  // Escape cancels. Capture phase + stopPropagation so that a Confirm stacked above an
+  // open Sheet (delete-session over the sessions sheet) closes alone — the Sheet's own
+  // bubble-phase Escape listener must not fire from the same keypress (#487).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, onCancel]);
+
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-60 flex items-center justify-center p-6" role="alertdialog" aria-modal="true">
+    <div
+      ref={dialogRef}
+      tabIndex={-1}
+      className="fixed inset-0 z-60 flex items-center justify-center p-6 outline-none"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="Confirm"
+    >
       <div className="absolute inset-0 bg-black/55" onClick={onCancel} />
       <Card className="relative w-full max-w-sm bg-surface">
         <p className="text-sm text-ink">{message}</p>
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>
+          <Button ref={cancelRef} variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
           <Button variant={danger ? "danger" : "primary"} onClick={onConfirm}>

@@ -53,7 +53,9 @@ CALENDAR_PAGE_ID = "calendar"
 
 # Tool-parameter aliases that surface JSON-Schema hints to the core-rendered form (#208):
 # the web SchemaForm renders an ISO-8601 string with ``format: date-time`` as a native
-# datetime picker, and a ``multiline`` string as a textarea.
+# datetime picker, and a ``multiline`` string as a textarea. The ``recurrence`` field carries
+# ``format: rrule`` (#471) so the form renders the shared friendly repeat picker instead of a
+# raw RRULE text box; the agent tool still accepts a bare RRULE string.
 _IsoDateTime = Annotated[str, Field(json_schema_extra={"format": "date-time"})]
 _Multiline = Annotated[str, Field(json_schema_extra={"format": "multiline"})]
 # A start/end value that collapses to a *date* picker (and emits a ``YYYY-MM-DD`` value)
@@ -197,7 +199,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.13.1",
+        version="0.14.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -292,7 +294,10 @@ def build_module(
                 )
             ),
         ] = None,
-        recurrence: Annotated[str | None, Field(description=_RECURRENCE_DESCRIPTION)] = None,
+        recurrence: Annotated[
+            str | None,
+            Field(json_schema_extra={"format": "rrule"}, description=_RECURRENCE_DESCRIPTION),
+        ] = None,
         attendees: Annotated[str | None, Field(description=_ATTENDEES_DESCRIPTION)] = None,
         add_meet: Annotated[bool, Field(description=_ADD_MEET_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
@@ -369,12 +374,13 @@ def build_module(
         recurrence: Annotated[
             str | None,
             Field(
+                json_schema_extra={"format": "rrule"},
                 description=(
                     _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all' or"
                     " 'following' (omitted there, the new tail series just continues the"
                     " existing pattern); setting it with edit_scope='this' (a single"
                     " occurrence) raises an error."
-                )
+                ),
             ),
         ] = None,
         attendees: Annotated[str | None, Field(description=_ATTENDEES_DESCRIPTION)] = None,

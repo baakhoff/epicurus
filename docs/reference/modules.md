@@ -422,9 +422,13 @@ proxy, refetching on success and surfacing a failed tool's message as a 400 `det
 ```
 
 A tool field whose JSON-Schema declares `format: "date-time"` (or `"date"`) is rendered by
-the shared form as a native datetime/date picker, and `format: "multiline"` as a textarea —
-so the calendar's `start`/`end` get pickers without any custom UI. The same `actions`
-vocabulary works for any archetype that wants core-rendered mutations.
+the shared form as a native datetime/date picker, `format: "multiline"` as a textarea, and
+`format: "rrule"` as a **friendly repeat picker** (None / Daily / Weekdays / Weekly / Monthly
+/ Yearly / Custom…) that submits a bare RFC 5545 RRULE string (#471) — so the tasks `repeat`
+field and the calendar `recurrence` field get a human-friendly control while the agent tool
+still accepts a raw RRULE. The module declares the format once on its tool parameter (via
+`Field(json_schema_extra={"format": "rrule"})`); no markup leaves the module. The same
+`actions` vocabulary works for any archetype that wants core-rendered mutations.
 
 ### Entity references & the resolver (ADR-0019)
 

@@ -27,10 +27,11 @@ from epicurus_tasks.models import Task, TaskScope
 
 _TaskStatus = Literal["open", "in_progress", "done"]
 
-# Columns added after the table's first release (#218, v0.5.0). create_all never
-# alters an existing table, so a database provisioned before then lacks these; they
-# are reconciled in place at startup by ``TaskStore._ensure_columns``.
-_ADDED_COLUMNS = ("status", "priority", "tags")
+# Columns added after the table's first release. create_all never alters an existing table,
+# so a database provisioned before a column existed lacks it; they are reconciled in place at
+# startup by ``TaskStore._ensure_columns``. ``status``/``priority``/``tags`` arrived in v0.5.0
+# (#218); ``repeat`` (the local recurrence rule) in v0.14.0 (#471, ADR-0082).
+_ADDED_COLUMNS = ("status", "priority", "tags", "repeat")
 
 
 class _Base(DeclarativeBase):
@@ -56,6 +57,10 @@ class _StoredTask(_Base):
     status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     priority: Mapped[str | None] = mapped_column(String(16), nullable=True)
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    # Recurrence rule (added v0.14.0, #471): a bare RFC 5545 RRULE on a recurring task; NULL
+    # for a one-off. Emulated module-side (Google Tasks has no recurrence field) — the local
+    # store keeps it in-row, Google in a side table (ADR-0082).
+    repeat: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 def _row_to_task(row: _StoredTask) -> Task:
@@ -75,6 +80,7 @@ def _row_to_task(row: _StoredTask) -> Task:
         completed_at=row.completed_at,
         priority=row.priority,  # type: ignore[arg-type]
         tags=raw_tags,
+        repeat=row.repeat,
     )
 
 
@@ -128,6 +134,7 @@ class TaskStore:
         status: str = "open",
         priority: str | None = None,
         tags: list[str] | None = None,
+        repeat: str | None = None,
     ) -> Task:
         """Insert a new task and return it."""
         task_id = str(uuid.uuid4())
@@ -141,6 +148,7 @@ class TaskStore:
             status=status,
             priority=priority,
             tags=json.dumps(tags or []),
+            repeat=repeat or None,
         )
         async with self._session() as session:
             session.add(row)
@@ -178,13 +186,14 @@ class TaskStore:
         status: str | None = None,
         priority: str | None = None,
         tags: list[str] | None = None,
+        repeat: str | None = None,
     ) -> Task:
         """Patch a task's editable fields and return it.
 
         Only the fields passed (non-``None``) are changed; the rest keep their
-        current value. An empty string clears ``due`` or ``notes`` to ``NULL``
-        rather than storing a literal empty string (#475). Raises :exc:`KeyError`
-        if the task does not exist.
+        current value. An empty string clears ``due`` / ``notes`` / ``repeat`` to
+        ``NULL`` rather than storing a literal empty string (#475; ``repeat`` #471).
+        Raises :exc:`KeyError` if the task does not exist.
         """
         values: dict[str, object] = {}
         if title is not None:
@@ -193,6 +202,8 @@ class TaskStore:
             values["notes"] = notes or None
         if due is not None:
             values["due"] = due or None
+        if repeat is not None:
+            values["repeat"] = repeat or None  # "" clears the recurrence (turns it one-off)
         if status is not None:
             values["status"] = status
             # Keep the legacy completed flag in sync so list_tasks still works.
@@ -244,3 +255,86 @@ class TaskStore:
                 )
             )
             await session.commit()
+
+
+class _StoredRepeat(_Base):
+    """An emulated recurrence rule for an *external-provider* task, tenant-scoped (ADR-0082).
+
+    Google Tasks has no recurrence field, so a repeating Google task's RRULE is kept here,
+    keyed by the provider list + task id. The local store keeps its own rule in-row
+    (``tasks_local.repeat``) and never touches this table. In the shared ``_Base`` metadata,
+    so ``TaskStore.init``'s ``create_all`` provisions it alongside ``tasks_local``.
+    """
+
+    __tablename__ = "task_repeats"
+    __table_args__ = (UniqueConstraint("tenant_id", "list_id", "task_id", name="uq_task_repeats"),)
+
+    pk: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(63), index=True)
+    list_id: Mapped[str] = mapped_column(String(255))
+    task_id: Mapped[str] = mapped_column(String(255), index=True)
+    rrule: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RepeatStore:
+    """Side-table storage of emulated recurrence rules for external-provider tasks (ADR-0082).
+
+    Keyed by ``(tenant_id, list_id, task_id)``. Backs the Google provider, which has no
+    recurrence field; the local provider stores its rule in-row and never uses this. Shares
+    the module's engine, so the table is created by :meth:`TaskStore.init` (same ``_Base``).
+    Writes are delete-then-insert so they work identically on SQLite (tests) and Postgres
+    without a dialect-specific upsert.
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def get(self, *, tenant_id: str, list_id: str, task_id: str) -> str | None:
+        """The rule for one task, or ``None`` if it isn't recurring."""
+        async with self._session() as session:
+            return await session.scalar(
+                select(_StoredRepeat.rrule).where(
+                    _StoredRepeat.tenant_id == tenant_id,
+                    _StoredRepeat.list_id == list_id,
+                    _StoredRepeat.task_id == task_id,
+                )
+            )
+
+    async def get_many(
+        self, *, tenant_id: str, list_id: str, task_ids: list[str]
+    ) -> dict[str, str]:
+        """Rules for many task ids in one query — fills ``task_id -> rrule`` for a list read."""
+        if not task_ids:
+            return {}
+        async with self._session() as session:
+            rows = await session.execute(
+                select(_StoredRepeat.task_id, _StoredRepeat.rrule).where(
+                    _StoredRepeat.tenant_id == tenant_id,
+                    _StoredRepeat.list_id == list_id,
+                    _StoredRepeat.task_id.in_(task_ids),
+                )
+            )
+            return dict(rows.tuples().all())
+
+    async def set(self, *, tenant_id: str, list_id: str, task_id: str, rrule: str | None) -> None:
+        """Upsert (non-empty *rrule*) or clear (``None`` / ``""``) one task's rule."""
+        async with self._session() as session:
+            await session.execute(
+                delete(_StoredRepeat).where(
+                    _StoredRepeat.tenant_id == tenant_id,
+                    _StoredRepeat.list_id == list_id,
+                    _StoredRepeat.task_id == task_id,
+                )
+            )
+            if rrule:
+                session.add(
+                    _StoredRepeat(
+                        tenant_id=tenant_id, list_id=list_id, task_id=task_id, rrule=rrule
+                    )
+                )
+            await session.commit()
+
+    async def delete(self, *, tenant_id: str, list_id: str, task_id: str) -> None:
+        """Retire a task's rule — GC when the task is deleted or vanishes from Google."""
+        await self.set(tenant_id=tenant_id, list_id=list_id, task_id=task_id, rrule=None)

@@ -52,6 +52,7 @@ class TasksProvider(Protocol):
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        repeat: str | None = None,
     ) -> Task:
         """Create and return a new task.
 
@@ -65,6 +66,9 @@ class TasksProvider(Protocol):
                 Google Tasks silently ignores this field.
             tags: Optional list of string labels. Google Tasks silently ignores them.
             list_id: Target list; ``None`` means the default list.
+            repeat: Optional bare RRULE making the task recurring (ADR-0082). Emulated
+                module-side (both providers persist it — Google in a side table); completing
+                the task later materializes the next instance. Requires a ``due`` to anchor.
         """
         ...
 
@@ -109,14 +113,15 @@ class TasksProvider(Protocol):
         tags: list[str] | None = None,
         list_id: str | None = None,
         to_list_id: str | None = None,
+        repeat: str | None = None,
     ) -> Task:
         """Edit a task's content and return the updated task.
 
         Only the fields passed (non-``None``) are changed; omitted fields keep
-        their current value. **An empty string clears** ``due`` or ``notes``
-        (``""`` means "unset", distinct from ``None`` which means "leave
-        unchanged") — #475. Distinct from :meth:`complete_task`, which flips the
-        done flag — this edits content. Google Tasks silently ignores priority/tags;
+        their current value. **An empty string clears** ``due``, ``notes``, or
+        ``repeat`` (``""`` means "unset", distinct from ``None`` which means "leave
+        unchanged") — #475; ``repeat`` #471. Distinct from :meth:`complete_task`, which
+        flips the done flag — this edits content. Google Tasks silently ignores priority/tags;
         ``"in_progress"`` status is mapped to ``"open"`` by Google on read-back.
 
         Args:
@@ -130,6 +135,8 @@ class TasksProvider(Protocol):
             priority: New priority; ``None`` leaves it unchanged.
             tags: New tags list; ``None`` leaves it unchanged.
             list_id: List containing the task; ``None`` means the default list.
+            repeat: New bare RRULE; ``None`` leaves it unchanged, ``""`` clears it (turns the
+                task one-off). Emulated module-side — ADR-0082.
             to_list_id: Move target — honored by the :class:`~epicurus_tasks.router.TasksRouter`
                 (which can move across lists by recreate+delete, ADR-0038). A single provider
                 has no cross-list move and **ignores** it (like Google ignores priority/tags).

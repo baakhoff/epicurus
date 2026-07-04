@@ -20,7 +20,7 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
-from epicurus_tasks.db import TaskStore
+from epicurus_tasks.db import RepeatStore, TaskStore
 from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
@@ -66,12 +66,18 @@ def create_app() -> FastAPI:
 
     engine = create_async_engine(settings.database_url)
     store = TaskStore(engine)
+    # Side table for emulated recurrence rules on external-provider tasks (ADR-0082); shares
+    # the engine, so ``TaskStore.init`` provisions its table too. Google has no recurrence
+    # field, so its repeating tasks' rules live here; the local store keeps its own in-row.
+    repeats = RepeatStore(engine)
 
     # Hold every backend at once and route to the active list per the operator's selection
     # (ADR-0030): the silent local default plus each connectable external provider. There
     # is no longer a single provider chosen at startup.
     local_provider = LocalTasksProvider(store)
-    external: dict[str, TasksProvider] = {"google": GoogleTasksProvider(platform=platform)}
+    external: dict[str, TasksProvider] = {
+        "google": GoogleTasksProvider(platform=platform, repeats=repeats)
+    }
     provider: TasksProvider = TasksRouter(local=local_provider, external=external, prefs=platform)
 
     async def _list_categories() -> list[tuple[str, str]]:

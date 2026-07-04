@@ -237,4 +237,43 @@ describe("SchemaForm", () => {
     // The submit reads as a full-width action bar at the foot of the sheet.
     expect(screen.getByRole("button", { name: "Save" }).className).toContain("w-full");
   });
+
+  // ── repeat picker (format: rrule, #471) ──────────────────────────────────────
+
+  const rruleSchema = {
+    type: "object",
+    properties: { repeat: { type: "string", format: "rrule", title: "Repeat" } },
+  } as const;
+
+  it("renders the repeat picker and submits a preset's canonical RRULE (#471)", () => {
+    const onSubmit = vi.fn();
+    render(<SchemaForm schema={rruleSchema} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByLabelText("Repeat"), { target: { value: "weekly" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ repeat: "FREQ=WEEKLY" });
+  });
+
+  it("preselects the matching preset when editing an existing rule", () => {
+    render(<SchemaForm schema={rruleSchema} initial={{ repeat: "FREQ=DAILY" }} onSubmit={() => {}} />);
+    expect(screen.getByLabelText("Repeat")).toHaveValue("daily");
+  });
+
+  it("reveals a raw RRULE input for Custom and submits it verbatim", () => {
+    const onSubmit = vi.fn();
+    render(<SchemaForm schema={rruleSchema} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByLabelText("Repeat"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("Repeat custom rule"), {
+      target: { value: "FREQ=MONTHLY;INTERVAL=2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ repeat: "FREQ=MONTHLY;INTERVAL=2" });
+  });
+
+  it("submits nothing for 'Does not repeat' (a one-off task)", () => {
+    const onSubmit = vi.fn();
+    render(<SchemaForm schema={rruleSchema} onSubmit={onSubmit} />);
+    // The default selection is "none" → an empty rule, dropped from the submitted args.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({});
+  });
 });

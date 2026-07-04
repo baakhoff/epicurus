@@ -176,3 +176,27 @@ async def test_create_list_not_implemented(provider: LocalTasksProvider) -> None
     """The local store is a single implicit list — it has nothing to create (#474)."""
     with pytest.raises(NotImplementedError, match="connect Google"):
         await provider.create_list(TENANT, "Groceries")
+
+
+# ── Recurrence rule persistence (#471, ADR-0082) ──────────────────────────────
+
+
+async def test_add_task_persists_repeat(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Weekly review", due="2026-07-06", repeat="FREQ=WEEKLY")
+    assert task.repeat == "FREQ=WEEKLY"
+    fetched = await provider.get_task(TENANT, task.id)
+    assert fetched is not None and fetched.repeat == "FREQ=WEEKLY"
+
+
+async def test_add_task_without_repeat_is_one_off(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "One-off", due="2026-07-06")
+    assert task.repeat is None
+
+
+async def test_update_task_sets_and_clears_repeat(provider: LocalTasksProvider) -> None:
+    task = await provider.add_task(TENANT, "Task", due="2026-07-06")
+    updated = await provider.update_task(TENANT, task.id, repeat="FREQ=DAILY")
+    assert updated.repeat == "FREQ=DAILY"
+    # An empty string clears the rule (turns it one-off), like due/notes (#475).
+    cleared = await provider.update_task(TENANT, task.id, repeat="")
+    assert cleared.repeat is None

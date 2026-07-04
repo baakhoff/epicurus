@@ -60,7 +60,11 @@ editing/deleting takes an `edit_scope` of `"this"` (one occurrence) or `"all"` (
 series) — see *Recurring events* under Contract, below. Since **v0.12** (#445) `edit_scope`
 also takes `"following"` — this occurrence and every later one, splitting the series in two.
 Since **v0.13** (#444) event creation can attach a **Google Meet** video-call link — see
-*Google Meet*, below.
+*Google Meet*, below. Since **v0.14** (#471, ADR-0082) the create/edit **form** renders the
+`recurrence` field as a **friendly repeat picker** (None / Daily / Weekdays / Weekly / Monthly
+/ Yearly / Custom…) shared with the tasks form, instead of a raw RRULE text box — the picker
+just authors the same RRULE string, so the agent tool surface and everything below the form is
+unchanged (the `recurrence` parameter still takes a bare RRULE).
 
 ## Contract
 

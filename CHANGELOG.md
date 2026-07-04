@@ -14,6 +14,23 @@ images to GHCR.
 
 ### Added
 
+- **Recurring tasks + a friendly repeat picker** (#471, ADR-0082) — tasks can now **repeat**, on
+  both providers, even though the Google Tasks API has **no recurrence field** (repeat is UI-only).
+  A task carries an optional RRULE; **completing it materializes the next instance** with the next
+  due date and retires the rule on the completed one, so the recurrence lives on exactly one open
+  task at a time (re-completing can't double-fire; a `COUNT`/`UNTIL` series ends cleanly). The rule
+  is stored per provider — a `repeat` column on the local row, a module-owned `task_repeats` side
+  table keyed by task id for Google — but materialization is provider-agnostic (in the
+  `TasksRouter`). The next due date uses a **skip-missed** policy (a late completion rolls forward
+  to the next *future* occurrence). `tasks_add`/`tasks_update` gain a `repeat` parameter; the board
+  card shows a *Repeats weekly* badge. The web form renders `repeat` — and the **calendar's**
+  `recurrence` field, replacing its raw RRULE box — as a shared **friendly repeat picker** (None /
+  Daily / Weekdays / Weekly / Monthly / Yearly / Custom…) via a new `format: rrule` form widget; the
+  agent tools still accept a raw RRULE. Google caveats accepted explicitly: the rule is invisible in
+  Google's own UI, a task changed directly in Google is reconciled on our next refresh, and deleting
+  it in Google retires the rule (GC on miss). `tasks` 0.13.0→0.14.0, `calendar` 0.13.0→0.14.0,
+  `web` 0.75.0→0.76.0.
+
 - **Web: paste & drag-drop attachments in the chat composer** (#489) — pasting a screenshot
   or file from the clipboard into the composer, or dropping files anywhere over the chat
   column, now attaches them exactly as the AttachMenu picker would: same

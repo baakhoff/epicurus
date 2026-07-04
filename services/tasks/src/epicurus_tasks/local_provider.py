@@ -41,6 +41,7 @@ class LocalTasksProvider:
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        repeat: str | None = None,
     ) -> Task:
         return await self._store.add_task(
             tenant_id=tenant_id,
@@ -50,6 +51,7 @@ class LocalTasksProvider:
             status=status,
             priority=priority,
             tags=tags,
+            repeat=repeat,
         )
 
     async def complete_task(
@@ -73,6 +75,7 @@ class LocalTasksProvider:
         tags: list[str] | None = None,
         list_id: str | None = None,
         to_list_id: str | None = None,  # ignored: the single local list has nowhere to move to
+        repeat: str | None = None,
     ) -> Task:
         try:
             return await self._store.update_task(
@@ -84,6 +87,7 @@ class LocalTasksProvider:
                 status=status,
                 priority=priority,
                 tags=tags,
+                repeat=repeat,
             )
         except KeyError as exc:
             raise ValueError(str(exc)) from exc

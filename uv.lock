@@ -874,7 +874,7 @@ dev = [
 
 [[package]]
 name = "epicurus-calendar"
-version = "0.13.0"
+version = "0.13.1"
 source = { editable = "services/calendar" }
 dependencies = [
     { name = "asyncpg" },

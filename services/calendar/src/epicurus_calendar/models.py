@@ -77,21 +77,25 @@ class Event(BaseModel):
     @field_validator("start", "end")
     @classmethod
     def _ensure_aware(cls, value: datetime) -> datetime:
-        """Coerce a naive datetime to UTC so events from different providers compare.
+        """Coerce any datetime to a UTC instant so events from different providers compare.
 
         The local store round-trips datetimes through a tz-naive DB column, while Google
-        returns tz-aware RFC3339 instants. A page that overlays both then sorts a mix of
-        naive and aware values, raising ``TypeError: can't compare offset-naive and
-        offset-aware datetimes`` (the merge sort in ``CalendarRouter.list_events``).
-        Normalising every event datetime to aware (UTC when naive) enforces this model's
-        documented timezone-aware contract and keeps cross-provider ordering total.
+        returns tz-aware RFC3339 instants — in the *event's own* offset, not necessarily UTC
+        (e.g. ``-05:00`` for an America/New_York meeting). A page that overlays both then
+        sorts a mix of naive and aware values, raising ``TypeError: can't compare
+        offset-naive and offset-aware datetimes`` (the merge sort in
+        ``CalendarRouter.list_events``) if naive values survive; a non-UTC offset that
+        survives instead compares fine but drifts from the codebase's ``+00:00``/``Z``
+        convention on serialization (#467). A naive value is assumed already-UTC (just
+        missing the label), so it's tagged rather than converted; an aware non-UTC value is
+        converted so the offset itself normalizes to zero.
         """
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     @field_validator("original_start")
     @classmethod
     def _ensure_aware_optional(cls, value: datetime | None) -> datetime | None:
-        """Same naive-to-UTC coercion as start/end, for the optional ``original_start``."""
-        if value is not None and value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value
+        """Same naive/non-UTC coercion as start/end, for the optional ``original_start``."""
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

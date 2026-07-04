@@ -490,6 +490,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Calendar: DST-anchored occurrence starts normalize to UTC; attendee carry-over across a
+  "following" split now has an explicit test** (#467) — after the ADR-0077 timezone anchor
+  (#446), a DST-anchored occurrence's `start`/`end` came back tzinfo-aware **in the series'
+  stored zone** (e.g. `2026-11-02T09:00:00-05:00`) instead of the codebase's `+00:00`/`Z`
+  convention. Root cause: `_synthesize_instance` builds each occurrence via `model_copy`,
+  which — unlike normal construction — never runs `Event._ensure_aware`, so the validator
+  alone can't fix it. Two fixes: `_synthesize_instance` (`providers/local.py`) now normalizes
+  explicitly, and `_ensure_aware`/`_ensure_aware_optional` (`models.py`) now also normalize any
+  aware-but-non-UTC value, closing the same latent gap in Google's `_google_item_to_event`
+  (which parses the event's own RFC3339 offset via normal construction). Also adds the
+  explicit test that attendees survive a "this and following" split — already correct by
+  inspection, just unasserted until now. `calendar` 0.13.0→0.13.1.
 - **Module tombstone-reconcile and autoconnect warnings no longer log an empty error**
   (#498) — both handlers logged `error=str(exc)` around a bare `except Exception`; for a
   timeout or cancellation (`str(TimeoutError()) == ""`), the warning recorded an empty

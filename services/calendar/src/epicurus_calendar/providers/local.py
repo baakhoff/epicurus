@@ -13,7 +13,7 @@ mean; ``"following"`` (#445) splits a series in two via ``epicurus_calendar.recu
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrule, rrulestr
@@ -74,14 +74,22 @@ def _in_range(at: datetime, time_range: DateTimeRange) -> bool:
 
 
 def _synthesize_instance(master: Event, occurrence_start: datetime, duration: timedelta) -> Event:
-    """An unmodified occurrence of *master*, as a full :class:`Event` (#432)."""
+    """An unmodified occurrence of *master*, as a full :class:`Event` (#432).
+
+    ``occurrence_start`` comes from a DST-anchored series' ``rrule`` (see ``_safe_rrule``)
+    in the series' stored IANA zone, not UTC. ``model_copy`` — unlike normal construction —
+    skips field validators entirely, so ``Event._ensure_aware`` never runs on the ``start``/
+    ``end``/``original_start`` set here; without this explicit ``astimezone(UTC)`` a
+    DST-anchored occurrence would keep its non-UTC offset (#467).
+    """
+    start = occurrence_start.astimezone(UTC)
     return master.model_copy(
         update={
             "id": instance_id(master.id, occurrence_start),
-            "start": occurrence_start,
-            "end": occurrence_start + duration,
+            "start": start,
+            "end": start + duration,
             "recurring_event_id": master.id,
-            "original_start": occurrence_start,
+            "original_start": start,
             "recurrence": None,  # an instance doesn't carry its own series rule
         }
     )

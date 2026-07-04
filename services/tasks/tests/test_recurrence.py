@@ -56,6 +56,13 @@ def test_monthly_on_time_advances_one_month() -> None:
     assert next_due("2026-01-15", "FREQ=MONTHLY", today="2026-01-15") == "2026-02-15"
 
 
+def test_monthly_jan31_skips_short_months_rather_than_clamping() -> None:
+    # dateutil's FREQ=MONTHLY does not clamp to the last day of a short month — a month with
+    # no 31st (Feb, and any 30-day month) is simply skipped, not rolled to its own end (#515).
+    # 2026 is not a leap year, so Feb has 28 days: Jan 31 -> Mar 31, Feb entirely skipped.
+    assert next_due("2026-01-31", "FREQ=MONTHLY", today="2026-01-31") == "2026-03-31"
+
+
 def test_weekdays_rule_skips_the_weekend() -> None:
     # Completed Friday → next weekday is the following Monday, not Saturday.
     assert next_due(FRI, "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", today=FRI) == NEXT_MON

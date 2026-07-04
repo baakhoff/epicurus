@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Tasks: overdue recurrence sweep** (#515) — a recurring task nobody ever completed used to
+  sit overdue forever (materialization was on-complete only). Every read (`tasks_list`, the
+  board) now also materializes a fresh instance for an open, overdue recurring task: the
+  overdue task itself stays open and untouched — only its rule retires, moving the recurrence
+  to a new successor (skip-missed, like a late completion). Also: a materialize failure (next-due
+  computation, successor creation, or rule retirement) is logged and never breaks the
+  completion/read that triggered it, with one retry on the retire write before giving up;
+  `tasks_update` now rejects setting `repeat` on a task with no due date (matching `tasks_add`);
+  and the shared board `SchemaForm` (tasks + calendar) now sends an explicit clear for an
+  optional field that had a value and was blanked — "Does not repeat" over an existing rule
+  actually clears it now, instead of being silently dropped. `tasks` 0.14.0→0.15.0, `web`
+  0.76.0→0.76.1.
+
 - **Recurring tasks + a friendly repeat picker** (#471, ADR-0082) — tasks can now **repeat**, on
   both providers, even though the Google Tasks API has **no recurrence field** (repeat is UI-only).
   A task carries an optional RRULE; **completing it materializes the next instance** with the next

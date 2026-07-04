@@ -293,13 +293,14 @@ class RepeatStore:
     async def get(self, *, tenant_id: str, list_id: str, task_id: str) -> str | None:
         """The rule for one task, or ``None`` if it isn't recurring."""
         async with self._session() as session:
-            return await session.scalar(
+            rule: str | None = await session.scalar(
                 select(_StoredRepeat.rrule).where(
                     _StoredRepeat.tenant_id == tenant_id,
                     _StoredRepeat.list_id == list_id,
                     _StoredRepeat.task_id == task_id,
                 )
             )
+            return rule
 
     async def get_many(
         self, *, tenant_id: str, list_id: str, task_ids: list[str]

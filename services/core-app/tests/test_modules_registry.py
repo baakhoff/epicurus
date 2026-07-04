@@ -740,6 +740,23 @@ async def test_reconcile_without_docker_is_noop() -> None:
     await registry.reconcile_tombstones()  # must not raise
 
 
+async def test_reconcile_tombstones_logs_repr_of_bare_exception() -> None:
+    # A bare TimeoutError() str()s to "" — logging str(exc) here would record an empty
+    # error field. repr(exc) is always non-empty (#498, the #478/#482 pattern applied
+    # to this handler's remaining bare-Exception catch). Tombstone first with a clean
+    # docker so "echo" lands in removed_modules, then make the reconcile's own
+    # remove_module call fail with a bare exception.
+    docker = _FakeDocker(count=1)
+    registry, _, _ = _registry(docker=docker)
+    await registry.remove("echo")
+    docker._error = TimeoutError()
+    with capture_logs() as logs:
+        await registry.reconcile_tombstones()
+    failures = [entry for entry in logs if entry["event"] == "tombstone reconcile failed"]
+    assert len(failures) == 1
+    assert failures[0]["error"] == "TimeoutError()"
+
+
 # ── Path-segment hardening (#175): reject '/', '\', '..' in interpolated segments ──
 
 
@@ -1127,6 +1144,24 @@ async def test_autoconnect_never_overrides_existing_selection() -> None:
 async def test_autoconnect_ignores_modules_not_using_provider() -> None:
     registry, _, _ = _registry()  # echo declares no collections
     assert await registry.autoconnect_collections("google") == []
+
+
+async def test_autoconnect_logs_repr_of_bare_exception() -> None:
+    # A bare TimeoutError() str()s to "" — logging str(exc) here would record an empty
+    # error field. accounts_view's underlying GET raises before _get_json's own
+    # httpx.HTTPError handling applies, so the bare exception reaches this handler's
+    # except Exception directly (#498, the #478/#482 pattern applied to this handler's
+    # remaining bare-Exception catch).
+    registry, _, _ = _registry(manifest=_collections_manifest())
+    cls, client = _patch_get(error=TimeoutError())
+    with cls as mock_cls, capture_logs() as logs:
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        seeded = await registry.autoconnect_collections("google")
+    assert seeded == []
+    failures = [entry for entry in logs if entry["event"] == "autoconnect: accounts unavailable"]
+    assert len(failures) == 1
+    assert failures[0]["error"] == "TimeoutError()"
 
 
 async def test_disconnect_clears_provider_selection() -> None:

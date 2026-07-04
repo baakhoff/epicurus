@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import structlog
 from fastapi import HTTPException
 from structlog.testing import capture_logs
 
@@ -26,6 +28,32 @@ from epicurus_core import (
 from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.docker_control import DockerError
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
+
+
+@pytest.fixture(autouse=True)
+def _unconfigured_structlog() -> Iterator[None]:
+    """Isolate every test in this file from another test's ``configure_logging()`` call.
+
+    Whichever test in the full suite happens to boot the real app first (e.g.
+    ``test_epicurus_core_app.py`` / ``test_core_app_lifespan.py``, both of which call
+    ``create_app()``) pins structlog's global ``wrapper_class`` to filter at the
+    process's configured level (``info`` by default) for the rest of the pytest
+    process — ``structlog.configure()`` has no per-process scoping. That silently
+    drops every ``log.debug(...)`` call afterward, including the ones the
+    health-transition tests below assert on via ``capture_logs()``, even though each
+    test already constructs its own fresh ``ModuleRegistry``. Reset to structlog's
+    built-in (unfiltered) defaults before each test and restore whatever was
+    configured beforehand afterward, so this file's log-level assertions hold
+    regardless of what ran earlier in the same session.
+    """
+    was_configured = structlog.is_configured()
+    prev_config = structlog.get_config() if was_configured else None
+    structlog.reset_defaults()
+    yield
+    if was_configured and prev_config is not None:
+        structlog.configure(**prev_config)
+    else:
+        structlog.reset_defaults()
 
 
 class _FakeMcp:

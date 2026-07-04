@@ -101,7 +101,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.1",
+        version="0.12.0",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -240,7 +240,8 @@ def build_module(
 
         Args:
             task_id: The provider-specific task identifier (from ``tasks_list``).
-            list_id: The list containing the task.  Omit for the default list.
+            list_id: The list containing the task.  Omit to have it looked up across
+                your lists — you don't need to know which one it's in.
 
         Returns the updated :class:`Task` with ``completed=True``.
         """
@@ -264,7 +265,13 @@ def build_module(
         """Edit an existing task's title, notes, due date, priority, tags, or status.
 
         Only the fields you pass are changed; omitted fields keep their current
-        value. To mark a task done use ``tasks_complete`` — this tool edits content.
+        value — pass **at least one** field (or ``to_list_id``), or this raises an
+        error rather than silently doing nothing. To mark a task done use
+        ``tasks_complete`` — this tool edits content.
+
+        To **clear** the due date or notes, pass an empty string: ``due=""`` removes
+        the due date, ``notes=""`` removes the notes. Omitting a field is different
+        from clearing it — omitting leaves it unchanged, ``""`` blanks it out.
 
         To **move** the task to another list, pass ``to_list_id`` (a list id from
         ``tasks_lists``). On Google Tasks a move recreates the task in the target list —
@@ -273,21 +280,35 @@ def build_module(
         Args:
             task_id: The provider-specific task identifier (from ``tasks_list``).
             title: New title.  Omit to leave it unchanged.
-            notes: New free-text notes.  Omit to leave them unchanged.
+            notes: New free-text notes.  Omit to leave them unchanged; pass ``""`` to clear.
             due: New due date as an ISO date string, e.g. ``"2025-01-15"``.  Omit
-                to leave it unchanged.
+                to leave it unchanged; pass ``""`` to clear it.
             priority: New priority (``"low"``/``"medium"``/``"high"``).  Omit to
                 leave unchanged.  Google Tasks ignores this field.
             tags: New comma-separated tags, e.g. ``"work, urgent"``.  Omit to leave
                 unchanged.  Google Tasks ignores this field.
             status: New status (``"open"``/``"in_progress"``/``"done"``).  Omit to
                 leave unchanged.
-            list_id: The list the task currently lives in.  Omit for the default list.
+            list_id: The list the task currently lives in.  Omit to have it looked up
+                across your lists — you don't need to know which one it's in.
             to_list_id: Move the task to this list.  Omit to leave it where it is; when
                 equal to its current list it's a no-op move (a normal edit).
 
         Returns the updated :class:`Task`.
         """
+        if (
+            title is None
+            and notes is None
+            and due is None
+            and priority is None
+            and tags is None
+            and status is None
+            and to_list_id is None
+        ):
+            raise RuntimeError(
+                "nothing to change — pass at least one field to edit;"
+                ' to clear the due date pass due="", or to clear notes pass notes=""'
+            )
         if priority is not None and priority not in VALID_PRIORITIES:
             raise RuntimeError(
                 f"invalid priority {priority!r}; must be one of {sorted(VALID_PRIORITIES)}"
@@ -322,7 +343,8 @@ def build_module(
 
         Args:
             task_id: The provider-specific task identifier (from ``tasks_list``).
-            list_id: The list containing the task.  Omit for the default list.
+            list_id: The list containing the task.  Omit to have it looked up across
+                your lists — you don't need to know which one it's in.
 
         Returns a short confirmation string.
         """

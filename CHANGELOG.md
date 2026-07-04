@@ -475,6 +475,23 @@ images to GHCR.
 
 ### Fixed
 
+- **`tasks_update` can no longer silently no-op, and can now clear a due date or notes**
+  (#475) — a dogfood session asked the agent to remove a task's due date; it called
+  `tasks_update` repeatedly, each call reported success, and nothing ever changed, on the
+  task page or in Google Tasks. Three compounding bugs: (1) omitting a field and "clearing"
+  it were the same call shape — there was no way to *unset* `due`/`notes`, so the agent's
+  only option (omit the field) meant "leave unchanged"; (2) a field-less update was itself
+  silently treated as success (Google's provider GETs and returns the current task when
+  there's nothing to change, by design); and (3) a mutation with no `list_id` always
+  targeted the default list, so a task living in another enabled list 404'd there instead of
+  being found — the likely source of the intermittent ✗ failures in the same run. Fixed: an
+  empty string (`due=""`, `notes=""`) now explicitly clears the field (Google sends a PATCH
+  `null`; the local store writes `NULL` instead of a literal empty string); `tasks_update`
+  rejects a call with nothing to change (title/notes/due/priority/tags/status/`to_list_id`
+  all omitted) with an actionable error instead of succeeding as a no-op; and
+  `complete_task`/`update_task`/`delete_task` now search across the operator's enabled lists
+  (the same active → enabled → local order `get_task` already used) when `list_id` is
+  omitted, instead of assuming the default write target. `tasks` 0.11.1→0.12.0.
 - **Memory recall/save no longer silently break after an embedding-model change** (#436) — the
   `<tenant>__facts` Qdrant collection was created at whatever dimension the embedder had when it
   was first touched; swapping to a differently-sized model left it stale, and every recall/save

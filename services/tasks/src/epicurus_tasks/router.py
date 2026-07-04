@@ -8,9 +8,12 @@ module — **each enabled list is a category**:
 * **reads** (``list_tasks`` with no ``list_id``) aggregate every *enabled* list, tagging
   each task with the list it came from (``list_id`` / ``list_title``); a failing source is
   skipped, not fatal (#209). An explicit ``list_id`` reads just that one list.
-* **writes** (``add_task``) and **per-task mutations** (``complete_task`` / ``update_task``)
-  target the list that owns the given ``list_id``; with none, the default write target is
-  the *active* list, else the first enabled, else local.
+* **creates** (``add_task``) target the list named by ``list_id``; with none, the default
+  write target is the *active* list, else the first enabled, else local.
+* **per-task mutations** (``complete_task`` / ``update_task`` / ``delete_task``) target the
+  list named by ``list_id`` when given; with none, they *search* for the task the same way
+  ``get_task`` does (active → other enabled → local) instead of assuming the default write
+  target, so a mutation reaches a task living in a non-default list (#475).
 * ``get_task`` searches the active, then the other enabled, then local — so a referenced
   task resolves wherever it lives.
 
@@ -129,7 +132,7 @@ class TasksRouter:
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
     ) -> Task:
         prefs = await self._load_prefs()
-        provider, ref = self._resolve_collection(list_id, prefs)
+        provider, ref = await self._locate_task(tenant_id, task_id, list_id, prefs)
         return await provider.complete_task(tenant_id, task_id, list_id=ref.collection or None)
 
     async def update_task(
@@ -147,7 +150,7 @@ class TasksRouter:
         to_list_id: str | None = None,
     ) -> Task:
         prefs = await self._load_prefs()
-        provider, ref = self._resolve_collection(list_id, prefs)
+        provider, ref = await self._locate_task(tenant_id, task_id, list_id, prefs)
         if to_list_id is not None:
             target_provider, target_ref = self._resolve_collection(to_list_id, prefs)
             if (target_ref.account, target_ref.collection) != (ref.account, ref.collection):
@@ -182,7 +185,7 @@ class TasksRouter:
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
     ) -> None:
         prefs = await self._load_prefs()
-        provider, ref = self._resolve_collection(list_id, prefs)
+        provider, ref = await self._locate_task(tenant_id, task_id, list_id, prefs)
         await provider.delete_task(tenant_id, task_id, list_id=ref.collection or None)
 
     async def _move_task(
@@ -264,6 +267,42 @@ class TasksRouter:
         return []
 
     # ── routing & tagging helpers ──────────────────────────────────────────────
+
+    async def _locate_task(
+        self, tenant_id: str, task_id: str, list_id: str | None, prefs: CollectionPrefs
+    ) -> tuple[TasksProvider, CollectionRef]:
+        """The provider + ref owning *task_id*, for a mutation on an *existing* task.
+
+        An explicit *list_id* is honored as-is (delegates to :meth:`_resolve_collection`,
+        no search needed). With none, this searches active → other enabled → local — the
+        same order as :meth:`get_task` — so ``complete_task`` / ``update_task`` /
+        ``delete_task`` reach the list the task actually lives in instead of assuming the
+        default write target (#475): a task added to a non-default list would otherwise have
+        its mutation routed to the active/first-enabled list and 404 there. A source that
+        errors is skipped, not fatal (#209). If the task isn't found anywhere, falls back to
+        the default write target so a genuinely bad id still gets the provider's own
+        not-found error, unchanged from before this search existed.
+        """
+        if list_id is not None:
+            return self._resolve_collection(list_id, prefs)
+        for ref in self._search_refs(prefs):
+            provider = self._provider_for(ref.account)
+            if provider is None:
+                continue
+            try:
+                task = await provider.get_task(tenant_id, task_id, list_id=ref.collection or None)
+            except Exception as exc:
+                log.warning(
+                    "task lookup failed while locating a mutation target;"
+                    " trying next source (#209)",
+                    account=ref.account,
+                    collection=ref.collection,
+                    error=str(exc),
+                )
+                continue
+            if task is not None:
+                return provider, ref
+        return self._resolve_collection(list_id, prefs)
 
     def _resolve_collection(
         self, list_id: str | None, prefs: CollectionPrefs

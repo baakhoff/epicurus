@@ -182,15 +182,17 @@ class TaskStore:
         """Patch a task's editable fields and return it.
 
         Only the fields passed (non-``None``) are changed; the rest keep their
-        current value. Raises :exc:`KeyError` if the task does not exist.
+        current value. An empty string clears ``due`` or ``notes`` to ``NULL``
+        rather than storing a literal empty string (#475). Raises :exc:`KeyError`
+        if the task does not exist.
         """
         values: dict[str, object] = {}
         if title is not None:
             values["title"] = title
         if notes is not None:
-            values["notes"] = notes
+            values["notes"] = notes or None
         if due is not None:
-            values["due"] = due
+            values["due"] = due or None
         if status is not None:
             values["status"] = status
             # Keep the legacy completed flag in sync so list_tasks still works.

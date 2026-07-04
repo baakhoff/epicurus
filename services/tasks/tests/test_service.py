@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.11.1"
+    assert manifest.version == "0.12.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -174,6 +174,56 @@ async def test_update_nonexistent_raises(module_fixture: object) -> None:
         await mod.mcp.call_tool(  # type: ignore[attr-defined]
             "tasks_update", {"task_id": "bad-id", "title": "x"}
         )
+
+
+# ── Clear sentinel + no-op rejection (#475: agent phantom updates) ────────────
+
+
+async def test_tasks_update_rejects_field_less_call(module_fixture: object) -> None:
+    """A tasks_update with nothing to change is a loud error, not a silent success."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool("tasks_add", {"title": "Untouched"})  # type: ignore[attr-defined]
+
+    with pytest.raises(Exception, match="nothing to change"):
+        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_update", {"task_id": task["id"]}
+        )
+
+
+async def test_tasks_update_with_only_to_list_id_is_not_rejected(module_fixture: object) -> None:
+    """to_list_id alone is a legitimate move, not a no-op — the local provider ignores the
+    move target (single flat list) but the call must not raise "nothing to change"."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool("tasks_add", {"title": "Movable"})  # type: ignore[attr-defined]
+
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "to_list_id": "somewhere"}
+    )
+    assert updated["title"] == "Movable"
+
+
+async def test_tasks_update_clears_due_with_empty_string(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Has a date", "due": "2026-01-01"}
+    )
+
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "due": ""}
+    )
+    assert updated["due"] is None
+
+
+async def test_tasks_update_clears_notes_with_empty_string(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Has notes", "notes": "some notes"}
+    )
+
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "notes": ""}
+    )
+    assert updated["notes"] is None
 
 
 # ── Chat-attachment source helpers (ADR-0019) ─────────────────────────────────
@@ -440,7 +490,13 @@ class _FakeGoogleTasks:
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
     ) -> Task | None:
         self.last_list_id = list_id
-        return next((t for t in self.tasks if t.id == task_id), None)
+        self.list_ids_seen.append(list_id)
+        if list_id in self.fail_lists:
+            raise RuntimeError("list read failed")
+        # Scoped the same way as list_tasks: a list not overridden in tasks_by_list
+        # falls back to the flat `tasks` bucket (so single-list tests are unaffected).
+        bucket = self.tasks_by_list.get(list_id, self.tasks)
+        return next((t for t in bucket if t.id == task_id), None)
 
 
 class _StaticPrefs:
@@ -691,3 +747,87 @@ async def test_tasks_lists_tool_reports_default_only_without_categories() -> Non
     module = build_module(_FakeGoogleTasks(), tenant_id=TENANT)  # no discovery hook
     content, _ = await module.mcp.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
     assert "default task list" in content[0].text.lower()
+
+
+# ── Cross-list resolution when list_id is omitted (#475) ──────────────────────
+#
+# complete_task / update_task / delete_task must find the task even when it lives in a
+# non-default enabled list, instead of assuming the default write target and 404ing there
+# (the incident: the agent tried to edit a task that lived outside "@default").
+
+
+async def test_router_update_without_list_id_resolves_across_lists() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    # The task lives only in "work" — not the default write target ("@default").
+    google.tasks_by_list = {"@default": [], "work": [Task(id="w1", title="Hiding in work")]}
+    await router.update_task(TENANT, "w1", title="Found me")
+    # The default list was checked and missed before "work" was tried and matched.
+    assert google.list_ids_seen == ["@default", "work"]
+    assert google.last_list_id == "work"
+
+
+async def test_router_complete_without_list_id_resolves_across_lists() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {"@default": [], "work": [Task(id="w1", title="Hiding in work")]}
+    await router.complete_task(TENANT, "w1")
+    assert google.list_ids_seen == ["@default", "work"]
+    assert google.last_list_id == "work"
+
+
+async def test_router_delete_without_list_id_resolves_across_lists() -> None:
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {"@default": [], "work": [Task(id="w1", title="Hiding in work")]}
+    await router.delete_task(TENANT, "w1")
+    assert google.list_ids_seen == ["@default", "work"]
+    assert ("work", "w1") in google.deleted
+
+
+async def test_router_update_falls_back_to_default_when_task_not_found_anywhere() -> None:
+    """An id that doesn't exist in any enabled/local list still routes to the default
+    write target — preserving the prior behavior for a genuinely bad id (the provider,
+    not the router, is what raises/404s for it)."""
+    refs = [CollectionRef(account="google", collection="work")]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks = []  # not found in "work", nor in local
+    await router.update_task(TENANT, "ghost", title="x")
+    assert google.last_list_id == "work"
+
+
+async def test_router_locate_task_skips_a_failing_list() -> None:
+    """A source that errors during the search is skipped, not fatal (#209), and the search
+    continues to the next candidate."""
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.fail_lists = {"@default"}
+    google.tasks_by_list = {"work": [Task(id="w1", title="Hiding in work")]}
+    await router.update_task(TENANT, "w1", title="Found me")
+    assert google.list_ids_seen == ["@default", "work"]
+    assert google.last_list_id == "work"
+
+
+async def test_tasks_complete_tool_resolves_across_lists_without_list_id() -> None:
+    """The MCP tool surface benefits from the same resolution (agent never passes list_id)."""
+    refs = [
+        CollectionRef(account="google", collection="@default"),
+        CollectionRef(account="google", collection="work"),
+    ]
+    router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
+    google.tasks_by_list = {"@default": [], "work": [Task(id="w1", title="Hiding in work")]}
+    module = build_module(router, tenant_id=TENANT)
+    await module.mcp.call_tool("tasks_complete", {"task_id": "w1"})  # type: ignore[attr-defined]
+    assert google.last_list_id == "work"

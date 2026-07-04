@@ -217,6 +217,31 @@ async def test_update_task(provider: GoogleTasksProvider) -> None:
     }
 
 
+async def test_update_task_clears_due_with_empty_string(provider: GoogleTasksProvider) -> None:
+    """due="" sends an explicit null so Google clears the due date, rather than being
+    silently dropped by a truthiness check (#475)."""
+    cleared = {"id": "goog-task-1", "title": "Write tests", "status": "needsAction"}
+    client = _tasks_client(cleared)
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        task = await provider.update_task(TENANT, "goog-task-1", due="")
+
+    assert task.due is None
+    client.patch.assert_awaited_once()
+    assert client.patch.call_args.kwargs["json"] == {"due": None}
+
+
+async def test_update_task_clear_due_alongside_other_fields(
+    provider: GoogleTasksProvider,
+) -> None:
+    """Clearing due alongside another edit sends both in the same PATCH body."""
+    updated = {"id": "goog-task-1", "title": "Retitled", "status": "needsAction"}
+    client = _tasks_client(updated)
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        await provider.update_task(TENANT, "goog-task-1", title="Retitled", due="")
+
+    assert client.patch.call_args.kwargs["json"] == {"title": "Retitled", "due": None}
+
+
 async def test_update_task_noop_reads_current(provider: GoogleTasksProvider) -> None:
     """With no fields to change, update GETs the task instead of PATCHing."""
     client = _tasks_client(_GOOGLE_TASK)

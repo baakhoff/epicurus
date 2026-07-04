@@ -26,17 +26,25 @@ nothing is enabled or the core is unreachable (local-first).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Protocol
 
 from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
 from epicurus_tasks.models import Task, TaskScope
 from epicurus_tasks.providers import TasksProvider
+from epicurus_tasks.recurrence import next_due
 
 log = get_logger("epicurus_tasks.router")
 
 _LOCAL_REF = CollectionRef(account=LOCAL_ACCOUNT)
 _LOCAL_TITLE = "Personal"
 """Category label for the silent local default list (ADR-0036)."""
+
+
+def _utc_today() -> str:
+    """Today's date (UTC) as an ISO string — the default clock for materialization."""
+    return datetime.now(UTC).date().isoformat()
 
 
 class CollectionPrefsSource(Protocol):
@@ -59,10 +67,14 @@ class TasksRouter:
         local: TasksProvider,
         external: dict[str, TasksProvider],
         prefs: CollectionPrefsSource,
+        now: Callable[[], str] = _utc_today,
     ) -> None:
         self._local = local
         self._external = external
         self._prefs = prefs
+        # Clock for recurrence materialization (ADR-0082); injectable so tests are
+        # deterministic without freezing the wall clock.
+        self._now = now
 
     def provider_name(self) -> str:
         return "tasks"
@@ -116,6 +128,7 @@ class TasksRouter:
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        repeat: str | None = None,
     ) -> Task:
         prefs = await self._load_prefs()
         provider, ref = self._resolve_collection(list_id, prefs)
@@ -128,6 +141,7 @@ class TasksRouter:
             priority=priority,
             tags=tags,
             list_id=ref.collection or None,
+            repeat=repeat,
         )
 
     async def complete_task(
@@ -135,7 +149,11 @@ class TasksRouter:
     ) -> Task:
         prefs = await self._load_prefs()
         provider, ref = await self._locate_task(tenant_id, task_id, list_id, prefs)
-        return await provider.complete_task(tenant_id, task_id, list_id=ref.collection or None)
+        done = await provider.complete_task(tenant_id, task_id, list_id=ref.collection or None)
+        # If the completed task carried a repeat rule, materialize its next instance and retire
+        # the rule on this one — the recurrence moves to the live successor (ADR-0082).
+        await self._materialize_next(tenant_id, provider, ref, done)
+        return done
 
     async def update_task(
         self,
@@ -150,6 +168,7 @@ class TasksRouter:
         tags: list[str] | None = None,
         list_id: str | None = None,
         to_list_id: str | None = None,
+        repeat: str | None = None,
     ) -> Task:
         prefs = await self._load_prefs()
         provider, ref = await self._locate_task(tenant_id, task_id, list_id, prefs)
@@ -170,6 +189,7 @@ class TasksRouter:
                     status=status,
                     priority=priority,
                     tags=tags,
+                    repeat=repeat,
                 )
         return await provider.update_task(
             tenant_id,
@@ -181,6 +201,7 @@ class TasksRouter:
             priority=priority,
             tags=tags,
             list_id=ref.collection or None,
+            repeat=repeat,
         )
 
     async def delete_task(
@@ -203,13 +224,16 @@ class TasksRouter:
         status: str | None,
         priority: str | None,
         tags: list[str] | None,
+        repeat: str | None,
     ) -> Task:
         """Move a task to another list by recreating it in *target* and deleting the source.
 
         Adds the new task before deleting the old, so a failure mid-move never loses the
         task (worst case a transient duplicate). The created task is stamped with the target
         list so the board shows it under its new category. Edits passed with the move
-        overlay the source task's current values.
+        overlay the source task's current values. A recurring task keeps its rule across the
+        move (the new list owns it, and — for Google — the source's side-table rule is retired
+        by ``delete_task``'s GC, ADR-0082); ``repeat=""`` alongside the move clears it.
         """
         source_provider, source_ref = source
         target_provider, target_ref = target
@@ -227,12 +251,61 @@ class TasksRouter:
             priority=priority if priority is not None else current.priority,
             tags=tags if tags is not None else current.tags,
             list_id=target_ref.collection or None,
+            repeat=repeat if repeat is not None else current.repeat,
         )
         await source_provider.delete_task(tenant_id, task_id, list_id=source_ref.collection or None)
         titles = await self._title_map(tenant_id, [target_ref])
         return self._stamp(
             [created], ref=target_ref, title=titles.get((target_ref.account, target_ref.collection))
         )[0]
+
+    async def _materialize_next(
+        self, tenant_id: str, provider: TasksProvider, ref: CollectionRef, done: Task
+    ) -> Task | None:
+        """Create the next instance of a just-completed recurring task (ADR-0082).
+
+        No-op for a one-off task (no ``repeat``). Computes the next due date from the rule; if
+        the series is exhausted (a ``COUNT``/``UNTIL`` rule yields no later occurrence) or the
+        completed task had no due date to anchor, nothing is created. The new instance carries
+        the rule and content forward, opens fresh, and lands in the **same** list. Either way
+        the rule is **retired on the completed instance** so re-completing it can't double-fire
+        and an exhausted series stops cleanly (the recurrence lives on exactly one open task).
+
+        Provider-agnostic: it only reads ``done.repeat`` and calls the seam, so local and
+        Google materialize identically — each having already persisted/returned the rule its
+        own way. Returns the new instance, or ``None`` when none was created.
+        """
+        if not done.repeat:
+            return None
+        coll = ref.collection or None
+        try:
+            upcoming = next_due(done.due, done.repeat, today=self._now())
+        except Exception as exc:
+            # A stored rule is validated at write time, so this is defensive: leave the rule in
+            # place (don't retire) so a genuine parse issue can be retried, and never let a
+            # materialization failure break the completion itself.
+            log.warning(
+                "recurring task: could not compute next due; not materializing",
+                task_id=done.id,
+                error=str(exc),
+            )
+            return None
+        created: Task | None = None
+        if upcoming is not None:
+            created = await provider.add_task(
+                tenant_id,
+                done.title,
+                notes=done.notes,
+                due=upcoming,
+                priority=done.priority,
+                tags=done.tags,
+                repeat=done.repeat,
+                list_id=coll,
+            )
+        # Retire the rule on the completed instance (add-before-retire, like a move, so a
+        # failure never loses the recurrence). "" clears it on both providers.
+        await provider.update_task(tenant_id, done.id, repeat="", list_id=coll)
+        return created
 
     async def get_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None

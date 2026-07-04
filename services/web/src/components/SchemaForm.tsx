@@ -11,6 +11,7 @@
 import { useMemo, useState } from "react";
 
 import { Button, Label, Select, Switch, TextArea, TextInput } from "@/components/ui";
+import { REPEAT_PRESETS, presetForRule, type RepeatPresetId } from "@/lib/rrule";
 
 interface PropertySchema {
   type?: string;
@@ -90,6 +91,63 @@ function initialValues(schema: ObjectSchema, current: FormValues): FormValues {
   return values;
 }
 
+/**
+ * The shared repeat picker (#471) for a `format: "rrule"` field: a friendly dropdown
+ * (None / Daily / Weekdays / Weekly / Monthly / Yearly / Custom) that emits a bare RRULE
+ * string. Choosing a named preset writes its canonical rule; "Custom…" reveals a raw RRULE
+ * input for anything the presets don't cover. Used by both the tasks and calendar forms.
+ */
+function RepeatField({
+  title,
+  description,
+  value,
+  onChange,
+}: {
+  title: string;
+  description?: string;
+  value: unknown;
+  onChange: (next: unknown) => void;
+}) {
+  const rule = typeof value === "string" ? value : "";
+  // The dropdown selection is UI state seeded from the incoming rule (so editing opens on the
+  // right option). While "Custom…" is chosen we keep the box open regardless of what's typed,
+  // so a half-typed rule that momentarily matches a preset doesn't collapse the input.
+  const [preset, setPreset] = useState<RepeatPresetId>(() => presetForRule(rule));
+
+  const choose = (id: RepeatPresetId) => {
+    setPreset(id);
+    if (id === "custom") return; // keep the current rule for the user to edit; don't clear it
+    onChange(REPEAT_PRESETS.find((p) => p.id === id)!.rrule);
+  };
+
+  return (
+    <div>
+      <Label hint={description}>{title}</Label>
+      <Select
+        aria-label={title}
+        value={preset}
+        onChange={(e) => choose(e.target.value as RepeatPresetId)}
+        className="w-full"
+      >
+        {REPEAT_PRESETS.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+      </Select>
+      {preset === "custom" && (
+        <TextInput
+          aria-label={`${title} custom rule`}
+          className="mt-2 font-mono text-xs"
+          placeholder="FREQ=WEEKLY;INTERVAL=2"
+          value={rule}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </div>
+  );
+}
+
 function FieldFor({
   name,
   prop,
@@ -139,6 +197,10 @@ function FieldFor({
         </Select>
       </div>
     );
+  }
+
+  if (prop.format === "rrule") {
+    return <RepeatField title={title} description={prop.description} value={value} onChange={onChange} />;
   }
 
   if (prop.format === "date-time" || prop.format === "date") {

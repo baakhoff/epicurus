@@ -27,6 +27,7 @@ def _task(
     priority: str | None = None,
     list_id: str | None = None,
     list_title: str | None = None,
+    repeat: str | None = None,
 ) -> Task:
     return Task(
         id=task_id,
@@ -37,6 +38,7 @@ def _task(
         priority=priority,  # type: ignore[arg-type]
         list_id=list_id,
         list_title=list_title,
+        repeat=repeat,
     )
 
 
@@ -67,6 +69,34 @@ def test_empty_columns_are_dropped() -> None:
     assert [c["title"] for c in board["columns"]] == ["Today"]
 
 
+# ── Recurrence (#471, ADR-0082) ───────────────────────────────────────────────
+
+
+def test_add_form_offers_the_repeat_field() -> None:
+    board = build_tasks_board([_task("1", "x", due=TODAY)], today=TODAY)
+    add = next(a for a in board["actions"] if a["tool"] == "tasks_add")
+    assert "repeat" in add["fields"]
+
+
+def test_recurring_card_shows_a_repeat_badge_and_prefills_edit() -> None:
+    board = build_tasks_board(
+        [_task("1", "Water plants", due=TODAY, repeat="FREQ=WEEKLY")], today=TODAY
+    )
+    card = board["columns"][0]["cards"][0]
+    assert "Repeats weekly" in [b["label"] for b in card["badges"]]
+    edit = next(a for a in card["actions"] if a["tool"] == "tasks_update" and a.get("form"))
+    assert "repeat" in edit["fields"]
+    assert edit["form_values"]["repeat"] == "FREQ=WEEKLY"
+
+
+def test_weekdays_rule_reads_as_on_weekdays() -> None:
+    board = build_tasks_board(
+        [_task("1", "Standup", due=TODAY, repeat="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR")], today=TODAY
+    )
+    card = board["columns"][0]["cards"][0]
+    assert "Repeats on weekdays" in [b["label"] for b in card["badges"]]
+
+
 def test_card_carries_complete_and_edit_actions() -> None:
     board = build_tasks_board(
         [_task("t1", "Buy milk", due="2026-06-20", notes="2 litres")], today=TODAY
@@ -85,7 +115,7 @@ def test_card_carries_complete_and_edit_actions() -> None:
 
     assert edit["form"] is True
     assert edit["args"] == {"task_id": "t1", "list_id": None}
-    assert edit["fields"] == ["title", "notes", "due", "priority", "tags", "status"]
+    assert edit["fields"] == ["title", "notes", "due", "priority", "tags", "status", "repeat"]
     assert edit["field_options"]["priority"] == ["low", "medium", "high"]
     assert edit["field_options"]["status"] == ["open", "in_progress", "done"]
     assert edit["form_values"]["title"] == "Buy milk"
@@ -150,7 +180,7 @@ def test_board_offers_add_action_even_when_empty() -> None:
     # The Add affordance is a compact icon-only "+" (#337).
     assert add["icon_only"] is True
     assert add["form"] is True
-    assert add["fields"] == ["title", "notes", "due", "priority", "tags"]
+    assert add["fields"] == ["title", "notes", "due", "priority", "tags", "repeat"]
     assert add["field_options"]["priority"] == ["low", "medium", "high"]
 
 
@@ -174,7 +204,7 @@ def test_add_action_has_list_selector_when_lists_given() -> None:
         default_list_id="work",
     )
     add = board["actions"][0]
-    assert add["fields"] == ["title", "list_id", "notes", "due", "priority", "tags"]
+    assert add["fields"] == ["title", "list_id", "notes", "due", "priority", "tags", "repeat"]
     # the list picker is a labeled `field_choices` (value=list id, label=title)
     assert add["field_choices"]["list_id"] == [
         {"value": "@default", "label": "My Tasks"},

@@ -33,6 +33,12 @@ class Task(BaseModel):
     priority: Literal["low", "medium", "high"] | None = None
     # Free-form labels; local-only
     tags: list[str] = []
+    # Repeat rule (#471): a bare RFC 5545 RRULE string (no leading "RRULE:"), e.g.
+    # "FREQ=WEEKLY". Set on a *recurring* task; ``None`` for a one-off. Google Tasks has no
+    # recurrence field, so this is emulated module-side and stored per provider (a column on
+    # the local row; a side table keyed by task id for Google) — see ADR-0082. Completing a
+    # task that carries a rule materializes the next instance (the router owns that logic).
+    repeat: str | None = None
     # The list (category) the task belongs to — stamped by the router when it aggregates
     # across the operator's enabled lists (ADR-0036). ``list_id`` routes a per-task mutation
     # to the owning list; ``list_title`` is the human label for the board's category tag.

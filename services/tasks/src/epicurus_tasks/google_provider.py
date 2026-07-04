@@ -18,6 +18,7 @@ from typing import Any, Literal
 import httpx
 
 from epicurus_core import Collection, PlatformClient
+from epicurus_tasks.db import RepeatStore
 from epicurus_tasks.models import Task, TaskScope
 
 _TASKS_BASE = "https://tasks.googleapis.com/tasks/v1"
@@ -31,13 +32,35 @@ class GoogleTasksError(RuntimeError):
 class GoogleTasksProvider:
     """Manages tasks via the Google Tasks REST API.
 
+    Google Tasks has **no recurrence field** (repeat is UI-only), so a repeating task's rule
+    is emulated module-side (ADR-0082): stored in a tenant-scoped :class:`RepeatStore` side
+    table keyed by the provider list + task id, filled onto reads and retired (GC) when the
+    task is deleted or a lookup misses. Without a store (unit tests) recurrence silently
+    degrades — ``repeat`` reads back ``None`` and writes are no-ops.
+
     Args:
         platform: A ``PlatformClient`` scoped to this service's tenant; used to
             fetch the Google OAuth token from the core (it never holds the token).
+        repeats: Side-table store for emulated recurrence rules; ``None`` disables
+            recurrence support (e.g. in unit tests without a database).
     """
 
-    def __init__(self, platform: PlatformClient) -> None:
+    def __init__(self, platform: PlatformClient, *, repeats: RepeatStore | None = None) -> None:
         self._platform = platform
+        self._repeats = repeats
+
+    def _list_key(self, list_id: str | None) -> str:
+        """The side-table list key — the same string this provider resolves for the API."""
+        return list_id or _DEFAULT_LIST
+
+    async def _fill_repeat(self, tenant_id: str, list_id: str | None, task: Task) -> Task:
+        """Attach the task's emulated recurrence rule from the side table, if any."""
+        if self._repeats is None:
+            return task
+        rule = await self._repeats.get(
+            tenant_id=tenant_id, list_id=self._list_key(list_id), task_id=task.id
+        )
+        return task.model_copy(update={"repeat": rule}) if rule else task
 
     def provider_name(self) -> str:
         return "google"
@@ -171,6 +194,16 @@ class GoogleTasksProvider:
         tasks = [self._parse_task(item) for item in items]
         if scope == "done":
             tasks = [t for t in tasks if t.status == "done"]
+        # Attach emulated recurrence rules (ADR-0082) in one query, not one per task.
+        if self._repeats is not None and tasks:
+            rules = await self._repeats.get_many(
+                tenant_id=tenant_id,
+                list_id=self._list_key(list_id),
+                task_ids=[t.id for t in tasks],
+            )
+            tasks = [
+                t.model_copy(update={"repeat": rules[t.id]}) if t.id in rules else t for t in tasks
+            ]
         return tasks
 
     async def add_task(
@@ -184,11 +217,14 @@ class GoogleTasksProvider:
         priority: str | None = None,
         tags: list[str] | None = None,
         list_id: str | None = None,
+        repeat: str | None = None,
     ) -> Task:
         """Create a task in the specified (or default) Google task list.
 
         ``priority`` and ``tags`` are silently ignored — Google Tasks has no
         equivalent fields. ``"in_progress"`` status is sent as ``"needsAction"``.
+        ``repeat`` (an RRULE) is stored in the side table keyed by the new task id
+        (Google has no recurrence field, ADR-0082).
         """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
@@ -211,7 +247,13 @@ class GoogleTasksProvider:
                     "Google token is invalid or revoked — reconnect via Settings"
                 )
             resp.raise_for_status()
-            return self._parse_task(resp.json())
+            task = self._parse_task(resp.json())
+        if self._repeats is not None and repeat:
+            await self._repeats.set(
+                tenant_id=tenant_id, list_id=tasklist, task_id=task.id, rrule=repeat
+            )
+            task = task.model_copy(update={"repeat": repeat})
+        return task
 
     async def complete_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
@@ -232,7 +274,10 @@ class GoogleTasksProvider:
             if resp.status_code == 404:
                 raise GoogleTasksError(f"task {task_id!r} not found in list {tasklist!r}")
             resp.raise_for_status()
-            return self._parse_task(resp.json())
+            task = self._parse_task(resp.json())
+        # A completed recurring task must carry its rule so the router can materialize the
+        # next instance (ADR-0082) — Google's response never includes it.
+        return await self._fill_repeat(tenant_id, list_id, task)
 
     async def delete_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
@@ -241,7 +286,8 @@ class GoogleTasksProvider:
 
         Backs moving a task between lists (recreate in target + delete here — Google has
         no cross-list move). A 404 is treated as already-gone, so a move whose source was
-        removed concurrently still succeeds; a 401 surfaces a reconnect hint.
+        removed concurrently still succeeds; a 401 surfaces a reconnect hint. Any emulated
+        recurrence rule for the task is retired (ADR-0082 GC).
         """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
@@ -254,9 +300,10 @@ class GoogleTasksProvider:
                 raise GoogleTasksError(
                     "Google token is invalid or revoked — reconnect via Settings"
                 )
-            if resp.status_code == 404:
-                return  # already gone — nothing to delete
-            resp.raise_for_status()
+            if resp.status_code != 404:  # 404 = already gone; still retire any rule below
+                resp.raise_for_status()
+        if self._repeats is not None:
+            await self._repeats.delete(tenant_id=tenant_id, list_id=tasklist, task_id=task_id)
 
     async def get_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
@@ -274,13 +321,20 @@ class GoogleTasksProvider:
                 headers=self._auth_headers(token),
             )
             if resp.status_code == 404:
+                # GC on miss (ADR-0082): a task deleted in Google's own UI retires its rule
+                # the next time we look it up, so an orphaned rule never lingers or errors.
+                if self._repeats is not None:
+                    await self._repeats.delete(
+                        tenant_id=tenant_id, list_id=tasklist, task_id=task_id
+                    )
                 return None
             if resp.status_code == 401:
                 raise GoogleTasksError(
                     "Google token is invalid or revoked — reconnect via Settings"
                 )
             resp.raise_for_status()
-            return self._parse_task(resp.json())
+            task = self._parse_task(resp.json())
+        return await self._fill_repeat(tenant_id, list_id, task)
 
     async def update_task(
         self,
@@ -295,6 +349,7 @@ class GoogleTasksProvider:
         tags: list[str] | None = None,
         list_id: str | None = None,
         to_list_id: str | None = None,  # ignored here; cross-list moves go through the router
+        repeat: str | None = None,
     ) -> Task:
         """Edit a task's title/notes/due/status via a PATCH to the Google Tasks API.
 
@@ -303,7 +358,8 @@ class GoogleTasksProvider:
         status is sent as ``"needsAction"`` and will read back as ``"open"``. With
         nothing Google-mappable to change, GETs and returns the current task.
         ``to_list_id`` is ignored — the router performs cross-list moves
-        (recreate+delete, ADR-0038).
+        (recreate+delete, ADR-0038). ``repeat`` (an RRULE, ``""`` clears it) is *not*
+        Google-mappable — it is written to the side table, never the API body (ADR-0082).
         """
         tasklist = list_id or _DEFAULT_LIST
         token = await self._access_token()
@@ -339,4 +395,11 @@ class GoogleTasksProvider:
             if resp.status_code == 404:
                 raise GoogleTasksError(f"task {task_id!r} not found in list {tasklist!r}")
             resp.raise_for_status()
-            return self._parse_task(resp.json())
+            task = self._parse_task(resp.json())
+        # Recurrence lives in the side table, not Google (ADR-0082): persist a change here,
+        # then re-attach the stored rule so the returned task reflects it.
+        if repeat is not None and self._repeats is not None:
+            await self._repeats.set(
+                tenant_id=tenant_id, list_id=tasklist, task_id=task_id, rrule=repeat or None
+            )
+        return await self._fill_repeat(tenant_id, list_id, task)

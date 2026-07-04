@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.13.0"
+    assert manifest.version == "0.14.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -227,6 +227,56 @@ async def test_tasks_update_clears_notes_with_empty_string(module_fixture: objec
     assert updated["notes"] is None
 
 
+# ── Recurrence at the tool boundary (#471, ADR-0082) ──────────────────────────
+
+
+async def test_tasks_add_persists_repeat(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Water plants", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
+    )
+    assert task["repeat"] == "FREQ=WEEKLY"
+
+
+async def test_tasks_add_repeat_requires_a_due_date(module_fixture: object) -> None:
+    mod = module_fixture
+    with pytest.raises(Exception, match="due date"):
+        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_add", {"title": "No anchor", "repeat": "FREQ=DAILY"}
+        )
+
+
+async def test_tasks_add_rejects_invalid_repeat(module_fixture: object) -> None:
+    mod = module_fixture
+    with pytest.raises(Exception, match="invalid recurrence rule"):
+        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_add", {"title": "Bad rule", "due": "2026-07-06", "repeat": "NONSENSE"}
+        )
+
+
+async def test_tasks_update_only_repeat_is_not_rejected(module_fixture: object) -> None:
+    """`repeat` counts as a mutable field, so a repeat-only update isn't a no-op error (#475)."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Make recurring", "due": "2026-07-06"}
+    )
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "repeat": "FREQ=WEEKLY"}
+    )
+    assert updated["repeat"] == "FREQ=WEEKLY"
+
+
+async def test_tasks_update_clears_repeat_with_empty_string(module_fixture: object) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Recurring", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
+    )
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "repeat": ""}
+    )
+    assert updated["repeat"] is None
+
+
 # ── Chat-attachment source helpers (ADR-0019) ─────────────────────────────────
 
 
@@ -293,6 +343,21 @@ def test_task_excerpt_includes_due_status_and_notes() -> None:
 
 def test_task_excerpt_marks_completed() -> None:
     assert "Completed" in task_excerpt(_task(status="done"))
+
+
+def test_hover_card_shows_repeat() -> None:
+    card = task_hover_card(_task(due="2026-07-06", repeat="FREQ=WEEKLY"))
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert labels["Repeat"] == "Weekly"
+
+
+def test_hover_card_omits_repeat_for_one_off() -> None:
+    card = task_hover_card(_task())
+    assert "Repeat" not in {d["label"] for d in card["details"]}
+
+
+def test_task_excerpt_includes_repeat() -> None:
+    assert "Repeats weekly" in task_excerpt(_task(due="2026-07-06", repeat="FREQ=WEEKLY"))
 
 
 def test_task_attachment_item_shape() -> None:

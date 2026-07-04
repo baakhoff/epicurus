@@ -96,6 +96,24 @@ itself, so it cannot auto-enable what it just created (a natural follow-up if wa
 and deleting a list are deliberately out of scope (destructive; need a policy for the tasks
 inside).
 
+**v0.14.0** adds **recurring tasks** (#471, ADR-0082) — on both providers, even though the
+Google Tasks API **has no recurrence field** (repeat is UI-only). A task carries an optional
+`repeat` rule (a bare RFC 5545 RRULE, e.g. `FREQ=WEEKLY`); **completing it materializes the next
+instance** with the next due date and retires the rule on the completed one, so the recurrence
+lives on exactly one open task at a time — re-completing can't double-fire and a `COUNT`/`UNTIL`
+series ends cleanly. The rule is stored per provider — a `repeat` column on the local row, a
+module-owned `task_repeats` side table keyed by task id for Google — but materialization is
+provider-agnostic (it lives in the `TasksRouter.complete_task`). `tasks_add`/`tasks_update` gain
+a `repeat` parameter (a `due` is required to anchor it, and the RRULE is validated at the tool
+boundary); the board card shows a **Repeats weekly** badge and the hover-card a **Repeat** row.
+The web form renders `repeat` as a **friendly repeat picker** (the shared `format: rrule` widget)
+rather than a raw RRULE box — the agent tool still takes a raw RRULE. The next due date uses a
+**skip-missed** policy: a task completed late rolls forward to the next *future* occurrence, not
+an already-overdue one. Google caveats: the rule is invisible in Google's own UI; a task changed
+directly in Google is reconciled on our next refresh; deleting it in Google retires the rule (GC
+on miss). Materialization is **on-complete only** — a scheduled sweep for overdue-uncompleted
+policies is a deliberate follow-up.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -105,9 +123,9 @@ inside).
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
 | `tasks_lists()` | none | The available lists (categories) as `- <title> — id: <id>` text, so the agent can pick one (or report only the default list exists). |
 | `tasks_create_list(title)` | `title`: the new list's display name | The created list as a `Collection` (`account`/`collection`/`title`/`writable`). **Google-only** (#474) — raises if no external account is connected; the local store has no lists of its own. |
-| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`) | The created `Task`. |
-| `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. |
-| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` **clears** that field (`None`/omitted leaves it unchanged). `to_list_id`: **move** the task to this list | The updated `Task` (the moved task on a move). |
+| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?, repeat?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`). `repeat`: RRULE making it recurring (needs a `due`) | The created `Task`. |
+| `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. A recurring task also spawns its next instance (ADR-0082). |
+| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged). `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
 | `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
 
 All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
@@ -133,6 +151,7 @@ class Task(BaseModel):
     completed_at: str | None = None
     priority: Literal["low", "medium", "high"] | None = None    # local-only
     tags: list[str] = []                                        # local-only
+    repeat: str | None = None                                   # RRULE if recurring (#471, ADR-0082)
     list_id: str | None = None                                  # the list (category) — router-stamped
     list_title: str | None = None                               # its human label — router-stamped
     # `completed` is a computed alias: True when status == "done".
@@ -140,6 +159,9 @@ class Task(BaseModel):
 
 `list_id` / `list_title` are **not stored** — the router stamps them when it aggregates the
 board so each card knows its category and routes its mutations to the owning list (ADR-0036).
+`repeat` **is** persisted, but per provider: the local store keeps it in-row, and the Google
+provider — Google Tasks has no recurrence field — keeps it in a module-owned `task_repeats`
+side table keyed by task id (ADR-0082).
 
 ### HTTP
 
@@ -299,26 +321,49 @@ and routes to the connected Google list the operator selects, which lives in the
 | `status` | `VARCHAR(32) \| NULL` | `open` / `in_progress` / `done` (added v0.5.0). |
 | `priority` | `VARCHAR(16) \| NULL` | `low` / `medium` / `high`; local-only (added v0.5.0). |
 | `tags` | `TEXT \| NULL` | JSON array of labels; local-only (added v0.5.0). |
+| `repeat` | `TEXT \| NULL` | RFC 5545 RRULE if recurring; local-only (added v0.14.0, #471). |
 
 Unique constraint on `(tenant_id, id)`. A read's `scope` selects the rows by the `completed` flag (ADR-0049): `open` (the default, `completed = FALSE`), `done` (`completed = TRUE`), or `all` (no filter); all ordered by `created_at DESC`. `tasks_list` always reads the `open` scope; the board's *Show* filter passes the chosen scope.
 
 Schema is created automatically by `TaskStore.init()` at startup, which also **reconciles
 columns added after the table's first release** — there is no migration framework, so `init()`
 runs `create_all` and then `ALTER TABLE … ADD COLUMN` for any model column missing from an
-existing table (additive only; the v0.5.0 `status`/`priority`/`tags` fields). Without this, a
-database provisioned before v0.5.0 has no `status` column and **every** task read (the board,
-`tasks_list`, the attachment picker, the resolver) 500s with `column tasks_local.status does
-not exist` (#247). Destructive changes — drops, renames, type changes, `NOT NULL` backfills —
-still require a real migration.
+existing table (additive only; the v0.5.0 `status`/`priority`/`tags` fields and the v0.14.0
+`repeat` field). Without this, a database provisioned before v0.5.0 has no `status` column and
+**every** task read (the board, `tasks_list`, the attachment picker, the resolver) 500s with
+`column tasks_local.status does not exist` (#247). Destructive changes — drops, renames, type
+changes, `NOT NULL` backfills — still require a real migration.
+
+- **Postgres `task_repeats`** (added v0.14.0, #471, ADR-0082) — emulated recurrence rules for
+  **external-provider** tasks (Google has no recurrence field). Tenant-scoped, keyed by
+  `(tenant_id, list_id, task_id)`; the local store keeps its own rule in `tasks_local.repeat`
+  and never uses this table:
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `pk` | `INTEGER` | Auto-increment primary key. |
+| `tenant_id` | `VARCHAR(63)` | Tenant scope (indexed). |
+| `list_id` | `VARCHAR(255)` | The provider list the task lives in (e.g. `@default`). |
+| `task_id` | `VARCHAR(255)` | The provider task id (indexed). |
+| `rrule` | `TEXT` | The bare RFC 5545 RRULE. |
+| `created_at` | `DATETIME` | Auto-set at insert time. |
+
+Unique constraint on `(tenant_id, list_id, task_id)`. Created by the same `TaskStore.init()`
+`create_all` (it shares the module's SQLAlchemy metadata). A row is written on `add_task`/
+`update_task`, filled onto reads, and **retired** on `delete_task` or a `get_task` 404 (GC on
+miss). Writes are delete-then-insert so they work identically on SQLite (tests) and Postgres.
 
 ### Google provider
 
-No local persistence — tasks live in Google Tasks. The OAuth token is stored in
-OpenBao by the core's OAuth subsystem under `oauth/tokens/google` (tenant-scoped).
+No task persistence — tasks live in Google Tasks. The OAuth token is stored in
+OpenBao by the core's OAuth subsystem under `oauth/tokens/google` (tenant-scoped). A repeating
+Google task's rule is the exception: it lives in the module's `task_repeats` table above
+(Google Tasks has no recurrence field), keyed by the provider list + task id (ADR-0082).
 
 ## Dependencies
 
-core-app (OAuth token endpoint) · Postgres (`local` provider only) · NATS.
+core-app (OAuth token endpoint) · Postgres (`local` provider + the `task_repeats` recurrence
+side table) · NATS · `python-dateutil` (RRULE expansion for materialization, #471).
 
 ## Run & extend
 
@@ -344,9 +389,10 @@ Package `epicurus_tasks`:
 | `models.py` | `Task` domain model (provider-neutral). |
 | `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`/`create_list`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default); `create_list` raises `NotImplementedError` (#474) — a single implicit list has nothing to create. |
-| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete + `create_list` via `tasklists.insert`, #474). |
-| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474). |
-| `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls**, the **New list** board action, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete + `create_list` via `tasklists.insert`, #474); persists/fills/GCs emulated recurrence rules via an injected `RepeatStore` (#471, ADR-0082). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082). |
+| `recurrence.py` | Pure RRULE math (#471, ADR-0082): `validate_rrule` (tool-boundary check) + `next_due` (the next occurrence, **skip-missed** policy), date-only (naive) parsing. |
+| `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store (incl. the `repeat` column); `RepeatStore` — the `task_repeats` side table for external-provider recurrence rules (#471). |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls**, the **New list** board action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
 | `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

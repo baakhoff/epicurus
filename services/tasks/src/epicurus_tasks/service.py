@@ -12,7 +12,9 @@ the shell renders it. No markup ever leaves this module.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from typing import Annotated, Any, cast
+
+from pydantic import Field
 
 from epicurus_core import (
     LOCAL_ACCOUNT,
@@ -39,6 +41,7 @@ from epicurus_tasks.models import (
     TaskScope,
 )
 from epicurus_tasks.providers import TasksProvider
+from epicurus_tasks.recurrence import validate_rrule
 
 log = get_logger("epicurus_tasks.service")
 
@@ -74,6 +77,50 @@ _PRIORITY_TONE: dict[str, str] = {
     "low": "dim",
 }
 
+# The recurrence rule (#471, ADR-0082). Agent-facing: a bare RRULE; the web form renders the
+# friendly repeat picker instead (via the ``format: rrule`` hint the shell's SchemaForm reads).
+_REPEAT_DESCRIPTION = (
+    "Repeat rule (RFC 5545 RRULE, no leading 'RRULE:'), e.g. 'FREQ=WEEKLY' or"
+    " 'FREQ=DAILY;COUNT=10'. Makes the task recurring: completing it creates the next"
+    " instance (a due date is required to anchor the rule). Omit for a one-off task; pass"
+    " an empty string to remove an existing rule."
+)
+# ``json_schema_extra={"format": "rrule"}`` tells the web SchemaForm to render the shared
+# repeat picker (None/Daily/Weekdays/Weekly/Monthly/Yearly/Custom) rather than a raw text box;
+# the submitted value is still a bare RRULE string, so the agent tool surface is unchanged.
+_Repeat = Annotated[
+    str, Field(json_schema_extra={"format": "rrule"}, description=_REPEAT_DESCRIPTION)
+]
+
+# Short labels for a repeat rule, for the board badge / hover-card. Best-effort: an exotic
+# custom rule falls back to "Custom" (the picker still round-trips the exact RRULE).
+_FREQ_LABEL: dict[str, str] = {
+    "DAILY": "Daily",
+    "WEEKLY": "Weekly",
+    "MONTHLY": "Monthly",
+    "YEARLY": "Yearly",
+}
+_WEEKDAYS_BYDAY = "MO,TU,WE,TH,FR"
+
+
+def _repeat_label(rule: str) -> str:
+    """A short human label for an RRULE: 'Daily' / 'Weekdays' / 'Weekly' / … / 'Custom'."""
+    parts = dict(p.split("=", 1) for p in rule.split(";") if "=" in p)
+    freq = parts.get("FREQ", "").upper()
+    if freq == "WEEKLY" and parts.get("BYDAY", "").upper() == _WEEKDAYS_BYDAY:
+        return "Weekdays"
+    return _FREQ_LABEL.get(freq, "Custom")
+
+
+def _repeat_summary(rule: str) -> str:
+    """A phrase for the board badge, e.g. 'Repeats weekly' / 'Repeats on weekdays'."""
+    label = _repeat_label(rule)
+    if label == "Weekdays":
+        return "Repeats on weekdays"
+    if label == "Custom":
+        return "Repeats"
+    return f"Repeats {label.lower()}"
+
 
 def _parse_tags(raw: str | None) -> list[str]:
     """Split a comma-separated tags string into a cleaned list."""
@@ -102,9 +149,9 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.13.0",
+        version="0.14.0",
         description=(
-            "Task management: list, add, edit, and complete tasks. Backed by a local"
+            "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
         ),
         ui=UiSection(
@@ -213,6 +260,7 @@ def build_module(
         tags: str | None = None,
         status: str = "open",
         list_id: str | None = None,
+        repeat: _Repeat | None = None,
     ) -> Task:
         """Create a new task.
 
@@ -231,6 +279,9 @@ def build_module(
                 ``"done"``.  Google Tasks maps ``"done"`` to completed;
                 ``"in_progress"`` is local-only and reads back as ``"open"`` from Google.
             list_id: Target list identifier.  Omit for the default list.
+            repeat: Optional RFC 5545 RRULE making the task recurring (e.g. ``"FREQ=WEEKLY"``).
+                Completing the task creates the next instance. Requires a ``due`` to anchor the
+                rule. Emulated module-side and works on both providers (#471, ADR-0082).
 
         Returns the created :class:`Task`.
         """
@@ -242,6 +293,13 @@ def build_module(
             raise RuntimeError(
                 f"invalid status {status!r}; must be one of {sorted(VALID_STATUSES)}"
             )
+        if repeat:
+            if not due:
+                raise RuntimeError("a recurring task needs a due date to anchor the repeat rule")
+            try:
+                validate_rrule(repeat)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
         tag_list = _parse_tags(tags)
         try:
             return await provider.add_task(
@@ -253,6 +311,7 @@ def build_module(
                 priority=priority,
                 tags=tag_list,
                 list_id=list_id,
+                repeat=repeat,
             )
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
@@ -284,17 +343,19 @@ def build_module(
         status: str | None = None,
         list_id: str | None = None,
         to_list_id: str | None = None,
+        repeat: _Repeat | None = None,
     ) -> Task:
-        """Edit an existing task's title, notes, due date, priority, tags, or status.
+        """Edit an existing task's title, notes, due date, priority, tags, status, or repeat.
 
         Only the fields you pass are changed; omitted fields keep their current
         value — pass **at least one** field (or ``to_list_id``), or this raises an
         error rather than silently doing nothing. To mark a task done use
         ``tasks_complete`` — this tool edits content.
 
-        To **clear** the due date or notes, pass an empty string: ``due=""`` removes
-        the due date, ``notes=""`` removes the notes. Omitting a field is different
-        from clearing it — omitting leaves it unchanged, ``""`` blanks it out.
+        To **clear** the due date, notes, or repeat rule, pass an empty string: ``due=""``
+        removes the due date, ``notes=""`` removes the notes, ``repeat=""`` makes a recurring
+        task one-off. Omitting a field is different from clearing it — omitting leaves it
+        unchanged, ``""`` blanks it out.
 
         To **move** the task to another list, pass ``to_list_id`` (a list id from
         ``tasks_lists``). On Google Tasks a move recreates the task in the target list —
@@ -316,6 +377,8 @@ def build_module(
                 across your lists — you don't need to know which one it's in.
             to_list_id: Move the task to this list.  Omit to leave it where it is; when
                 equal to its current list it's a no-op move (a normal edit).
+            repeat: New RFC 5545 RRULE (e.g. ``"FREQ=WEEKLY"``).  Omit to leave unchanged;
+                pass ``""`` to remove an existing rule (#471, ADR-0082).
 
         Returns the updated :class:`Task`.
         """
@@ -327,6 +390,7 @@ def build_module(
             and tags is None
             and status is None
             and to_list_id is None
+            and repeat is None
         ):
             raise RuntimeError(
                 "nothing to change — pass at least one field to edit;"
@@ -340,6 +404,15 @@ def build_module(
             raise RuntimeError(
                 f"invalid status {status!r}; must be one of {sorted(VALID_STATUSES)}"
             )
+        if repeat:
+            if due == "":
+                raise RuntimeError(
+                    "a recurring task needs a due date — don't clear due with a repeat"
+                )
+            try:
+                validate_rrule(repeat)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
         tag_list = _parse_tags(tags) if tags is not None else None
         try:
             return await provider.update_task(
@@ -353,6 +426,7 @@ def build_module(
                 tags=tag_list,
                 list_id=list_id,
                 to_list_id=to_list_id,
+                repeat=repeat,
             )
         except (GoogleTasksError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
@@ -617,6 +691,8 @@ def _task_card(
         badges.append({"label": tag, "tone": "accent"})
     if task.list_title:  # the list (category) the task came from
         badges.append({"label": task.list_title, "tone": "dim"})
+    if task.repeat:  # recurring task (ADR-0082): e.g. "Repeats weekly"
+        badges.append({"label": _repeat_summary(task.repeat), "tone": "accent"})
 
     args = {"task_id": task.id, "list_id": task.list_id}
     edit_action: dict[str, Any] = {
@@ -624,7 +700,7 @@ def _task_card(
         "label": "Edit",
         "icon": "pencil",
         "form": True,
-        "fields": ["title", "notes", "due", "priority", "tags", "status"],
+        "fields": ["title", "notes", "due", "priority", "tags", "status", "repeat"],
         "field_options": _TASK_FIELD_OPTIONS,
         "args": args,
         "form_values": {
@@ -634,6 +710,7 @@ def _task_card(
             "priority": task.priority or "",
             "tags": ", ".join(task.tags),
             "status": task.status,
+            "repeat": task.repeat or "",
         },
     }
     if move_lists:
@@ -646,6 +723,7 @@ def _task_card(
             "priority",
             "tags",
             "status",
+            "repeat",
         ]
         edit_action["field_choices"] = {
             "to_list_id": [{"value": list_id, "label": title} for list_id, title in move_lists],
@@ -761,7 +839,7 @@ def build_tasks_board(
         # Render as a compact icon-only "+" (#337); the label moves to a tooltip/aria-label.
         "icon_only": True,
         "form": True,
-        "fields": ["title", "notes", "due", "priority", "tags"],
+        "fields": ["title", "notes", "due", "priority", "tags", "repeat"],
         "field_options": _TASK_FIELD_OPTIONS,
     }
     actions = [add_action]
@@ -769,7 +847,7 @@ def build_tasks_board(
         # Offer a list (category) picker: a labeled choice whose value is the list id and
         # label its title — the shell renders `field_choices` as a label≠value <select>
         # (ADR-0036), distinct from `field_options`' plain string enums (priority/status).
-        add_action["fields"] = ["title", "list_id", "notes", "due", "priority", "tags"]
+        add_action["fields"] = ["title", "list_id", "notes", "due", "priority", "tags", "repeat"]
         add_action["field_choices"] = {
             "list_id": [{"value": list_id, "label": title} for list_id, title in lists],
         }
@@ -845,6 +923,8 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         details.append(HoverCardDetail(label="Priority", value=task.priority.capitalize()))
     if task.tags:
         details.append(HoverCardDetail(label="Tags", value=", ".join(task.tags)))
+    if task.repeat:
+        details.append(HoverCardDetail(label="Repeat", value=_repeat_label(task.repeat)))
     return HoverCard(
         title=task.title,
         description=task.notes or "",
@@ -862,6 +942,8 @@ def task_excerpt(task: Task) -> str:
         lines.append(f"Priority: {task.priority}")
     if task.tags:
         lines.append(f"Tags: {', '.join(task.tags)}")
+    if task.repeat:
+        lines.append(_repeat_summary(task.repeat))
     if task.notes:
         lines.extend(["", task.notes])
     return "\n".join(lines)

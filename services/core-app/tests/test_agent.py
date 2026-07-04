@@ -11,9 +11,24 @@ from structlog.testing import capture_logs
 
 from epicurus_core import Attachment, EntityRef, tool_envelope
 from epicurus_core_app.agent.agent import _ANSWER_NUDGE, _EMPTY_ANSWER_FALLBACK, Agent
+from epicurus_core_app.agent.instructions import (
+    DEFAULT_AGENT_INSTRUCTIONS,
+    AgentInstructionsStore,
+)
 from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+
+
+async def _fresh_instructions(default: str = DEFAULT_AGENT_INSTRUCTIONS) -> AgentInstructionsStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = AgentInstructionsStore(engine, default=default)
+    await store.init()
+    return store
 
 
 async def _fresh_prefs() -> LlmPrefsStore:
@@ -708,3 +723,41 @@ async def test_agent_blank_final_answer_at_max_steps_falls_back() -> None:
     )
     assert turn.stopped == "max_steps"
     assert turn.content == _EMPTY_ANSWER_FALLBACK
+
+
+# ── base system prompt (#497, ADR-0083) ───────────────────────────────────────
+
+
+async def test_base_prompt_leads_the_turn() -> None:
+    """The resolved prompt is the FIRST message the model sees — even with no memory/session
+    (the headless path), which takes the early return in ``_assemble``."""
+    gw = _FakeGateway([ChatResult(model="m", content="ok")])
+    store = await _fresh_instructions(default="You are epsilon.")
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), instructions=store).run(
+        [ChatMessage(role="user", content="hi")]
+    )
+    assert turn.content == "ok"
+    first = gw.calls[0][0]
+    assert first.role == "system"
+    assert first.content == "You are epsilon."
+
+
+async def test_no_base_prompt_when_instructions_unset() -> None:
+    """Backward-compat: with no instructions store the agent runs with no base prompt, exactly
+    as it did before #497 — the first message is the user's, not a system prompt."""
+    gw = _FakeGateway([ChatResult(model="m", content="ok")])
+    await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    assert gw.calls[0][0].role == "user"
+
+
+async def test_custom_prompt_overrides_default_and_leads() -> None:
+    """An operator edit replaces the default and still leads the turn (resolved per turn)."""
+    gw = _FakeGateway([ChatResult(model="m", content="ok")])
+    store = await _fresh_instructions(default="DEFAULT")
+    await store.set_instructions("local", "CUSTOM PROMPT")  # "local" is the agent's default tenant
+    await Agent(gateway=gw, mcp=_FakeMcp(), instructions=store).run(
+        [ChatMessage(role="user", content="hi")]
+    )
+    first = gw.calls[0][0]
+    assert first.role == "system"
+    assert first.content == "CUSTOM PROMPT"

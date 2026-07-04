@@ -31,6 +31,8 @@ vi.mock("@/lib/api", () => ({
     setTimezone: vi.fn(),
     llmPrefs: () => Promise.resolve({ global_agent_max_steps: null }),
     setAgentMaxSteps: vi.fn(),
+    agentInstructions: () => Promise.resolve({ instructions: "Default prompt.", is_default: true }),
+    setAgentInstructions: vi.fn(),
     maintenanceStatus: () =>
       Promise.resolve({ schedule_enabled: false, schedule_hour: 3, jobs: [], last_run: null }),
     runMaintenance: vi.fn(),

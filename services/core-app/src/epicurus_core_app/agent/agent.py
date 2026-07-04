@@ -28,6 +28,7 @@ from epicurus_core_app.agent.activity import (
     append_tool,
 )
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
+from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.gateway import LlmGateway
@@ -251,6 +252,7 @@ class Agent:
         recall_timeout_s: float = _DEFAULT_RECALL_TIMEOUT_S,
         prefs: LlmPrefsStore | None = None,
         suspended: SuspendedRunStore | None = None,
+        instructions: AgentInstructionsStore | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
@@ -272,6 +274,9 @@ class Agent:
         # Suspend store for ask_user pause/resume (ADR-0053). None disables pausing (the loop
         # then degrades: ask_user gets an instruction to proceed rather than suspending).
         self._suspended = suspended
+        # Editable base system prompt (#497, ADR-0083). None disables it (the agent runs with no
+        # base prompt, as it did before this store existed); resolved per turn in ``_assemble``.
+        self._instructions = instructions
 
     async def _effective_max_steps(self, tenant_id: str | None) -> int:
         """The active agent loop bound: the stored pref if set, else the env default.
@@ -651,6 +656,25 @@ class Agent:
             )
             return []
 
+    async def _system_messages(self, tenant: str) -> list[ChatMessage]:
+        """The base system prompt as a leading system message (#497, ADR-0083), or ``[]``.
+
+        Resolved per turn from the tenant's editable instructions (else the shipped default), so
+        an edit takes effect on the next turn with no restart — like the max-steps pref (#297).
+        Placed **first** in the assembled conversation, ahead of recalled memory and attached
+        context, so the compaction leading-prefix rule protects it. Applies to headless bridge
+        turns too (ADR-0058): they carry no session/memory but still assemble through here. A read
+        failure degrades to no prompt rather than breaking the turn.
+        """
+        if self._instructions is None:
+            return []
+        try:
+            text = await self._instructions.get_instructions(tenant)
+        except Exception as exc:  # a prompt read must never break the turn
+            log.warning("instructions read failed; running with no base prompt", error=str(exc))
+            return []
+        return [ChatMessage(role="system", content=text)] if text.strip() else []
+
     async def _assemble(
         self,
         messages: list[ChatMessage],
@@ -667,9 +691,13 @@ class Agent:
         With ``persist_input=False`` and no new ``messages`` this re-answers the stored tail
         (regenerate / edit, #302): the recall query falls back to the last *stored* user turn,
         and nothing new is persisted — the user message is already in history.
+
+        The base system prompt (#497) leads every path — the no-memory/headless early return, the
+        assembled convo, and the degraded fallback — so it is always the first message.
         """
+        system = await self._system_messages(tenant)
         if self._memory is None or not session_id:
-            return list(messages)
+            return [*system, *messages]
         try:
             convo: list[ChatMessage] = []
             history = await self._memory.history(tenant=tenant, session_id=session_id)
@@ -708,10 +736,10 @@ class Agent:
                                 else None
                             ),
                         )
-            return convo
+            return [*system, *convo]
         except Exception as exc:  # memory is an enhancement, never a hard dependency
             log.warning("memory read failed; proceeding without it", error=str(exc))
-            return list(messages)
+            return [*system, *messages]
 
     async def _loop(
         self, messages: list[ChatMessage], *, model: str | None, tenant_id: str | None

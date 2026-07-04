@@ -44,6 +44,8 @@ from epicurus_core_app.agent.builtins import (
     make_now_handler,
     make_remember_handler,
 )
+from epicurus_core_app.agent.instructions import AgentInstructionsStore
+from epicurus_core_app.agent.instructions_routes import create_instructions_router
 from epicurus_core_app.agent.live_runs import LiveRunRegistry
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.routes import create_agent_router
@@ -178,6 +180,9 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # The agent's editable base system prompt (#497, ADR-0083): one row per tenant, NULL = the
+    # shipped default. Resolved per turn in ``Agent._assemble``, edited in web Settings.
+    agent_instructions = AgentInstructionsStore(engine)
     # Durable state behind ask_user pause/resume (ADR-0053): a paused turn lives here until
     # the operator answers (or it expires).
     suspended_runs = SuspendedRunStore(engine, ttl_hours=settings.ask_user_ttl_hours)
@@ -254,6 +259,9 @@ def create_app() -> FastAPI:
         # operator's UI choice takes effect without a restart (#297).
         prefs=prefs,
         suspended=suspended_runs,
+        # The editable base system prompt (#497), resolved per turn and injected first — so both
+        # chat and the headless bridge consumer below run with the same instructions.
+        instructions=agent_instructions,
     )
     # Inbound messaging consumer (ADR-0058) — the first inbound NATS subscriber in core. It
     # turns a bridge message (``messaging.inbound``) into a headless agent turn and routes the
@@ -360,6 +368,10 @@ def create_app() -> FastAPI:
             await timezone_prefs.init()
         except Exception as exc:
             log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
+        try:
+            await agent_instructions.init()
+        except Exception as exc:
+            log.error("agent instructions init failed; using the default prompt", error=str(exc))
         try:
             await suspended_runs.init()
         except Exception as exc:
@@ -480,6 +492,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         create_timezone_router(timezone_prefs, default_tenant=settings.default_tenant_id)
+    )
+    app.include_router(
+        create_instructions_router(agent_instructions, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(

@@ -29,6 +29,20 @@ describe("Button", () => {
     rerender(<Button size="sm">Save</Button>);
     expect(screen.getByRole("button", { name: "Save" }).className).toContain("text-xs");
   });
+
+  // #505: the primary label rides --ep-on-accent (AA on the accent fill in both themes
+  // and both power states) and hover swaps to the fill-grade accent-hover token — NOT
+  // accent-strong, which in the light theme is text-grade and would sink the label to
+  // 3.0:1. The token values themselves are gated by contrast.test.ts; this pins the
+  // component to those tokens.
+  it("labels the primary variant with on-accent and hovers to the fill-grade token", () => {
+    render(<Button variant="primary">Go</Button>);
+    const btn = screen.getByRole("button", { name: "Go" });
+    expect(btn.className).toContain("text-on-accent");
+    expect(btn.className).toContain("hover:bg-accent-hover");
+    expect(btn.className).not.toContain("text-canvas");
+    expect(btn.className).not.toContain("hover:bg-accent-strong");
+  });
 });
 
 describe("Switch", () => {

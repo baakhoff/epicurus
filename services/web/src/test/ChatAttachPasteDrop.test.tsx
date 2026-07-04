@@ -193,3 +193,34 @@ describe("drag-drop to attach", () => {
     expect(await screen.findByLabelText("Remove two.png")).toBeInTheDocument();
   });
 });
+
+// Suppress-under-overlay (#511): a Sheet's backdrop blocks clicks but not native drag
+// events — without the gate, a drag while a sheet was open still popped the hint and
+// uploaded underneath the layer the user was looking at. While any aria-modal overlay
+// is open the drop surface is inert; the drop is still swallowed (never handed to the
+// browser, which would navigate to the file).
+describe("drag-drop under an open Sheet (#511)", () => {
+  it("neither hints nor uploads while the sessions sheet is open, and recovers on close", async () => {
+    mockUpload.mockResolvedValue({ att_id: "a3", kind: "file", title: "notes.pdf" });
+    const { container } = render(<ChatScreen />, { wrapper });
+    await screen.findByLabelText("Message");
+    const root = container.firstElementChild as HTMLElement;
+
+    fireEvent.click(screen.getByLabelText("Conversations"));
+    await screen.findByRole("dialog", { name: "Conversations" });
+
+    const pdf = new File(["y"], "notes.pdf", { type: "application/pdf" });
+    fireEvent.dragEnter(root, { dataTransfer: { types: ["Files"], files: [] } });
+    expect(screen.queryByText("Drop to attach")).not.toBeInTheDocument();
+    fireEvent.drop(root, { dataTransfer: { types: ["Files"], files: [pdf] } });
+    expect(mockUpload).not.toHaveBeenCalled();
+
+    // Close the sheet — the drop surface must come straight back.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.dragEnter(root, { dataTransfer: { types: ["Files"], files: [] } });
+    expect(screen.getByText("Drop to attach")).toBeInTheDocument();
+    fireEvent.drop(root, { dataTransfer: { types: ["Files"], files: [pdf] } });
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    expect(await screen.findByLabelText("Remove notes.pdf")).toBeInTheDocument();
+  });
+});

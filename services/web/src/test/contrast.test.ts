@@ -96,4 +96,22 @@ describe.each(THEMES)("%s theme contrast (WCAG AA, #490)", (_name, tokens) => {
       expect(r, `--ep-${accent}-strong on ${worst} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
     },
   );
+
+  // Accent-filled controls (#505): the label is --ep-on-<family> and the hovered fill is
+  // --ep-<family>-hover — accent-strong is NOT the hover fill (in the light theme it is
+  // text-grade badge ink, far too dark to sit under the label). Button primary, the
+  // ActionControl primary segment, and the calendar "today" pip all ride these tokens,
+  // so both accent families must hold AA at rest and under hover, in both themes.
+  it.each([["gold"], ["moon"]])(
+    "on-%s holds >= 4.5:1 on the resting and hovered accent fills",
+    (accent) => {
+      for (const fill of [accent, `${accent}-hover`]) {
+        const r = ratio(tokens[`on-${accent}`], tokens[fill]);
+        expect(
+          r,
+          `--ep-on-${accent} ${tokens[`on-${accent}`]} on --ep-${fill} ${tokens[fill]} = ${r.toFixed(2)}`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    },
+  );
 });

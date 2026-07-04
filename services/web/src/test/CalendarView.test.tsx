@@ -396,3 +396,53 @@ describe("CalendarView", () => {
     expect(mockModulePage).toHaveBeenCalled(); // …and it still revalidates in the background
   });
 });
+
+// The modal focus contract (#512): EventDetail is a hand-rolled role="dialog" outside
+// ui.tsx's kit — it must honor the same keyboard contract Sheet/Confirm got in #487:
+// focus moves in on open, Tab wraps inside, and the opener chip regains focus on close.
+describe("EventDetail focus management (#512)", () => {
+  it("moves focus into the dialog on open and returns it to the chip on close", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    const chip = (await screen.findByText("Standup")).closest("button");
+    if (!chip) throw new Error("event chip not rendered");
+    chip.focus();
+    fireEvent.click(chip);
+
+    const dialog = await screen.findByRole("dialog", { name: "Standup" });
+    expect(dialog).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(chip).toHaveFocus();
+  });
+
+  it("wraps Tab at the dialog edges instead of walking the calendar underneath", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "e1",
+          title: "Standup",
+          start: "2026-06-15T09:00:00",
+          end: "2026-06-15T09:30:00",
+          meet_url: "https://meet.google.com/abc-defg-hij",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    fireEvent.click(await screen.findByText("Standup"));
+    await screen.findByRole("dialog", { name: "Standup" });
+
+    // Focusables in DOM order: the Close button first, then the Meet link.
+    const close = screen.getByRole("button", { name: "Close" });
+    const link = screen.getByRole("link", { name: "Join with Google Meet" });
+
+    link.focus();
+    fireEvent.keyDown(link, { key: "Tab" });
+    expect(close).toHaveFocus(); // forward from the last wraps to the first
+
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(link).toHaveFocus(); // backward from the first wraps to the last
+  });
+});

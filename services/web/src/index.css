@@ -10,14 +10,21 @@
    ─────────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* lamplight (awake) accent */
+  /* lamplight (awake) accent. The -hover/on- pair carries accent-as-FILL duty (#505):
+     on-gold is the label on a gold fill, gold-hover the hovered fill under that same
+     label. gold-strong is NOT a fill token — in the light theme it is text-grade
+     (badge ink) and far too dark to sit under a label that also works at rest. */
   --ep-gold: #c9a961;
   --ep-gold-strong: #e0be78;
   --ep-gold-dim: #c9a96126;
+  --ep-gold-hover: #e0be78; /* == gold-strong here; the light block re-tunes it */
+  --ep-on-gold: #121411; /* the dark canvas hex — 8.2:1 on gold at rest (#505) */
   /* moonlight (paused) accent */
   --ep-moon: #8fa3b8;
   --ep-moon-strong: #aabfd4;
   --ep-moon-dim: #8fa3b826;
+  --ep-moon-hover: #aabfd4; /* == moon-strong here; the light block re-tunes it */
+  --ep-on-moon: #121411; /* 7.1:1 on moon at rest (#505) */
   /* semantic — dark-tuned; the light block re-tunes all three. Every text-role token
      here holds WCAG AA (>= 4.5:1) against canvas, surface AND surface-2 — audited and
      enforced by src/test/contrast.test.ts (#490). */
@@ -28,6 +35,8 @@
   --ep-accent: var(--ep-gold);
   --ep-accent-strong: var(--ep-gold-strong);
   --ep-accent-dim: var(--ep-gold-dim);
+  --ep-accent-hover: var(--ep-gold-hover);
+  --ep-on-accent: var(--ep-on-gold);
 
   /* dark (default): warm olive-black, lamplit */
   --ep-canvas: #121411;
@@ -59,9 +68,14 @@
   --ep-gold: #a8833b;
   --ep-gold-strong: #795d25; /* 4.68:1 on gold-dim over surface-2 — badge text worst case (#490) */
   --ep-gold-dim: #a8833b21;
+  --ep-gold-hover: #9c7a37; /* deepen-on-hover on paper — 4.63:1 under on-gold (#505) */
+  /* on-gold inherits the :root near-black — 5.27:1 on this gold (#505) */
   --ep-moon: #5d7891;
   --ep-moon-strong: #46607a;
   --ep-moon-dim: #5d789121;
+  --ep-moon-hover: #46607a; /* == moon-strong — 6.5:1 under white (#505) */
+  --ep-on-moon: #ffffff; /* paper moon is a mid-tone: near-black tops out at 4.0:1 and the
+     paper canvas at 4.2 — only white clears both the resting and hovered fill (#505) */
   /* semantic, re-tuned for paper: the dark-theme hexes measured 1.89–3.63 here (#490) */
   --ep-ok: #527540;
   --ep-warn: #84681d;
@@ -73,6 +87,8 @@
   --ep-accent: var(--ep-moon);
   --ep-accent-strong: var(--ep-moon-strong);
   --ep-accent-dim: var(--ep-moon-dim);
+  --ep-accent-hover: var(--ep-moon-hover);
+  --ep-on-accent: var(--ep-on-moon);
 }
 
 @theme inline {
@@ -87,6 +103,8 @@
   --color-accent: var(--ep-accent);
   --color-accent-strong: var(--ep-accent-strong);
   --color-accent-dim: var(--ep-accent-dim);
+  --color-accent-hover: var(--ep-accent-hover);
+  --color-on-accent: var(--ep-on-accent);
   --color-ok: var(--ep-ok);
   --color-warn: var(--ep-warn);
   --color-danger: var(--ep-danger);

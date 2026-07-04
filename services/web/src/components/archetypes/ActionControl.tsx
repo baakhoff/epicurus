@@ -145,7 +145,7 @@ export function ActionControl({
               action.intent === "danger"
                 ? "border border-danger/40 text-danger hover:bg-danger/10"
                 : action.intent === "primary"
-                  ? "bg-accent text-canvas hover:bg-accent-strong"
+                  ? "bg-accent text-on-accent hover:bg-accent-hover"
                   : "border border-edge-strong text-ink hover:border-accent hover:text-accent-strong",
             )}
           >

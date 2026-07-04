@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.14.0"
+    assert manifest.version == "0.15.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -275,6 +275,35 @@ async def test_tasks_update_clears_repeat_with_empty_string(module_fixture: obje
         "tasks_update", {"task_id": task["id"], "repeat": ""}
     )
     assert updated["repeat"] is None
+
+
+async def test_tasks_update_rejects_repeat_on_a_task_with_no_due_date(
+    module_fixture: object,
+) -> None:
+    """Setting `repeat` on a task with no due — and none supplied here — can't anchor the
+    rule, so it would silently never materialize (#515). Rejects like tasks_add does."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "No date yet"}
+    )
+    with pytest.raises(Exception, match="due date"):
+        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_update", {"task_id": task["id"], "repeat": "FREQ=WEEKLY"}
+        )
+
+
+async def test_tasks_update_accepts_repeat_when_due_supplied_in_the_same_call(
+    module_fixture: object,
+) -> None:
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "No date yet"}
+    )
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "due": "2026-08-01", "repeat": "FREQ=WEEKLY"}
+    )
+    assert updated["repeat"] == "FREQ=WEEKLY"
+    assert updated["due"] == "2026-08-01"
 
 
 # ── Chat-attachment source helpers (ADR-0019) ─────────────────────────────────

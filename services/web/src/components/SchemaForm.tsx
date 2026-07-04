@@ -327,10 +327,17 @@ export function SchemaForm({
       className="flex flex-col gap-4"
       onSubmit={(e) => {
         e.preventDefault();
-        // Drop empty optional strings so we send only what was filled in.
+        // An optional field left blank throughout (never had a value) is omitted — nothing to
+        // change. One that *had* a value and was blanked (e.g. "Does not repeat" over an
+        // existing rule) sends an explicit "" instead, so the tool can tell "clear this" apart
+        // from "leave it alone" (#515 — previously always dropped, so clearing never reached
+        // the tool at all).
         const cleaned: FormValues = {};
         for (const [key, value] of Object.entries(values)) {
-          if (value === "" && !required.has(key)) continue;
+          if (value === "" && !required.has(key)) {
+            if (start[key] !== "" && start[key] != null) cleaned[key] = "";
+            continue;
+          }
           cleaned[key] = value;
         }
         onSubmit(cleaned);

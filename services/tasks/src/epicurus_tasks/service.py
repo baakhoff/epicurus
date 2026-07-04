@@ -149,7 +149,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.14.0",
+        version="0.15.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -413,6 +413,17 @@ def build_module(
                 validate_rrule(repeat)
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
+            if due is None:
+                # repeat is being set without a due in *this* call — the anchor must already
+                # be on the task, or the rule silently never materializes (#515). tasks_add's
+                # due-required check can't see this case: an existing task that has no due
+                # and isn't getting one in this same update.
+                current = await provider.get_task(tenant_id, task_id, list_id=list_id)
+                if current is None or not current.due:
+                    raise RuntimeError(
+                        "a recurring task needs a due date to anchor the repeat rule —"
+                        ' pass due="YYYY-MM-DD" in this update, or set one first'
+                    )
         tag_list = _parse_tags(tags) if tags is not None else None
         try:
             return await provider.update_task(

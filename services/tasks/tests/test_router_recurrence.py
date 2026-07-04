@@ -9,6 +9,8 @@ creates exactly one successor with the right due date, retires the rule on the c
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -23,6 +25,36 @@ MON = "2026-07-06"
 THU = "2026-07-09"
 FRI = "2026-07-10"
 NEXT_MON = "2026-07-13"
+
+
+class _AddFailsProvider:
+    """Wraps a real provider; ``add_task`` always raises, everything else delegates (#515)."""
+
+    def __init__(self, inner: LocalTasksProvider) -> None:
+        self._inner = inner
+        self.add_calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def add_task(self, *args: Any, **kwargs: Any) -> Task:
+        self.add_calls += 1
+        raise RuntimeError("boom: provider unavailable")
+
+
+class _RetireFailsProvider:
+    """Wraps a real provider; ``update_task`` always raises, everything else delegates (#515)."""
+
+    def __init__(self, inner: LocalTasksProvider) -> None:
+        self._inner = inner
+        self.update_calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def update_task(self, *args: Any, **kwargs: Any) -> Task:
+        self.update_calls += 1
+        raise RuntimeError("boom: provider unavailable")
 
 
 class _LocalPrefs:
@@ -110,3 +142,78 @@ async def test_re_completing_does_not_double_fire(store: TaskStore) -> None:
     await router.complete_task(TENANT, task.id)  # again
     open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
     assert len(open_tasks) == 1  # still just the one successor, not two
+
+
+# ── materialize failure paths (#515) ──────────────────────────────────────────
+
+
+async def test_add_failure_leaves_completion_intact_and_rule_live(store: TaskStore) -> None:
+    # If spawning the successor fails, the completion itself must still succeed — and the
+    # rule stays live on the completed task (not retired) so a retry can pick it up later,
+    # rather than silently losing the recurrence.
+    inner = LocalTasksProvider(store)
+    task = await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+    flaky = _AddFailsProvider(inner)
+    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=lambda: MON)
+
+    done = await router.complete_task(TENANT, task.id)  # must not raise
+    assert done.completed
+    assert flaky.add_calls == 1
+
+    open_tasks, done_tasks = _partition(await inner.list_tasks(TENANT, scope="all"))
+    assert open_tasks == []  # no successor was created
+    assert done_tasks[0].repeat == "FREQ=WEEKLY"  # rule left live, not retired
+
+
+async def test_retire_failure_after_successful_add_is_logged_not_raised(store: TaskStore) -> None:
+    # The dangerous case: the successor already exists when the retire write fails. The
+    # completion must still succeed, and the retire is retried once before being logged and
+    # given up on — never raised back to the caller.
+    inner = LocalTasksProvider(store)
+    task = await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+    flaky = _RetireFailsProvider(inner)
+    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=lambda: MON)
+
+    done = await router.complete_task(TENANT, task.id)  # must not raise
+    assert done.completed
+    assert flaky.update_calls == 2  # the initial attempt plus one retry
+
+    open_tasks, _ = _partition(await inner.list_tasks(TENANT, scope="all"))
+    assert len(open_tasks) == 1  # the successor exists even though the retire never landed
+    assert open_tasks[0].due == NEXT_MON
+
+
+# ── overdue sweep (#515) ───────────────────────────────────────────────────────
+
+
+async def test_list_tasks_materializes_an_overdue_recurring_task(store: TaskStore) -> None:
+    # A recurring task nobody completed, now overdue, gets a fresh successor on read — the
+    # series doesn't stall forever waiting for a completion that may never come.
+    router = _router(store, today=THU)
+    await router.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+
+    open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len(open_tasks) == 2
+    original = next(t for t in open_tasks if t.due == MON)
+    successor = next(t for t in open_tasks if t.due != MON)
+    # The overdue original stays open (the operator's call whether to still do it) but its
+    # rule is retired so it is never swept again.
+    assert original.repeat is None
+    # The successor's due is skip-missed-advanced from *today*, exactly like a late completion.
+    assert successor.due == NEXT_MON
+    assert successor.repeat == "FREQ=WEEKLY"
+
+
+async def test_list_tasks_leaves_a_not_yet_due_recurring_task_alone(store: TaskStore) -> None:
+    router = _router(store, today=MON)
+    await router.add_task(TENANT, "Water plants", due=NEXT_MON, repeat="FREQ=WEEKLY")
+    open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len(open_tasks) == 1  # not overdue yet — no sweep, no successor
+    assert open_tasks[0].repeat == "FREQ=WEEKLY"
+
+
+async def test_list_tasks_leaves_an_overdue_non_recurring_task_alone(store: TaskStore) -> None:
+    router = _router(store, today=THU)
+    await router.add_task(TENANT, "Plain overdue task", due=MON)
+    open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len(open_tasks) == 1  # nothing to sweep — no repeat rule to advance

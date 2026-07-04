@@ -1,15 +1,18 @@
 """Mail module — MCP tool surface (ADR-0016).
 
-Provider-agnostic tools: ``mail_search``, ``mail_read``, ``mail_send``, and the
-read-state pair ``mail_mark_read`` / ``mail_mark_unread``.
+Provider-agnostic tools: ``mail_search``, ``mail_read``, ``mail_send``, ``mail_reply``,
+and the read-state pair ``mail_mark_read`` / ``mail_mark_unread``.
 The tool names and signatures are domain-neutral; no Gmail specifics appear in the
 tool surface (the manifest declares Gmail's OAuth scopes for the connect flow, #241).
 ``mail_search`` returns a :func:`~epicurus_core.tool_envelope` so the UI renders
 each result as an entity-reference chip (ADR-0019): hover for the hover-card,
 click to open the full message in the right-panel email-reader.
-``mail_send`` is declared a danger action (ADR-0007): it sends a real message
-and cannot be undone, so the web shell displays a confirmation prompt before
-invoking it.
+``mail_send`` and ``mail_reply`` are declared danger actions (ADR-0007): each sends
+a real message and cannot be undone, so the web shell displays a confirmation prompt
+before invoking either. ``mail_reply`` (#461) keeps the message in its existing
+conversation thread — RFC-2822 ``In-Reply-To``/``References`` plus the provider's
+native thread association — deriving the recipient and subject from the original
+message rather than taking them as arguments.
 ``mail_mark_read`` / ``mail_mark_unread`` flip a message's read state; the
 ``email-reader`` panel also surfaces them as a tool-backed toggle (ADR-0024).
 """
@@ -36,9 +39,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.7.0",
+        version="0.8.0",
         description=(
-            "Provider-agnostic mail — search, read, and send. Gmail is the v0.1 provider."
+            "Provider-agnostic mail — search, read, send, and reply. Gmail is the v0.1 provider."
         ),
         ui=UiSection(
             icon="mail",
@@ -55,6 +58,15 @@ def build_module(provider: MailProvider) -> EpicurusModule:
                     intent="danger",
                     confirm=(
                         "Send this message? This will deliver a real email and cannot be undone."
+                    ),
+                ),
+                UiAction(
+                    tool="mail_reply",
+                    label="Reply",
+                    description="Send a reply in the same conversation thread.",
+                    intent="danger",
+                    confirm=(
+                        "Send this reply? This will deliver a real email and cannot be undone."
                     ),
                 ),
             ],
@@ -141,6 +153,25 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         Returns a confirmation string containing the sent message ID.
         """
         sent_id = await provider.send(to=to, subject=subject, body=body)
+        return f"sent:{sent_id}"
+
+    @module.tool()
+    async def mail_reply(message_id: str, body: str) -> str:
+        """Reply to a mail message, keeping it in the same conversation thread.
+
+        **This action delivers a real message and cannot be undone.**
+        Only invoke after explicit user confirmation of the reply body — the
+        recipient and subject are derived from the original message (its
+        sender, and its subject prefixed with "Re:" unless already a reply),
+        so there is nothing else to compose.
+
+        Args:
+            message_id: The message being replied to (from ``mail_search`` or ``mail_read``).
+            body: Plain-text reply body.
+
+        Returns a confirmation string containing the sent message ID.
+        """
+        sent_id = await provider.reply(message_id, body)
         return f"sent:{sent_id}"
 
     @module.tool()

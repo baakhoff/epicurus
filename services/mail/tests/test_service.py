@@ -16,6 +16,7 @@ def _make_provider(*messages: MailMessage) -> MailProvider:
     provider.search = AsyncMock(return_value=list(messages))
     provider.read = AsyncMock(return_value=messages[0] if messages else _sample())
     provider.send = AsyncMock(return_value="sent_msg_id")
+    provider.reply = AsyncMock(return_value="reply_msg_id")
     provider.set_unread = AsyncMock(return_value=None)
     return provider  # type: ignore[return-value]
 
@@ -112,6 +113,17 @@ async def test_mail_send_returns_sent_id() -> None:
     )
 
 
+async def test_mail_reply_returns_sent_id() -> None:
+    provider = _make_provider(_sample())
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool(
+        "mail_reply", {"message_id": "msg1", "body": "Sounds good!"}
+    )
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "sent:" in str(text)
+    provider.reply.assert_called_once_with("msg1", "Sounds good!")  # type: ignore[attr-defined]
+
+
 async def test_mail_mark_read_clears_unread() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
@@ -155,6 +167,7 @@ async def test_manifest_declares_all_tools() -> None:
         "mail_search",
         "mail_read",
         "mail_send",
+        "mail_reply",
         "mail_mark_read",
         "mail_mark_unread",
     }
@@ -169,15 +182,14 @@ async def test_manifest_has_ui_with_status_url() -> None:
     assert manifest.ui.icon == "mail"
 
 
-async def test_manifest_mail_send_is_danger_action() -> None:
+async def test_manifest_mail_send_and_reply_are_danger_actions() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
     assert manifest.ui is not None
     danger = [a for a in manifest.ui.actions if a.intent == "danger"]
-    assert len(danger) == 1
-    assert danger[0].tool == "mail_send"
-    assert danger[0].confirm is not None
+    assert {a.tool for a in danger} == {"mail_send", "mail_reply"}
+    assert all(a.confirm is not None for a in danger)
 
 
 async def test_manifest_emits_mail_sent_event() -> None:
@@ -195,11 +207,11 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_7_0() -> None:
+async def test_manifest_version_is_0_8_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.7.0"
+    assert manifest.version == "0.8.0"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:

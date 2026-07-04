@@ -44,6 +44,18 @@ class MailProvider(ABC):
         """Send a message and return the sent message ID."""
 
     @abstractmethod
+    async def reply(self, message_id: str, body: str) -> str:
+        """Reply to *message_id* in its existing thread; return the sent message ID.
+
+        The recipient and subject are derived from the original message — the provider
+        replies to its sender with its subject (``Re: ...``, not doubled if already a
+        reply) — so the caller supplies only the new body. The provider is responsible
+        for the RFC-2822 threading headers (``In-Reply-To`` / ``References``) and any
+        native thread association its API offers, so the reply lands in the same
+        conversation on both ends (#461).
+        """
+
+    @abstractmethod
     async def set_unread(self, message_id: str, unread: bool) -> None:
         """Set a message's read state: ``unread=False`` marks it read, ``True`` unread.
 

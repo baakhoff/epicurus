@@ -2,10 +2,11 @@
 
 ## What it is
 
-The **mail module** gives the agent the ability to search, read, and send mail on
-the user's behalf.  The module is **provider-agnostic**: tools are named and typed
-in terms of the mail domain (`mail_search`, `mail_read`, `mail_send`), and the
-underlying provider is pluggable via the `MailProvider` interface (ADR-0016).
+The **mail module** gives the agent the ability to search, read, send, and reply to
+mail on the user's behalf.  The module is **provider-agnostic**: tools are named and
+typed in terms of the mail domain (`mail_search`, `mail_read`, `mail_send`,
+`mail_reply`), and the underlying provider is pluggable via the `MailProvider`
+interface (ADR-0016).
 
 Gmail is the v0.1 provider.  Tokens are fetched at runtime from the core's OAuth
 vault — the module never holds a client secret or refresh token (see
@@ -37,6 +38,17 @@ on the `UNREAD` label, which requires the **`gmail.modify`** scope (replacing `g
 which it supersets). **Operators who connected Google before v0.7.0 must reconnect once**
 (Settings → Connect) to grant `gmail.modify`; until then the mark tools return a reconnect hint.
 
+**v0.8.0** (#461): mail can now **reply** in an existing thread, not just start new
+conversations. The new `mail_reply(message_id, body)` tool fetches the original message's
+`Message-ID`/`References`/`Subject`/`From` (a lightweight metadata-only call — no body fetch),
+then sends with RFC-2822 `In-Reply-To`/`References` headers (chaining the full reference list,
+not just the immediate parent) and the Gmail `threadId` in the send payload, so the reply lands
+in the same conversation for both Gmail and any RFC-2822-compliant client. The recipient (the
+original sender) and subject (`Re: <original>`, not doubled if already a reply) are derived —
+the caller supplies only the new body. Declared a **danger action** (ADR-0007) exactly like
+`mail_send`. The provider seam gains `MailProvider.reply(message_id, body)`, so a future
+non-Gmail provider implements the same threading contract.
+
 ---
 
 ## Contract
@@ -50,6 +62,7 @@ All tools operate on the active `MailProvider` for the tenant.
 | `mail_search` | `query: str`, `max_results: int = 10` | `ToolEnvelope` (text + entity refs) | Returns entity-ref chips; no body. Gmail query syntax. Max 50. |
 | `mail_read` | `message_id: str` | `str` (formatted text) | Subject, sender, date, and decoded plain-text body for the agent to reason on. |
 | `mail_send` | `to: str`, `subject: str`, `body: str` | `str` | **Danger action** — sends a real message. Returns `"sent:<id>"`. |
+| `mail_reply` | `message_id: str`, `body: str` | `str` | **Danger action** — replies in *message_id*'s thread (RFC-2822 `In-Reply-To`/`References` + provider thread association). Recipient and subject are derived from the original message. Returns `"sent:<id>"`. |
 | `mail_mark_read` | `message_id: str` | `str` | Clears the unread flag (`messages.modify`). Returns `"marked-read:<id>"`. Distinct from `mail_read` (which fetches the body). Idempotent. |
 | `mail_mark_unread` | `message_id: str` | `str` | Restores the unread flag. Returns `"marked-unread:<id>"`. Idempotent. |
 
@@ -61,9 +74,9 @@ summary; `entity_refs` carries one `EntityRef` per message (`module="mail"`,
 `kind="message"`) so the UI renders interactive chips — no body content is
 transferred to the model context.
 
-`mail_send` is declared a **danger action** (ADR-0007): the web shell renders a
-confirmation prompt before invoking it and the tool docstring requires explicit
-user confirmation before it is called.
+`mail_send` and `mail_reply` are each declared a **danger action** (ADR-0007): the web
+shell renders a confirmation prompt before invoking either, and each tool's docstring
+requires explicit user confirmation before it is called.
 
 ### HTTP endpoints (internal)
 

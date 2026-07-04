@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import email
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,7 +11,13 @@ import httpx
 import pytest
 
 from epicurus_core import PlatformClient
-from epicurus_mail.gmail import GmailProvider, _extract_body, _parse_message
+from epicurus_mail.gmail import (
+    GmailProvider,
+    _build_reply_mime,
+    _extract_body,
+    _parse_message,
+    _reply_subject,
+)
 
 
 def _b64(text: str) -> str:
@@ -138,6 +145,56 @@ def test_parse_message_unread_defaults_false_without_labels() -> None:
     assert msg.unread is False
 
 
+# ── _reply_subject ───────────────────────────────────────────────────────────
+
+
+def test_reply_subject_prefixes_re() -> None:
+    assert _reply_subject("Hello") == "Re: Hello"
+
+
+@pytest.mark.parametrize("already", ["Re: Hello", "RE: Hello", "re: Hello", "  Re: Hello"])
+def test_reply_subject_does_not_double_prefix(already: str) -> None:
+    assert _reply_subject(already) == already
+
+
+def test_reply_subject_empty_becomes_no_subject() -> None:
+    assert _reply_subject("") == "Re: (no subject)"
+
+
+# ── _build_reply_mime ─────────────────────────────────────────────────────────
+
+
+def test_build_reply_mime_addresses_the_original_sender() -> None:
+    msg = _build_reply_mime({"from": "alice@example.com", "subject": "Hi"}, "body")
+    assert msg["To"] == "alice@example.com"
+    assert msg["Subject"] == "Re: Hi"
+    assert msg.get_payload(decode=True) == b"body"
+
+
+def test_build_reply_mime_sets_in_reply_to_and_references() -> None:
+    headers = {"from": "a@x.com", "subject": "Hi", "message-id": "<orig@mail>"}
+    msg = _build_reply_mime(headers, "body")
+    assert msg["In-Reply-To"] == "<orig@mail>"
+    assert msg["References"] == "<orig@mail>"
+
+
+def test_build_reply_mime_chains_existing_references() -> None:
+    headers = {
+        "from": "a@x.com",
+        "subject": "Hi",
+        "message-id": "<orig@mail>",
+        "references": "<earlier@mail>",
+    }
+    msg = _build_reply_mime(headers, "body")
+    assert msg["References"] == "<earlier@mail> <orig@mail>"
+
+
+def test_build_reply_mime_omits_threading_headers_without_message_id() -> None:
+    msg = _build_reply_mime({"from": "a@x.com", "subject": "Hi"}, "body")
+    assert msg["In-Reply-To"] is None
+    assert msg["References"] is None
+
+
 # ── GmailProvider (httpx patched via provider internals) ─────────────────────
 
 
@@ -238,6 +295,103 @@ async def test_send_encodes_mime_and_calls_api(subject: str, to: str, body: str)
     # Verify the raw payload decodes back to valid RFC 2822 message containing the subject
     decoded = base64.urlsafe_b64decode(captured["raw"] + "==").decode("utf-8", errors="replace")
     assert to in decoded
+
+
+# ── reply() ───────────────────────────────────────────────────────────────────
+
+
+def _original_message(
+    *, thread_id: str | None = "thread-abc", message_id: str = "<orig@mail>"
+) -> dict[str, Any]:
+    headers = [
+        {"name": "Subject", "value": "Hello"},
+        {"name": "From", "value": "alice@example.com"},
+    ]
+    if message_id:
+        headers.append({"name": "Message-ID", "value": message_id})
+    data: dict[str, Any] = {"payload": {"headers": headers}}
+    if thread_id is not None:
+        data["threadId"] = thread_id
+    return data
+
+
+async def test_reply_fetches_original_and_sends_threaded() -> None:
+    """reply() fetches the original message's headers, then sends threaded via RFC-2822."""
+    platform = _make_platform("tok_reply")
+    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    captured: dict[str, Any] = {}
+
+    async def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        captured["get_url"] = url
+        captured["get_params"] = kwargs.get("params")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=_original_message())
+        return resp
+
+    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
+        captured["post_url"] = url
+        captured["post_json"] = kwargs["json"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={"id": "reply_id"})
+        return resp
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(side_effect=fake_get)
+    mock_client.post = AsyncMock(side_effect=fake_post)
+    provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+    sent_id = await provider.reply("m1", "My reply body")
+
+    assert sent_id == "reply_id"
+    assert captured["get_url"] == "/users/me/messages/m1"
+    assert captured["get_params"]["format"] == "metadata"
+    assert captured["post_url"] == "/users/me/messages/send"
+    assert captured["post_json"]["threadId"] == "thread-abc"
+    decoded = base64.urlsafe_b64decode(captured["post_json"]["raw"] + "==").decode(
+        "utf-8", errors="replace"
+    )
+    assert "To: alice@example.com" in decoded
+    assert "Subject: Re: Hello" in decoded
+    assert "In-Reply-To: <orig@mail>" in decoded
+    assert "References: <orig@mail>" in decoded
+    # The body itself is base64 content-transfer-encoded inside the MIME part; parse it
+    # rather than looking for the plain text verbatim in the outer decoded raw message.
+    sent_msg = email.message_from_string(decoded)
+    assert sent_msg.get_payload(decode=True) == b"My reply body"
+
+
+async def test_reply_omits_thread_id_when_original_has_none() -> None:
+    """A Gmail response with no threadId must not send a null/empty threadId."""
+    platform = _make_platform("tok_reply2")
+    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    captured: dict[str, Any] = {}
+
+    async def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=_original_message(thread_id=None))
+        return resp
+
+    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
+        captured["post_json"] = kwargs["json"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={"id": "reply_id2"})
+        return resp
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(side_effect=fake_get)
+    mock_client.post = AsyncMock(side_effect=fake_post)
+    provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+    await provider.reply("m2", "body")
+    assert "threadId" not in captured["post_json"]
 
 
 @pytest.mark.parametrize(

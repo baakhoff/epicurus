@@ -14,6 +14,18 @@ images to GHCR.
 
 ### Added
 
+- **Web: themed toasts replace every native browser dialog** (#488) — every mutation-failure
+  path that fired a `window.alert(...)` popup (12 sites: editor tree operations, file-browser
+  open/move, board card move, suggestion approve/reject) now raises a themed toast instead — a
+  bottom-anchored card in the shell's own style (`role="status"` polite live announcement,
+  manual close, auto-dismiss with errors lingering longer than info, identical re-raises
+  replacing rather than stacking). The store-driven `Toaster` (`src/stores/toasts.ts`,
+  `toast.error()`/`toast.info()`) is callable from any non-hook code path. The editor's three
+  `window.confirm` prompts (restore version over unsaved edits, delete file, delete folder) now
+  route through the shared `<Confirm>` primitive with the danger treatment. An ESLint
+  `no-restricted-syntax` + `no-restricted-globals` guard (the #394 pattern) bans
+  `window.alert`/`window.confirm` so native dialogs can't come back. `web` 0.71.1→0.72.0.
+
 - **Tasks: create a task list from the UI or the agent** (#474) — previously the only way to
   get a new Google task list was outside epicurus, in Google Tasks' own UI, and the local store
   had no list concept to create at all. A new **`create_list`** provider seam, a

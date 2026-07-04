@@ -19,6 +19,7 @@ import { Badge, Button, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import type { PendingSuggestion } from "@/lib/contracts";
 import { type DiffLine, diffLines, mergeHunks, toHunks } from "@/lib/linediff";
+import { toast } from "@/stores/toasts";
 
 type Op = PendingSuggestion["operation"];
 
@@ -156,7 +157,7 @@ export function SuggestionReviewModal({
     onClose();
   };
   const onError = (err: unknown) =>
-    window.alert(err instanceof ApiError ? err.detail : "Action failed.");
+    toast.error(err instanceof ApiError ? err.detail : "Action failed.");
 
   const approve = useMutation({
     mutationFn: () =>

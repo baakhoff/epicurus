@@ -33,6 +33,7 @@ import { Button, EmptyState, Spinner, TextInput, Tooltip, cn } from "@/component
 import { ApiError } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
+import { toast } from "@/stores/toasts";
 
 /**
  * A data adapter the `browser` archetype renders against (ADR-0063). It decouples the
@@ -115,7 +116,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
     mutationFn: (path: string) => source.readText(path),
     onSuccess: (file) => panelOpen("doc-reader", file, file.name),
     onError: (err) =>
-      window.alert(
+      toast.error(
         err instanceof ApiError ? `Could not open: ${err.detail}` : "Could not open this file.",
       ),
   });
@@ -129,7 +130,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
       setRenaming(false);
     },
     onError: (err) =>
-      window.alert(
+      toast.error(
         err instanceof ApiError ? `Could not move: ${err.detail}` : "Could not move this item.",
       ),
   });

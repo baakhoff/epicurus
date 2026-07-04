@@ -57,6 +57,7 @@ import { api } from "@/lib/api";
 import { EditorData } from "@/lib/contracts";
 import type { EditorDoc, EditorScope, EditorVersionContent } from "@/lib/contracts";
 import { relativeTime } from "@/lib/format";
+import { toast } from "@/stores/toasts";
 
 // The editable WYSIWYG Preview (#377) — lazy-loaded so Milkdown/ProseMirror never enters the
 // main bundle (it loads only when a document is opened in the editor archetype).
@@ -510,6 +511,10 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   const [newProjectName, setNewProjectName] = useState("");
   // The knowledge base awaiting a delete confirm (#340); null = no dialog open.
   const [scopeToDelete, setScopeToDelete] = useState<EditorScope | null>(null);
+  // Destructive tree actions awaiting a themed confirm (#488) — window.confirm is banned.
+  const [pathToDelete, setPathToDelete] = useState<string | null>(null);
+  const [folderToDelete, setFolderToDelete] = useState<string | null>(null);
+  const [confirmingRestore, setConfirmingRestore] = useState(false);
 
   // Version history (ADR-0046): the dropdown's open state and the past version being
   // previewed (read-only) in place of the live buffer. `null` = editing the current doc.
@@ -678,7 +683,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
     onError: (err) => {
       const msg = err instanceof ApiError ? err.detail : String(err);
-      window.alert(`Could not create folder: ${msg}`);
+      toast.error(`Could not create folder: ${msg}`);
     },
   });
 
@@ -695,7 +700,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
     onError: (err) => {
       const msg = err instanceof ApiError ? err.detail : String(err);
-      window.alert(`Could not create knowledge base: ${msg}`);
+      toast.error(`Could not create knowledge base: ${msg}`);
     },
   });
 
@@ -715,7 +720,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     onError: (err) => {
       setScopeToDelete(null);
       const msg = err instanceof ApiError ? err.detail : String(err);
-      window.alert(`Could not delete knowledge base: ${msg}`);
+      toast.error(`Could not delete knowledge base: ${msg}`);
     },
   });
 
@@ -730,7 +735,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
     onError: (err) => {
       const msg = err instanceof ApiError ? err.detail : String(err);
-      window.alert(`Could not delete file: ${msg}`);
+      toast.error(`Could not delete file: ${msg}`);
     },
   });
 
@@ -739,7 +744,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     onSuccess: invalidateList,
     onError: (err) => {
       const msg = err instanceof ApiError ? err.detail : String(err);
-      window.alert(`Could not delete folder: ${msg}`);
+      toast.error(`Could not delete folder: ${msg}`);
     },
   });
 
@@ -755,7 +760,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     },
     onError: (err) => {
       const msg = err instanceof ApiError ? err.detail : String(err);
-      window.alert(`Could not rename: ${msg}`);
+      toast.error(`Could not rename: ${msg}`);
     },
   });
 
@@ -838,17 +843,24 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   };
 
   // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
-  // as a new version through the normal path. Confirms first if it would drop unsaved edits.
-  const restoreVersion = () => {
-    if (!viewingVersion || !selectedPath || data.read_only) return;
-    if (dirty && !window.confirm("Restore this version? Unsaved changes will be replaced.")) {
-      return;
-    }
+  // as a new version through the normal path. Confirms first (in-theme, #488) if it would
+  // drop unsaved edits.
+  const applyRestore = () => {
+    if (!viewingVersion || !selectedPath) return;
     const content = viewingVersion.content;
+    setConfirmingRestore(false);
     setViewingVersion(null);
     setDraft(content);
     setMode("preview");
     save.mutate({ path: selectedPath, content });
+  };
+  const restoreVersion = () => {
+    if (!viewingVersion || !selectedPath || data.read_only) return;
+    if (dirty) {
+      setConfirmingRestore(true);
+      return;
+    }
+    applyRestore();
   };
 
   // can_create: the existing "New note" flow (used by Notes module)
@@ -887,15 +899,9 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setMode("edit");
   };
 
-  const handleDeleteFile = (path: string) => {
-    if (!window.confirm(`Delete "${path}"? This cannot be undone.`)) return;
-    deleteDoc.mutate(path);
-  };
+  const handleDeleteFile = (path: string) => setPathToDelete(path);
 
-  const handleDeleteFolder = (path: string) => {
-    if (!window.confirm(`Delete folder "${path}"? It must be empty.`)) return;
-    deleteFolder.mutate(path);
-  };
+  const handleDeleteFolder = (path: string) => setFolderToDelete(path);
 
   const handleStartRename = (path: string, currentTitle: string) => {
     setRenamingPath(path);
@@ -1428,6 +1434,38 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
           </>
         )}
       </div>
+
+      {/* Destructive tree actions confirm in-theme (#488) — never via window.confirm. */}
+      <Confirm
+        open={pathToDelete !== null}
+        danger
+        message={pathToDelete ? `Delete “${pathToDelete}”? This cannot be undone.` : ""}
+        confirmLabel="Delete"
+        onCancel={() => setPathToDelete(null)}
+        onConfirm={() => {
+          if (pathToDelete) deleteDoc.mutate(pathToDelete);
+          setPathToDelete(null);
+        }}
+      />
+      <Confirm
+        open={folderToDelete !== null}
+        danger
+        message={folderToDelete ? `Delete the folder “${folderToDelete}”? It must be empty.` : ""}
+        confirmLabel="Delete"
+        onCancel={() => setFolderToDelete(null)}
+        onConfirm={() => {
+          if (folderToDelete) deleteFolder.mutate(folderToDelete);
+          setFolderToDelete(null);
+        }}
+      />
+      <Confirm
+        open={confirmingRestore}
+        danger
+        message="Restore this version? Unsaved changes will be replaced."
+        confirmLabel="Restore"
+        onCancel={() => setConfirmingRestore(false)}
+        onConfirm={applyRestore}
+      />
     </div>
   );
 }

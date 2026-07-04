@@ -71,6 +71,7 @@ import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
+import { toast } from "@/stores/toasts";
 
 // A small rotation keeps the garden fresh without ever surprising twice in one day:
 // the quote is picked by day-of-year, so it changes overnight, never mid-session.
@@ -677,7 +678,7 @@ export function SuggestionBubble() {
   const approveSimple = useMutation({
     mutationFn: (s: PendingSuggestion) => api.approveSuggestion(s.module, s.page_id, s.id),
     onSuccess: invalidate,
-    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not approve."),
+    onError: (e) => toast.error(e instanceof ApiError ? e.detail : "Could not approve."),
   });
 
   // Reject discards the suggestion server-side and never opens the review overlay (#341) —
@@ -685,7 +686,7 @@ export function SuggestionBubble() {
   const reject = useMutation({
     mutationFn: (s: PendingSuggestion) => api.rejectSuggestion(s.module, s.page_id, s.id),
     onSuccess: invalidate,
-    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not reject."),
+    onError: (e) => toast.error(e instanceof ApiError ? e.detail : "Could not reject."),
   });
   const busy = approveSimple.isPending || reject.isPending;
 

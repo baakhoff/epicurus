@@ -45,6 +45,7 @@ import {
   TimezonePrefs,
   type PowerState,
 } from "@/lib/contracts";
+import { epFetch } from "@/lib/http";
 import { parseFrame } from "@/lib/sse";
 
 export class ApiError extends Error {
@@ -63,7 +64,7 @@ async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(path, {
+  const response = await epFetch(path, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
@@ -371,7 +372,7 @@ export const api = {
     ),
   // Delete a knowledge base (project) and its indexed documents (#340).
   deleteModuleProject: async (name: string, pageId: string, projectName: string): Promise<void> => {
-    const response = await fetch(
+    const response = await epFetch(
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/project?project=${encodeURIComponent(projectName)}`,
       { method: "DELETE", headers: { "Content-Type": "application/json" } },
     );
@@ -383,7 +384,7 @@ export const api = {
   },
   // Delete a document from an editor page's store (#216).
   deleteModuleDoc: async (name: string, pageId: string, path: string): Promise<void> => {
-    const response = await fetch(
+    const response = await epFetch(
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/doc?path=${encodeURIComponent(path)}`,
       { method: "DELETE", headers: { "Content-Type": "application/json" } },
     );
@@ -395,7 +396,7 @@ export const api = {
   },
   // Delete an empty folder from an editor page's store (#216).
   deleteModuleFolder: async (name: string, pageId: string, path: string): Promise<void> => {
-    const response = await fetch(
+    const response = await epFetch(
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/folder?path=${encodeURIComponent(path)}`,
       { method: "DELETE", headers: { "Content-Type": "application/json" } },
     );
@@ -497,7 +498,7 @@ export const api = {
   uploadAttachment: async (file: File): Promise<AttachmentUploaded> => {
     const form = new FormData();
     form.append("file", file);
-    const response = await fetch("/platform/v1/agent/attachments", { method: "POST", body: form });
+    const response = await epFetch("/platform/v1/agent/attachments", { method: "POST", body: form });
     if (!response.ok) {
       let detail = response.statusText;
       try {
@@ -591,7 +592,7 @@ export async function* logStream(
   const query = params.size ? `?${params}` : "";
   const url = `/platform/v1/logs/stream${query}`;
 
-  const response = await fetch(url, {
+  const response = await epFetch(url, {
     method: "GET",
     headers: { Accept: "text/event-stream" },
     signal,

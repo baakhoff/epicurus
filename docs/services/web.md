@@ -137,6 +137,40 @@ a winner and the rest sit invisible underneath) rather than stack; as column chi
 toast, the update prompt, and a download pill all show at once. Add any future corner
 surface as a `CornerStack` child, never as a new `fixed` element.
 
+### Offline & backend-unreachable banner (#494)
+
+The PWA shell loads from the service-worker cache even when nothing behind it is
+reachable — so silence is confusing, and on a LAN/VPN self-hosted setup (#460) "app up,
+backend unreachable" is a *normal* state, not an edge case. The shell keeps **one
+connection signal** (`src/stores/connection.ts`) with two inputs and renders it as a
+quiet, moonlight-toned banner at the top of the main column:
+
+- **offline — reconnecting** (`navigator.onLine` + the `online`/`offline` events): the
+  device has no network at all. Wins when both signals fire — an offline phone also
+  fails its probes, and "offline" is the truer story.
+- **can't reach epicurus — retrying**: the device is fine but epicurus isn't answering.
+  Evidence-based, with **no dedicated probe endpoint**: every `/platform` request flows
+  through one fetch wrapper (`epFetch`, `src/lib/http.ts`), and each doubles as evidence
+  — a network-level failure (fetch `TypeError`) or a gateway **502/504** (nginx up, core
+  container down) marks it unreachable; **any** other answer marks it reachable (a 404
+  or 500 proves the core answered, and **503 is excluded** — the LLM surface uses it for
+  the *paused* state). The PowerOrb's existing 15 s `power` poll is the heartbeat that
+  trips and clears the banner while the tab is visible; TanStack pauses that poll in
+  hidden tabs, so a backgrounded PWA makes no extra requests.
+
+Recovery is event-shaped (`useConnectionWatch`, mounted once in the Shell): the
+browser's `online` event re-checks the vitals (`power`, `modules`) immediately;
+returning to a visible tab while unreachable re-checks at once instead of waiting out
+the poll; and when evidence flips back to reachable, the whole query cache is
+invalidated **once per outage**, so screens showing outage-era data refetch instead of
+quietly staying stale. The chat surface's own re-attach probe (#477) needs no wiring —
+its `activeRun` calls flow through the same fetch, so a mid-turn outage feeds the same
+signal it always fed.
+
+While disconnected, the **composer keeps the draft** (it already persists) and disables
+Send — button and Enter alike — behind a hint, instead of letting the message fail into
+an error card for a reason the banner already explains.
+
 ### Models — per-model rows (#328)
 
 Each local model is an **inline disclosure**, not a row of hover-only icons behind a

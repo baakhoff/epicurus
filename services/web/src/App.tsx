@@ -1,4 +1,5 @@
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CloudOff, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
@@ -13,6 +14,7 @@ import { Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import { useViewportMirror } from "@/lib/viewport";
+import { useConnection, useConnectionWatch } from "@/stores/connection";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { ChatScreen } from "@/screens/ChatScreen";
@@ -109,6 +111,28 @@ const queryClient = new QueryClient({
   },
 });
 
+/**
+ * The shell-level connection banner (#494): quiet, moonlight-toned, top of the main
+ * column. Distinguishes the two silences a cached PWA shell can hide — the device is
+ * offline vs. the device is fine but epicurus isn't answering (a normal state on a
+ * LAN/VPN self-hosted box, #460). State-driven, so it clears itself on recovery.
+ */
+function ConnectionBanner() {
+  const online = useConnection((s) => s.online);
+  const coreDown = useConnection((s) => s.coreDown);
+  if (online && !coreDown) return null;
+  const Icon = online ? CloudOff : WifiOff;
+  return (
+    <div
+      role="status"
+      className="flex items-center justify-center gap-2 border-b border-edge bg-(--ep-moon-dim) px-4 py-1.5 text-xs text-(--ep-moon-strong)"
+    >
+      <Icon size={13} className="shrink-0" />
+      {online ? "can't reach epicurus — retrying" : "offline — reconnecting"}
+    </div>
+  );
+}
+
 function UpdateToast() {
   const {
     needRefresh: [needRefresh],
@@ -161,6 +185,19 @@ export function Shell() {
   // Module-contributed pages join the nav at runtime (ADR-0018): the shell renders
   // them, the modules only declare which archetype + supply data.
   const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
+
+  // Connection recovery wiring (#494): the `online` event and a return-to-visible tab
+  // re-check the always-on queries at once; the down→up flip un-stales everything so
+  // screens don't keep showing outage-era data. Detection itself lives in the transport
+  // (epFetch) — the PowerOrb's 15 s power poll is the heartbeat, no new polling here.
+  const queryClient = useQueryClient();
+  useConnectionWatch({
+    refetchVitals: useCallback(() => {
+      void queryClient.refetchQueries({ queryKey: ["power"] });
+      void queryClient.refetchQueries({ queryKey: ["modules"] });
+    }, [queryClient]),
+    onRecovered: useCallback(() => void queryClient.invalidateQueries(), [queryClient]),
+  });
   // Review pages are aggregated into the top-level Suggestions inbox (#KB-refactor), so they
   // no longer get their own per-module rail entry.
   const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");
@@ -220,6 +257,8 @@ export function Shell() {
           </div>
           <PowerOrb />
         </header>
+
+        <ConnectionBanner />
 
         <main className="min-h-0 min-w-0 flex-1">
           <Routes>

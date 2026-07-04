@@ -70,6 +70,21 @@ explicit `overflow: hidden` + `overscroll-behavior: none` as a defensive stateme
 "the document itself is never a scrollable" invariant `#root`'s fixed positioning already
 enforces in practice.
 
+### Design tokens & contrast (#490)
+
+The `--ep-*` tokens (`src/index.css`) carry a **WCAG AA guarantee**: every text-role token
+(`text`, `text-dim`, `text-faint`, `ok`, `warn`, `danger`) holds **≥ 4.5:1 against all three
+backgrounds** (`canvas`, `surface`, `surface-2`) in **both themes**, and each accent family's
+`-strong` member clears the badge worst case (its own translucent `-dim` fill composited over
+`surface-2`). `src/test/contrast.test.ts` parses the CSS and enforces exactly this, plus the
+`faint < dim < text` quietness hierarchy — change a token and the suite tells you whether it
+still complies. Two consequences worth knowing: the light theme's muted pair is deliberately
+compressed (paper backgrounds leave little luminance room under the AA floor), and the light
+theme re-tunes the semantic trio rather than inheriting the dark hexes. Decorative/disabled
+uses (dots, watermarks) are exempt by convention, but since the tokens themselves comply, no
+call site has to reason about it. Phone tab labels render at 11px minimum — primary
+navigation never sits at the app's smallest text size.
+
 ### Overlay focus management (#487)
 
 `Sheet` and `Confirm` (`src/components/ui.tsx`) honor the full modal keyboard contract via

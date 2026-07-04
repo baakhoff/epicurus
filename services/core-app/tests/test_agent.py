@@ -422,6 +422,29 @@ async def test_agent_plain_tool_output_yields_no_refs() -> None:
     assert turn.entity_refs == []
 
 
+async def test_agent_empty_entity_refs_envelope_yields_no_refs_or_appended_block() -> None:
+    # Distinct from the plain-string case above (#466): a *valid* ToolEnvelope whose
+    # entity_refs is explicitly [] must take the same early return as no envelope at all —
+    # no chips, and critically no "Referenced items" block appended to what the model sees
+    # (that block is only ever built from a non-empty ref list, #449).
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="ok"),
+        ]
+    )
+    mcp = _FakeMcp(
+        specs=[_echo_spec()],
+        route={"echo": "u"},
+        outputs={"echo": tool_envelope("just an envelope, no refs")},
+    )
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+
+    assert turn.entity_refs == []
+    tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
+    assert tool_msg.content == "just an envelope, no refs"  # unchanged — nothing appended
+
+
 async def test_agent_persists_entity_refs_with_the_answer() -> None:
     gw = _FakeGateway(
         [

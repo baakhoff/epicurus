@@ -461,6 +461,25 @@ images to GHCR.
   container regardless of compose edits can instead set `log-opts` in the box's Docker daemon
   config — see [Installation](docs/user/installation.md#container-logs). Infra-only; no
   component version bump.
+- **Web: WCAG AA contrast pass on the muted text tokens** (#490) — `--ep-text-faint` measured
+  **3.05–3.67:1** in dark and **2.37–2.69:1** in light, below the 4.5:1 AA floor for small
+  text, and it is load-bearing at 10px (phone tab labels, the chat "memory on" footer, model
+  meta lines). The audit went wider than the ticket and found more: light `--ep-text-dim`
+  missed on surface-2 (4.35), light `--ep-gold-strong` (accent badge text / active tab) sat at
+  4.27 on its real blended background, dark `--ep-danger` missed on surface-2 (4.12), and the
+  light theme reused the dark semantic hexes wholesale (`ok`/`warn`/`danger` error text at
+  **1.89–3.63:1** on paper). Every text-role token now clears **≥ 4.5:1 against canvas,
+  surface *and* surface-2 in both themes** — dark faint `#6e7064→#8b8d7f`, dark danger
+  `#c26d5c→#c97767`, light dim/faint re-tiered `#636555`/`#6b6d5c` (the paper backgrounds span
+  a narrow luminance band, so the AA-compliant muted pair is necessarily compressed), light
+  gold-strong `#8a6a2c→#795d25`, and new light semantic overrides `#527540`/`#84681d`/`#9d4736`.
+  The moon (paused) accent pair already passed and is unchanged. Phone tab labels bump
+  10px→11px — primary navigation shouldn't sit at the app's smallest size. A new
+  **`contrast.test.ts` gate** parses `index.css` and enforces all of this (plus the
+  faint<dim<text hierarchy and the badge worst-case over translucent accent fills), so the
+  next theme tweak fails CI instead of shipping an illegible token. Known remaining gap,
+  filed separately: the light-theme primary Button label (`text-canvas` on `bg-accent`)
+  measures 3.22:1 — a component-level treatment decision. `web` 0.73.0→0.74.0.
 
 - **Knowledge reads the vault through the core file API — its `/data` mount is gone** (#346) —
   the read-path tail of the file-space migration. A new `VaultReader` seam (ADR-0070) puts every

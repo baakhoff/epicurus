@@ -32,7 +32,9 @@ const railLinkClass = ({ isActive }: { isActive: boolean }) =>
 
 const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
   cn(
-    "flex min-w-16 flex-1 flex-col items-center gap-0.5 py-2 text-[10px]",
+    // 11px, not 10px: the tab labels are primary navigation on phones — the one place
+    // faint text is load-bearing at the smallest size in the app (#490).
+    "flex min-w-16 flex-1 flex-col items-center gap-0.5 py-2 text-[11px]",
     isActive ? "text-accent-strong" : "text-ink-faint",
   );
 

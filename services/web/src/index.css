@@ -18,10 +18,12 @@
   --ep-moon: #8fa3b8;
   --ep-moon-strong: #aabfd4;
   --ep-moon-dim: #8fa3b826;
-  /* semantic */
+  /* semantic — dark-tuned; the light block re-tunes all three. Every text-role token
+     here holds WCAG AA (>= 4.5:1) against canvas, surface AND surface-2 — audited and
+     enforced by src/test/contrast.test.ts (#490). */
   --ep-ok: #7fa66a;
   --ep-warn: #d4a93f;
-  --ep-danger: #c26d5c;
+  --ep-danger: #c97767;
 
   --ep-accent: var(--ep-gold);
   --ep-accent-strong: var(--ep-gold-strong);
@@ -35,7 +37,7 @@
   --ep-border-strong: #3c4133;
   --ep-text: #e8e6dd;
   --ep-text-dim: #9a9b8f;
-  --ep-text-faint: #6e7064;
+  --ep-text-faint: #8b8d7f; /* 4.54:1 on surface-2 — the old #6e7064 sat at 3.05 (#490) */
   --ep-user-bubble: #2a2c20;
   --ep-shadow: 0 4px 24px rgb(0 0 0 / 0.35);
 }
@@ -47,16 +49,23 @@
   --ep-border: #e0ded0;
   --ep-border-strong: #cdcaba;
   --ep-text: #26281f;
-  --ep-text-dim: #6e705f;
-  --ep-text-faint: #9b9d8c;
+  /* The light muted pair is necessarily compressed (#490): the paper-toned backgrounds
+     span a narrow luminance band, so any AA-compliant faint lands near dim. Both clear
+     4.5:1 on surface-2; faint still reads a notch quieter. */
+  --ep-text-dim: #636555;
+  --ep-text-faint: #6b6d5c;
   --ep-user-bubble: #ece9da;
   --ep-shadow: 0 4px 24px rgb(60 55 30 / 0.08);
   --ep-gold: #a8833b;
-  --ep-gold-strong: #8a6a2c;
+  --ep-gold-strong: #795d25; /* 4.68:1 on gold-dim over surface-2 — badge text worst case (#490) */
   --ep-gold-dim: #a8833b21;
   --ep-moon: #5d7891;
   --ep-moon-strong: #46607a;
   --ep-moon-dim: #5d789121;
+  /* semantic, re-tuned for paper: the dark-theme hexes measured 1.89–3.63 here (#490) */
+  --ep-ok: #527540;
+  --ep-warn: #84681d;
+  --ep-danger: #9d4736;
 }
 
 /* Paused: the house sleeps — the accent cools to moonlight. */

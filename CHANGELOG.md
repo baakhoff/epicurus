@@ -14,6 +14,21 @@ images to GHCR.
 
 ### Added
 
+- **Tasks: create a task list from the UI or the agent** (#474) — previously the only way to
+  get a new Google task list was outside epicurus, in Google Tasks' own UI, and the local store
+  had no list concept to create at all. A new **`create_list`** provider seam, a
+  **`tasks_create_list(title)`** MCP tool, and a board-level **New list** action (shown
+  wherever the Add form's list picker already is) all route through `TasksRouter` to the sole
+  configured external provider — **Google-only**: the local store is a single implicit list by
+  design (ADR-0030), so `LocalTasksProvider.create_list` raises `NotImplementedError` rather
+  than a half-working local multi-list system. The returned id is immediately usable as
+  `list_id` / `to_list_id` on the other tools, but — like any newly discovered Google list — it
+  still needs the operator's one-time enable toggle in the connected-accounts Lists section
+  before it appears as a board category; the module has no write path to the operator's
+  collection prefs to auto-enable it, a natural scoped follow-up. Renaming/deleting a list is
+  deliberately out of scope (destructive; needs a policy for the tasks inside). `tasks`
+  0.12.0→0.13.0.
+
 - **NATS authentication** (#50) — the event bus now **requires credentials**; it previously
   ran open, so any client on the internal network could publish/subscribe across all subjects.
   A new `infra/compose/nats-server.conf` defines an account/user model with three roles — `core`

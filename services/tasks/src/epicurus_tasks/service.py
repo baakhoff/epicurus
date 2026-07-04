@@ -18,6 +18,7 @@ from epicurus_core import (
     LOCAL_ACCOUNT,
     Account,
     AccountsView,
+    Collection,
     CollectionPrefs,
     CollectionsSpec,
     EntityRef,
@@ -101,7 +102,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.12.0",
+        version="0.13.0",
         description=(
             "Task management: list, add, edit, and complete tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -180,6 +181,28 @@ def build_module(
             return "Only the default task list is available — add tasks without a list_id."
         lines = [f"- {title} — id: {list_id}" for list_id, title in options]
         return "Available task lists:\n" + "\n".join(lines)
+
+    @module.tool()
+    async def tasks_create_list(title: str) -> Collection:
+        """Create a new task list under your connected Google account.
+
+        Requires a connected Google account — the local store is a single implicit list
+        and has no way to create named lists of its own (#474). Use the returned
+        ``collection`` id right away as ``list_id`` on ``tasks_add`` or ``to_list_id`` on
+        ``tasks_update`` — no need to call ``tasks_lists`` again first for that. It won't
+        appear as a board category or in ``tasks_lists`` itself, though, until the operator
+        enables it once in the connected-accounts Lists section (same as any other newly
+        discovered Google list) — mention that if they expect to see it there.
+
+        Args:
+            title: The new list's display name.
+
+        Returns the created list (``account``/``collection``/``title``/``writable``).
+        """
+        try:
+            return await provider.create_list(tenant_id, title)
+        except (GoogleTasksError, ValueError, NotImplementedError) as exc:
+            raise RuntimeError(str(exc)) from exc
 
     @module.tool()
     async def tasks_add(
@@ -708,9 +731,17 @@ def build_tasks_board(
     matching tasks). Empty columns are dropped; the board always declares its **view
     controls** and a board-level **Add task** action. When *lists* (``(list_id, title)``
     pairs for the operator's enabled writable lists) is given, the Add form gains a list
-    (category) picker preselecting *default_list_id*, and the *Group by* control offers
-    **List**; with two or more lists each task's Edit form also gains a List picker that
-    moves it (ADR-0038).
+    (category) picker preselecting *default_list_id*, the *Group by* control offers
+    **List**, and a board-level **New list** action (``tasks_create_list``) appears
+    (#474) — *lists* non-empty is a reliable proxy for "an external account is
+    connected" (ADR-0031 auto-enables every discovered list on connect), so the same
+    condition gates both. A list created this way exists on Google immediately (and its
+    id is immediately usable for `tasks_add`/`tasks_update`), but — like any other newly
+    discovered collection — needs the operator's one-time toggle in the connected-accounts
+    Lists section before it appears as a board category or in this picker; auto-enabling
+    it here would need the module to write the operator's collection prefs, which it has
+    no path to do today. With two or more lists each task's Edit form also gains a List
+    picker that moves it (ADR-0038).
     """
     # Grouping by list needs named lists; with none, fall back to the due-date layout so the
     # control and the columns stay consistent.
@@ -733,6 +764,7 @@ def build_tasks_board(
         "fields": ["title", "notes", "due", "priority", "tags"],
         "field_options": _TASK_FIELD_OPTIONS,
     }
+    actions = [add_action]
     if lists:
         # Offer a list (category) picker: a labeled choice whose value is the list id and
         # label its title — the shell renders `field_choices` as a label≠value <select>
@@ -743,11 +775,24 @@ def build_tasks_board(
         }
         if default_list_id is not None:
             add_action["form_values"] = {"list_id": default_list_id}
+        # "New list" needs a connected external account to create against (Google, today);
+        # *lists* being non-empty is a reliable proxy for that (connecting auto-enables every
+        # discovered list, ADR-0031), so this reuses the same gate as the list picker above
+        # rather than a separate is-connected check (#474).
+        actions.append(
+            {
+                "tool": "tasks_create_list",
+                "label": "New list",
+                "icon": "folder",
+                "form": True,
+                "fields": ["title"],
+            }
+        )
     return {
         "title": "Tasks",
         "columns": columns,
         "controls": _board_controls(group_by=group_by, scope=scope, lists=lists),
-        "actions": [add_action],
+        "actions": actions,
     }
 
 

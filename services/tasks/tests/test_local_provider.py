@@ -170,3 +170,9 @@ async def test_get_task_returns_task(provider: LocalTasksProvider) -> None:
 
 async def test_get_task_missing_returns_none(provider: LocalTasksProvider) -> None:
     assert await provider.get_task(TENANT, "nonexistent-id") is None
+
+
+async def test_create_list_not_implemented(provider: LocalTasksProvider) -> None:
+    """The local store is a single implicit list — it has nothing to create (#474)."""
+    with pytest.raises(NotImplementedError, match="connect Google"):
+        await provider.create_list(TENANT, "Groceries")

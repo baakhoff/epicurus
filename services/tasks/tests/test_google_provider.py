@@ -289,3 +289,37 @@ async def test_due_date_stripped_to_date(provider: GoogleTasksProvider) -> None:
         tasks = await provider.list_tasks(TENANT)
 
     assert tasks[0].due == "2025-11-30"
+
+
+# ── create_list (#474) ────────────────────────────────────────────────────────
+
+
+async def test_create_list(provider: GoogleTasksProvider) -> None:
+    """create_list POSTs to tasklists.insert and returns the new list as a Collection."""
+    new_list = {"id": "new-list-id", "title": "Groceries"}
+    client = _tasks_client(new_list)
+    with patch("epicurus_tasks.google_provider.httpx.AsyncClient", return_value=client):
+        collection = await provider.create_list(TENANT, "Groceries")
+
+    client.post.assert_awaited_once()
+    assert client.post.call_args.args[0] == "/users/@me/lists"
+    assert client.post.call_args.kwargs["json"] == {"title": "Groceries"}
+    assert collection.account == "google"
+    assert collection.collection == "new-list-id"
+    assert collection.title == "Groceries"
+    assert collection.writable is True
+
+
+async def test_create_list_not_connected_raises() -> None:
+    """As with every other call, a missing/invalid token surfaces a clear reconnect hint."""
+    platform = MagicMock(spec=PlatformClient)
+    platform.get_oauth_token = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "404",
+            request=None,  # type: ignore[arg-type]
+            response=None,  # type: ignore[arg-type]
+        )
+    )
+    provider = GoogleTasksProvider(platform=platform)  # type: ignore[arg-type]
+    with pytest.raises(GoogleTasksError, match="not connected"):
+        await provider.create_list(TENANT, "Groceries")

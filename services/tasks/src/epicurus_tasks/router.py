@@ -16,6 +16,8 @@ module — **each enabled list is a category**:
   target, so a mutation reaches a task living in a non-default list (#475).
 * ``get_task`` searches the active, then the other enabled, then local — so a referenced
   task resolves wherever it lives.
+* ``create_list`` routes to the sole configured external provider (Google, today) — the
+  local store has no lists of its own to create (ADR-0030, #474).
 
 It satisfies the :class:`~epicurus_tasks.providers.TasksProvider` Protocol, so the module's
 tools and board treat it like any other backend. Reads fall back to the local store when
@@ -265,6 +267,28 @@ class TasksRouter:
     async def list_collections(self, tenant_id: str) -> list[Collection]:
         # Discovery is driven from the external providers directly (see /accounts).
         return []
+
+    async def create_list(self, tenant_id: str, title: str) -> Collection:
+        """Create a new list under the operator's connected external account (#474).
+
+        Routes to the sole *configured* external provider (Google, today — the local
+        store has no create_list of its own, ADR-0030). Raises a clear, actionable error
+        if none is configured, or if more than one is (``tasks_create_list`` takes no
+        provider selector, so a second external provider type would be ambiguous — not
+        reachable today since only Google is implemented, but the router already holds
+        an arbitrary map of providers). A provider that is configured but not actually
+        *connected* raises its own "not connected" error (e.g. Google's `_access_token`) —
+        no need to duplicate that check here.
+        """
+        if not self._external:
+            raise ValueError("no external account connected — connect Google to create a list")
+        if len(self._external) > 1:
+            raise ValueError(
+                "more than one external provider is configured — tasks_create_list can't"
+                " yet tell them apart"
+            )
+        provider = next(iter(self._external.values()))
+        return await provider.create_list(tenant_id, title)
 
     # ── routing & tagging helpers ──────────────────────────────────────────────
 

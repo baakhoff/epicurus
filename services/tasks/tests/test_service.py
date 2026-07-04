@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.12.0"
+    assert manifest.version == "0.13.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -56,6 +56,7 @@ async def test_manifest(module_fixture: object) -> None:
     assert tool_names == {
         "tasks_list",
         "tasks_lists",
+        "tasks_create_list",
         "tasks_add",
         "tasks_complete",
         "tasks_update",
@@ -498,6 +499,9 @@ class _FakeGoogleTasks:
         bucket = self.tasks_by_list.get(list_id, self.tasks)
         return next((t for t in bucket if t.id == task_id), None)
 
+    async def create_list(self, tenant_id: str, title: str) -> Collection:
+        return Collection(account="google", collection="new-list-id", title=title)
+
 
 class _StaticPrefs:
     def __init__(self, prefs: CollectionPrefs) -> None:
@@ -831,3 +835,61 @@ async def test_tasks_complete_tool_resolves_across_lists_without_list_id() -> No
     module = build_module(router, tenant_id=TENANT)
     await module.mcp.call_tool("tasks_complete", {"task_id": "w1"})  # type: ignore[attr-defined]
     assert google.last_list_id == "work"
+
+
+# ── create_list: Google-only, #474 ─────────────────────────────────────────────
+
+
+async def test_router_create_list_routes_to_sole_external_provider() -> None:
+    router, _local, _google = await _local_router(CollectionPrefs())
+    created = await router.create_list(TENANT, "Groceries")
+    assert created.account == "google"
+    assert created.collection == "new-list-id"
+    assert created.title == "Groceries"
+
+
+async def test_router_create_list_raises_with_no_external_provider() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = TaskStore(engine)
+    await store.init()
+    local = LocalTasksProvider(store)
+    router = TasksRouter(local=local, external={}, prefs=_StaticPrefs(CollectionPrefs()))
+    with pytest.raises(ValueError, match="no external account"):
+        await router.create_list(TENANT, "Groceries")
+
+
+async def test_router_create_list_raises_when_ambiguous() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = TaskStore(engine)
+    await store.init()
+    local = LocalTasksProvider(store)
+    external = {"google": _FakeGoogleTasks(), "google2": _FakeGoogleTasks()}
+    router = TasksRouter(local=local, external=external, prefs=_StaticPrefs(CollectionPrefs()))
+    with pytest.raises(ValueError, match="more than one"):
+        await router.create_list(TENANT, "Groceries")
+
+
+async def _empty_store() -> TaskStore:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = TaskStore(engine)
+    await store.init()
+    return store
+
+
+async def test_tasks_create_list_tool_returns_the_new_collection() -> None:
+    router, _local, _google = await _local_router(CollectionPrefs())
+    module = build_module(router, tenant_id=TENANT)
+    _, result = await module.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_create_list", {"title": "Groceries"}
+    )
+    assert result["account"] == "google"
+    assert result["collection"] == "new-list-id"
+    assert result["title"] == "Groceries"
+
+
+async def test_tasks_create_list_tool_raises_with_no_external_provider() -> None:
+    module = build_module(LocalTasksProvider(await _empty_store()), tenant_id=TENANT)
+    with pytest.raises(Exception, match="connect Google"):
+        await module.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_create_list", {"title": "Groceries"}
+        )

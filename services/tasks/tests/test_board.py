@@ -192,6 +192,26 @@ def test_add_action_has_no_list_selector_when_no_lists() -> None:
     assert "field_choices" not in add
 
 
+# ── "New list" board action (#474) ─────────────────────────────────────────────
+
+
+def test_board_offers_new_list_action_when_lists_given() -> None:
+    board = build_tasks_board([], today=TODAY, lists=[("@default", "My Tasks")])
+    tools = {a["tool"] for a in board["actions"]}
+    assert "tasks_create_list" in tools
+    new_list = next(a for a in board["actions"] if a["tool"] == "tasks_create_list")
+    assert new_list["form"] is True
+    assert new_list["fields"] == ["title"]
+
+
+def test_board_omits_new_list_action_without_lists() -> None:
+    # No lists means no external account is connected — nothing to create against yet.
+    board = build_tasks_board([], today=TODAY, lists=[])
+    tools = {a["tool"] for a in board["actions"]}
+    assert "tasks_create_list" not in tools
+    assert board["actions"] == [board["actions"][0]]  # just "Add task"
+
+
 def test_edit_action_has_move_picker_when_multiple_lists() -> None:
     # With ≥2 lists each task's Edit form gains a List picker to move it (ADR-0038).
     task = _task("t1", "Movable", due=TODAY, list_id="work", list_title="Work")

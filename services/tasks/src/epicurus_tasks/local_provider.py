@@ -105,3 +105,10 @@ class LocalTasksProvider:
     async def list_collections(self, tenant_id: str) -> list[Collection]:
         # Local is the silent default, not a selectable account (ADR-0030).
         return []
+
+    async def create_list(self, tenant_id: str, title: str) -> Collection:
+        # Local is a single implicit list, not a selectable account (ADR-0030) — there is
+        # nothing to create here; connect an external account for named lists (#474).
+        raise NotImplementedError(
+            "the local store is a single implicit list — connect Google to create named lists"
+        )

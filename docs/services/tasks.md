@@ -81,6 +81,21 @@ now). **Cross-list resolution** — `complete_task` / `update_task` / `delete_ta
 `get_task` already used) via `TasksRouter._locate_task` instead of assuming the default write
 target, so a mutation reaches a task that lives in a non-default list instead of 404ing there.
 
+**v0.13.0** adds **creating a task list** (#474) — previously only possible outside epicurus, in
+Google Tasks' own UI. A new **`create_list`** provider seam, a **`tasks_create_list(title)`**
+MCP tool, and a board-level **New list** action (shown whenever the Add form's list picker is,
+i.e. once an external account is connected — ADR-0031 auto-enables its lists on connect) all
+route through the `TasksRouter` to the sole configured external provider — **Google only**: the
+local store is a single implicit list by design (ADR-0030) and has no lists of its own to
+create, so `LocalTasksProvider.create_list` raises `NotImplementedError` rather than pretending
+to support it. The returned list id is immediately usable as `list_id` on `tasks_add` or
+`to_list_id` on `tasks_update`, but — like any newly discovered Google list — it needs the
+operator's one-time toggle in the connected-accounts Lists section before it appears as a board
+category or in `tasks_lists`; the module has no path to write the operator's collection prefs
+itself, so it cannot auto-enable what it just created (a natural follow-up if wanted). Renaming
+and deleting a list are deliberately out of scope (destructive; need a policy for the tasks
+inside).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -89,6 +104,7 @@ target, so a mutation reaches a task that lives in a non-default list instead of
 | --- | --- | --- |
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
 | `tasks_lists()` | none | The available lists (categories) as `- <title> — id: <id>` text, so the agent can pick one (or report only the default list exists). |
+| `tasks_create_list(title)` | `title`: the new list's display name | The created list as a `Collection` (`account`/`collection`/`title`/`writable`). **Google-only** (#474) — raises if no external account is connected; the local store has no lists of its own. |
 | `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`) | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. |
 | `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` **clears** that field (`None`/omitted leaves it unchanged). `to_list_id`: **move** the task to this list | The updated `Task` (the moved task on a move). |
@@ -178,8 +194,11 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   writable lists the Edit form also gains a **List** picker bound to `to_list_id` (prefilled
   to the task's current list); choosing another **moves** the task there — a recreate+delete
   on Google (ADR-0038). The **Add task** action sets `icon_only: true` so the shell renders it
-  as a compact **"+"** with a tooltip label (#337). The board never carries credentials or
-  business logic — it is data plus tool references.
+  as a compact **"+"** with a tooltip label (#337). A board-level **New list** action
+  (`tasks_create_list`, a form with a single `title` field) appears alongside it whenever the
+  list picker does — Google-only (#474); creating one still needs the operator's one-time
+  enable toggle before it shows up as a category (see the version note above). The board never
+  carries credentials or business logic — it is data plus tool references.
 
 ### Connected accounts & collections (ADR-0030)
 
@@ -234,12 +253,14 @@ attach proxy forwards no list selector).
 - Tasks stored in `tasks_local` (Postgres), scoped by `tenant_id`.
 - `list_id` is ignored — single flat list per tenant.
 - Works out of the box with no operator setup beyond a running Postgres instance.
+- `create_list` raises `NotImplementedError` — there is no list concept to add to (#474).
 
 ### `google` provider
 
 - Calls the Google Tasks REST API (`tasks.googleapis.com`).
 - OAuth token fetched from `GET /platform/v1/oauth/google/token` — **no client
   secret or refresh token lives in this module** (ADR-0020 / non-negotiable #8).
+- `create_list` calls `POST /users/@me/lists` (`tasklists.insert`, #474).
 - Requires the Google account to be connected via the Settings screen (issue #86
   OAuth flow) before any tool call can succeed.
 - `list_id` defaults to `@default` (the user's default Google task list).
@@ -309,21 +330,23 @@ docker compose up -d tasks
 To use Google: connect the account and pick a list in **Modules → Tasks → Lists** (or connect
 from **Settings**). No restart or env change is needed (ADR-0030).
 
-**Adding a new provider** — implement the `TasksProvider` Protocol (including `is_available`
-and `list_collections`) in a new file, add it to the `external` map in `app.py` (keyed by its
-account id), and add it to `PROVIDER_LABELS` + `collections.providers` in `service.py`. No
-tool or model changes are needed.
+**Adding a new provider** — implement the `TasksProvider` Protocol (including `is_available`,
+`list_collections`, and `create_list`) in a new file, add it to the `external` map in `app.py`
+(keyed by its account id), and add it to `PROVIDER_LABELS` + `collections.providers` in
+`service.py`. No tool or model changes are needed. If the new provider has no concept of
+multiple lists, `create_list` can raise `NotImplementedError` like the local store does — the
+router's own `create_list` only ever calls it on a genuine external provider, never on local.
 
 Package `epicurus_tasks`:
 
 | Module | Responsibility |
 | --- | --- |
 | `models.py` | `Task` domain model (provider-neutral). |
-| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`). |
-| `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default). |
-| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete). |
-| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475). |
+| `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`/`create_list`). |
+| `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default); `create_list` raises `NotImplementedError` (#474) — a single implicit list has nothing to create. |
+| `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete + `create_list` via `tasklists.insert`, #474). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474). |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store. |
-| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls** and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls**, the **New list** board action, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
 | `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

@@ -171,6 +171,22 @@ def test_build_reply_mime_addresses_the_original_sender() -> None:
     assert msg.get_payload(decode=True) == b"body"
 
 
+def test_build_reply_mime_prefers_reply_to_over_from() -> None:
+    # A newsletter/support-desk pattern: From is the sending address, Reply-To routes
+    # replies elsewhere — the reply must go where the sender asked, not where it came
+    # from (#513).
+    headers = {"from": "noreply@list.example", "reply-to": "support@list.example", "subject": "Hi"}
+    msg = _build_reply_mime(headers, "body")
+    assert msg["To"] == "support@list.example"
+
+
+def test_build_reply_mime_falls_back_to_from_with_empty_reply_to() -> None:
+    # A blank Reply-To header must not win over a real From address.
+    headers = {"from": "alice@example.com", "reply-to": "", "subject": "Hi"}
+    msg = _build_reply_mime(headers, "body")
+    assert msg["To"] == "alice@example.com"
+
+
 def test_build_reply_mime_sets_in_reply_to_and_references() -> None:
     headers = {"from": "a@x.com", "subject": "Hi", "message-id": "<orig@mail>"}
     msg = _build_reply_mime(headers, "body")

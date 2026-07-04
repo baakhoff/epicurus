@@ -49,6 +49,16 @@ the caller supplies only the new body. Declared a **danger action** (ADR-0007) e
 `mail_send`. The provider seam gains `MailProvider.reply(message_id, body)`, so a future
 non-Gmail provider implements the same threading contract.
 
+**v0.8.1** (#513) hardens reply/send: the recipient now honors the original message's
+`Reply-To` header over its `From` when both are present (mailing lists, newsletters, and
+support desks commonly set `Reply-To` to route replies away from the sending address); a 403
+from Gmail (a `gmail.send`-less token) returns the same reconnect-hint treatment
+`mail_mark_read`/`mail_mark_unread` already have for `gmail.modify`, instead of a bare
+exception; and a self-reply (the operator replying to their own message) is deliberately left
+unguarded — documented as a considered decision rather than an oversight, since it is
+indistinguishable from mailing yourself a note and the danger-action confirm already shows
+the recipient before anything sends.
+
 ---
 
 ## Contract
@@ -68,6 +78,15 @@ All tools operate on the active `MailProvider` for the tenant.
 
 `mail_mark_read` / `mail_mark_unread` require the `gmail.modify` scope; on a 403 (a Google
 account connected before v0.7.0, lacking the scope) they return a reconnect hint instead of failing.
+`mail_send` / `mail_reply` require the `gmail.send` scope and return the equivalent reconnect
+hint on a 403, rather than raising (#513).
+
+`mail_reply` sends the reply body **clean** — it is never auto-quoted with the original
+message's text — and addresses the original's `Reply-To` header when present, falling back
+to its sender (#513). Replying to a message the operator sent themselves is allowed with no
+special guard: it is indistinguishable from deliberately mailing yourself a note, and
+`mail_reply` is already a confirm-gated danger action (ADR-0007), so the operator sees the
+recipient before anything sends.
 
 `mail_search` returns a `ToolEnvelope` (ADR-0019): the `text` field is a human-readable
 summary; `entity_refs` carries one `EntityRef` per message (`module="mail"`,

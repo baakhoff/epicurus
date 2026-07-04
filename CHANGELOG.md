@@ -587,6 +587,17 @@ images to GHCR.
 
 ### Fixed
 
+- **Mail: reply/send hardening — Reply-To, scope-hint errors, contract wording** (#513) —
+  `mail_reply` now addresses the original message's `Reply-To` header over its `From` when
+  both are present (mailing lists, newsletters, and support desks commonly set `Reply-To` to
+  route replies away from the sending address); a 403 from Gmail on `mail_send`/`mail_reply`
+  (a token missing the `gmail.send` scope) now returns the same reconnect-hint treatment
+  `mail_mark_read`/`mail_mark_unread` already have for `gmail.modify`, instead of a bare
+  exception; and a self-reply (replying to a message the operator sent themselves) is
+  deliberately documented as allowed-by-design rather than left as an unconsidered gap — it's
+  indistinguishable from mailing yourself a note, and the danger-action confirm (ADR-0007)
+  already shows the recipient before anything sends. `mail` 0.8.0→0.8.1.
+
 - **Calendar: DST-anchored occurrence starts normalize to UTC; attendee carry-over across a
   "following" split now has an explicit test** (#467) — after the ADR-0077 timezone anchor
   (#446), a DST-anchored occurrence's `start`/`end` came back tzinfo-aware **in the series'

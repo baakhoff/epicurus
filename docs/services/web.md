@@ -70,6 +70,18 @@ explicit `overflow: hidden` + `overscroll-behavior: none` as a defensive stateme
 "the document itself is never a scrollable" invariant `#root`'s fixed positioning already
 enforces in practice.
 
+### Overlay focus management (#487)
+
+`Sheet` and `Confirm` (`src/components/ui.tsx`) honor the full modal keyboard contract via
+a shared `useModalFocus` hook (hand-rolled, dependency-free): on open, focus moves into the
+dialog — the container itself by default, `Confirm`'s **Cancel** button as the safe default
+under a destructive prompt, and **neither** if a child rendered with `autoFocus` (search /
+rename fields) already claimed it. While open, Tab/Shift+Tab wrap inside the dialog; on
+close, focus returns to the element that triggered it. `Confirm` also cancels on Escape —
+registered in the **capture phase** with `stopPropagation`, so a Confirm stacked above an
+open Sheet (e.g. delete-session over the sessions sheet) closes alone instead of taking the
+sheet with it.
+
 ### Toasts & confirmations (#488)
 
 Native browser dialogs are **banned** in the shell — an ESLint

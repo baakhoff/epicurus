@@ -1,7 +1,17 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { Button, NumberInput, Select, Switch, TextInput, Tooltip } from "@/components/ui";
+import {
+  Button,
+  Confirm,
+  NumberInput,
+  Select,
+  Sheet,
+  Switch,
+  TextInput,
+  Tooltip,
+} from "@/components/ui";
 
 function thumb(sw: HTMLElement): HTMLElement {
   const span = sw.querySelector("span");
@@ -101,6 +111,150 @@ describe("Tooltip", () => {
       </Tooltip>,
     );
     expect(screen.getByRole("tooltip").className).toContain("pointer-events-none");
+  });
+});
+
+// Focus management for the overlay primitives (#487): aria-modal was already declared,
+// but the keyboard didn't honor it — focus stayed behind the backdrop, Tab walked the
+// page underneath, and closing dropped focus on <body>. These pin the contract.
+describe("Sheet focus management", () => {
+  it("moves focus onto the dialog on open when no child claims it", () => {
+    render(
+      <Sheet open onClose={() => {}} title="Pick">
+        <button>alpha</button>
+      </Sheet>,
+    );
+    expect(screen.getByRole("dialog", { name: "Pick" })).toHaveFocus();
+  });
+
+  // React applies a child's autoFocus at commit, before effects run — the sheet must
+  // not steal focus from a search/rename field (that would pop the phone keyboard shut).
+  it("yields to a child rendered with autoFocus", () => {
+    render(
+      <Sheet open onClose={() => {}} title="Search">
+        <TextInput aria-label="Query" autoFocus />
+      </Sheet>,
+    );
+    expect(screen.getByRole("textbox", { name: "Query" })).toHaveFocus();
+  });
+
+  it("wraps Tab at the edges instead of leaving the dialog", () => {
+    render(
+      <Sheet open onClose={() => {}} title="Trap">
+        <button>alpha</button>
+        <button>omega</button>
+      </Sheet>,
+    );
+    // Focusables in DOM order: the header's Close button first, then alpha, omega.
+    const omega = screen.getByRole("button", { name: "omega" });
+    const close = screen.getByRole("button", { name: "Close" });
+
+    omega.focus();
+    fireEvent.keyDown(omega, { key: "Tab" });
+    expect(close).toHaveFocus(); // forward from the last wraps to the first
+
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(omega).toHaveFocus(); // backward from the first wraps to the last
+  });
+
+  it("Shift+Tab from the container itself wraps to the last focusable", () => {
+    render(
+      <Sheet open onClose={() => {}} title="Fresh">
+        <button>only</button>
+      </Sheet>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Fresh" });
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(screen.getByRole("button", { name: "only" })).toHaveFocus();
+  });
+
+  it("returns focus to the trigger on close", () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>open sheet</button>
+          <Sheet open={open} onClose={() => setOpen(false)} title="T">
+            <button>inside</button>
+          </Sheet>
+        </>
+      );
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "open sheet" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "T" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(trigger).toHaveFocus();
+  });
+});
+
+describe("Confirm focus & keyboard", () => {
+  it("lands initial focus on Cancel — the safe default under a destructive prompt", () => {
+    render(
+      <Confirm open message="Delete?" danger onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
+  it("cancels on Escape", () => {
+    const onCancel = vi.fn();
+    render(<Confirm open message="Sure?" onConfirm={() => {}} onCancel={onCancel} />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Cancel" }), { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  // A Confirm stacked above an open Sheet (delete-session over the sessions sheet):
+  // one Escape must close only the top layer, not both at once.
+  it("Escape over an open Sheet closes only the Confirm", () => {
+    const onSheetClose = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <>
+        <Sheet open onClose={onSheetClose} title="Under">
+          <button>below</button>
+        </Sheet>
+        <Confirm open message="Sure?" onConfirm={() => {}} onCancel={onCancel} />
+      </>,
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Cancel" }), { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onSheetClose).not.toHaveBeenCalled();
+  });
+
+  it("traps Tab between the two actions", () => {
+    render(
+      <Confirm open message="Move on?" confirmLabel="Proceed" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const proceed = screen.getByRole("button", { name: "Proceed" });
+    proceed.focus();
+    fireEvent.keyDown(proceed, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
+  it("returns focus to the trigger on cancel", () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>delete thing</button>
+          <Confirm
+            open={open}
+            message="Delete thing?"
+            onConfirm={() => {}}
+            onCancel={() => setOpen(false)}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "delete thing" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(trigger).toHaveFocus();
   });
 });
 

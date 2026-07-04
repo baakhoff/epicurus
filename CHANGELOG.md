@@ -14,6 +14,18 @@ images to GHCR.
 
 ### Added
 
+- **Web: overlay focus management for Sheet/Confirm** (#487) — the two overlay primitives
+  declared `role="dialog"`/`aria-modal` but had no focus handling at all: on open, focus
+  stayed behind the backdrop; Tab walked the page underneath; closing dropped focus on
+  `<body>`. A shared `useModalFocus` hook (hand-rolled, dependency-free) now gives both the
+  full keyboard contract: on open, focus moves into the dialog (yielding to a child's
+  `autoFocus` — stealing from a search/rename field would pop the phone keyboard shut);
+  Tab/Shift+Tab wrap inside; on close, focus returns to the triggering element. `Confirm`
+  additionally gains an Escape-to-cancel handler (capture-phase, so a Confirm stacked above
+  an open Sheet closes alone) and lands its initial focus on **Cancel** — the safe default
+  under a destructive prompt. `Button` now forwards a `ref` like the other kit primitives.
+  `web` 0.72.0→0.73.0.
+
 - **Web: themed toasts replace every native browser dialog** (#488) — every mutation-failure
   path that fired a `window.alert(...)` popup (12 sites: editor tree operations, file-browser
   open/move, board card move, suggestion approve/reject) now raises a themed toast instead — a

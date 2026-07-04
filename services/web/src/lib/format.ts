@@ -24,6 +24,26 @@ export function relativeTime(date: Date): string {
   return date.toLocaleDateString();
 }
 
+/** The conversation-list recency groups, in display order. */
+export const RECENCY_BUCKETS = ["Today", "Yesterday", "This week", "This month", "Earlier"] as const;
+export type RecencyBucket = (typeof RECENCY_BUCKETS)[number];
+
+/**
+ * Which recency group a moment belongs to. "Today"/"Yesterday" compare calendar days in
+ * local time (a chat from 23:50 last night is "Yesterday" even ten minutes later); the
+ * wider buckets are rolling windows of 7 and 30 days. `now` is injectable for tests.
+ */
+export function recencyBucket(date: Date, now: Date = new Date()): RecencyBucket {
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const day = 86_400_000;
+  const days = Math.floor((startOfDay(now) - startOfDay(date)) / day);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "This week";
+  if (days < 30) return "This month";
+  return "Earlier";
+}
+
 /** A readable name for a provider alias. */
 export const PROVIDER_LABELS: Record<string, string> = {
   local: "Local (Ollama)",

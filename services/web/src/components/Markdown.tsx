@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { SmartLink } from "@/components/EntityRef";
+import { copyText } from "@/lib/clipboard";
 
 const LANG_RE = /language-(\w+)/;
 
@@ -12,7 +13,8 @@ function CodeBlock({ lang, text }: { lang: string | undefined; text: string }) {
   const [copied, setCopied] = useState(false);
 
   const copy = useCallback(() => {
-    void navigator.clipboard.writeText(text).then(() => {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });

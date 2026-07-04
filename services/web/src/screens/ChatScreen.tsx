@@ -6,10 +6,12 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowDown,
   Check,
   ChevronDown,
   CircleHelp,
   CloudMoon,
+  Copy,
   History,
   Pencil,
   RefreshCw,
@@ -37,25 +39,53 @@ import {
   Badge,
   Button,
   Card,
+  Confirm,
   Dot,
   EmptyState,
   Sheet,
   Spinner,
   TextArea,
   TextInput,
+  Tooltip,
   cn,
 } from "@/components/ui";
 import { activityTimeline } from "@/lib/activity";
 import { ApiError, api } from "@/lib/api";
-import type { Attachment, EntityRef, MessageRecord, PendingSuggestion } from "@/lib/contracts";
-import { relativeTime, PROVIDER_MODEL_HINTS, formatBytes } from "@/lib/format";
+import { copyText } from "@/lib/clipboard";
+import type {
+  Attachment,
+  EntityRef,
+  MessageRecord,
+  ModuleSnapshot,
+  PendingSuggestion,
+  SessionSummary,
+} from "@/lib/contracts";
+import {
+  RECENCY_BUCKETS,
+  recencyBucket,
+  relativeTime,
+  PROVIDER_MODEL_HINTS,
+  formatBytes,
+} from "@/lib/format";
 import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 
-const QUOTE =
-  "It is not what we have but what we enjoy that constitutes our abundance.";
+// A small rotation keeps the garden fresh without ever surprising twice in one day:
+// the quote is picked by day-of-year, so it changes overnight, never mid-session.
+const QUOTES = [
+  "It is not what we have but what we enjoy that constitutes our abundance.",
+  "Do not spoil what you have by desiring what you have not.",
+  "Of all the means to insure happiness throughout the whole life, by far the most important is the acquisition of friends.",
+  "Nothing is enough for the man to whom enough is too little.",
+];
+
+function dayQuote(now: Date = new Date()): string {
+  const start = new Date(now.getFullYear(), 0, 0);
+  const dayOfYear = Math.floor((now.getTime() - start.getTime()) / 86_400_000);
+  return QUOTES[dayOfYear % QUOTES.length];
+}
 
 /* ── assistant turn scaffolding ─────────────────────────────────────────── */
 
@@ -225,11 +255,62 @@ function AskUserPrompt({
 
 /* ── sessions sheet ─────────────────────────────────────────────────────── */
 
+function SessionRow({
+  session,
+  current,
+  running,
+  onOpen,
+  onDelete,
+}: {
+  session: SessionSummary;
+  current: boolean;
+  running: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "group flex items-center gap-2 rounded-(--radius-field) px-2 py-2 hover:bg-surface-2",
+        current && "bg-accent-dim",
+      )}
+    >
+      <button className="min-w-0 flex-1 text-left" onClick={onOpen}>
+        <p className="flex items-center gap-1.5 font-serif text-sm text-ink">
+          {running && (
+            <span
+              title="Generating…"
+              aria-label="Generating"
+              className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
+            />
+          )}
+          <span className="min-w-0 truncate">{session.title || "untitled"}</span>
+        </p>
+        <p className="text-xs text-ink-faint">
+          {relativeTime(session.last_at)} · {session.message_count} messages
+        </p>
+      </button>
+      <button
+        aria-label={`Delete ${session.title || "conversation"}`}
+        onClick={onDelete}
+        className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100"
+      >
+        <Trash2 size={15} />
+      </button>
+    </div>
+  );
+}
+
 function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const openSession = useChat((s) => s.openSession);
+  const newSession = useChat((s) => s.newSession);
   const current = useChat((s) => s.sessionId);
   const streaming = useChat((s) => s.streaming);
+  const [query, setQuery] = useState("");
+  // Deleting a whole conversation from a hover-revealed icon is one misclick away from the
+  // row's open-target, so it always confirms first (#480).
+  const [confirming, setConfirming] = useState<SessionSummary | null>(null);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, enabled: open });
   // Which conversations are generating right now (#396): poll while the list is open so a turn
   // finishing in another session updates here too. The current session also reflects its own
@@ -244,8 +325,37 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   if (streaming) running.add(current);
   const remove = useMutation({
     mutationFn: api.deleteSession,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: (_result, id) => {
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // Deleting the open conversation would leave the transcript orphaned on screen —
+      // start fresh instead, exactly like the New-chat button.
+      if (id === current) newSession();
+    },
   });
+
+  const needle = query.trim().toLowerCase();
+  const matching = (sessions.data ?? []).filter(
+    (s) => !needle || (s.title || "untitled").toLowerCase().includes(needle),
+  );
+  // Grouped by recency when browsing; a search shows one flat result list instead.
+  const groups = RECENCY_BUCKETS.map((bucket) => ({
+    bucket,
+    items: matching.filter((s) => recencyBucket(s.last_at) === bucket),
+  })).filter((g) => g.items.length > 0);
+
+  const row = (session: SessionSummary) => (
+    <SessionRow
+      key={session.id}
+      session={session}
+      current={session.id === current}
+      running={running.has(session.id)}
+      onOpen={() => {
+        openSession(session.id);
+        onClose();
+      }}
+      onDelete={() => setConfirming(session)}
+    />
+  );
 
   return (
     <Sheet open={open} onClose={onClose} title="Conversations" side="left">
@@ -253,46 +363,43 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
       {sessions.data?.length === 0 && (
         <p className="text-sm text-ink-dim">Nothing yet — your conversations will gather here.</p>
       )}
-      <div className="flex flex-col gap-1">
-        {sessions.data?.map((session) => (
-          <div
-            key={session.id}
-            className={cn(
-              "group flex items-center gap-2 rounded-(--radius-field) px-2 py-2 hover:bg-surface-2",
-              session.id === current && "bg-accent-dim",
-            )}
-          >
-            <button
-              className="min-w-0 flex-1 text-left"
-              onClick={() => {
-                openSession(session.id);
-                onClose();
-              }}
-            >
-              <p className="flex items-center gap-1.5 font-serif text-sm text-ink">
-                {running.has(session.id) && (
-                  <span
-                    title="Generating…"
-                    aria-label="Generating"
-                    className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
-                  />
-                )}
-                <span className="min-w-0 truncate">{session.title || "untitled"}</span>
-              </p>
-              <p className="text-xs text-ink-faint">
-                {relativeTime(session.last_at)} · {session.message_count} messages
-              </p>
-            </button>
-            <button
-              aria-label={`Delete ${session.title || "conversation"}`}
-              onClick={() => remove.mutate(session.id)}
-              className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
-            >
-              <Trash2 size={15} />
-            </button>
+      {(sessions.data?.length ?? 0) > 0 && (
+        <TextInput
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search conversations…"
+          aria-label="Search conversations"
+          className="mb-3"
+        />
+      )}
+      {needle ? (
+        <div className="flex flex-col gap-1">
+          {matching.length === 0 && (
+            <p className="text-sm text-ink-dim">Nothing matches “{query.trim()}”.</p>
+          )}
+          {matching.map(row)}
+        </div>
+      ) : (
+        groups.map(({ bucket, items }) => (
+          <div key={bucket} className="mb-3">
+            <p className="mb-1 px-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+              {bucket}
+            </p>
+            <div className="flex flex-col gap-1">{items.map(row)}</div>
           </div>
-        ))}
-      </div>
+        ))
+      )}
+      <Confirm
+        open={confirming !== null}
+        message={`Delete “${confirming?.title || "this conversation"}”? The whole conversation is removed.`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => {
+          if (confirming) remove.mutate(confirming.id);
+          setConfirming(null);
+        }}
+        onCancel={() => setConfirming(null)}
+      />
     </Sheet>
   );
 }
@@ -445,7 +552,7 @@ function Welcome() {
   const suggestions = ["llama3.2", "qwen2.5:0.5b"];
 
   return (
-    <EmptyState quote={QUOTE}>
+    <EmptyState quote={dayQuote()}>
       <Card className="mt-2 w-full max-w-sm text-left">
         <h3 className="font-serif text-base text-ink">Welcome to the garden</h3>
         <p className="mt-1 text-sm leading-relaxed text-ink-dim">
@@ -479,6 +586,72 @@ function Welcome() {
         </div>
       </Card>
     </EmptyState>
+  );
+}
+
+/* ── starter prompts (empty conversation, #480) ─────────────────────────── */
+
+/**
+ * What a fresh conversation can offer, drawn from the modules that are actually
+ * installed (enabled + healthy). The mapping is shell-owned — modules only exist in it
+ * by name, consistent with the icon vocabulary (ADR-0018). Prompts ending in a space
+ * are deliberate openers: the chip fills the composer and leaves the cursor waiting.
+ */
+const STARTERS: Array<{ module: string; label: string; prompt: string }> = [
+  { module: "calendar", label: "What's on this week?", prompt: "What's on my calendar this week?" },
+  { module: "mail", label: "Anything important in mail?", prompt: "Anything important in my mail today?" },
+  { module: "tasks", label: "Plan my day", prompt: "Look at my tasks and help me plan today." },
+  { module: "knowledge", label: "Ask my knowledge base", prompt: "Search my knowledge base for " },
+  { module: "notes", label: "Capture a note", prompt: "Add to my notes: " },
+  { module: "websearch", label: "Search the web", prompt: "Search the web for " },
+];
+
+function StarterPrompts({
+  modules,
+  onPick,
+}: {
+  modules: ModuleSnapshot[];
+  onPick: (prompt: string) => void;
+}) {
+  const available = new Set(
+    modules.filter((m) => m.status.healthy && m.enabled).map((m) => m.manifest.name),
+  );
+  const starters = STARTERS.filter((s) => available.has(s.module)).slice(0, 4);
+  if (starters.length === 0) return null;
+  return (
+    <div className="flex max-w-sm flex-wrap justify-center gap-1.5">
+      {starters.map((s) => (
+        <button
+          key={s.module}
+          onClick={() => onPick(s.prompt)}
+          className="rounded-full border border-edge px-3 py-1.5 text-xs text-ink-dim transition-colors hover:border-accent hover:text-accent-strong"
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ── copy an assistant turn (#480) ──────────────────────────────────────── */
+
+function CopyMessage({ text, className }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <button
+      aria-label="Copy message"
+      onClick={copy}
+      className={cn("flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink", className)}
+    >
+      {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />} Copy
+    </button>
   );
 }
 
@@ -601,6 +774,13 @@ export function ChatScreen() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
+  // Mirrors pinnedRef for rendering (the ref stays authoritative in scroll handlers):
+  // when the reader scrolls up, a "jump to latest" affordance appears (#480).
+  const [pinned, setPinned] = useState(true);
+  const pin = () => {
+    pinnedRef.current = true;
+    setPinned(true);
+  };
 
   // The composer text lives in the chat store so it survives leaving and returning
   // to the page. The textarea's auto-grown height is set imperatively on keystroke,
@@ -620,6 +800,13 @@ export function ChatScreen() {
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  // The open conversation's title for the header (#480) — same cache key the sessions
+  // sheet uses, and the send/turn-done invalidations keep it fresh once a title lands.
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, staleTime: 15_000 });
+  const sessionTitle = sessions.data?.find((s) => s.id === chat.sessionId)?.title || null;
+  // Module-aware starter prompts on the empty state (#480); the Shell already holds
+  // this query, so the cache is warm.
+  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
 
   // The model this chat will actually use (the per-chat choice, else the core default). If it's
   // a local one, check whether it can call tools so we can warn that it's chat-only.
@@ -647,7 +834,9 @@ export function ChatScreen() {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
-      pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      const nowPinned = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      pinnedRef.current = nowPinned;
+      setPinned(nowPinned); // no-op re-render while the value is unchanged
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -684,7 +873,7 @@ export function ChatScreen() {
     if (!text || chat.streaming) return;
     const sent = attachments;
     setAttachments([]); // chat.send clears the draft itself
-    pinnedRef.current = true;
+    pin();
     // chat.send clears the draft, but the textarea's height was grown imperatively on
     // each keystroke — clear the inline height so an emptied composer snaps back to one
     // line (min-h-[42px]) instead of keeping its multi-line height. Same on mobile + desktop.
@@ -729,7 +918,7 @@ export function ChatScreen() {
     queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) =>
       (old ?? []).slice(0, lastUserIdx + 1),
     );
-    pinnedRef.current = true;
+    pin();
     void chat.regenerate(model, onTurnDone);
   };
 
@@ -750,30 +939,53 @@ export function ChatScreen() {
       if (last) trimmed[trimmed.length - 1] = { ...last, content };
       return trimmed;
     });
-    pinnedRef.current = true;
+    pin();
     void chat.editAndRerun(content, model, onTurnDone);
+  };
+
+  // A starter chip fills the composer and hands over the caret — it never sends on the
+  // user's behalf. Openers ending in a space leave the cursor waiting mid-sentence.
+  const pickStarter = (prompt: string) => {
+    chat.setDraft(prompt);
+    const el = composerRef.current;
+    if (el) {
+      el.focus();
+      requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length));
+    }
   };
 
   return (
     <div className="flex h-full flex-col">
-      {/* chat header row */}
-      <div className="flex items-center justify-between gap-2 border-b border-edge px-4 py-2">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setSessionsOpen(true)}
-            aria-label="Conversations"
-            className="rounded-md p-1.5 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          >
-            <History size={18} />
-          </button>
-          <button
-            onClick={() => chat.newSession()}
-            aria-label="New chat"
-            className="rounded-md p-1.5 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          >
-            <SquarePen size={18} />
-          </button>
+      {/* chat header row: nav controls · the open conversation's title (#480) · model */}
+      <div className="flex items-center gap-2 border-b border-edge px-4 py-2">
+        <div className="flex shrink-0 items-center gap-2">
+          <Tooltip label="Conversations" side="bottom">
+            <button
+              onClick={() => setSessionsOpen(true)}
+              aria-label="Conversations"
+              className="rounded-md p-1.5 text-ink-dim hover:bg-surface-2 hover:text-ink"
+            >
+              <History size={18} />
+            </button>
+          </Tooltip>
+          <Tooltip label="New chat" side="bottom">
+            <button
+              onClick={() => chat.newSession()}
+              aria-label="New chat"
+              className="rounded-md p-1.5 text-ink-dim hover:bg-surface-2 hover:text-ink"
+            >
+              <SquarePen size={18} />
+            </button>
+          </Tooltip>
         </div>
+        <h1
+          className={cn(
+            "min-w-0 flex-1 truncate text-center font-serif text-sm",
+            sessionTitle ? "text-ink" : "italic text-ink-faint",
+          )}
+        >
+          {sessionTitle ?? "New conversation"}
+        </h1>
         <ModelPicker />
       </div>
 
@@ -782,8 +994,9 @@ export function ChatScreen() {
         <div className="mx-auto flex max-w-2xl flex-col gap-5">
           {firstRun && <Welcome />}
           {!firstRun && messages.length === 0 && !chat.pendingUser && (
-            <EmptyState quote={QUOTE}>
+            <EmptyState quote={dayQuote()}>
               <p className="text-xs text-ink-faint">a new conversation — it will remember</p>
+              <StarterPrompts modules={modules.data ?? []} onPick={pickStarter} />
             </EmptyState>
           )}
           {messages.map((message, i) =>
@@ -841,21 +1054,36 @@ export function ChatScreen() {
                 </div>
               )
             ) : (
-              <div key={i}>
+              <div key={i} className="group">
                 <AssistantBlock
                   text={message.content}
                   timeline={activityTimeline(message.activity)}
                   streaming={false}
                   entityRefs={message.entity_refs}
                 />
-                {i === lastAssistantIdx && turnControlsVisible && (
-                  <button
-                    aria-label="Regenerate response"
-                    onClick={regenerate}
-                    className="mt-1 ml-7 flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
-                  >
-                    <RefreshCw size={12} /> Regenerate
-                  </button>
+                {(message.content !== "" || (i === lastAssistantIdx && turnControlsVisible)) && (
+                  <div className="mt-1 ml-7 flex items-center gap-3">
+                    {message.content !== "" && (
+                      <CopyMessage
+                        text={message.content}
+                        // Always at hand on the latest answer; earlier turns reveal it on
+                        // hover or keyboard focus to keep the transcript quiet.
+                        className={cn(
+                          i !== lastAssistantIdx &&
+                            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+                        )}
+                      />
+                    )}
+                    {i === lastAssistantIdx && turnControlsVisible && (
+                      <button
+                        aria-label="Regenerate response"
+                        onClick={regenerate}
+                        className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                      >
+                        <RefreshCw size={12} /> Regenerate
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             ),
@@ -880,7 +1108,7 @@ export function ChatScreen() {
               <AskUserPrompt
                 question={chat.awaiting.question}
                 onSubmit={(answer) => {
-                  pinnedRef.current = true;
+                  pin();
                   void chat.resume(answer, onTurnDone);
                 }}
               />
@@ -906,6 +1134,26 @@ export function ChatScreen() {
           )}
           <div className="h-2" />
         </div>
+        {/* Scrolled up (reading back, or during a long stream): one tap returns to the
+            tail and re-pins the view. Sticky inside the scroller, so it floats at the
+            scrollport's bottom edge without an extra positioning wrapper (#480). */}
+        {!pinned && (
+          <button
+            onClick={() => {
+              const el = scrollRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+              pin();
+            }}
+            aria-label="Jump to latest"
+            className={cn(
+              "ep-settle sticky bottom-1 mx-auto flex items-center justify-center",
+              "rounded-full border border-edge bg-surface p-2 text-ink-dim shadow-(--ep-shadow)",
+              "transition-colors hover:border-accent hover:text-accent-strong",
+            )}
+          >
+            <ArrowDown size={16} />
+          </button>
+        )}
       </div>
 
       {/* composer */}

@@ -41,6 +41,18 @@ export function AttachmentPill({
   );
 }
 
+/** The in-flight placeholder (#489): the same pill silhouette with a spinner while a
+ *  paste/drop upload runs; it swaps for a real AttachmentPill (or an error toast) when
+ *  the server answers. */
+export function PendingAttachmentPill({ name }: { name: string }) {
+  return (
+    <span className="inline-flex max-w-48 items-center gap-1 rounded-full border border-edge bg-surface-2 px-2 py-0.5 text-xs text-ink-dim">
+      <Spinner className="size-3 shrink-0" />
+      <span className="truncate">{name}</span>
+    </span>
+  );
+}
+
 function SectionTitle({ children }: { children: string }) {
   return (
     <h4 className="mb-2 text-xs font-medium tracking-wide text-ink-faint uppercase">{children}</h4>

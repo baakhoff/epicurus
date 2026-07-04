@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **Web: paste & drag-drop attachments in the chat composer** (#489) — pasting a screenshot
+  or file from the clipboard into the composer, or dropping files anywhere over the chat
+  column, now attaches them exactly as the AttachMenu picker would: same
+  `POST /platform/v1/agent/attachments` endpoint, same pill, same server-sourced 413/415
+  size/type messages (surfaced as an error toast). Text pastes flow through untouched; a
+  themed "Drop to attach" hint appears only for real file drags (a depth counter stops
+  enter/leave flicker across child boundaries, and in-app drags never trigger it); in-flight
+  uploads show spinner pills; multi-file drops upload every file. On a PWA whose main
+  surface is chat, paste-to-attach was the highest-QoL missing interaction. `web`
+  0.74.0→0.75.0.
+
 - **Web: overlay focus management for Sheet/Confirm** (#487) — the two overlay primitives
   declared `role="dialog"`/`aria-modal` but had no focus handling at all: on open, focus
   stayed behind the backdrop; Tab walked the page underneath; closing dropped focus on

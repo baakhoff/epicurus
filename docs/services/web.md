@@ -267,6 +267,15 @@ turn lands. An
 uploaded file is also kept durably in the storage module and shown in the Files page (the
 upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
 
+**Paste & drag-drop (#489).** Two more routes into the same upload endpoint: pasting a
+clipboard that carries files (a screenshot, a copied file) into the composer textarea
+uploads each one — plain-text pastes flow through untouched — and dragging files anywhere
+over the chat column shows a themed **"Drop to attach"** hint (a depth counter keeps it
+from flickering across child boundaries; non-file drags never trigger it) and uploads on
+drop. In-flight uploads render as spinner pills (`PendingAttachmentPill`) beside the real
+ones; failures surface as an error toast carrying the server's 413/415 size/type message,
+so the limit messaging stays single-sourced with the picker's.
+
 ### Reviewing suggested changes (#KB-refactor, ADR-0033)
 
 Every agent change to a module's content — the knowledge base **and** private **notes** — is

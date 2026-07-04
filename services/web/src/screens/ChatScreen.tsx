@@ -13,6 +13,7 @@ import {
   CloudMoon,
   Copy,
   History,
+  Paperclip,
   Pencil,
   RefreshCw,
   Sparkles,
@@ -22,10 +23,18 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router-dom";
 
-import { AttachButton, AttachmentPill } from "@/components/AttachMenu";
+import { AttachButton, AttachmentPill, PendingAttachmentPill } from "@/components/AttachMenu";
 import {
   EntityRefsContext,
   SourcesPill,
@@ -769,6 +778,13 @@ export function ChatScreen() {
   const model = usePrefs((s) => s.model);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  // Paste/drop uploads in flight (#489): rendered as spinner pills until the server
+  // answers. The drag depth counter survives dragenter/dragleave pairs firing on every
+  // child the pointer crosses — plain boolean state flickers.
+  const [uploading, setUploading] = useState<Array<{ id: number; name: string }>>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const uploadSeq = useRef(0);
+  const dragDepth = useRef(0);
   // Inline edit of the last user message (#302): the index being edited + its draft text.
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
@@ -959,8 +975,73 @@ export function ChatScreen() {
     }
   };
 
+  // Paste & drag-drop attachments (#489): every route lands on the same upload endpoint
+  // the AttachMenu picker uses, so the server's 413/415 size/type messages stay the one
+  // source of truth — here they surface as a toast instead of the picker's inline line.
+  const uploadFiles = useCallback((files: File[]) => {
+    for (const file of files) {
+      const id = ++uploadSeq.current;
+      setUploading((prev) => [...prev, { id, name: file.name || "pasted file" }]);
+      void api
+        .uploadAttachment(file)
+        .then((res) =>
+          setAttachments((prev) => [
+            ...prev,
+            { att_id: res.att_id, source: "file", kind: res.kind, title: res.title },
+          ]),
+        )
+        .catch((err: unknown) =>
+          toast.error(err instanceof ApiError ? err.detail : "Could not attach the file."),
+        )
+        .finally(() => setUploading((prev) => prev.filter((u) => u.id !== id)));
+    }
+  }, []);
+
+  // Only real file drags count — a text selection or an in-app drag must neither show
+  // the overlay nor swallow the drop.
+  const isFileDrag = (e: DragEvent<HTMLDivElement>) => e.dataTransfer.types.includes("Files");
+  const onDragEnter = (e: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    dragDepth.current += 1;
+    setDragActive(true);
+  };
+  const onDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault(); // required — without it the browser navigates to the file on drop
+  };
+  const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  };
+  const onDrop = (e: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    uploadFiles(Array.from(e.dataTransfer.files));
+  };
+
   return (
-    <div className="flex h-full flex-col">
+    <div
+      className="relative flex h-full flex-col"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {/* drop hint (#489) — pointer-events-none so the drop lands on the container */}
+      {dragActive && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-canvas/70"
+        >
+          <div className="flex items-center gap-2 rounded-(--radius-card) border-2 border-dashed border-accent bg-surface px-5 py-3 font-serif text-[15px] text-ink shadow-(--ep-shadow)">
+            <Paperclip size={16} className="text-accent" />
+            Drop to attach
+          </div>
+        </div>
+      )}
       {/* chat header row: nav controls · the open conversation's title (#480) · model */}
       <div className="flex items-center gap-2 border-b border-edge px-4 py-2">
         <div className="flex shrink-0 items-center gap-2">
@@ -1185,7 +1266,7 @@ export function ChatScreen() {
           </div>
         )}
         <SuggestionBubble />
-        {attachments.length > 0 && (
+        {(attachments.length > 0 || uploading.length > 0) && (
           <div className="mx-auto mb-2 flex max-w-2xl flex-wrap gap-1.5">
             {attachments.map((a) => (
               <AttachmentPill
@@ -1195,6 +1276,9 @@ export function ChatScreen() {
                   setAttachments((prev) => prev.filter((x) => x.att_id !== a.att_id))
                 }
               />
+            ))}
+            {uploading.map((u) => (
+              <PendingAttachmentPill key={u.id} name={u.name} />
             ))}
           </div>
         )}
@@ -1214,6 +1298,14 @@ export function ChatScreen() {
                 e.preventDefault();
                 send();
               }
+            }}
+            onPaste={(e) => {
+              // A clipboard with files (screenshot, copied file) attaches them (#489);
+              // plain text pastes flow through untouched.
+              const files = Array.from(e.clipboardData?.files ?? []);
+              if (files.length === 0) return;
+              e.preventDefault(); // don't also paste the file's name as text
+              uploadFiles(files);
             }}
             placeholder={chat.paused ? "asleep — wake to chat locally" : "Ask anything…"}
             aria-label="Message"

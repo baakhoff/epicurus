@@ -5,7 +5,7 @@
  * here with no UI rebuild. No module code ever runs in this shell.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Fragment, createElement, useState } from "react";
 
 import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
@@ -27,7 +27,7 @@ function ActionRow({ module, action }: { module: string; action: UiAction; }) {
   const invoke = useMutation({
     mutationFn: (args: Record<string, unknown>) => api.invokeModuleTool(module, action.tool, args),
   });
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules() });
   const tool: ToolSpec | undefined = modules.data
     ?.find((m) => m.manifest.name === module)
     ?.manifest.tools.find((t) => t.name === action.tool);
@@ -559,10 +559,18 @@ function matchesQuery(snapshot: ModuleSnapshot, query: string): boolean {
 }
 
 export function ModulesScreen() {
+  const queryClient = useQueryClient();
   const modules = useQuery({
     queryKey: ["modules"],
-    queryFn: api.modules,
+    queryFn: () => api.modules(),
     refetchInterval: 30_000,
+  });
+  // Bypasses the core's short-TTL probe cache for an immediate fleet-wide re-probe (#478) —
+  // the 30s poll picks up a health change on its own eventually, but this gives the operator
+  // an explicit "check now" right after e.g. restarting a container.
+  const refresh = useMutation({
+    mutationFn: () => api.modules({ refresh: true }),
+    onSuccess: (data) => queryClient.setQueryData(["modules"], data),
   });
   const [query, setQuery] = useState("");
   // Modules removed while the core had no Docker socket (#382): the module is gone from the
@@ -587,12 +595,24 @@ export function ModulesScreen() {
           </p>
         </div>
         {all.length > 0 && (
-          <TextInput
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search modules by name, description, or tag…"
-            aria-label="Search modules"
-          />
+          <div className="flex items-center gap-2">
+            <TextInput
+              className="flex-1"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search modules by name, description, or tag…"
+              aria-label="Search modules"
+            />
+            <button
+              className="flex shrink-0 items-center justify-center rounded-(--radius-field) border border-edge p-2.5 text-ink-faint hover:text-ink disabled:opacity-50"
+              onClick={() => refresh.mutate()}
+              disabled={refresh.isPending}
+              aria-label="Refresh module health"
+              title="Refresh module health"
+            >
+              <RefreshCw size={14} className={refresh.isPending ? "animate-spin" : undefined} />
+            </button>
+          </div>
         )}
         {deferred.length > 0 && (
           <Card className="border-accent/40 bg-accent-dim text-sm text-ink-dim">

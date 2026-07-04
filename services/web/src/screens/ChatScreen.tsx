@@ -806,7 +806,7 @@ export function ChatScreen() {
   const sessionTitle = sessions.data?.find((s) => s.id === chat.sessionId)?.title || null;
   // Module-aware starter prompts on the empty state (#480); the Shell already holds
   // this query, so the cache is warm.
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
 
   // The model this chat will actually use (the per-chat choice, else the core default). If it's
   // a local one, check whether it can call tools so we can warn that it's chat-only.

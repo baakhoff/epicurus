@@ -10,6 +10,7 @@ the shell never talks to a module directly.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -126,6 +127,11 @@ class ApproveRequest(BaseModel):
 class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
+    # Network probes are cached per base for this long before a caller triggers a fresh
+    # one (#478); an unhealthy entry expires sooner so a recovery shows up promptly.
+    _HEALTHY_PROBE_TTL_S = 15.0
+    _UNHEALTHY_PROBE_TTL_S = 5.0
+
     def __init__(
         self,
         base_urls: list[str],
@@ -142,8 +148,16 @@ class ModuleRegistry:
         self._tenant = tenant
         self._prefs = prefs
         self._docker = docker
+        # Per-base probe cache (#478), 1:1 with ``self._bases``: each base refreshes
+        # independently and single-flight, so one hung module can never delay a call
+        # routed to a different, healthy one.
+        self._probe_cache: list[ModuleSnapshot | None] = [None] * len(self._bases)
+        self._probed_at: list[float] = [0.0] * len(self._bases)
+        self._probe_locks: list[asyncio.Lock] = [asyncio.Lock() for _ in self._bases]
+        self._unprobed: set[int] = set(range(len(self._bases)))
+        self._last_healthy: dict[str, bool] = {}  # name -> last observed health (log transitions)
 
-    async def snapshot(self) -> list[ModuleSnapshot]:
+    async def snapshot(self, *, force: bool = False) -> list[ModuleSnapshot]:
         """Every configured module — reachable ones with their manifest, dead ones flagged.
 
         Each snapshot carries the operator's ``enabled`` flag (#126) and a ``removed``
@@ -152,19 +166,67 @@ class ModuleRegistry:
         so disabled and removed modules are flagged in place, not dropped — disabled ones
         are still shown so the shell can re-enable them, while removed ones are dropped by
         the list endpoint.
+
+        The network probe behind each entry is TTL-cached (#478) — this only re-probes
+        bases whose cache entry is stale, never the whole fleet on every call. The
+        operator-prefs overlay (``enabled``/``removed``/``disabled_tools``) is always read
+        fresh, so a toggle takes effect immediately regardless of probe caching.
+        ``force=True`` (the Modules page's manual refresh) bypasses the TTL fleet-wide.
         """
-        probed = await asyncio.gather(*(self._probe(base) for base in self._bases))
+        probed = await asyncio.gather(
+            *(self._probe_cached(i, force=force) for i in range(len(self._bases)))
+        )
         enabled = await self._prefs.enabled_map(self._tenant)
         removed = await self._prefs.removed_modules(self._tenant)
+        out: list[ModuleSnapshot] = []
         for snap in probed:
-            snap.enabled = enabled.get(snap.manifest.name, True)
-            snap.removed = snap.manifest.name in removed
-            snap.disabled_tools = sorted(
-                await self._prefs.get_disabled_tools(self._tenant, snap.manifest.name)
+            overlaid = snap.model_copy()
+            overlaid.enabled = enabled.get(overlaid.manifest.name, True)
+            overlaid.removed = overlaid.manifest.name in removed
+            overlaid.disabled_tools = sorted(
+                await self._prefs.get_disabled_tools(self._tenant, overlaid.manifest.name)
             )
-        return list(probed)
+            out.append(overlaid)
+        return out
+
+    def _cache_fresh(self, index: int) -> bool:
+        snap = self._probe_cache[index]
+        if snap is None:
+            return False
+        ttl = self._HEALTHY_PROBE_TTL_S if snap.status.healthy else self._UNHEALTHY_PROBE_TTL_S
+        return (time.monotonic() - self._probed_at[index]) < ttl
+
+    async def _probe_cached(self, index: int, *, force: bool = False) -> ModuleSnapshot:
+        """The base at ``index``'s cached-or-fresh probe result, single-flight per base.
+
+        A TTL hit never touches the network. A miss (or ``force``) probes only *this*
+        base — concurrent callers for the same stale base share one in-flight probe
+        (double-checked locking) rather than each firing their own.
+        """
+        if not force and self._cache_fresh(index):
+            cached = self._probe_cache[index]
+            assert cached is not None
+            return cached
+        async with self._probe_locks[index]:
+            if not force and self._cache_fresh(index):  # refreshed while we waited
+                cached = self._probe_cache[index]
+                assert cached is not None
+                return cached
+            snap = await self._probe(self._bases[index])
+            self._probe_cache[index] = snap
+            self._probed_at[index] = time.monotonic()
+            self._unprobed.discard(index)
+            return snap
 
     async def _probe(self, base: str) -> ModuleSnapshot:
+        """One module's manifest + live health.
+
+        Logs on health **transitions** only (#478): a WARN the instant a previously
+        healthy module goes unreachable, an INFO the instant it recovers, and DEBUG for
+        a module that has never yet been reachable (the startup grace window) — never a
+        WARN per probe, which used to spam the console for ordinary boot/reconcile
+        timing and for a busy module's normal retry cadence.
+        """
         try:
             async with httpx.AsyncClient(base_url=base, timeout=5) as client:
                 manifest_resp = await client.get("/manifest")
@@ -173,22 +235,56 @@ class ModuleRegistry:
                 health_resp = await client.get("/health")
                 healthy = health_resp.status_code == 200
                 version = (health_resp.json() or {}).get("version") if healthy else None
+            error = None if healthy else f"health check returned {health_resp.status_code}"
+            self._log_health_transition(manifest.name, healthy, error)
             return ModuleSnapshot(
                 manifest=manifest, status=ModuleStatus(healthy=healthy, version=version)
             )
         except Exception as exc:  # a dead module is a fact to display, not an error
-            log.warning("module probe failed", base=base, error=str(exc))
             name = urlsplit(base).hostname or base
+            self._log_health_transition(name, False, repr(exc))
             return ModuleSnapshot(
                 manifest=ModuleManifest(name=name, version="unknown"),
                 status=ModuleStatus(healthy=False),
             )
 
+    def _log_health_transition(self, name: str, healthy: bool, error: str | None) -> None:
+        prev = self._last_healthy.get(name)
+        self._last_healthy[name] = healthy
+        if healthy:
+            if prev is False:
+                log.info("module recovered", module=name)
+            return
+        if prev is True:
+            log.warning("module probe failed", module=name, error=error)
+        elif prev is None:
+            log.debug("module probe failed", module=name, error=error)
+        # prev is False: steady-state unreachable — already reported, don't repeat.
+
+    def _index_for_name(self, name: str) -> int | None:
+        for i, snap in enumerate(self._probe_cache):
+            if snap is not None and snap.manifest.name == name:
+                return i
+        return None
+
     async def _resolve(self, name: str) -> tuple[str, ModuleManifest]:
-        """The base URL + manifest of the module called ``name`` (404 if absent)."""
-        for snapshot, base in zip(await self.snapshot(), self._bases, strict=True):
-            if snapshot.manifest.name == name and snapshot.status.healthy:
-                return base, snapshot.manifest
+        """The base URL + manifest of the module called ``name`` (404 if absent).
+
+        Routes via the probe cache and re-checks at most *name*'s own base — never the
+        rest of the fleet (#478). The very first call for a not-yet-seen name still
+        probes whatever bases haven't been probed yet (bounded to those, not a
+        guaranteed full fan-out); a warm registry resolves a bad name with zero network
+        calls.
+        """
+        index = self._index_for_name(name)
+        if index is None and self._unprobed:
+            await asyncio.gather(*(self._probe_cached(i) for i in list(self._unprobed)))
+            index = self._index_for_name(name)
+        if index is None:
+            raise HTTPException(status_code=404, detail=f"no reachable module named {name!r}")
+        snap = await self._probe_cached(index)
+        if snap.status.healthy:
+            return self._bases[index], snap.manifest
         raise HTTPException(status_code=404, detail=f"no reachable module named {name!r}")
 
     async def base_url(self, name: str) -> str:
@@ -1017,9 +1113,11 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     router = APIRouter(prefix="/platform/v1/modules", tags=["modules"])
 
     @router.get("", response_model=list[ModuleSnapshot])
-    async def list_modules() -> list[ModuleSnapshot]:
+    async def list_modules(refresh: bool = Query(False)) -> list[ModuleSnapshot]:
         # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
-        return [snap for snap in await registry.snapshot() if not snap.removed]
+        # ``?refresh=true`` bypasses the probe cache for a fleet-wide re-probe — the
+        # Modules page's manual refresh (#478); the default read serves from cache.
+        return [snap for snap in await registry.snapshot(force=refresh) if not snap.removed]
 
     @router.post("/reembed")
     async def reembed() -> dict[str, Any]:

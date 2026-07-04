@@ -487,6 +487,11 @@ is a separate, privileged action — see issue #127.)
   `{manifest, status, enabled, disabled_tools}` — and **includes disabled modules** so the
   shell can show the toggle. The shell omits a disabled module's pages from the nav and its
   entities from the attach menu.
+- **Live health is TTL-cached, not re-probed per call** (#478): `status.healthy` reflects a
+  per-module probe cached for ~5–15s (shorter while unreachable, so a recovery shows up
+  promptly), never a fleet-wide fetch on every request. `GET /platform/v1/modules?refresh=true`
+  bypasses the cache for an immediate fleet-wide re-probe. The `enabled`/`disabled_tools` flags
+  above are unaffected — they're always read fresh regardless of probe-cache state.
 - **Invoking a disabled module's tool** through the core returns **403**; the agent never
   sees the tool in the first place.
 - **Tags** — `ModuleManifest.tags` feed the shell's search alongside the name and

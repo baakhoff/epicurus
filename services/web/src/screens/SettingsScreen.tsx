@@ -106,7 +106,7 @@ export function OAuthProviderRow({ providerId }: { providerId: string }) {
 
   // Request every installed module's API scopes for this provider, so one connect grants
   // them all (the core unions them onto the default identity scopes and accumulates) (#241).
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules() });
 
   const connect = useMutation({
     mutationFn: () => api.oauthConnect(providerId, oauthScopeUnion(modules.data, providerId)),
@@ -420,7 +420,7 @@ export function SettingsScreen() {
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   // Chat bridges are a messaging-module capability — hide the card (and skip its API
   // calls) unless messaging is installed and enabled (#430).
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules() });
   const messagingEnabled =
     modules.data?.some((m) => m.manifest.name === "messaging" && m.enabled) ?? false;
   const location = useLocation();

@@ -125,7 +125,7 @@ function ModuleSection({
   enabled: boolean;
 }) {
   const [moduleName, setModuleName] = useState<string | null>(null);
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, enabled });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), enabled });
   const attachable = (modules.data ?? []).filter(
     (m) => m.status.healthy && m.enabled && m.manifest.attachable,
   );

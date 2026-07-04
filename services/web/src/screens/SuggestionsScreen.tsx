@@ -112,7 +112,7 @@ function ModuleGroup({
 
 export function SuggestionsScreen() {
   const qc = useQueryClient();
-  const modules = useQuery({ queryKey: ["modules"], queryFn: api.modules, staleTime: 30_000 });
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
   const feed = useQuery({ queryKey: ["suggestions"], queryFn: api.suggestions });
   const [reviewing, setReviewing] = useState<PendingSuggestion | null>(null);
 

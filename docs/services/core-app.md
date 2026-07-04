@@ -306,9 +306,25 @@ that previously had no bound at all.
 
 ### Module registry (ADR-0004/0007)
 
+Each configured base's manifest + health is a **per-base, TTL-cached, single-flight** probe
+(#478) — 15s while healthy, 5s while unhealthy (so a recovery shows up promptly) — rather than
+a fresh fleet-wide fetch on every call. `_resolve(name)` (the routing path behind tool
+invocations, page proxies, `base_url()`, etc.) reads the cache directly and re-probes **only**
+that module's own base when its entry is stale; it never fans out to the rest of the fleet, so
+one hung or restarting module can no longer delay calls routed to a different, healthy one.
+The very first resolve after startup is the one documented exception — it still has to learn
+the name→base mapping, so it probes whatever bases it hasn't seen yet. The operator-prefs
+overlay (`enabled`/`removed`/`disabled_tools`) is **never** cached — it's read fresh from
+Postgres on every call regardless of probe-cache hits, so toggling a module takes effect
+immediately. Health changes log a **transition**, not an observation: one WARN the instant a
+previously-healthy module goes unreachable (with `repr(exc)`, never the empty string a bare
+`TimeoutError` used to stringify to), one INFO the instant it recovers, and DEBUG while a
+module has never yet been reachable (the startup/reconcile grace window) — a module that stays
+down produces no repeat log.
+
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. |
+| `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). |
 | `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |

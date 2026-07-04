@@ -490,6 +490,13 @@ images to GHCR.
 
 ### Fixed
 
+- **Module tombstone-reconcile and autoconnect warnings no longer log an empty error**
+  (#498) — both handlers logged `error=str(exc)` around a bare `except Exception`; for a
+  timeout or cancellation (`str(TimeoutError()) == ""`), the warning recorded an empty
+  `error` field with nothing to debug from. `reconcile_tombstones()` (a resurrected
+  module's re-removal failing) and `autoconnect_collections()` (a module's `/accounts`
+  becoming unavailable mid-autoconnect) now log `repr(exc)`, which is never empty — the
+  same fix `_probe`'s handler already got in #482. `core-app` 0.57.0→0.57.1.
 - **`tasks_update` can no longer silently no-op, and can now clear a due date or notes**
   (#475) — a dogfood session asked the agent to remove a task's due date; it called
   `tasks_update` repeatedly, each call reported success, and nothing ever changed, on the

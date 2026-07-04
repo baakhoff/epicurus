@@ -416,7 +416,7 @@ class ModuleRegistry:
                 if containers:
                     log.info("re-removed resurrected module", module=name, containers=containers)
             except Exception as exc:
-                log.warning("tombstone reconcile failed", module=name, error=str(exc))
+                log.warning("tombstone reconcile failed", module=name, error=repr(exc))
 
     async def get_models(self, name: str) -> dict[str, str]:
         """The operator's per-slot model choices for *name* (#128). 404 if unknown."""
@@ -541,7 +541,7 @@ class ModuleRegistry:
             try:
                 view = await self.accounts_view(name)
             except Exception as exc:
-                log.warning("autoconnect: accounts unavailable", module=name, error=str(exc))
+                log.warning("autoconnect: accounts unavailable", module=name, error=repr(exc))
                 continue
             account = next(
                 (a for a in view.accounts if a.account == provider and a.connected), None

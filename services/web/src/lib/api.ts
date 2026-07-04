@@ -40,6 +40,7 @@ import {
   PowerStatus,
   ProviderInfo,
   Readiness,
+  SavedModelsResponse,
   SessionSummary,
   SystemInfo,
   TimezonePrefs,
@@ -212,6 +213,28 @@ export const api = {
     request(z.object({ status: z.string() }), `/platform/v1/llm/providers/${alias}/key`, {
       method: "DELETE",
     }),
+
+  // Saved hosted model ids the operator has used (#496) — server-persisted, tenant-scoped, so
+  // they survive a PWA reinstall and follow the tenant across devices. This is the source of
+  // truth the chat picker renders and the Models page lists; the browser's local recents are a
+  // warm fallback only.
+  savedModels: () =>
+    request(SavedModelsResponse, "/platform/v1/llm/saved-models").then((r) => r.models),
+  // Persist a hosted id (idempotent; a re-save bumps it first). The core rejects a non-hosted
+  // id with 400, so a local `hf.co/…` model can never land here.
+  addSavedModel: (model: string) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/saved-models", {
+      method: "POST",
+      body: JSON.stringify({ model }),
+    }),
+  // Forget a saved hosted model. `model` is a query param — ids carry "/" and ":" which
+  // proxies may mangle in a path (mirrors deleteModel).
+  removeSavedModel: (model: string) =>
+    request(
+      z.object({ status: z.string() }),
+      `/platform/v1/llm/saved-models?model=${encodeURIComponent(model)}`,
+      { method: "DELETE" },
+    ),
 
   sessions: () => request(z.array(SessionSummary), "/platform/v1/agent/sessions"),
   sessionMessages: (id: string) =>

@@ -74,6 +74,14 @@ export type LlmPrefs = z.infer<typeof LlmPrefs>;
 export const TimezonePrefs = z.object({ timezone: z.string() });
 export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 
+/** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
+export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
+export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
+
+/** The tenant's saved hosted-model ids, most-recently-saved first (#496). */
+export const SavedModelsResponse = z.object({ models: z.array(SavedHostedModel).default([]) });
+export type SavedModelsResponse = z.infer<typeof SavedModelsResponse>;
+
 /* ── system / GPU info (context-window suggestion) ────────────────────────── */
 
 /** A detected GPU. `vram_free_mb` is null when the vendor can't report it. */

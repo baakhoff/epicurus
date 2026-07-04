@@ -139,6 +139,26 @@ Both take an optional `tenant_id` query param, falling back to the default tenan
 
 ---
 
+## `GET` · `POST` · `DELETE /platform/v1/llm/saved-models`
+
+The operator's saved hosted-model ids (#496) — a tenant-scoped, durable home for the hosted
+model strings entered in the chat picker, so they survive restarts / a PWA reinstall and follow
+the tenant across devices (unlike the browser's per-origin `recentModels` localStorage cache).
+
+- **`GET`** → `{models: [{model, provider}]}`, most-recently-saved first. `provider` is the id's
+  `<provider>/` prefix (for grouping on the Models page).
+- **`POST {model}`** persists one id, idempotent (a re-save bumps it to the front). **400**s
+  anything that isn't a *hosted* id — a known `<provider>/` prefix (`claude/…`, `gpt/…`, …) — so
+  a local `hf.co/org/model:tag` can never land here (the server-side half of the fix for the web
+  client's old `includes("/")` misclassification).
+- **`DELETE ?model=…`** (query param, since ids carry `/` and `:`) forgets one; a no-op if absent.
+
+Backed by the tenant-scoped `saved_models` table. The chat picker renders this list (auto-saving
+on use), the Models page lists it (remove / set-as-default), and module model slots offer it
+(ADR-0029). Mutations **503** when the store is unavailable.
+
+---
+
 ## `GET /platform/v1/maintenance` · `POST /platform/v1/maintenance/run`
 
 The maintenance orchestrator (ADR-0060) — one coordinated batch over the core's background jobs

@@ -60,6 +60,7 @@ from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
+from epicurus_core_app.llm.saved_models import SavedHostedModelStore
 from epicurus_core_app.llm.variants import VariantLookup
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
@@ -121,6 +122,10 @@ def create_app() -> FastAPI:
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
 
     prefs = LlmPrefsStore(engine)
+    # The operator's saved hosted-model ids (#496) — a durable, tenant-scoped home for the
+    # hosted model strings entered in the picker, so they survive restarts / a PWA reinstall and
+    # follow the tenant across devices (unlike the browser's per-origin recentModels cache).
+    saved_models = SavedHostedModelStore(engine)
     model_settings = ModelSettingsStore(engine)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
@@ -340,6 +345,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
         try:
+            await saved_models.init()
+        except Exception as exc:
+            log.error("saved-models init failed; hosted-model list disabled", error=str(exc))
+        try:
             await model_settings.init()
         except Exception as exc:
             log.error("model settings init failed; per-model tuning disabled", error=str(exc))
@@ -466,6 +475,7 @@ def create_app() -> FastAPI:
             variants=variant_lookup,
             model_settings=model_settings,
             ollama_runtime=ollama_runtime,
+            saved_models=saved_models,
         )
     )
     app.include_router(

@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Hosted/API model ids you enter are now saved per tenant** (#496) — a hosted model typed into
+  the chat picker (e.g. `claude/<model-id>`) used to live only in the browser (`recentModels`,
+  capped at five, per device *and* per origin): come back from another device, a VPN-hostname
+  origin, or after a PWA reinstall and it was gone. The core now persists the ids the operator uses
+  in a tenant-scoped `saved_models` table, behind `GET` / `POST` / `DELETE
+  /platform/v1/llm/saved-models`. The chat picker renders that server list as pick rows and
+  **auto-saves on use** (the free-text box stays for one-off / new ids); the Models page lists them
+  under each provider, where they can be **removed** or **set as the global default** (the star
+  local models already had); and they're now assignable to a **module model slot** (ADR-0029).
+  Saving rejects anything that isn't a *hosted* id — a known `<provider>/` prefix — which also
+  fixes the client's old `includes("/")` heuristic that mis-filed a local `hf.co/org/model:tag` as
+  hosted. `core-app` 0.57.1→0.58.0, `web` 0.78.0→0.79.0.
+
 - **Web: offline / backend-unreachable banner** (#494) — the PWA now says when the backend can't
   be reached instead of failing silently. A transport-level detector (`epFetch`, wrapping every API
   fetch site) marks the core unreachable on network errors and 502/504 — 503 is deliberately

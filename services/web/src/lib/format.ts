@@ -64,3 +64,21 @@ export const PROVIDER_MODEL_HINTS: Record<string, string> = {
   gemini: "gemini/gemini-3-pro",
   custom: "custom/your-model-id",
 };
+
+/** The known hosted (non-local) provider aliases — mirrors the core's provider registry
+ *  (`epicurus_core_app.llm.providers.PROVIDERS`, minus the local runtime). */
+export const HOSTED_PROVIDER_ALIASES: ReadonlySet<string> = new Set(
+  Object.keys(PROVIDER_LABELS).filter((alias) => alias !== "local"),
+);
+
+/**
+ * Whether a model id targets a hosted provider — a known, non-local `<provider>/…` prefix.
+ * Mirrors the core's `providers.is_hosted`: `claude/…` is hosted, while a bare name, the
+ * explicit `local/…` alias, and an unknown `hf.co/org/model:tag` prefix are all local. This
+ * replaces the old `includes("/")` heuristic that mis-filed local `hf.co/…` models as hosted (#496).
+ */
+export function isHostedModelId(model: string): boolean {
+  const slash = model.indexOf("/");
+  if (slash <= 0) return false;
+  return HOSTED_PROVIDER_ALIASES.has(model.slice(0, slash));
+}

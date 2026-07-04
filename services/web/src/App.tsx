@@ -7,6 +7,7 @@ import { SURFACES, modulePageNavs, type ModulePageNav } from "@/app/registry";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
 import { PanelHost } from "@/components/Panel";
+import { Toaster } from "@/components/Toaster";
 import { Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
@@ -238,6 +239,7 @@ export function Shell() {
 
       <DownloadTray />
       <UpdateToast />
+      <Toaster />
     </div>
   );
 }

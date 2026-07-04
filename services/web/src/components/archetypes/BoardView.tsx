@@ -26,6 +26,7 @@ import { useState } from "react";
 
 import { Badge, EmptyState, Select, Spinner, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
+import { toast } from "@/stores/toasts";
 import {
   BoardData,
   type BoardAction,
@@ -173,7 +174,7 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
     mutationFn: ({ action, toListId }: { action: BoardAction; toListId: string }) =>
       api.invokeModuleTool(module, action.tool, { ...action.args, to_list_id: toListId }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["module-page", module, pageId] }),
-    onError: (e) => window.alert(e instanceof ApiError ? e.detail : "Could not move the task."),
+    onError: (e) => toast.error(e instanceof ApiError ? e.detail : "Could not move the task."),
   });
 
   if (query.isLoading && !query.data) {

@@ -70,6 +70,24 @@ explicit `overflow: hidden` + `overscroll-behavior: none` as a defensive stateme
 "the document itself is never a scrollable" invariant `#root`'s fixed positioning already
 enforces in practice.
 
+### Toasts & confirmations (#488)
+
+Native browser dialogs are **banned** in the shell — an ESLint
+`no-restricted-syntax`/`no-restricted-globals` guard (the #394 pattern) rejects any
+`window.alert`/`window.confirm` at lint time. In their place:
+
+- **Toasts** (`src/stores/toasts.ts` + `src/components/Toaster.tsx`): a zustand-driven
+  stack rendered once in the shell — bottom-anchored above the phone tab bar, bottom-right
+  on wide screens, themed via the `--ep-*` tokens, above the Confirm layer (`z-70`) so a
+  failure raised from a dialog action is never hidden. Any code path raises one
+  imperatively — `toast.error(msg)` / `toast.info(msg)` — no hook needed, so a mutation's
+  `onError` can call it directly. Each card is a `role="status"` live region (polite
+  announcement), closable by hand, auto-dismissed on a per-tone clock (errors 8 s, info
+  4 s); re-raising an identical message replaces the card instead of stacking duplicates.
+- **Confirmations** route through the shared `<Confirm>` primitive (`src/components/ui.tsx`)
+  with `danger` styling for destructive actions — the editor's delete-file / delete-folder /
+  restore-version prompts hold the pending action in state until the dialog resolves it.
+
 ### Models — per-model rows (#328)
 
 Each local model is an **inline disclosure**, not a row of hover-only icons behind a

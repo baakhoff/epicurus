@@ -38,10 +38,13 @@ def vault_dir(files_root: Path) -> Path:
 
 
 class _FakeIndexer:
-    """Minimal stand-in — tree ops don't touch the indexer."""
+    """Minimal stand-in — tree ops don't touch the indexer beyond move's re-index (#470)."""
 
     async def index_path(self, rel: str) -> int:
         return 0
+
+    async def move_path(self, from_rel: str, to_rel: str) -> bool:
+        return True
 
 
 class _FilePlatform:
@@ -254,7 +257,7 @@ def test_move_file_to_new_path(tmp_path: Path) -> None:
         "/pages/vault/move", json={"from_path": "alpha.md", "to_path": "renamed.md"}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"path": "renamed.md"}
+    assert resp.json() == {"path": "renamed.md", "indexed": True}
     assert not (vault_dir(tmp_path) / "alpha.md").exists()
     assert (vault_dir(tmp_path) / "renamed.md").is_file()
 

@@ -81,6 +81,16 @@ class _FakeIndexer:
         self.ran += 1
         return {"indexed": 0, "deleted": 0, "unchanged": 0}
 
+    async def move_path(self, from_rel: str, to_rel: str) -> bool:
+        # Mirrors KnowledgeIndexer.move_path (#470): a single file swaps its vectors
+        # directly, a folder move reconciles via a full run.
+        if from_rel.endswith(".md"):
+            await self.remove_path(from_rel)
+            await self.index_path(to_rel)
+            return True
+        await self.run()
+        return True
+
 
 class _FilePlatform:
     """A ``PlatformClient`` stand-in whose ``files_*`` delegate to a real on-disk store.
@@ -630,6 +640,22 @@ async def test_approve_move_file_relocates_and_reindexes(tmp_path: Path) -> None
     assert "kb/a.md" in indexer.removed
     assert "kb/b.md" in indexer.indexed
     assert await store.list(tenant=TENANT) == []
+
+
+async def test_approve_move_file_reindexes_exactly_once(tmp_path: Path) -> None:
+    """VaultPages.move_item re-indexes internally (#470) - approve() must not do it again.
+
+    Uses exact list equality (not membership) so a regression to the pre-fix double-reindex
+    — calling move_path once inside move_item and again in approve() — fails loudly instead
+    of silently passing an ``in`` check.
+    """
+    review, store, indexer = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
+    (vault_dir(tmp_path) / "kb" / "a.md").write_text("# A\n", encoding="utf-8")
+    sid = await _add(store, path="kb/a.md", operation="move", to_path="kb/b.md")
+    await review.approve(sid)
+    assert indexer.removed == ["kb/a.md"]
+    assert indexer.indexed == ["kb/b.md"]
 
 
 async def test_approve_move_folder_reconciles_index(tmp_path: Path) -> None:

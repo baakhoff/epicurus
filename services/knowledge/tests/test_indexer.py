@@ -282,6 +282,55 @@ async def test_index_path_replaces_old_vectors_on_reindex(
     qdrant.delete.assert_awaited()  # stale chunks purged before the re-upsert
 
 
+async def test_move_path_reindexes_single_file(note_index: NoteIndex, vault: Path) -> None:
+    """move_path drops the old identity's vectors + ledger row and re-embeds under the new one.
+
+    The #470 fix: before this existed, the direct editor move endpoint left the old path's
+    ledger row and Qdrant vectors in place indefinitely, showing up as a phantom search hit.
+    """
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()
+    # The caller (VaultPages.move_item) always renames on disk first.
+    (vault / "note_a.md").rename(vault / "renamed.md")
+
+    assert await indexer.move_path("note_a.md", "renamed.md") is True
+
+    assert await note_index.get(tenant=TENANT, note_path="note_a.md") is None
+    rec = await note_index.get(tenant=TENANT, note_path="renamed.md")
+    assert rec is not None
+    qdrant = indexer._qdrant  # type: ignore[attr-defined]
+    qdrant.delete.assert_awaited()  # the old identity's points were purged
+
+
+async def test_move_path_returns_false_when_reindex_fails(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """A failed re-embed after a move is reported, not raised — the move already stands."""
+    indexer = _make_indexer(note_index, vault)
+    await indexer.run()
+    (vault / "note_a.md").rename(vault / "renamed.md")
+    indexer._platform.embed = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[attr-defined]
+
+    assert await indexer.move_path("note_a.md", "renamed.md") is False
+    # The old identity is still gone even though the re-embed failed — no orphaned ledger row.
+    assert await note_index.get(tenant=TENANT, note_path="note_a.md") is None
+
+
+async def test_move_path_folder_triggers_full_run(note_index: NoteIndex, tmp_path: Path) -> None:
+    """A folder move (no ``.md`` suffix) reconciles via a full run, not a single re-embed."""
+    (tmp_path / "old_kb").mkdir()
+    (tmp_path / "old_kb" / "one.md").write_text("# One\n\nA.")
+    indexer = _make_indexer(note_index, tmp_path)
+    await indexer.run()
+    (tmp_path / "old_kb").rename(tmp_path / "new_kb")
+
+    assert await indexer.move_path("old_kb", "new_kb") is True
+
+    remaining = await note_index.list_paths(tenant=TENANT)
+    assert "old_kb/one.md" not in remaining
+    assert "new_kb/one.md" in remaining
+
+
 async def test_non_markdown_files_are_ignored(note_index: NoteIndex, vault: Path) -> None:
     (vault / "image.png").write_bytes(b"\x89PNG")
     (vault / "config.yaml").write_text("key: value")
@@ -710,6 +759,41 @@ async def test_reconcile_noop_when_collection_exists(note_index: NoteIndex, vaul
 async def test_reconcile_noop_when_ledger_empty(note_index: NoteIndex, vault: Path) -> None:
     indexer = _missing_collection_indexer(note_index, vault)
     assert await indexer.reconcile() is False
+
+
+async def test_reconcile_gcs_ledger_row_whose_path_no_longer_exists(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """A ledger row for a path the vault no longer has is GC'd even though the collection
+    is intact (#470) — the self-heal for a move/rename that bypasses ``move_path``, or any
+    future gap like it, without waiting for a full re-embed run."""
+    indexer = _make_indexer(note_index, vault)  # collection_exists -> True
+    await note_index.upsert(
+        tenant=TENANT, note_path="ghost.md", mtime_ns=1, content_hash="h", chunk_count=1
+    )
+    assert await indexer.reconcile() is True
+    assert await note_index.get(tenant=TENANT, note_path="ghost.md") is None
+    qdrant = indexer._qdrant  # type: ignore[attr-defined]
+    qdrant.delete.assert_awaited()  # the ghost's vectors were purged too
+
+
+async def test_reconcile_gc_leaves_live_paths_untouched(note_index: NoteIndex, vault: Path) -> None:
+    """A ledger row whose path genuinely still exists survives the GC pass."""
+    indexer = _make_indexer(note_index, vault)
+    await note_index.upsert(
+        tenant=TENANT, note_path="note_a.md", mtime_ns=1, content_hash="h", chunk_count=1
+    )
+    assert await indexer.reconcile() is False  # note_a.md is real — nothing to GC
+    assert await note_index.get(tenant=TENANT, note_path="note_a.md") is not None
+
+
+async def test_reconcile_gc_is_idempotent(note_index: NoteIndex, vault: Path) -> None:
+    indexer = _make_indexer(note_index, vault)
+    await note_index.upsert(
+        tenant=TENANT, note_path="ghost.md", mtime_ns=1, content_hash="h", chunk_count=1
+    )
+    assert await indexer.reconcile() is True
+    assert await indexer.reconcile() is False  # nothing left to GC on the second pass
 
 
 async def test_reindexes_from_scratch_after_qdrant_reset(

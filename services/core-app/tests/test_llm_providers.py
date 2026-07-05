@@ -43,3 +43,18 @@ def test_unknown_prefix_falls_back_to_local() -> None:
     litellm_model, provider = registry.resolve("anthropic/foo")
     assert provider.is_local
     assert litellm_model == "ollama_chat/anthropic/foo"
+
+
+def test_is_hosted_recognises_known_provider_prefixes() -> None:
+    assert registry.is_hosted("claude/claude-3-5-sonnet-latest")
+    assert registry.is_hosted("gpt/gpt-4o")
+    assert registry.is_hosted("custom/my-model")
+
+
+def test_is_hosted_rejects_local_ids() -> None:
+    # The classification that keeps a local model out of the saved-hosted list (#496): a bare
+    # name, the explicit local alias, and — the original bug — an ``hf.co/…`` prefix are all local.
+    assert not registry.is_hosted("llama3.2")
+    assert not registry.is_hosted("local/llama3.2")
+    assert not registry.is_hosted("hf.co/org/model:tag")
+    assert not registry.is_hosted("qwen2.5:0.5b")

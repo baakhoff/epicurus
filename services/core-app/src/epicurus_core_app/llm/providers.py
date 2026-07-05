@@ -50,3 +50,15 @@ def resolve(model: str) -> tuple[str, Provider]:
         return f"{provider.litellm_prefix}/{rest}", provider
     local = PROVIDERS["local"]
     return f"{local.litellm_prefix}/{model}", local
+
+
+def is_hosted(model: str) -> bool:
+    """Whether ``model`` names a hosted provider — a known, non-local alias prefix.
+
+    ``claude/…`` → True; a bare name, an unknown prefix (``hf.co/org/model:tag``), or the
+    explicit ``local/…`` alias → False. Mirrors :func:`resolve`'s classification so a local
+    model can never be mistaken for a hosted one — the fix for the web client's old
+    ``includes("/")`` heuristic that let ``hf.co/…`` locals pollute the hosted list (#496).
+    """
+    alias, sep, _ = model.partition("/")
+    return bool(sep) and alias in PROVIDERS and not PROVIDERS[alias].is_local

@@ -1431,6 +1431,104 @@ function Providers() {
   );
 }
 
+// ── Saved hosted models (#496) ──────────────────────────────────────────────────
+
+/**
+ * Saved hosted models — the hosted/API model ids the operator has used, now first-class
+ * per-tenant rows (#496): server-persisted so they survive a PWA reinstall and follow the
+ * account across devices. Grouped under their provider; each can be set as the global default
+ * (the star that local rows already have) or removed. New ids are added from the chat picker.
+ */
+export function SavedHostedModels() {
+  const queryClient = useQueryClient();
+  const saved = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
+  const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  const globalDefault = llmPrefs.data?.global_default ?? null;
+
+  const setDefault = useMutation({
+    mutationFn: (model: string | null) => api.setGlobalDefault(model),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llmPrefs"] }),
+  });
+  const remove = useMutation({
+    mutationFn: (model: string) => api.removeSavedModel(model),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["savedModels"] }),
+  });
+
+  // Group by provider alias, preserving the server's most-recent-first order within each group.
+  const groups = new Map<string, string[]>();
+  for (const m of saved.data ?? []) {
+    groups.set(m.provider, [...(groups.get(m.provider) ?? []), m.model]);
+  }
+
+  return (
+    <Card>
+      <h3 className="mb-1 font-serif text-base text-ink">Hosted models</h3>
+      <p className="mb-3 text-xs leading-relaxed text-ink-dim">
+        The hosted model ids you've used, saved to your account so they follow you across
+        devices. Star one to make it the global default, or remove it — add new ids from the
+        model picker in a chat.
+      </p>
+      {saved.isLoading ? (
+        <Spinner />
+      ) : (saved.data ?? []).length === 0 ? (
+        <p className="text-sm text-ink-dim">
+          None yet — pick a hosted model in a chat (e.g.{" "}
+          <code className="font-mono">claude/…</code>) and it's saved here.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {[...groups.entries()].map(([provider, ids]) => (
+            <div key={provider}>
+              <p className="mb-1 text-[11px] uppercase tracking-wide text-ink-faint">
+                {PROVIDER_LABELS[provider] ?? provider}
+              </p>
+              <div className="flex flex-col gap-1">
+                {ids.map((id) => {
+                  const isDefault = globalDefault === id;
+                  return (
+                    <div
+                      key={id}
+                      className="flex items-center gap-2 rounded-(--radius-field) border border-edge px-3 py-2"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-mono text-sm text-ink">
+                        {id}
+                      </span>
+                      {isDefault && <Badge tone="accent">default</Badge>}
+                      <Tooltip label={isDefault ? "Default model" : "Set as default"}>
+                        <Button
+                          variant="ghost"
+                          aria-label={isDefault ? `${id} is the default` : `Set ${id} as default`}
+                          onClick={() => setDefault.mutate(isDefault ? null : id)}
+                          disabled={setDefault.isPending}
+                        >
+                          <Star size={14} fill={isDefault ? "currentColor" : "none"} />
+                        </Button>
+                      </Tooltip>
+                      <Button
+                        variant="ghost"
+                        aria-label={`Remove ${id}`}
+                        onClick={() => remove.mutate(id)}
+                        disabled={remove.isPending}
+                      >
+                        <Trash2 size={14} />
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {(setDefault.isError || remove.isError) && (
+        <p className="mt-2 text-sm text-danger">
+          {((setDefault.error ?? remove.error) as Error)?.message}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export function ModelsScreen() {
@@ -1448,6 +1546,7 @@ export function ModelsScreen() {
         <KvCache />
         <EmbedDefault />
         <Providers />
+        <SavedHostedModels />
       </div>
     </div>
   );

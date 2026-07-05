@@ -74,6 +74,7 @@ import {
   RECENCY_BUCKETS,
   recencyBucket,
   relativeTime,
+  isHostedModelId,
   PROVIDER_MODEL_HINTS,
   formatBytes,
 } from "@/lib/format";
@@ -419,6 +420,7 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
 /* ── model picker ───────────────────────────────────────────────────────── */
 
 function ModelPicker() {
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const model = usePrefs((s) => s.model);
   const setModel = usePrefs((s) => s.setModel);
@@ -427,11 +429,31 @@ function ModelPicker() {
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
+  const saved = useQuery({ queryKey: ["savedModels"], queryFn: api.savedModels, enabled: open });
 
   const hosted = providers.data?.filter((p) => !p.local && p.configured) ?? [];
   const visibleModels = models.data?.filter((m) => !m.hidden) ?? [];
   const globalDefault = llmPrefs.data?.global_default;
   const defaultLabel = globalDefault ? `core default (${globalDefault})` : "core default";
+
+  // The hosted rows: the server's saved list (source of truth, #496) first, then any
+  // device-local recents not yet in it — an instant echo before the query resolves / on an
+  // older core with no saved-models endpoint.
+  const savedIds = saved.data?.map((s) => s.model) ?? [];
+  const hostedIds = [...savedIds, ...recents.filter((r) => !savedIds.includes(r))];
+
+  // Auto-save a hosted id on use, so it's offered on every device next time (#496). Idempotent
+  // (a re-use just bumps recency); guarded by isHostedModelId so a bare/local free-text entry is
+  // never sent to the hosted-only endpoint (which would 400).
+  const save = useMutation({
+    mutationFn: api.addSavedModel,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["savedModels"] }),
+  });
+  const chooseHosted = (id: string) => {
+    setModel(id);
+    if (isHostedModelId(id)) save.mutate(id);
+    setOpen(false);
+  };
 
   return (
     <>
@@ -471,7 +493,7 @@ function ModelPicker() {
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
               Hosted
             </p>
-            {hosted.length === 0 && (
+            {hosted.length === 0 && hostedIds.length === 0 && (
               <p className="text-xs text-ink-dim">
                 No provider keys yet — add one under{" "}
                 <Link to="/models" className="text-accent-strong underline" onClick={() => setOpen(false)}>
@@ -480,19 +502,10 @@ function ModelPicker() {
                 .
               </p>
             )}
-            {recents.length > 0 && (
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {recents.map((recent) => (
-                  <button
-                    key={recent}
-                    onClick={() => {
-                      setModel(recent);
-                      setOpen(false);
-                    }}
-                    className="rounded-full border border-edge px-2.5 py-1 text-xs text-ink-dim hover:border-accent hover:text-accent-strong"
-                  >
-                    {recent}
-                  </button>
+            {hostedIds.length > 0 && (
+              <div className="mb-2 flex flex-col gap-1">
+                {hostedIds.map((id) => (
+                  <PickRow key={id} label={id} active={model === id} onPick={() => chooseHosted(id)} />
                 ))}
               </div>
             )}
@@ -502,9 +515,8 @@ function ModelPicker() {
                 onSubmit={(e) => {
                   e.preventDefault();
                   if (!custom.trim()) return;
-                  setModel(custom.trim());
+                  chooseHosted(custom.trim());
                   setCustom("");
-                  setOpen(false);
                 }}
               >
                 <TextInput
@@ -834,7 +846,7 @@ export function ChatScreen() {
   // The model this chat will actually use (the per-chat choice, else the core default). If it's
   // a local one, check whether it can call tools so we can warn that it's chat-only.
   const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
-  const effectiveIsLocal = Boolean(effectiveModel) && !effectiveModel!.includes("/");
+  const effectiveIsLocal = Boolean(effectiveModel) && !isHostedModelId(effectiveModel!);
   const modelDetails = useQuery({
     queryKey: ["modelDetails", effectiveModel],
     queryFn: () => api.modelDetails(effectiveModel!),

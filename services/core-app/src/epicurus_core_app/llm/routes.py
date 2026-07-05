@@ -16,6 +16,8 @@ from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, Pr
 from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.providers import is_hosted
+from epicurus_core_app.llm.saved_models import SavedHostedModelStore
 from epicurus_core_app.llm.variants import ModelVariantsResponse, VariantLookup
 from epicurus_core_app.system_info import suggest_context_for_model
 
@@ -117,6 +119,25 @@ class SuggestModelContextRequest(BaseModel):
     model: str
 
 
+class SavedModel(BaseModel):
+    """One saved hosted-model id plus its provider alias (the id's ``<provider>/`` prefix)."""
+
+    model: str
+    provider: str
+
+
+class SavedModelsResponse(BaseModel):
+    """The tenant's saved hosted-model ids, most-recently-saved first (#496)."""
+
+    models: list[SavedModel]
+
+
+class SaveModelRequest(BaseModel):
+    """Body for POST /llm/saved-models — a hosted model id to persist for the tenant."""
+
+    model: str
+
+
 def create_llm_router(
     gateway: LlmGateway,
     prefs: LlmPrefsStore | None = None,
@@ -125,6 +146,7 @@ def create_llm_router(
     variants: VariantLookup | None = None,
     model_settings: ModelSettingsStore | None = None,
     ollama_runtime: OllamaRuntime | None = None,
+    saved_models: SavedHostedModelStore | None = None,
 ) -> APIRouter:
     """Gateway management routes — installed models, the browse catalog, providers,
     pulls, and prefs.
@@ -327,6 +349,51 @@ def create_llm_router(
             updated = current
         await prefs.set_hidden(default_tenant, updated)
         return {"status": "ok", "hidden": updated}
+
+    # ── Saved hosted models (first-class hosted ids, #496) ────────────────────
+
+    @router.get("/saved-models", response_model=SavedModelsResponse)
+    async def list_saved_models() -> SavedModelsResponse:
+        """The tenant's saved hosted-model ids, most-recently-saved first.
+
+        This is the source of truth the chat picker renders and the Models page lists — the
+        browser's ``recentModels`` cache is only a warm fallback. Each entry carries the
+        provider alias (the id's ``<provider>/`` prefix) so the UI can group by provider.
+        """
+        if saved_models is None:
+            return SavedModelsResponse(models=[])
+        ids = await saved_models.list(default_tenant)
+        return SavedModelsResponse(
+            models=[SavedModel(model=m, provider=m.split("/", 1)[0]) for m in ids]
+        )
+
+    @router.post("/saved-models")
+    async def add_saved_model(request: SaveModelRequest) -> dict[str, str]:
+        """Persist a hosted model id for the tenant (idempotent; a re-save bumps it first).
+
+        Rejects anything that isn't a hosted id (a known ``<provider>/`` prefix) with 400, so a
+        local ``hf.co/org/model:tag`` can never land here — the server-side half of the fix for
+        the client's old ``includes("/")`` misclassification (#496).
+        """
+        if saved_models is None:
+            raise HTTPException(status_code=503, detail="saved-models store not available")
+        model = request.model.strip()
+        if not is_hosted(model):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{model!r} is not a hosted model id (expected <provider>/<model>)",
+            )
+        await saved_models.add(default_tenant, model)
+        return {"status": "ok", "model": model}
+
+    @router.delete("/saved-models")
+    async def remove_saved_model(model: str) -> dict[str, str]:
+        """Forget a saved hosted model. ``model`` is a query param — ids carry ``/`` and ``:``
+        which proxies may mangle in a path (mirrors ``DELETE /models``)."""
+        if saved_models is None:
+            raise HTTPException(status_code=503, detail="saved-models store not available")
+        await saved_models.remove(default_tenant, model)
+        return {"status": "ok", "model": model}
 
     # ── Per-model settings (context window + keep-alive) ──────────────────────
 

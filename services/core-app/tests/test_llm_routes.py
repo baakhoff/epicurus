@@ -14,6 +14,7 @@ from epicurus_core_app.llm.models import ModelDetails
 from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
+from epicurus_core_app.llm.saved_models import SavedHostedModelStore
 from epicurus_core_app.llm.variants import VariantLookup
 
 
@@ -58,6 +59,17 @@ async def _fresh_model_settings() -> ModelSettingsStore:
     return store
 
 
+async def _fresh_saved_models() -> SavedHostedModelStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = SavedHostedModelStore(engine)
+    await store.init()
+    return store
+
+
 def _app(
     prefs: LlmPrefsStore | None = None,
     catalog: ModelCatalog | None = None,
@@ -65,6 +77,7 @@ def _app(
     model_settings: ModelSettingsStore | None = None,
     ollama_runtime: OllamaRuntime | None = None,
     gateway: _StubGateway | None = None,
+    saved_models: SavedHostedModelStore | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
@@ -76,6 +89,7 @@ def _app(
             variants=variants,
             model_settings=model_settings,
             ollama_runtime=ollama_runtime,
+            saved_models=saved_models,
         )
     )
     return app
@@ -572,3 +586,80 @@ async def test_suggest_context_route_null_when_nothing_to_size(
         got = await client.get("/platform/v1/llm/model-settings", params={"model": "claude/sonnet"})
     # Nothing was persisted — the model still inherits the global/env default.
     assert got.json()["context_window"] is None
+
+
+# ── saved hosted models (#496) ────────────────────────────────────────────────
+
+
+def test_saved_models_routes_present() -> None:
+    assert "/platform/v1/llm/saved-models" in _app().openapi()["paths"]
+
+
+async def test_saved_models_empty_without_store() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=None)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/llm/saved-models")
+    assert resp.status_code == 200
+    assert resp.json() == {"models": []}
+
+
+async def test_saved_models_add_persists_with_provider() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        post = await client.post(
+            "/platform/v1/llm/saved-models",
+            json={"model": "claude/claude-3-5-sonnet-latest"},
+        )
+        assert post.status_code == 200
+        get = await client.get("/platform/v1/llm/saved-models")
+    assert get.json() == {
+        "models": [{"model": "claude/claude-3-5-sonnet-latest", "provider": "claude"}]
+    }
+
+
+async def test_saved_models_rejects_local_id() -> None:
+    """A local id (bare name or an unknown ``hf.co/…`` prefix) is not a hosted model — 400.
+
+    This is the server-side half of the fix for the client's old ``includes("/")`` heuristic
+    that let ``hf.co/…`` locals pollute the hosted list (#496)."""
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        bare = await client.post("/platform/v1/llm/saved-models", json={"model": "llama3.2"})
+        hf = await client.post(
+            "/platform/v1/llm/saved-models", json={"model": "hf.co/org/model:tag"}
+        )
+        get = await client.get("/platform/v1/llm/saved-models")
+    assert bare.status_code == 400
+    assert hf.status_code == 400
+    assert get.json() == {"models": []}  # neither landed
+
+
+async def test_saved_models_remove() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "gpt/gpt-4o"})
+        delete = await client.delete(
+            "/platform/v1/llm/saved-models", params={"model": "gpt/gpt-4o"}
+        )
+        assert delete.status_code == 200
+        get = await client.get("/platform/v1/llm/saved-models")
+    assert get.json() == {"models": []}
+
+
+async def test_saved_models_mutations_without_store_are_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=None)), base_url="http://test"
+    ) as client:
+        post = await client.post("/platform/v1/llm/saved-models", json={"model": "gpt/gpt-4o"})
+        delete = await client.delete(
+            "/platform/v1/llm/saved-models", params={"model": "gpt/gpt-4o"}
+        )
+    assert post.status_code == 503
+    assert delete.status_code == 503

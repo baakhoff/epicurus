@@ -156,6 +156,9 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
     queryFn: () => api.getModuleModels(name),
   });
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
+  // Saved hosted ids (#496) are assignable to a chat slot too — a module can run on a hosted
+  // model, not only a local one (ADR-0029).
+  const saved = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
   const save = useMutation({
     mutationFn: (next: Record<string, string>) => api.setModuleModels(name, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-models", name] }),
@@ -165,6 +168,7 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
   // Choosing "Core default" (value "") clears the slot; the core falls back to its default.
   const current = selections.data ?? {};
   const available = (models.data ?? []).filter((m) => !m.hidden);
+  const hosted = saved.data ?? [];
 
   return (
     <div>
@@ -188,6 +192,17 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
                   {m.name}
                 </option>
               ))}
+              {/* Hosted ids are chat-only — the gateway embeds locally, so an embedding slot
+                  never offers them (they'd fail at call time). */}
+              {slot.role === "chat" && hosted.length > 0 && (
+                <optgroup label="Hosted">
+                  {hosted.map((h) => (
+                    <option key={h.model} value={h.model}>
+                      {h.model}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </Select>
           </label>
         ))}

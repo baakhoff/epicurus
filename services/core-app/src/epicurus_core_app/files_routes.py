@@ -7,7 +7,8 @@ Two surfaces share one router and one swappable :class:`~epicurus_core.files.Fil
   ``delete`` / ``dir`` / ``move``. Modules consume these via ``PlatformClient.files_*`` instead
   of mounting the shared volume.
 * **Operator-facing Files UI** (Phase 2, ADR-0063) — ``page`` (the browser archetype's data),
-  ``search``, and ``download``. The Files page used to live in the storage module; it now lives
+  ``search``, ``download``, and ``upload`` (#479, the Files page's way in — bounded by the
+  shared #175 caps). The Files page used to live in the storage module; it now lives
   here, served from the core-owned file index over the FileStore, **merged** with the storage
   module's object store (chat uploads / agent objects) via an injected :class:`ObjectBackend`.
   ``read`` / ``move`` / ``download`` are file-space-first and fall back to the object store, so
@@ -17,10 +18,11 @@ Two surfaces share one router and one swappable :class:`~epicurus_core.files.Fil
 from __future__ import annotations
 
 import mimetypes
+from collections.abc import Sequence
 from contextlib import suppress
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -29,6 +31,11 @@ from epicurus_core.files import normalize_rel
 from epicurus_core.tenancy import TenantError, validate_tenant_id
 from epicurus_core_app.file_index import FileIndex
 from epicurus_core_app.object_backend import ObjectBackend
+from epicurus_core_app.upload_limits import (
+    DEFAULT_ALLOWED_UPLOAD_TYPES,
+    DEFAULT_MAX_UPLOAD_BYTES,
+    content_type_allowed,
+)
 
 
 class FileListResponse(BaseModel):
@@ -110,12 +117,18 @@ def create_files_router(
     default_tenant: str = "local",
     index: FileIndex | None = None,
     objects: ObjectBackend | None = None,
+    max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
+    allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
+    locked_prefixes: frozenset[str] = frozenset(),
 ) -> APIRouter:
     """Build the ``/platform/v1/files`` router over a :class:`FileStore`.
 
     *index* powers the Files page's search (the file-space tree, name/path matched); without it
     search is empty. *objects* merges the storage module's object store into the Files view and
     serves object read/download/move; without it the view is the file-space tree alone.
+    ``max_upload_bytes`` / ``allowed_upload_types`` bound the upload route (the shared #175
+    caps). *locked_prefixes* names the top-level folders modules own (by convention their
+    hostnames, ADR-0063): files under them are not movable in the UI and not upload targets.
     """
     router = APIRouter(prefix="/platform/v1/files", tags=["files"])
 
@@ -131,6 +144,17 @@ def create_files_router(
             return normalize_rel(path)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _fs_movable(path: str, kind: str) -> bool:
+        """Whether a file-space entry may be moved from the Files UI (#479).
+
+        Operator-space *files* are movable, like object uploads; directories and anything
+        under a module-owned top-level folder (*locked_prefixes*) stay read-only — moving a
+        module's files behind its back would desync the module's own index.
+        """
+        if kind != "file":
+            return False
+        return path.split("/", 1)[0] not in locked_prefixes
 
     # ── Module-facing I/O (Phase 1) ──────────────────────────────────────────────
 
@@ -254,6 +278,81 @@ def create_files_router(
 
     # ── Operator-facing Files UI (Phase 2) ───────────────────────────────────────
 
+    async def _unused_path(*, tenant: str, rel_dir: str, name: str) -> str:
+        """The first collision-free path for *name* under *rel_dir* (photo.jpg → photo-2.jpg).
+
+        Uploading must never silently replace an existing file; suffix the stem instead.
+        Best-effort under concurrency (stat-then-write), which is fine for an operator UI.
+        """
+        stem, dot, ext = name.rpartition(".")
+        if not dot or not stem:  # "README", or a dotfile like ".env" — suffix the whole name
+            stem, ext = name, ""
+        for n in range(1, 1000):
+            cand = name if n == 1 else (f"{stem}-{n}.{ext}" if ext else f"{stem}-{n}")
+            path = f"{rel_dir}/{cand}" if rel_dir else cand
+            if await store.stat(tenant=tenant, path=path) is None:
+                return path
+        raise HTTPException(status_code=409, detail=f"too many files named like {name!r}")
+
+    @router.post("/upload", response_model=FileEntry)
+    async def upload_file(
+        file: UploadFile,
+        dir: str = Query(default="", description="Destination directory (empty = tenant root)"),
+        tenant_id: str | None = Query(default=None),
+    ) -> FileEntry:
+        """Upload one file into the tenant file space — the Files page's upload door (#479).
+
+        Enforces the shared #175 caps — content-type allowlist (415) and byte cap (413) —
+        then lands the bytes through the FileStore seam (local-FS ↔ S3, constraint #3) and
+        indexes the entry immediately, so it is listed and searchable with no rescan. The
+        multi-file UI sends one request per file, which is what per-file progress and
+        failure states want. Module-owned destinations are refused (400); a name collision
+        gets a ``-2``/``-3``… suffix rather than overwriting.
+        """
+        tenant = _tenant(tenant_id)
+        rel_dir = _safe(dir)
+        top = rel_dir.split("/", 1)[0]
+        if top and top in locked_prefixes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{top}' belongs to the {top} module — upload into your own folders",
+            )
+        kind = file.content_type or "application/octet-stream"
+        if not content_type_allowed(kind, allowed_upload_types):
+            raise HTTPException(status_code=415, detail=f"unsupported file type: {kind}")
+        over_limit = f"file exceeds the {max_upload_bytes}-byte limit"
+        # Starlette sets file.size from the parsed part — reject before reading the spool.
+        if file.size is not None and file.size > max_upload_bytes:
+            raise HTTPException(status_code=413, detail=over_limit)
+        data = await file.read()
+        if len(data) > max_upload_bytes:  # defense if size was unset or understated
+            raise HTTPException(status_code=413, detail=over_limit)
+
+        # The client sends a bare filename; a path-y one (odd browsers, curl) is reduced to
+        # its basename — the destination directory is the `dir` param, never the filename.
+        name = (file.filename or "file").replace("\\", "/").rsplit("/", 1)[-1].strip()
+        if name in ("", ".", ".."):
+            name = "file"
+        target = await _unused_path(tenant=tenant, rel_dir=rel_dir, name=name)
+        entry = await store.write_bytes(tenant=tenant, path=target, data=data, content_type=kind)
+        # Keep the index in step immediately so the upload is searchable at once (the
+        # watcher would also catch it, debounced). Best-effort: the write already stands.
+        if index is not None:
+            with suppress(Exception):
+                await index.upsert_batch(
+                    tenant=tenant,
+                    entries=[
+                        {
+                            "path": entry.path,
+                            "name": entry.name,
+                            "size": entry.size,
+                            "mtime": entry.mtime,
+                            "kind": entry.kind,
+                        }
+                    ],
+                )
+        return entry
+
     @router.get("/page")
     async def files_page(
         path: str = Query(default="", description="Directory to browse (empty = root)"),
@@ -264,8 +363,9 @@ def create_files_router(
 
         Returns a ``BrowserData``-shaped payload: ``{title, path, search_enabled, items}``.
         Merges the file-space tree (folders the user navigates, files they read/download) with
-        the storage module's objects. File-space entries are read-only in the UI (modules own
-        their subtrees); only object entries (uploads / agent-written) are ``movable``.
+        the storage module's objects. Object entries (uploads / agent-written) and operator-
+        space file-space files are ``movable``; directories and module-owned subtrees
+        (*locked_prefixes*) are read-only in the UI (#479).
         """
         tenant = _tenant(tenant_id)
         query = q.strip()
@@ -274,7 +374,13 @@ def create_files_router(
             fs_hits = await index.search(tenant=tenant, query=query, limit=200) if index else []
             for e in fs_hits:
                 items.append(
-                    _browser_item(path=e.path, name=e.name, kind=e.kind, size=e.size, movable=False)
+                    _browser_item(
+                        path=e.path,
+                        name=e.name,
+                        kind=e.kind,
+                        size=e.size,
+                        movable=_fs_movable(e.path, e.kind),
+                    )
                 )
             title = f"Files — {query}"
         else:
@@ -282,7 +388,11 @@ def create_files_router(
             for fe in await store.list_dir(tenant=tenant, path=rel):
                 items.append(
                     _browser_item(
-                        path=fe.path, name=fe.name, kind=fe.kind, size=fe.size, movable=False
+                        path=fe.path,
+                        name=fe.name,
+                        kind=fe.kind,
+                        size=fe.size,
+                        movable=_fs_movable(fe.path, fe.kind),
                     )
                 )
             title = f"Files — {path}" if path else "Files"

@@ -73,7 +73,8 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/files/page?path=&q=&tenant_id=` | **Files browser page (ADR-0063).** `BrowserData` for the `browser` archetype — merges the file-space tree (the core file index) with the **storage module's objects** (chat uploads, agent-written files). `path` browses a directory (empty = root); `q` runs a name/path search. The shell renders the core-owned **Files** surface from this. |
+| `GET /platform/v1/files/page?path=&q=&tenant_id=` | **Files browser page (ADR-0063).** `BrowserData` for the `browser` archetype — merges the file-space tree (the core file index) with the **storage module's objects** (chat uploads, agent-written files). `path` browses a directory (empty = root); `q` runs a name/path search. The shell renders the core-owned **Files** surface from this. **Movability (#479):** object entries and operator-space file-space *files* are `movable`; directories and anything under a module-owned top-level folder (the `module_urls` hostnames — `knowledge/…`, `notes/…`) are read-only in the UI. |
+| `POST /platform/v1/files/upload?dir=&tenant_id=` (multipart `file`) | **Upload into the file space (#479)** — the Files page's upload door (one file per request; the UI sequences multi-picks for per-file progress). Lands `dir/<filename>` through the FileStore seam and **indexes it immediately** (listed + searchable, no rescan). Enforces the shared #175 caps: **415** type not in `ATTACHMENT_ALLOWED_TYPES`, **413** over `ATTACHMENT_MAX_BYTES`. **400** traversal or a module-owned `dir`. A name collision gets a `-2`/`-3`… suffix, never an overwrite. Returns the written `FileEntry`. Operator-UI-facing: modules keep writing via `PUT …/write` / `PlatformClient.files_write`, so there is deliberately no `files_upload` client method. |
 | `GET /platform/v1/files/search?q=&limit=&tenant_id=` | `{entries: [FileEntry]}` — name/path search over the core file index (merged with object names); backs `PlatformClient.files_search`. |
 | `GET /platform/v1/files/download?path=&tenant_id=` | Stream a file (binary-safe). **File-space first**, else proxies the storage object store (`GET /download` on the storage module) for object entries. **400** traversal, **404** missing. |
 | `GET /platform/v1/files/list?path=&tenant_id=` | `{entries: [FileEntry]}` — children of `path` (empty = root). |
@@ -107,6 +108,11 @@ returns `list[FileEntry]` over the core file index, used by storage's `storage_s
 | `files_s3_access_key` / `files_s3_secret_key` | `FILES_S3_ACCESS_KEY` / `FILES_S3_SECRET_KEY` | `epicurus` / `epicurus-dev` | S3 credentials (dev defaults; OpenBao later). |
 | `files_watch` | `FILES_WATCH` | `true` | Watch the mounted file space and **incrementally rescan on change** (create/modify/delete) so files another module or an external write lands after startup show up in the Files page and search without a restart (ADR-0063). On by default. Set `false` to keep startup-only scanning. |
 | `files_watch_debounce_ms` | `FILES_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires; a module dropping many files at once is grouped into one incremental pass. |
+
+The **upload route shares the chat-attachment caps** (#175 → #479): `ATTACHMENT_MAX_BYTES`
+(default 10 MiB → 413) and `ATTACHMENT_ALLOWED_TYPES` (default `text/*,image/*,application/pdf,
+application/json` → 415) — one policy for every byte an operator puts into epicurus. The web
+container's nginx fronts both routes with `client_max_body_size 12m` (keep it ≥ the byte cap).
 
 ## Data model
 
@@ -155,5 +161,6 @@ The store is constructed in `create_app()` via `build_file_store(...)` from the 
 and mounted by `create_files_router` (`epicurus_core_app/files_routes.py`); the core also mounts the
 shared `/data` volume, provisions the tenant root, and starts the file index (startup scan + the
 `FILES_WATCH` watcher). A new backend implements `FileStore` and is selected in `build_file_store`.
-When adding an endpoint, extend the router and the matching `PlatformClient.files_*` method together
-so the contract stays symmetric.
+When adding a module-facing endpoint, extend the router and the matching `PlatformClient.files_*`
+method together so the contract stays symmetric (operator-UI-facing routes — `page`, `download`,
+`upload` — deliberately have no client method; modules never call them).

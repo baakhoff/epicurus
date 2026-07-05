@@ -9,12 +9,14 @@ import { BrowserView, type BrowserSource } from "@/components/archetypes/Browser
 import { api } from "@/lib/api";
 
 // A core-backed BrowserSource (ADR-0063). The view is data-source-agnostic; this adapter
-// points it at the core file-space endpoints rather than a module's page proxy.
+// points it at the core file-space endpoints rather than a module's page proxy. Upload is
+// a Files-surface capability (#479) — module browser pages don't get one.
 const filesSource: BrowserSource = {
   queryKey: ["files-page"],
   fetchPage: (path, q) => api.filesPage(path, q),
   readText: (p) => api.filesRead(p),
   move: (f, t) => api.filesMove(f, t),
+  upload: { send: (file, dir) => api.filesUpload(file, dir) },
 };
 
 export function FilesScreen() {

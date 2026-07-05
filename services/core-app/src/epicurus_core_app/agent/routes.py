@@ -26,6 +26,16 @@ from epicurus_core_app.memory.memory import Memory, MemoryItem
 from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
 from epicurus_core_app.readiness import ReadinessProbe
 
+# Chat-upload limits (#175) — shared with the Files-page upload (#479). Re-exported under
+# the old names so existing imports (tests included) keep working.
+from epicurus_core_app.upload_limits import (
+    DEFAULT_ALLOWED_UPLOAD_TYPES,
+    DEFAULT_MAX_UPLOAD_BYTES,
+)
+from epicurus_core_app.upload_limits import (
+    content_type_allowed as _content_type_allowed,
+)
+
 log = get_logger("epicurus_core_app.agent.routes")
 
 SSE_HEADERS = {
@@ -37,28 +47,6 @@ SSE_HEADERS = {
 # How long the in-stream readiness probe may run before we stop waiting and start the
 # answer. A slow or still-booting module must never delay the first token (ADR-0027).
 READINESS_BUDGET_S = 2.0
-
-# Chat-upload limits (#175) — used when a caller (production wiring) passes no override.
-DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MiB
-DEFAULT_ALLOWED_UPLOAD_TYPES: tuple[str, ...] = (
-    "text/*",
-    "image/*",
-    "application/pdf",
-    "application/json",
-)
-
-
-def _content_type_allowed(content_type: str, allowed: Sequence[str]) -> bool:
-    """Whether *content_type* matches the allowlist (supports ``type/*`` and ``*/*``)."""
-    ct = content_type.split(";", 1)[0].strip().lower()
-    if not ct:
-        return False
-    for rule in allowed:
-        if rule in ("*/*", ct):
-            return True
-        if rule.endswith("/*") and ct.startswith(rule[:-1]):
-            return True
-    return False
 
 
 class AgentRequest(BaseModel):

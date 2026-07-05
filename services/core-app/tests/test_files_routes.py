@@ -24,6 +24,7 @@ LIST = "/platform/v1/files/list"
 STAT = "/platform/v1/files/stat"
 DIR = "/platform/v1/files/dir"
 MOVE = "/platform/v1/files/move"
+UPLOAD = "/platform/v1/files/upload"
 ROOT = "/platform/v1/files"
 
 
@@ -119,6 +120,116 @@ async def test_write_and_delete_root_are_400(client: AsyncClient) -> None:
 async def test_tenant_isolation(client: AsyncClient) -> None:
     await client.put(
         WRITE, params={"path": "secret.txt", "tenant_id": "tenant-a"}, json={"content": "a"}
+    )
+    ls = await client.get(LIST, params={"path": "", "tenant_id": "tenant-b"})
+    assert ls.json()["entries"] == []
+
+
+# ── The Files-page upload door (#479) ───────────────────────────────────────────
+
+
+@pytest.fixture
+async def capped_client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
+    """Tight caps + one locked module prefix, for the guard-rail tests."""
+    app = FastAPI()
+    app.include_router(
+        create_files_router(
+            LocalFileStore(tmp_path),
+            default_tenant=TENANT,
+            max_upload_bytes=8,
+            allowed_upload_types=("text/*",),
+            locked_prefixes=frozenset({"knowledge"}),
+        )
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        base_url="http://test",
+    ) as c:
+        yield c
+
+
+async def test_upload_lands_in_the_destination_directory(client: AsyncClient) -> None:
+    resp = await client.post(
+        UPLOAD,
+        params={"dir": "inbox"},
+        files={"file": ("trip notes.txt", b"hello", "text/plain")},
+    )
+    assert resp.status_code == 200
+    entry = resp.json()
+    assert entry["path"] == "inbox/trip notes.txt"
+    assert entry["kind"] == "file" and entry["size"] == 5
+
+    ls = await client.get(LIST, params={"path": "inbox"})
+    assert [e["name"] for e in ls.json()["entries"]] == ["trip notes.txt"]
+    rd = await client.get(READ, params={"path": "inbox/trip notes.txt"})
+    assert rd.json()["content"] == "hello"
+
+
+async def test_upload_defaults_to_the_tenant_root(client: AsyncClient) -> None:
+    resp = await client.post(UPLOAD, files={"file": ("a.txt", b"x", "text/plain")})
+    assert resp.status_code == 200 and resp.json()["path"] == "a.txt"
+
+
+async def test_upload_oversize_is_413(capped_client: AsyncClient) -> None:
+    resp = await capped_client.post(UPLOAD, files={"file": ("big.txt", b"123456789", "text/plain")})
+    assert resp.status_code == 413
+    assert "8-byte" in resp.json()["detail"]
+
+
+async def test_upload_disallowed_type_is_415(capped_client: AsyncClient) -> None:
+    resp = await capped_client.post(UPLOAD, files={"file": ("pic.png", b"x", "image/png")})
+    assert resp.status_code == 415
+    assert "image/png" in resp.json()["detail"]
+
+
+async def test_upload_into_a_module_dir_is_400(capped_client: AsyncClient) -> None:
+    resp = await capped_client.post(
+        UPLOAD, params={"dir": "knowledge/vault"}, files={"file": ("a.txt", b"x", "text/plain")}
+    )
+    assert resp.status_code == 400
+    assert "knowledge module" in resp.json()["detail"]
+
+
+async def test_upload_traversal_dir_is_400(client: AsyncClient) -> None:
+    resp = await client.post(
+        UPLOAD, params={"dir": "../out"}, files={"file": ("a.txt", b"x", "text/plain")}
+    )
+    assert resp.status_code == 400
+
+
+async def test_upload_collision_gets_a_suffix_not_an_overwrite(client: AsyncClient) -> None:
+    first = await client.post(
+        UPLOAD, params={"dir": "docs"}, files={"file": ("a.txt", b"one", "text/plain")}
+    )
+    second = await client.post(
+        UPLOAD, params={"dir": "docs"}, files={"file": ("a.txt", b"two", "text/plain")}
+    )
+    assert first.json()["path"] == "docs/a.txt"
+    assert second.json()["path"] == "docs/a-2.txt"
+    # The original is untouched; the newcomer carries the new bytes.
+    assert (await client.get(READ, params={"path": "docs/a.txt"})).json()["content"] == "one"
+    assert (await client.get(READ, params={"path": "docs/a-2.txt"})).json()["content"] == "two"
+
+
+async def test_upload_filename_is_reduced_to_its_basename(client: AsyncClient) -> None:
+    # A path-y filename (odd browsers, curl) must not steer the destination.
+    resp = await client.post(
+        UPLOAD, params={"dir": "inbox"}, files={"file": ("../../evil.txt", b"x", "text/plain")}
+    )
+    assert resp.status_code == 200 and resp.json()["path"] == "inbox/evil.txt"
+    windows = await client.post(
+        UPLOAD, files={"file": ("C:\\Users\\me\\pic.txt", b"x", "text/plain")}
+    )
+    assert windows.json()["path"] == "pic.txt"
+    dots = await client.post(UPLOAD, files={"file": ("..", b"x", "text/plain")})
+    assert dots.json()["path"] == "file"
+
+
+async def test_upload_tenant_isolation(client: AsyncClient) -> None:
+    await client.post(
+        UPLOAD,
+        params={"tenant_id": "tenant-a"},
+        files={"file": ("secret.bin", b"x", "text/plain")},
     )
     ls = await client.get(LIST, params={"path": "", "tenant_id": "tenant-b"})
     assert ls.json()["entries"] == []

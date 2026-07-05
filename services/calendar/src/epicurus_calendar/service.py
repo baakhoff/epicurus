@@ -425,6 +425,13 @@ def build_module(
         """
         tz, tz_name = await _resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
+        if recurrence == "":
+            # The shared board form sends "" when the repeat picker is blanked (web 0.76.1
+            # clear-fields). Calendar has no ""-means-clear contract yet — Google would
+            # receive a bare "RRULE:" (API 400) and the local 'this' scope a misleading
+            # error — so treat it as "leave unchanged" (the pre-0.76.1 no-op) until
+            # clear-recurrence ships properly.
+            recurrence = None
         if recurrence:
             _validate_recurrence(recurrence, dtstart=start_dt or datetime.now(tz=UTC))
         event = await provider.update_event(

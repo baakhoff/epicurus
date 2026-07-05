@@ -1233,6 +1233,34 @@ async def test_calendar_update_event_tool_unknown_raises(
         await module.mcp.call_tool("calendar_update_event", {"event_id": "nope", "title": "x"})
 
 
+async def test_calendar_update_event_tool_blank_recurrence_leaves_rule_unchanged(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # The shared board form sends recurrence="" when its repeat picker is blanked
+    # (web 0.76.1 clear-fields). Calendar has no ""-means-clear contract yet — Google
+    # would receive a bare "RRULE:" (API 400) — so a blank must mean "leave unchanged".
+    module = build_module(local_provider, tenant_id="t1")
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": "2026-07-06T09:00:00+00:00",
+            "end": "2026-07-06T09:30:00+00:00",
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    series_id = _extract(created_structured)["id"]
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": series_id, "title": "Standup (moved)", "recurrence": "", "edit_scope": "all"},
+    )
+    result = _extract(structured)
+    assert result["title"] == "Standup (moved)"
+    stored = await local_provider.get_event(tenant_id="t1", event_id=series_id)
+    assert stored is not None
+    assert stored.recurrence == "FREQ=WEEKLY;COUNT=4"  # blank did not clear the rule
+
+
 async def test_calendar_delete_event_tool_removes(local_provider: LocalCalendarProvider) -> None:
     created = await local_provider.create_event(
         tenant_id="t1", title="Bye", start=_dt(9), end=_dt(10)

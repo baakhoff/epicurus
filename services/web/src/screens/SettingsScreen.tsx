@@ -7,7 +7,17 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ChatBridgesCard } from "@/components/ChatBridgesCard";
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
-import { Button, Card, Dot, NumberInput, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
+import {
+  Button,
+  Card,
+  Dot,
+  NumberInput,
+  Spinner,
+  TextArea,
+  TextInput,
+  Tooltip,
+  cn,
+} from "@/components/ui";
 import { api } from "@/lib/api";
 import type { ModuleSnapshot } from "@/lib/contracts";
 import { usePrefs } from "@/stores/prefs";
@@ -358,6 +368,88 @@ export function AgentCard() {
   );
 }
 
+/**
+ * Assistant instructions — the agent's base system prompt (#497, ADR-0083). It leads every turn
+ * (identity, tone, tool-use), so it's server-stored and applies from any device; edits take
+ * effect on the next message. "Reset to default" clears the override back to the shipped prompt.
+ */
+export function AssistantInstructionsCard() {
+  const queryClient = useQueryClient();
+  const prefs = useQuery({ queryKey: ["agentInstructions"], queryFn: api.agentInstructions });
+  // `null` = following the saved/effective value; a string = an in-progress edit.
+  const [draft, setDraft] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: (value: string | null) => api.setAgentInstructions(value),
+    onSuccess: () => {
+      setDraft(null); // fall back to following the freshly-saved value
+      void queryClient.invalidateQueries({ queryKey: ["agentInstructions"] });
+    },
+  });
+
+  const effective = prefs.data?.instructions ?? "";
+  const isDefault = prefs.data?.is_default ?? true;
+  const value = draft ?? effective;
+  const dirty = draft !== null && draft.trim() !== effective.trim();
+  // The prompt counts against every turn's context window and compaction never trims it, so warn
+  // (don't block) past a generous size. ~4k chars is roughly 1k tokens.
+  const SOFT_LIMIT = 4000;
+  const overSoft = value.length > SOFT_LIMIT;
+
+  return (
+    <Card>
+      <h3 className="mb-2 font-serif text-base text-ink">Assistant instructions</h3>
+      <p className="mb-3 text-sm text-ink-dim">
+        The base system prompt the assistant follows on every turn — its identity, tone, and how
+        it uses tools. Edits take effect on your next message and apply from any device. Leave it
+        on the default unless you want to steer its behaviour.
+      </p>
+      {prefs.isLoading ? (
+        <Spinner />
+      ) : (
+        <div className="flex flex-col gap-2">
+          <TextArea
+            value={value}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={10}
+            aria-label="Assistant instructions"
+            className="font-mono text-sm leading-relaxed"
+            spellCheck={false}
+          />
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px]">
+            <span className={cn(overSoft ? "text-warn" : "text-ink-faint")}>
+              {value.length.toLocaleString()} characters
+              {overSoft && " · long prompts eat into every turn's context and are never trimmed"}
+            </span>
+            {isDefault && !dirty && (
+              <span className="text-ink-faint">Using the shipped default</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              busy={save.isPending}
+              disabled={!dirty || !value.trim()}
+              onClick={() => save.mutate(value)}
+            >
+              Save
+            </Button>
+            {(!isDefault || dirty) && (
+              <Button variant="ghost" disabled={save.isPending} onClick={() => save.mutate(null)}>
+                Reset to default
+              </Button>
+            )}
+            {save.isError && (
+              <p className="text-xs text-danger">{(save.error as Error).message}</p>
+            )}
+            {save.isSuccess && !dirty && <p className="text-xs text-ok">Saved.</p>}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 /** Maintenance — run the core's background jobs as one coordinated batch (#383, ADR-0060). */
 export function MaintenanceCard() {
   const qc = useQueryClient();
@@ -510,6 +602,8 @@ export function SettingsScreen() {
         <TimezoneCard />
 
         <AgentCard />
+
+        <AssistantInstructionsCard />
 
         <MaintenanceCard />
 

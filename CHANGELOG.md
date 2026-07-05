@@ -14,6 +14,21 @@ images to GHCR.
 
 ### Added
 
+- **Editable assistant system prompt — and a real base prompt at last** (#497, ADR-0083) — the
+  agent ran with **no** base system prompt: its identity and behaviour were emergent from the tool
+  schemas and the model's own defaults. This introduces the mechanism *and* the editor. A
+  tenant-scoped prompt (new `agent_instructions` table, following the timezone-pref pattern) is
+  injected as the **first** message of every turn — chat and headless bridge turns alike — ahead of
+  recalled memory and attached context, where the compaction leading-prefix rule protects it from
+  being trimmed. It's resolved per turn, so edits apply on the next message with no restart.
+  `GET`/`PUT /platform/v1/agent/instructions` back a new **Settings → Assistant instructions** card
+  (a textarea prefilled with the effective prompt, Save, Reset to default, and a soft-size warning —
+  the prompt counts against every turn's context and is never trimmed). A shipped default
+  establishes who epicurus is, a concise and candid voice, and tool-use discipline (with no
+  date/time baked in — the `now` tool owns that). **Behaviour shift for existing installs:** with no
+  stored prompt, every turn now gains the default preamble where before there was none. `core-app`
+  0.58.0→0.59.0, `web` 0.79.0→0.80.0.
+
 - **Hosted/API model ids you enter are now saved per tenant** (#496) — a hosted model typed into
   the chat picker (e.g. `claude/<model-id>`) used to live only in the browser (`recentModels`,
   capped at five, per device *and* per origin): come back from another device, a VPN-hostname

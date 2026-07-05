@@ -157,6 +157,19 @@ Backed by the tenant-scoped `saved_models` table. The chat picker renders this l
 on use), the Models page lists it (remove / set-as-default), and module model slots offer it
 (ADR-0029). Mutations **503** when the store is unavailable.
 
+## `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions`
+
+The agent's editable **base system prompt** (#497, ADR-0083) — injected as the **first** message
+of every turn (chat and headless bridge turns alike), ahead of recalled memory and attached
+context, where the compaction leading-prefix rule protects it from being trimmed. `GET` returns
+`{instructions, is_default}`: the effective prompt (the stored value, else the shipped default)
+and whether it is the default (so the editor can offer *Reset to default*). `PUT {instructions}`
+sets it; a `null`/blank body **resets** to the default, and a prompt over **32,000 characters**
+is rejected with a `422` (the prompt leads every turn and is never compacted away, so a runaway
+value must not be storable). Both take an optional `tenant_id`. Resolved per turn, so an edit
+takes effect on the next message with no restart. Edited in the web
+**Settings → Assistant instructions** card.
+
 ---
 
 ## `GET /platform/v1/maintenance` · `POST /platform/v1/maintenance/run`

@@ -82,6 +82,14 @@ export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 export const SavedModelsResponse = z.object({ models: z.array(SavedHostedModel).default([]) });
 export type SavedModelsResponse = z.infer<typeof SavedModelsResponse>;
 
+/** The agent's editable base system prompt (#497). `instructions` is the effective prompt
+ *  (the stored value, else the shipped default); `is_default` is true when none is stored. */
+export const AgentInstructions = z.object({
+  instructions: z.string(),
+  is_default: z.boolean(),
+});
+export type AgentInstructions = z.infer<typeof AgentInstructions>;
+
 /* ── system / GPU info (context-window suggestion) ────────────────────────── */
 
 /** A detected GPU. `vram_free_mb` is null when the vendor can't report it. */

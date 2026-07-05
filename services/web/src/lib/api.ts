@@ -8,6 +8,7 @@ import {
   AccountsView,
   ActiveRun,
   ActiveSessions,
+  AgentInstructions,
   AttachmentUploaded,
   BridgeStatus,
   CatalogResponse,
@@ -202,6 +203,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ timezone }),
     }),
+
+  // The agent's editable base system prompt (#497). GET returns the effective prompt + whether
+  // it's the shipped default; PUT sets it, or resets to the default when `instructions` is null.
+  agentInstructions: () => request(AgentInstructions, "/platform/v1/agent/instructions"),
+  setAgentInstructions: (instructions: string | null) =>
+    request(
+      z.object({ status: z.string(), is_default: z.boolean() }),
+      "/platform/v1/agent/instructions",
+      { method: "PUT", body: JSON.stringify({ instructions }) },
+    ),
 
   providers: () => request(z.array(ProviderInfo), "/platform/v1/llm/providers"),
   setProviderKey: (alias: string, apiKey: string, apiBase?: string) =>

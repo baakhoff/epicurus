@@ -673,6 +673,23 @@ images to GHCR.
 
 ### Fixed
 
+- **CI: the wiki sync no longer fails red before the wiki's first page exists** (#540) — the
+  workflow's `has_wiki` check only confirms the wiki *feature* is on; GitHub doesn't create the
+  wiki's own git repo (the `.wiki.git` remote) until a first page is made from the Wiki tab in
+  the web UI, so every docs push died with "repository not found" (exit 128) in the meantime.
+  A `git ls-remote` probe against that remote now gates the sync the same way the `has_wiki`
+  check does — a `::notice::` and a clean skip, not a failed run — until the operator does that
+  one-time setup. Infra-only; no component version change.
+
+- **Tasks: overdue-recurrence sweep hardening** (#533, #534, #535, #539) — `tasks_update(due="")`
+  on a task with a live repeat rule now rejects instead of silently stranding the series
+  (clearing `due=""` and `repeat=""` together still ends it); the sweep and materialization
+  compute "today" in the operator's timezone with a UTC fallback (mirroring calendar #433); an
+  in-process per-`(tenant, task)` claim stops two concurrent reads double-materializing the
+  same anchor and a persistently failing retire from spawning a fresh duplicate on every
+  subsequent read; and `tasks_list` text adopts the shared listing cap (the tasks half of
+  #539). `tasks` 0.15.0→0.15.1.
+
 - **Mail: 403s no longer conflate rate-limiting with a missing scope; `mail_search` adopts
   `capped_listing`** (#538, #539) — Gmail returns 403 both for a missing OAuth scope and for
   per-user/per-day rate limiting (`usageLimits`); the blanket scope-hint treatment from #513

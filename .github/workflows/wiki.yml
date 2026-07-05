@@ -34,6 +34,18 @@ jobs:
             exit 0
           fi
           wiki_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          # has_wiki only means the *feature* is on — GitHub doesn't create the wiki's own git
+          # repo (the .wiki.git remote) until a first page is made from the Wiki tab in the web
+          # UI. Until then, cloning/pushing dies with "repository not found" (exit 128) and this
+          # workflow shows red on every docs push for a reason no docs change can fix. Probe for
+          # that repo exactly the same way has_wiki is probed above: a notice-and-skip, not a
+          # failure, so main stays green until the operator does that one-time setup.
+          if ! git ls-remote "$wiki_url" HEAD >/dev/null 2>&1; then
+            echo "::notice::Wiki enabled but its git repo doesn't exist yet — create the first" \
+                 "page from the repo's Wiki tab once (the next sync overwrites it with" \
+                 "docs/index.md as Home). Skipping until then."
+            exit 0
+          fi
           work="$(mktemp -d)"
           if ! git clone --depth 1 "$wiki_url" "$work" 2>/dev/null; then
             git -C "$work" init -q

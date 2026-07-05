@@ -663,6 +663,14 @@ images to GHCR.
 
 ### Fixed
 
+- **CI: the wiki sync no longer fails red before the wiki's first page exists** (#540) — the
+  workflow's `has_wiki` check only confirms the wiki *feature* is on; GitHub doesn't create the
+  wiki's own git repo (the `.wiki.git` remote) until a first page is made from the Wiki tab in
+  the web UI, so every docs push died with "repository not found" (exit 128) in the meantime.
+  A `git ls-remote` probe against that remote now gates the sync the same way the `has_wiki`
+  check does — a `::notice::` and a clean skip, not a failed run — until the operator does that
+  one-time setup. Infra-only; no component version change.
+
 - **Mail: reply/send hardening — Reply-To, scope-hint errors, contract wording** (#513) —
   `mail_reply` now addresses the original message's `Reply-To` header over its `From` when
   both are present (mailing lists, newsletters, and support desks commonly set `Reply-To` to

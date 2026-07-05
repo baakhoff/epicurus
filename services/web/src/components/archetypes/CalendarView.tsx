@@ -25,6 +25,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { isExternalHref } from "@/components/CardLink";
 import { EmptyState, Spinner, cn, useModalFocus } from "@/components/ui";
 import { api } from "@/lib/api";
+import { onColor } from "@/lib/color";
 import {
   CalendarData,
   type AccountsView,
@@ -608,7 +609,10 @@ function MonthView({
   );
 }
 
-/** A compact event pill used inside a day cell, tinted with its calendar's colour (#431). */
+/** A compact event pill used inside a day cell, tinted with its calendar's colour (#431).
+ *  The hovered chip fills with the calendar's own colour — runtime data, so its text
+ *  colour is computed per colour (`onColor`, #531) instead of pairing a theme token
+ *  with an arbitrary fill (light theme + light calendar used to wash the label out). */
 function EventChip({
   ev,
   color,
@@ -622,8 +626,8 @@ function EventChip({
     <button
       onClick={() => onSelect(ev)}
       title={ev.title}
-      style={{ "--cal": color } as CSSProperties}
-      className="flex items-baseline gap-1 truncate rounded-sm bg-[color-mix(in_srgb,var(--cal)_24%,transparent)] px-1 py-0.5 text-left text-[11px] leading-tight text-ink hover:bg-(--cal) hover:text-canvas"
+      style={{ "--cal": color, "--cal-ink": onColor(color) } as CSSProperties}
+      className="flex items-baseline gap-1 truncate rounded-sm bg-[color-mix(in_srgb,var(--cal)_24%,transparent)] px-1 py-0.5 text-left text-[11px] leading-tight text-ink hover:bg-(--cal) hover:text-(--cal-ink)"
     >
       {!ev.all_day && (
         <span className="shrink-0 tabular-nums opacity-80">{fmtTime(ev.start)}</span>

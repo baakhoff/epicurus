@@ -187,6 +187,15 @@ def test_build_reply_mime_falls_back_to_from_with_empty_reply_to() -> None:
     assert msg["To"] == "alice@example.com"
 
 
+def test_build_reply_mime_falls_back_to_from_with_whitespace_only_reply_to() -> None:
+    # A Reply-To header that is present but only whitespace is still a non-empty (truthy)
+    # Python string — without stripping first it would "win" over From and produce an
+    # unroutable blank recipient (#538).
+    headers = {"from": "alice@example.com", "reply-to": "   ", "subject": "Hi"}
+    msg = _build_reply_mime(headers, "body")
+    assert msg["To"] == "alice@example.com"
+
+
 def test_build_reply_mime_sets_in_reply_to_and_references() -> None:
     headers = {"from": "a@x.com", "subject": "Hi", "message-id": "<orig@mail>"}
     msg = _build_reply_mime(headers, "body")

@@ -21,7 +21,14 @@ from __future__ import annotations
 
 import httpx
 
-from epicurus_core import EntityRef, EpicurusModule, UiAction, UiSection, tool_envelope
+from epicurus_core import (
+    EntityRef,
+    EpicurusModule,
+    UiAction,
+    UiSection,
+    capped_listing,
+    tool_envelope,
+)
 from epicurus_mail.gmail import GMAIL_API_SCOPES
 from epicurus_mail.provider import MailProvider
 
@@ -41,12 +48,62 @@ _SCOPE_HINT_SEND = (
     " Reconnect Google (Settings → Connect) to grant it."
 )
 
+# Shown when mail_reply's own metadata lookup (the original message's Reply-To/From/
+# Subject/Message-ID — needs gmail.modify) is rejected for lack of scope. Distinct wording
+# from _SCOPE_HINT: that constant talks about "the read state", which doesn't apply here —
+# the reply was never composed, let alone sent (#538).
+_SCOPE_HINT_REPLY_LOOKUP = (
+    "Couldn't reply: the connected Google account is missing the Gmail modify permission"
+    " needed to look up the original message. Reconnect Google (Settings → Connect) to"
+    " grant it."
+)
+
+# Gmail returns 403 both for a missing OAuth scope and for per-user/per-day rate limiting
+# (``usageLimits``) — the reasons below are Google's Discovery-API error codes for the
+# latter. Blaming every 403 on a missing scope misdirects an operator who is simply being
+# throttled (#538).
+_RATE_LIMIT_REASONS = frozenset(
+    {"rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded"}
+)
+
+_RATE_LIMIT_HINT = (
+    "Gmail is rate-limiting this account (too many requests in a short time, or the daily"
+    " quota was reached). Wait a bit and try again."
+)
+
+
+def _describe_403(exc: httpx.HTTPStatusError, scope_hint: str) -> str:
+    """The user-facing hint for a Gmail 403: *scope_hint* unless the error body names one
+    of :data:`_RATE_LIMIT_REASONS`, in which case that's the real cause (#538). Falls back
+    to *scope_hint* whenever the body doesn't parse into Google's error shape too, since a
+    missing scope remains the far more common cause of an unparseable 403.
+    """
+    try:
+        reason = exc.response.json()["error"]["errors"][0]["reason"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return scope_hint
+    return _RATE_LIMIT_HINT if reason in _RATE_LIMIT_REASONS else scope_hint
+
+
+def _reply_scope_hint(exc: httpx.HTTPStatusError) -> str:
+    """Which scope mail_reply's 403 actually names.
+
+    ``mail_reply`` makes two Gmail calls: a metadata GET for the original message (needs
+    ``gmail.modify``), then the send POST (needs ``gmail.send``). A blanket ``except``
+    around both couldn't tell which one 403'd, so every failure was reported as a missing
+    send scope even when the read lookup was what actually failed (#538) — the send
+    endpoint is the only one of the two whose path ends in ``/send``.
+    """
+    if exc.request.url.path.endswith("/send"):
+        return _SCOPE_HINT_SEND
+    return _SCOPE_HINT_REPLY_LOOKUP
+
 
 def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.1",
+        version="0.8.2",
         description=(
             "Provider-agnostic mail — search, read, send, and reply. Gmail is the v0.1 provider."
         ),
@@ -119,7 +176,11 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             + (f" ({m.date})" if m.date else "")
             for m in messages
         ]
-        text = f"Found {len(messages)} message(s):\n" + "\n".join(lines)
+        # Capped the same way as the entity-ref id block the core appends (both default to
+        # LIST_CAP, #468/#522) — max_results is already clamped to 50 above so this can't
+        # bite today, but it keeps mail_search consistent with calendar's adoption (#539)
+        # rather than reinventing the listing text.
+        text = capped_listing(lines, noun="message")
         return tool_envelope(text, refs)
 
     @module.tool()
@@ -163,7 +224,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             sent_id = await provider.send(to=to, subject=subject, body=body)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
-                return _SCOPE_HINT_SEND
+                return _describe_403(exc, _SCOPE_HINT_SEND)
             raise
         return f"sent:{sent_id}"
 
@@ -189,7 +250,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             sent_id = await provider.reply(message_id, body)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
-                return _SCOPE_HINT_SEND
+                return _describe_403(exc, _reply_scope_hint(exc))
             raise
         return f"sent:{sent_id}"
 
@@ -208,7 +269,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             await provider.set_unread(message_id, unread=False)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
-                return _SCOPE_HINT
+                return _describe_403(exc, _SCOPE_HINT)
             raise
         return f"marked-read:{message_id}"
 
@@ -226,7 +287,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             await provider.set_unread(message_id, unread=True)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
-                return _SCOPE_HINT
+                return _describe_403(exc, _SCOPE_HINT)
             raise
         return f"marked-unread:{message_id}"
 

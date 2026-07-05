@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CloudOff, WifiOff } from "lucide-react";
+import { CloudOff, Search, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
 import { SURFACES, modulePageNavs, type ModulePageNav } from "@/app/registry";
+import { CommandPalette, shortcutLabel } from "@/components/CommandPalette";
 import { CornerStack } from "@/components/CornerStack";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
@@ -202,6 +203,10 @@ export function Shell() {
   // no longer get their own per-module rail entry.
   const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");
 
+  // The command palette (#491): Ctrl/Cmd+K anywhere (the listener lives in the palette,
+  // which is always mounted); the rail button below is its pointer-first doorway.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
   return (
     // `h-full` fills the fixed #root, which index.css pins to the dynamic viewport.
     // Not `h-dvh`: re-measuring the viewport here disagrees with the root on a phone
@@ -220,6 +225,16 @@ export function Shell() {
           <EpsilonMark draw />
           <Wordmark />
         </div>
+        <button
+          onClick={() => setPaletteOpen(true)}
+          className="mb-2 flex items-center gap-2 rounded-(--radius-field) border border-edge px-3 py-1.5 text-left text-sm text-ink-faint transition-colors hover:border-edge-strong hover:text-ink-dim"
+        >
+          <Search size={14} />
+          <span className="flex-1">Search…</span>
+          <kbd className="rounded border border-edge px-1 font-mono text-[10px] leading-4">
+            {shortcutLabel()}
+          </kbd>
+        </button>
         {SURFACES.map(({ path, label, icon: Icon }) => (
           <NavLink key={path} to={path} end={path === "/"} className={railLinkClass}>
             <Icon size={17} />
@@ -277,6 +292,7 @@ export function Shell() {
         <MobileTabBar modulePages={modulePages} />
       </div>
 
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <PanelHost />
 
       {/* Every corner-anchored transient surface stacks in ONE positioned column —

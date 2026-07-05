@@ -29,8 +29,32 @@ images to GHCR.
   refreshes per success. Movability in the Files view now follows the real ownership rule:
   **operator-space files are movable like object uploads; module-owned subtrees (the module
   hostnames — `knowledge/…`, `notes/…`) and directories stay read-only.** `core-app`
-  0.60.0→0.61.0, `web` 0.80.1→0.81.0 (flag a version-line collision at merge time against
-  other in-flight web PRs, e.g. #544).
+  0.60.0→0.61.0, `web` 0.82.0→0.83.0.
+
+- **Cmd+K command palette** (#491) — the wayfinding capstone on #480: one keyboard-first
+  overlay over everything the shell already knows. Ctrl/Cmd+K toggles it on every screen
+  (a "Search… ⌘K" affordance in the side rail opens it by pointer); typing fuzzy-filters
+  conversations (recency-ordered, from the sessions cache), core surfaces + module pages
+  (the same registry data the rail renders), and a few actions — New chat, Wake/Pause,
+  and New note when the notes module is installed (a `?new=1` deep-link that opens the
+  editor's create flow). Arrows + Enter navigate, Esc closes and restores focus (#487
+  contract, combobox semantics). Deliberately not a second API surface: the palette only
+  reuses queries the shell already holds; the fuzzy scorer is a dependency-free
+  subsequence ranker in `src/lib/fuzzy.ts`. Also fixes the calendar event-chip hover
+  pairing `text-canvas` with a runtime calendar colour (#531): the hovered chip's text
+  colour is now computed per colour (house ink → white → pure black, first to clear
+  WCAG AA — `src/lib/color.ts`), so a light calendar on the light theme no longer washes
+  the label out. `web` 0.81.0→0.82.0.
+
+- **Web: fetch-guard lint rule + connection-gate regenerate/edit/resume** (#529, #530) — two
+  follow-ups from the #519/#494 outage-detection review. (1) A `no-restricted-globals` rule
+  (the same mechanism already banning `alert`/`confirm`, #488) now rejects a bare `fetch(`
+  anywhere in `src` outside `src/lib/http.ts`'s own `epFetch`, so a future call site can't
+  silently bypass the outage detector. (2) `regenerate()`, `saveEdit()`, and the `ask_user`
+  resume-answer submit were the three remaining send-adjacent actions that still fired while
+  the core was unreachable and failed into the generic error card instead of the composer's
+  existing gate; all three now bail on `connectionLost` and disable their buttons the same way
+  Send does, reusing the existing hint pill — no new UI. `web` 0.80.1→0.81.0.
 
 - **Tasks: overdue recurrence sweep** (#515) — a recurring task nobody ever completed used to
   sit overdue forever (materialization was on-complete only). Every read (`tasks_list`, the
@@ -680,6 +704,38 @@ images to GHCR.
   endpoints and never enable the profile. Infra-only; no component version change.
 
 ### Fixed
+
+- **CI: the wiki sync no longer fails red before the wiki's first page exists** (#540) — the
+  workflow's `has_wiki` check only confirms the wiki *feature* is on; GitHub doesn't create the
+  wiki's own git repo (the `.wiki.git` remote) until a first page is made from the Wiki tab in
+  the web UI, so every docs push died with "repository not found" (exit 128) in the meantime.
+  A `git ls-remote` probe against that remote now gates the sync the same way the `has_wiki`
+  check does — a `::notice::` and a clean skip, not a failed run — until the operator does that
+  one-time setup. Infra-only; no component version change.
+
+- **Tasks: overdue-recurrence sweep hardening** (#533, #534, #535, #539) — `tasks_update(due="")`
+  on a task with a live repeat rule now rejects instead of silently stranding the series
+  (clearing `due=""` and `repeat=""` together still ends it); the sweep and materialization
+  compute "today" in the operator's timezone with a UTC fallback (mirroring calendar #433); an
+  in-process per-`(tenant, task)` claim stops two concurrent reads double-materializing the
+  same anchor and a persistently failing retire from spawning a fresh duplicate on every
+  subsequent read; and `tasks_list` text adopts the shared listing cap (the tasks half of
+  #539). `tasks` 0.15.0→0.15.1.
+
+- **Mail: 403s no longer conflate rate-limiting with a missing scope; `mail_search` adopts
+  `capped_listing`** (#538, #539) — Gmail returns 403 both for a missing OAuth scope and for
+  per-user/per-day rate limiting (`usageLimits`); the blanket scope-hint treatment from #513
+  misreported the latter as "reconnect Google", so a 403 body's `error.errors[].reason` is now
+  inspected first and only a genuine scope reason still gets that hint (an unparseable body
+  falls back to it too, since a missing scope remains the more common cause). `mail_reply` also
+  makes two Gmail calls under one `try` — a metadata GET (needs `gmail.modify`) then the send
+  POST (needs `gmail.send`) — so a 403 on the GET was always reported as the send scope; it's
+  now attributed to whichever endpoint actually failed. Also: a whitespace-only `Reply-To`
+  header is a non-empty (truthy) string, so it used to "win" over `From` and address an
+  unroutable blank recipient — `Reply-To` is now stripped before that check. Separately,
+  `mail_search` adopts the shared `epicurus_core.capped_listing` helper (#468/ADR-0084) for its
+  listing text instead of hand-rolling it, matching `calendar_list_events`'s adoption
+  (`tasks_list` remains hand-built, tracked as the rest of #539). `mail` 0.8.1→0.8.2.
 
 - **Mail: reply/send hardening — Reply-To, scope-hint errors, contract wording** (#513) —
   `mail_reply` now addresses the original message's `Reply-To` header over its `From` when

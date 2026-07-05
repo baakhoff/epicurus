@@ -62,6 +62,10 @@ export default tseslint.config(
           name: "confirm",
           message: "Use the <Confirm> primitive from @/components/ui instead (#488).",
         },
+        {
+          name: "fetch",
+          message: "Use epFetch() from @/lib/http instead of bare fetch() — it feeds the outage/connection detector (#494, #529).",
+        },
       ],
     },
   },
@@ -69,5 +73,10 @@ export default tseslint.config(
     // The primitives in ui.tsx are the one sanctioned home for the raw <input>/<select>.
     files: ["src/components/ui.tsx"],
     rules: { "no-restricted-syntax": "off" },
+  },
+  {
+    // epFetch's own implementation is the one sanctioned home for a bare fetch() (#529).
+    files: ["src/lib/http.ts"],
+    rules: { "no-restricted-globals": "off" },
   },
 );

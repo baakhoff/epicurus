@@ -59,6 +59,19 @@ unguarded — documented as a considered decision rather than an oversight, sinc
 indistinguishable from mailing yourself a note and the danger-action confirm already shows
 the recipient before anything sends.
 
+**v0.8.2** (#538, #539): a Gmail 403 is no longer automatically treated as a missing scope —
+the error body's reason is inspected first, so per-user/per-day rate limiting (`usageLimits`)
+now returns a distinct "wait and try again" hint instead of a misleading "reconnect Google"
+one. `mail_reply` specifically makes two Gmail calls (a metadata lookup needing `gmail.modify`,
+then the send itself needing `gmail.send`); a 403 is now attributed to whichever of the two
+actually failed, rather than always blaming the send scope. A whitespace-only `Reply-To`
+header (present but blank) no longer wins over `From` — it is stripped before the precedence
+check, since a non-empty string of only spaces is still truthy in Python. Separately,
+`mail_search`'s listing text now goes through the shared `epicurus_core.capped_listing`
+helper (#468/ADR-0084) instead of hand-rolling it, matching `calendar_list_events`'s adoption
+— a no-op in practice today since `max_results` is already clamped to the same 50-item cap,
+but it keeps the two modules from drifting apart on how a capped list reads.
+
 ---
 
 ## Contract
@@ -79,7 +92,9 @@ All tools operate on the active `MailProvider` for the tenant.
 `mail_mark_read` / `mail_mark_unread` require the `gmail.modify` scope; on a 403 (a Google
 account connected before v0.7.0, lacking the scope) they return a reconnect hint instead of failing.
 `mail_send` / `mail_reply` require the `gmail.send` scope and return the equivalent reconnect
-hint on a 403, rather than raising (#513).
+hint on a 403, rather than raising (#513). A 403 caused by Gmail rate limiting (`usageLimits`,
+not a scope problem) returns a distinct "wait and try again" hint instead (#538) — the error
+body's reason decides which hint applies, so throttling is never misreported as a missing scope.
 
 `mail_reply` sends the reply body **clean** — it is never auto-quoted with the original
 message's text — and addresses the original's `Reply-To` header when present, falling back

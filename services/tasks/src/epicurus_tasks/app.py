@@ -25,7 +25,7 @@ from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
 from epicurus_tasks.providers import TasksProvider
-from epicurus_tasks.router import TasksRouter
+from epicurus_tasks.router import TasksRouter, operator_clock
 from epicurus_tasks.service import (
     MODULE_NAME,
     TASK_KIND,
@@ -78,7 +78,14 @@ def create_app() -> FastAPI:
     external: dict[str, TasksProvider] = {
         "google": GoogleTasksProvider(platform=platform, repeats=repeats)
     }
-    provider: TasksProvider = TasksRouter(local=local_provider, external=external, prefs=platform)
+    # The recurrence clock reads the operator's timezone (ADR-0039), not UTC, so the overdue
+    # sweep and materialization treat "today" the way the operator does (#433, #535).
+    provider: TasksProvider = TasksRouter(
+        local=local_provider,
+        external=external,
+        prefs=platform,
+        now=operator_clock(platform.get_timezone),
+    )
 
     async def _list_categories() -> list[tuple[str, str]]:
         """The enabled writable lists ``(id, title)`` for the ``tasks_lists`` tool.

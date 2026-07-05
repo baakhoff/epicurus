@@ -223,7 +223,10 @@ def _build_reply_mime(headers: dict[str, str], body: str) -> MIMEText:
     The recipient honors ``Reply-To`` over ``From`` when the original carries one (#513) —
     mailing lists, newsletters, and support desks commonly set ``Reply-To`` to route replies
     away from the sending address, and addressing ``From`` in that case sends the reply
-    somewhere the sender never intended it to land.
+    somewhere the sender never intended it to land. ``Reply-To`` is stripped before that
+    check (#538): a whitespace-only value (some senders emit ``Reply-To: `` with nothing
+    after it) is still a non-empty string, which Python treats as truthy, so an unstripped
+    check would "win" with blank whitespace and produce an unroutable ``To``.
 
     No self-reply guard: replying to a message the operator sent themselves addresses the
     operator (``Reply-To``/``From`` both resolve back to their own account). Deliberately
@@ -233,7 +236,8 @@ def _build_reply_mime(headers: dict[str, str], body: str) -> MIMEText:
     extra profile lookup per reply for a case with no clear wrong answer to guard against.
     """
     msg = MIMEText(body, "plain", "utf-8")
-    msg["To"] = headers.get("reply-to") or headers.get("from", "")
+    reply_to = headers.get("reply-to", "").strip()
+    msg["To"] = reply_to or headers.get("from", "")
     msg["Subject"] = _reply_subject(headers.get("subject", ""))
     original_message_id = headers.get("message-id", "")
     if original_message_id:

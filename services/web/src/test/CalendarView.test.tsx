@@ -357,6 +357,7 @@ describe("CalendarView", () => {
               title: "Family",
               writable: true,
               enabled: true,
+              color: "#fbd75b",
             },
           ],
         },
@@ -373,13 +374,29 @@ describe("CalendarView", () => {
           provider: "google",
           calendar_id: "google:primary",
         },
+        {
+          id: "e3",
+          title: "Picnic",
+          start: "2026-06-16T12:00:00",
+          end: "2026-06-16T13:00:00",
+          provider: "google",
+          calendar_id: "google:family@group",
+        },
       ],
     });
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
 
-    // The chip carries the provider's colour as its --cal variable.
+    // The chip carries the provider's colour as its --cal variable, and a computed
+    // AA-safe hover text colour as --cal-ink (#531): this mid-tone purple sits in the
+    // crossover band where neither house ink nor white clears 4.5:1 — pure black does.
     const chip = await screen.findByText("Sync");
     expect(chip.closest("button")?.style.getPropertyValue("--cal")).toBe("#af4fd7");
+    expect(chip.closest("button")?.style.getPropertyValue("--cal-ink")).toBe("#000000");
+
+    // A light calendar colour gets the house near-black, never the old text-canvas
+    // (which in the light theme washed out on a light fill — the #531 failure).
+    const light = await screen.findByText("Picnic");
+    expect(light.closest("button")?.style.getPropertyValue("--cal-ink")).toBe("#121411");
   });
 
   it("paints the cached window instantly on reopen, then revalidates (#379)", async () => {

@@ -553,6 +553,16 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
     setIsNew(false);
   }
 
+  // Deep-link (#491): `?new=1` — the command palette's "New note" — opens the create
+  // flow once, exactly like pressing the New-note button. Harmless when the page can't
+  // create: the naming form only renders inside the `can_create` toolbar.
+  const newParam = searchParams.get("new");
+  const [appliedNew, setAppliedNew] = useState(false);
+  if (newParam && !appliedNew) {
+    setAppliedNew(true);
+    setCreating(true);
+  }
+
   const doc = useQuery({
     queryKey: ["module-doc", module, pageId, scope, selectedPath],
     queryFn: () => api.modulePageDoc(module, pageId, toModulePath(selectedPath as string)),

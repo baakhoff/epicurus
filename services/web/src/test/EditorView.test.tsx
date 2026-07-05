@@ -458,6 +458,33 @@ describe("EditorView — knowledge bases (scopes)", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
+  it("starts the New-note flow from a ?new=1 deep-link (#491)", async () => {
+    mockModulePage.mockResolvedValue({
+      can_create: true,
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/notes/notes?new=1"]}>
+          <EditorView module="notes" pageId="notes" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    // The naming form is already open — exactly as if "New note" had been pressed.
+    expect(await screen.findByLabelText("New note title")).toBeInTheDocument();
+  });
+
+  it("leaves the New-note flow closed without the deep-link", async () => {
+    mockModulePage.mockResolvedValue({
+      can_create: true,
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+    });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    expect(await screen.findByRole("button", { name: /New note/ })).toBeInTheDocument();
+    expect(screen.queryByLabelText("New note title")).toBeNull();
+  });
+
   it("renders the platform-docs reference scope as read-only", async () => {
     mockModulePage.mockResolvedValue({
       ...SCOPED,

@@ -92,6 +92,15 @@ uses (dots, watermarks) are exempt by convention, but since the tokens themselve
 call site has to reason about it. Phone tab labels render at 11px minimum — primary
 navigation never sits at the app's smallest text size.
 
+**Runtime colours get the same discipline, computed (#531).** A calendar's colour arrives
+from provider data (hex) or is derived per id (`hsl(h 55% 58%)`) — no static token can pair
+text with it. `src/lib/color.ts` computes the on-colour per fill: the first of **house ink →
+white → pure black** to clear 4.5:1 (the black/white pair mathematically guarantees a
+compliant pick for any fill). The calendar event chip's hover uses it via a `--cal-ink`
+inline variable next to `--cal`; `src/test/color.test.ts` holds the AA floor across every
+derivable hue and the classic Google palette. Any future surface that fills with a
+runtime colour should set its text with `onColor(fill)`, never with a theme token.
+
 ### Overlay focus management (#487)
 
 `Sheet` and `Confirm` (`src/components/ui.tsx`) honor the full modal keyboard contract via
@@ -105,10 +114,39 @@ open Sheet (e.g. delete-session over the sessions sheet) closes alone instead of
 sheet with it.
 
 `useModalFocus` is **exported** for the hand-rolled `role="dialog"` overlays that live
-outside the kit: the calendar archetype's **EventDetail** adopted it (#512), so Sheet,
-Confirm, and the event detail all honor the one keyboard contract. Any new dialog must
-either build on `Sheet`/`Confirm` or wire this hook — `SuggestionReviewModal` is the known
-remaining hand-rolled exception.
+outside the kit: the calendar archetype's **EventDetail** adopted it (#512) and the
+**command palette** (#491) is the input-first case, so Sheet, Confirm, the event detail,
+and the palette all honor the one keyboard contract. Any new dialog must either build on
+`Sheet`/`Confirm` or wire this hook — `SuggestionReviewModal` is the known remaining
+hand-rolled exception. One ordering subtlety the palette surfaced: a dialog that wants
+Esc-to-restore-focus must route its initial focus through the hook's `initialFocus`
+parameter, **never** via a child's `autoFocus` — autoFocus fires at React commit, before
+the hook's effect captures who had focus, so the hook would record the dialog's own input
+as the "opener" and restore focus to a dead node.
+
+### Command palette (#491)
+
+`Ctrl/Cmd+K` toggles a keyboard-first overlay on every screen (`src/components/
+CommandPalette.tsx`, mounted once in the Shell; a **Search… ⌘K** button in the side rail
+opens it by pointer). It is wayfinding, **not a second API surface**: every entry comes
+from state the shell already holds —
+
+- **Conversations** — the `["sessions"]` query cache, recency-ordered (capped at 8 while
+  browsing, uncapped under a query); picking one `openSession(id)` + navigates to `/`.
+- **Pages** — `SURFACES` plus `modulePageNavs(modules)` minus `review` archetypes: exactly
+  the rail's data, so new module pages appear with zero palette changes.
+- **Actions** — *New chat*, *Wake up / Pause — unload models* (mirrors the PowerOrb's
+  mutation on the `["power"]` cache), and *New note* when a notes editor page exists —
+  a `?new=1` deep-link the editor archetype applies once, exactly like pressing its
+  New-note button (the `?doc=` applied-guard pattern).
+
+Typing filters every section through a dependency-free greedy subsequence scorer
+(`src/lib/fuzzy.ts`: +2/char, +4 word-boundary start, +3 consecutive run, small
+leading-gap penalty; ties keep recency/nav order). The input is a `role="combobox"` with
+`aria-activedescendant` — focus never leaves it; arrows/Home/End move the active
+`role="option"`, Enter runs it, Escape closes (capture-phase, the Confirm stacking
+pattern) and `useModalFocus` restores focus. The dialog body mounts per open, so state
+resets structurally rather than via effects.
 
 ### Toasts & confirmations (#488)
 

@@ -34,12 +34,19 @@ _SCOPE_HINT = (
     " modify permission. Reconnect Google (Settings → Connect) to grant it."
 )
 
+# Shown when ``messages.send`` is rejected for lack of scope (#513) — mirrors _SCOPE_HINT's
+# reconnect-hint treatment for send/reply instead of a bare exception.
+_SCOPE_HINT_SEND = (
+    "Couldn't send: the connected Google account is missing the Gmail send permission."
+    " Reconnect Google (Settings → Connect) to grant it."
+)
+
 
 def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.0",
+        version="0.8.1",
         description=(
             "Provider-agnostic mail — search, read, send, and reply. Gmail is the v0.1 provider."
         ),
@@ -152,7 +159,12 @@ def build_module(provider: MailProvider) -> EpicurusModule:
 
         Returns a confirmation string containing the sent message ID.
         """
-        sent_id = await provider.send(to=to, subject=subject, body=body)
+        try:
+            sent_id = await provider.send(to=to, subject=subject, body=body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                return _SCOPE_HINT_SEND
+            raise
         return f"sent:{sent_id}"
 
     @module.tool()
@@ -161,9 +173,11 @@ def build_module(provider: MailProvider) -> EpicurusModule:
 
         **This action delivers a real message and cannot be undone.**
         Only invoke after explicit user confirmation of the reply body — the
-        recipient and subject are derived from the original message (its
-        sender, and its subject prefixed with "Re:" unless already a reply),
-        so there is nothing else to compose.
+        recipient and subject are derived from the original message (preferring
+        its ``Reply-To`` over its sender when the original carries one, and its
+        subject prefixed with "Re:" unless already a reply), so there is nothing
+        else to compose. The reply body is sent **clean**: it is not auto-quoted
+        with the original message's text.
 
         Args:
             message_id: The message being replied to (from ``mail_search`` or ``mail_read``).
@@ -171,7 +185,12 @@ def build_module(provider: MailProvider) -> EpicurusModule:
 
         Returns a confirmation string containing the sent message ID.
         """
-        sent_id = await provider.reply(message_id, body)
+        try:
+            sent_id = await provider.reply(message_id, body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                return _SCOPE_HINT_SEND
+            raise
         return f"sent:{sent_id}"
 
     @module.tool()

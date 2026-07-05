@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_mail.provider import MailMessage, MailProvider
@@ -158,6 +159,61 @@ async def test_mail_mark_read_returns_hint_on_missing_scope() -> None:
     assert "Reconnect Google" in str(text)
 
 
+async def test_mail_send_returns_hint_on_missing_scope() -> None:
+    # A 403 from Gmail (token lacks gmail.send) returns a reconnect hint, not a raw
+    # exception (#513) — the same treatment mail_mark_read/unread already get for
+    # gmail.modify.
+    provider = _make_provider(_sample())
+    provider.send = AsyncMock(  # type: ignore[method-assign]
+        side_effect=httpx.HTTPStatusError(
+            "403 Forbidden",
+            request=httpx.Request("POST", "http://gmail/send"),
+            response=httpx.Response(403),
+        )
+    )
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool(
+        "mail_send", {"to": "bob@example.com", "subject": "Hi", "body": "Hello!"}
+    )
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "Reconnect Google" in str(text)
+
+
+async def test_mail_reply_returns_hint_on_missing_scope() -> None:
+    # Same scope-hint treatment for reply() (#513).
+    provider = _make_provider(_sample())
+    provider.reply = AsyncMock(  # type: ignore[method-assign]
+        side_effect=httpx.HTTPStatusError(
+            "403 Forbidden",
+            request=httpx.Request("POST", "http://gmail/send"),
+            response=httpx.Response(403),
+        )
+    )
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool(
+        "mail_reply", {"message_id": "msg1", "body": "Sounds good!"}
+    )
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "Reconnect Google" in str(text)
+
+
+async def test_mail_send_reraises_non_scope_errors() -> None:
+    # A non-403 HTTP error must not be swallowed into a false "reconnect" hint.
+    provider = _make_provider(_sample())
+    provider.send = AsyncMock(  # type: ignore[method-assign]
+        side_effect=httpx.HTTPStatusError(
+            "500 Server Error",
+            request=httpx.Request("POST", "http://gmail/send"),
+            response=httpx.Response(500),
+        )
+    )
+    module = build_module(provider)
+    with pytest.raises(Exception, match="500"):
+        await module.mcp.call_tool(
+            "mail_send", {"to": "bob@example.com", "subject": "Hi", "body": "Hello!"}
+        )
+
+
 async def test_manifest_declares_all_tools() -> None:
     provider = _make_provider()
     module = build_module(provider)
@@ -211,7 +267,7 @@ async def test_manifest_version_is_0_8_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.8.0"
+    assert manifest.version == "0.8.1"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:

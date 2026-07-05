@@ -115,13 +115,14 @@ class GmailProvider(MailProvider):
         """The lowercased headers needed to build a reply, plus the Gmail ``threadId``.
 
         A metadata-only fetch (no body) — a reply doesn't quote the original by default,
-        so there's nothing here beyond the headers this needs.
+        so there's nothing here beyond the headers this needs. ``Reply-To`` is fetched
+        alongside ``From`` so the reply can honor it when present (#513).
         """
         resp = await client.get(
             f"/users/me/messages/{message_id}",
             params={
                 "format": "metadata",
-                "metadataHeaders": ["Message-ID", "References", "Subject", "From"],
+                "metadataHeaders": ["Message-ID", "References", "Subject", "From", "Reply-To"],
             },
         )
         resp.raise_for_status()
@@ -218,9 +219,21 @@ def _build_reply_mime(headers: dict[str, str], body: str) -> MIMEText:
     ``References`` is the original's own reference chain plus that same ``Message-ID`` (RFC
     2822 recommends the full chain, not just the immediate parent), so the reply threads
     correctly even in mail clients that ignore Gmail's own ``threadId``.
+
+    The recipient honors ``Reply-To`` over ``From`` when the original carries one (#513) —
+    mailing lists, newsletters, and support desks commonly set ``Reply-To`` to route replies
+    away from the sending address, and addressing ``From`` in that case sends the reply
+    somewhere the sender never intended it to land.
+
+    No self-reply guard: replying to a message the operator sent themselves addresses the
+    operator (``Reply-To``/``From`` both resolve back to their own account). Deliberately
+    left unguarded (#513) — it is indistinguishable from legitimately mailing yourself a
+    note, ``mail_reply`` is already a confirm-gated danger action (ADR-0007) so nothing
+    fires without the operator seeing the recipient first, and detecting it would need an
+    extra profile lookup per reply for a case with no clear wrong answer to guard against.
     """
     msg = MIMEText(body, "plain", "utf-8")
-    msg["To"] = headers.get("from", "")
+    msg["To"] = headers.get("reply-to") or headers.get("from", "")
     msg["Subject"] = _reply_subject(headers.get("subject", ""))
     original_message_id = headers.get("message-id", "")
     if original_message_id:

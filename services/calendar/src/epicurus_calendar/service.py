@@ -200,7 +200,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.14.1",
+        version="0.14.2",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"

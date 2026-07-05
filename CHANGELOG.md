@@ -28,7 +28,7 @@ images to GHCR.
   blanked repeat picker for now (`""` means "leave the series unchanged", the pre-existing
   behaviour): calendar has no clear-recurrence contract yet, and passing the blank through
   would reach Google as a bare `RRULE:` (API 400). `tasks` 0.14.0→0.15.0, `calendar`
-  0.14.0→0.14.1, `web` 0.76.0→0.76.1.
+  0.14.1→0.14.2, `web` 0.80.0→0.80.1.
 
 - **Bound the entity-ref id block and a module's list text for large results** (#468,
   ADR-0084) — a large ref list (a wide search, RRULE-expanded calendar events over a long

@@ -14,6 +14,21 @@ images to GHCR.
 
 ### Added
 
+- **Cmd+K command palette** (#491) — the wayfinding capstone on #480: one keyboard-first
+  overlay over everything the shell already knows. Ctrl/Cmd+K toggles it on every screen
+  (a "Search… ⌘K" affordance in the side rail opens it by pointer); typing fuzzy-filters
+  conversations (recency-ordered, from the sessions cache), core surfaces + module pages
+  (the same registry data the rail renders), and a few actions — New chat, Wake/Pause,
+  and New note when the notes module is installed (a `?new=1` deep-link that opens the
+  editor's create flow). Arrows + Enter navigate, Esc closes and restores focus (#487
+  contract, combobox semantics). Deliberately not a second API surface: the palette only
+  reuses queries the shell already holds; the fuzzy scorer is a dependency-free
+  subsequence ranker in `src/lib/fuzzy.ts`. Also fixes the calendar event-chip hover
+  pairing `text-canvas` with a runtime calendar colour (#531): the hovered chip's text
+  colour is now computed per colour (house ink → white → pure black, first to clear
+  WCAG AA — `src/lib/color.ts`), so a light calendar on the light theme no longer washes
+  the label out. `web` 0.81.0→0.82.0.
+
 - **Web: fetch-guard lint rule + connection-gate regenerate/edit/resume** (#529, #530) — two
   follow-ups from the #519/#494 outage-detection review. (1) A `no-restricted-globals` rule
   (the same mechanism already banning `alert`/`confirm`, #488) now rejects a bare `fetch(`

@@ -209,12 +209,15 @@ function AskUserPrompt({
 }) {
   const [answer, setAnswer] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Same connection gate as the main composer (#494): resuming a suspended turn is just
+  // as send-adjacent as the composer's own Send, so it fails the same way if ungated (#530).
+  const connectionLost = useConnection((s) => s.coreDown || !s.online);
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
   const submit = () => {
     const text = answer.trim();
-    if (!text) return;
+    if (!text || connectionLost) return;
     setAnswer("");
     onSubmit(text);
   };
@@ -253,7 +256,7 @@ function AskUserPrompt({
                 variant="primary"
                 aria-label="Send answer"
                 onClick={submit}
-                disabled={!answer.trim()}
+                disabled={!answer.trim() || connectionLost}
                 className="h-[42px]"
               >
                 <SendHorizonal size={16} />
@@ -954,7 +957,7 @@ export function ChatScreen() {
   // Regenerate: optimistically drop the stale answer (everything after the last user turn),
   // then stream a fresh one. The server truncates the same tail before re-answering (#302).
   const regenerate = () => {
-    if (chat.streaming || lastUserIdx < 0) return;
+    if (chat.streaming || lastUserIdx < 0 || connectionLost) return;
     queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) =>
       (old ?? []).slice(0, lastUserIdx + 1),
     );
@@ -971,7 +974,7 @@ export function ChatScreen() {
   // old answer), then stream the new answer. The server edits + truncates server-side.
   const saveEdit = () => {
     const content = editText.trim();
-    if (!content || chat.streaming || lastUserIdx < 0) return;
+    if (!content || chat.streaming || lastUserIdx < 0 || connectionLost) return;
     setEditingIdx(null);
     queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) => {
       const trimmed = (old ?? []).slice(0, lastUserIdx + 1);
@@ -1137,7 +1140,11 @@ export function ChatScreen() {
                     <Button variant="ghost" onClick={cancelEdit}>
                       Cancel
                     </Button>
-                    <Button variant="primary" onClick={saveEdit} disabled={!editText.trim()}>
+                    <Button
+                      variant="primary"
+                      onClick={saveEdit}
+                      disabled={!editText.trim() || connectionLost}
+                    >
                       Resend
                     </Button>
                   </div>
@@ -1193,7 +1200,8 @@ export function ChatScreen() {
                       <button
                         aria-label="Regenerate response"
                         onClick={regenerate}
-                        className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                        disabled={connectionLost}
+                        className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink disabled:opacity-50"
                       >
                         <RefreshCw size={12} /> Regenerate
                       </button>

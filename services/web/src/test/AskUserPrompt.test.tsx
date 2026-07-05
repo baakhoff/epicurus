@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,6 +50,7 @@ vi.mock("@/lib/api", () => ({
 
 import { ChatScreen } from "@/screens/ChatScreen";
 import { useChat } from "@/stores/chat";
+import { useConnection } from "@/stores/connection";
 import { usePrefs } from "@/stores/prefs";
 
 const done = (): SseMessage => ({
@@ -86,6 +87,7 @@ beforeEach(() => {
     lastSeq: 0,
     awaiting: null,
   });
+  useConnection.setState({ online: true, coreDown: false });
   localStorage.clear();
 });
 
@@ -126,5 +128,24 @@ describe("AskUserPrompt — the ask_user clarifying prompt (#360)", () => {
     useChat.setState({ awaiting: { runId: "run-3", question: "" } });
     render(<ChatScreen />, { wrapper });
     expect(await screen.findByText(/needs a little more to go on/i)).toBeInTheDocument();
+  });
+
+  // Resuming a suspended turn is send-adjacent the same way the composer's Send is (#494) —
+  // gate it on the connection store too, or it fails into the old error card (#530).
+  it("disables Send and ignores Enter-to-resume while the core is unreachable", async () => {
+    useChat.setState({ awaiting: { runId: "run-7", question: "Which file?" } });
+    render(<ChatScreen />, { wrapper });
+
+    const input = await screen.findByLabelText(/answer the assistant/i);
+    fireEvent.change(input, { target: { value: "the readme" } });
+    act(() => useConnection.getState().reportUnreachable());
+
+    expect(screen.getByLabelText(/send answer/i)).toBeDisabled();
+
+    // Enter-to-submit bypasses the button entirely (composer parity, #494) — the guard
+    // inside submit() must catch it too, or the prompt would dismiss on a failed resume.
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(useChat.getState().awaiting).not.toBeNull();
+    expect(sseCalls.some((c) => c.path.includes("/resume"))).toBe(false);
   });
 });

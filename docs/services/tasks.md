@@ -143,6 +143,31 @@ on miss).
   field alone. It now sends an explicit `""` when a field that *had* a value is blanked, while a
   field left blank throughout is still omitted.
 
+**v0.15.1** hardens the v0.15.0 sweep, closing four follow-ups from its own merge review
+(#533, #534, #535, #539):
+
+- **Due clear now rejects on a live rule.** The symmetric case to the due-less-repeat check
+  above: `tasks_update(due="")` with `repeat` left untouched now rejects when the task's rule
+  is currently live — clearing the anchor would otherwise strand the recurrence exactly like
+  the due-less case (the sweep skips a due-less task, and a later completion has no due date
+  to compute a next occurrence from). Clearing both `due=""` and `repeat=""` together in the
+  same call is unaffected — that's an intentional "end the series."
+- **Overdue-sweep concurrency guard.** Two holes in the on-read sweep: (a) two simultaneous
+  `tasks_list` reads (e.g. the board and a chat turn) could both materialize the same overdue
+  anchor with no lock, and (b) a persistently failing retire spawned a fresh duplicate on
+  *every* subsequent read instead of failing once. Both are closed by a small in-process claim
+  the router holds per `(tenant_id, task_id)` while materializing — best-effort (it narrows the
+  race within one running instance rather than guaranteeing it across replicas), which is a
+  proportionate trade for a failure mode the original review already characterized as rare.
+- **Operator-timezone recurrence clock.** The overdue sweep and materialization compute
+  "today" via the tenant's configured IANA timezone (ADR-0039) now, not UTC — mirroring
+  calendar's `_resolve_timezone` (#433). A UTC-negative operator previously had a task swept
+  (its rule retired, a successor spawned) up to the timezone offset hours early; UTC-positive,
+  late. Falls back to UTC if the core is unreachable or the zone name is unrecognized.
+- **`tasks_list` adopts the shared listing cap.** Matches calendar's `capped_listing`
+  adoption (#522/#468) for consistency — a long backlog no longer inflates the tool's text
+  with an unbounded number of lines; the entity-reference chips stay uncapped regardless.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -154,7 +179,7 @@ on miss).
 | `tasks_create_list(title)` | `title`: the new list's display name | The created list as a `Collection` (`account`/`collection`/`title`/`writable`). **Google-only** (#474) — raises if no external account is connected; the local store has no lists of its own. |
 | `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?, repeat?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`). `repeat`: RRULE making it recurring (needs a `due`) | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. A recurring task also spawns its next instance (ADR-0082). |
-| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged). `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
+| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged) — clearing `due` alone while a repeat rule is still live raises (#534; clear `repeat=""` too, or give it a new due, instead). `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
 | `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
 
 All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
@@ -419,7 +444,7 @@ Package `epicurus_tasks`:
 | `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`/`create_list`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default); `create_list` raises `NotImplementedError` (#474) — a single implicit list has nothing to create. |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete + `create_list` via `tasklists.insert`, #474); persists/fills/GCs emulated recurrence rules via an injected `RepeatStore` (#471, ADR-0082). |
-| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082), and `list_tasks` sweeps overdue ones the same way (#515) — both funnel through the shared `_materialize`, guarded by an in-process `_claim_materialize`/`_release_materialize` pair against concurrent double-materialization and retire-failure amplification (#533); `operator_clock` resolves the sweep's "today" in the operator's timezone rather than UTC (#433, #535). |
 | `recurrence.py` | Pure RRULE math (#471, ADR-0082): `validate_rrule` (tool-boundary check) + `next_due` (the next occurrence, **skip-missed** policy), date-only (naive) parsing. |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store (incl. the `repeat` column); `RepeatStore` — the `task_repeats` side table for external-provider recurrence rules (#471). |
 | `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls**, the **New list** board action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |

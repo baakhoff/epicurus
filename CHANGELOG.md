@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Web: fetch-guard lint rule + connection-gate regenerate/edit/resume** (#529, #530) — two
+  follow-ups from the #519/#494 outage-detection review. (1) A `no-restricted-globals` rule
+  (the same mechanism already banning `alert`/`confirm`, #488) now rejects a bare `fetch(`
+  anywhere in `src` outside `src/lib/http.ts`'s own `epFetch`, so a future call site can't
+  silently bypass the outage detector. (2) `regenerate()`, `saveEdit()`, and the `ask_user`
+  resume-answer submit were the three remaining send-adjacent actions that still fired while
+  the core was unreachable and failed into the generic error card instead of the composer's
+  existing gate; all three now bail on `connectionLost` and disable their buttons the same way
+  Send does, reusing the existing hint pill — no new UI. `web` 0.80.1→0.81.0.
+
 - **Tasks: overdue recurrence sweep** (#515) — a recurring task nobody ever completed used to
   sit overdue forever (materialization was on-complete only). Every read (`tasks_list`, the
   board) now also materializes a fresh instance for an open, overdue recurring task: the

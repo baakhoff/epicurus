@@ -9,7 +9,11 @@ creates exactly one successor with the right due date, retires the rule on the c
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -18,13 +22,23 @@ from epicurus_core import CollectionPrefs
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
-from epicurus_tasks.router import TasksRouter
+from epicurus_tasks.router import TasksRouter, _resolve_timezone, operator_clock
 
 TENANT = "t"
 MON = "2026-07-06"
 THU = "2026-07-09"
 FRI = "2026-07-10"
 NEXT_MON = "2026-07-13"
+
+
+def _fixed(date: str) -> Callable[[], Awaitable[str]]:
+    """A `now` clock pinned to *date*, bypassing timezone resolution entirely (#535) — these
+    tests pin recurrence math to an exact day, independent of wall-clock or operator zone."""
+
+    async def _today() -> str:
+        return date
+
+    return _today
 
 
 class _AddFailsProvider:
@@ -69,7 +83,7 @@ def _router(store: TaskStore, *, today: str) -> TasksRouter:
         local=LocalTasksProvider(store),
         external={},
         prefs=_LocalPrefs(),
-        now=lambda: today,
+        now=_fixed(today),
     )
 
 
@@ -154,7 +168,7 @@ async def test_add_failure_leaves_completion_intact_and_rule_live(store: TaskSto
     inner = LocalTasksProvider(store)
     task = await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
     flaky = _AddFailsProvider(inner)
-    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=lambda: MON)
+    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=_fixed(MON))
 
     done = await router.complete_task(TENANT, task.id)  # must not raise
     assert done.completed
@@ -172,7 +186,7 @@ async def test_retire_failure_after_successful_add_is_logged_not_raised(store: T
     inner = LocalTasksProvider(store)
     task = await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
     flaky = _RetireFailsProvider(inner)
-    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=lambda: MON)
+    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=_fixed(MON))
 
     done = await router.complete_task(TENANT, task.id)  # must not raise
     assert done.completed
@@ -217,3 +231,100 @@ async def test_list_tasks_leaves_an_overdue_non_recurring_task_alone(store: Task
     await router.add_task(TENANT, "Plain overdue task", due=MON)
     open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
     assert len(open_tasks) == 1  # nothing to sweep — no repeat rule to advance
+
+
+# ── sweep hardening: concurrent-read race + retire-failure amplification (#533) ─────────
+
+
+async def test_sweep_with_persistent_retire_failure_creates_exactly_one_successor_across_reads(
+    store: TaskStore,
+) -> None:
+    """The sweep's own honest-read behaviour when retire fails, exercised through
+    ``list_tasks`` rather than ``complete_task`` (the #517/#528 review noted only the
+    completion path had this coverage) — plus the second-read idempotency assertion: without
+    the claim guard, a persistently failing retire would spawn a fresh duplicate on *every*
+    read since the anchor's rule never actually clears. This proves exactly one successor
+    exists after two reads, not two (#533b)."""
+    inner = LocalTasksProvider(store)
+    await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+    flaky = _RetireFailsProvider(inner)
+    router = TasksRouter(local=flaky, external={}, prefs=_LocalPrefs(), now=_fixed(THU))
+
+    # First read: the sweep fires, add succeeds, retire fails (and is retried once, still
+    # fails) — the read must stay honest about what actually landed.
+    first_open, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len(first_open) == 2
+    original = next(t for t in first_open if t.due == MON)
+    assert original.repeat == "FREQ=WEEKLY"  # retire never landed — stayed live, honestly
+    assert flaky.update_calls == 2  # the initial attempt plus one retry
+
+    # Second read: the anchor is still overdue and its rule is still (truthfully) live, so
+    # without the claim guard this would materialize *again*. It must not.
+    second_open, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len(second_open) == 2  # still just the one successor — no amplification
+    successors = [t for t in second_open if t.due == NEXT_MON]
+    assert len(successors) == 1
+
+
+async def test_concurrent_sweeps_of_the_same_overdue_anchor_create_one_successor(
+    store: TaskStore,
+) -> None:
+    """Two 'simultaneous' list_tasks calls (#533a) — e.g. the board and a chat turn — must
+    not both materialize the same overdue anchor. ``asyncio.gather`` starts both coroutines
+    before either completes and the local store's real async I/O gives them genuine
+    interleaving points, so this exercises the actual race window rather than a sequential
+    stand-in for it."""
+    router = _router(store, today=THU)
+    await router.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+
+    await asyncio.gather(
+        router.list_tasks(TENANT, scope="all"),
+        router.list_tasks(TENANT, scope="all"),
+    )
+
+    # Ground truth, read once more after both concurrent calls have settled.
+    final_open, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    successors = [t for t in final_open if t.due == NEXT_MON]
+    assert len(successors) == 1  # exactly one successor, not two, despite the race
+
+
+# ── operator-timezone recurrence clock (#535) ──────────────────────────────────
+
+
+def _tz(name: str) -> Callable[[], Any]:
+    """A TimezoneSource stub returning a fixed IANA zone name (mirrors calendar's #433 tests)."""
+
+    async def source() -> str:
+        return name
+
+    return source
+
+
+async def test_resolve_timezone_with_no_source_defaults_to_utc() -> None:
+    assert await _resolve_timezone(None) is UTC
+
+
+async def test_resolve_timezone_resolves_the_operator_zone() -> None:
+    assert await _resolve_timezone(_tz("America/New_York")) == ZoneInfo("America/New_York")
+
+
+async def test_resolve_timezone_degrades_to_utc_on_unknown_zone() -> None:
+    assert await _resolve_timezone(_tz("Neverland/Nowhere")) is UTC
+
+
+async def test_resolve_timezone_degrades_to_utc_on_source_error() -> None:
+    async def broken() -> str:
+        raise RuntimeError("core down")
+
+    assert await _resolve_timezone(broken) is UTC
+
+
+async def test_operator_clock_reads_today_in_the_resolved_zone() -> None:
+    # Proves the wiring end to end: the clock actually reads the *resolved* zone rather than
+    # silently staying UTC — the exact regression #535 exists to prevent. A UTC-negative zone
+    # (e.g. US Pacific) can disagree with UTC about what day it is right now; comparing against
+    # the same `datetime.now(tz)` expression computed here (not a hardcoded UTC one) is what
+    # keeps this deterministic without freezing the wall clock.
+    tz = ZoneInfo("Pacific/Kiritimati")  # UTC+14 — the furthest-ahead named zone
+    clock = operator_clock(_tz("Pacific/Kiritimati"))
+    assert await clock() == datetime.now(tz).date().isoformat()

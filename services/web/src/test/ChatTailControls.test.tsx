@@ -1,11 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatScreen } from "@/screens/ChatScreen";
 import { useChat } from "@/stores/chat";
+import { useConnection } from "@/stores/connection";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -56,6 +57,7 @@ beforeEach(() => {
     paused: false,
     abort: null,
   });
+  useConnection.setState({ online: true, coreDown: false });
 });
 
 describe("Chat tail controls (#302)", () => {
@@ -74,5 +76,32 @@ describe("Chat tail controls (#302)", () => {
     expect(screen.getByRole("button", { name: "Resend" })).toBeInTheDocument();
     // The Regenerate control hides while editing.
     expect(screen.queryByRole("button", { name: "Regenerate response" })).not.toBeInTheDocument();
+  });
+});
+
+// Regenerate/Resend are send-adjacent the same way the composer's Send is (#494) — gate them
+// on the connection store too, or they fail into the old error card instead of the hint (#530).
+describe("Chat tail controls while unreachable (#530)", () => {
+  it("disables Regenerate while the core is unreachable", async () => {
+    render(<ChatScreen />, { wrapper });
+    const regenerate = await screen.findByRole("button", { name: "Regenerate response" });
+    expect(regenerate).not.toBeDisabled();
+
+    act(() => useConnection.getState().reportUnreachable());
+    expect(regenerate).toBeDisabled();
+  });
+
+  it("disables Resend and ignores Enter-to-resend while the core is unreachable", async () => {
+    render(<ChatScreen />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit message" }));
+    const editor = await screen.findByLabelText("Edit message");
+
+    act(() => useConnection.getState().reportUnreachable());
+    expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
+
+    // Enter-to-resend bypasses the button entirely (composer parity, #494) — the guard
+    // inside saveEdit() must catch it too, or the editor would close on a failed resend.
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "Resend" })).toBeInTheDocument();
   });
 });

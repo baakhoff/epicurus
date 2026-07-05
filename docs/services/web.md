@@ -487,7 +487,9 @@ all carry the one themed look — an `--color-edge` border on `--color-surface-2
 so a native date/`datetime-local` picker or a select can't overflow a narrow mobile sheet
 (#335). An eslint `no-restricted-syntax` guard rejects a **bare `<input>` / `<select>`** outside
 `ui.tsx` (#394); a non-text input (range / file / checkbox) opts out with an `eslint-disable`
-+ reason. `Select` and `Button` both take `size="sm"` for a denser toolbar (compact inline filters /
++ reason. A `no-restricted-globals` guard likewise rejects a bare `fetch(` outside
+`src/lib/http.ts`'s `epFetch` (#494), so a new call site can't silently bypass outage
+detection (#529). `Select` and `Button` both take `size="sm"` for a denser toolbar (compact inline filters /
 view-controls, or a page-level `ActionControl` sized to match — #427) and `md` (default,
 matching the text-field height) for forms; `Select`'s width is opt-in (`className="w-full"`).
 `Tooltip` (#334) is a dependency-free hover/focus label for **icon-only** controls — the icon

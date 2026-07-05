@@ -447,11 +447,12 @@ The assistant can mention a module entity (an event, task, email, doc…) as an
 - **The id block is capped, and your own list text should be too** (#468, ADR-0084): past
   `LIST_CAP` (50) refs the id block above truncates with a "showing 50 of N" note — the
   full ref list still reaches the UI's chips unchanged, only the model-facing text is
-  bounded. If your tool hand-builds its own "Found N {noun}(s): ..." text (as `mail_search`,
-  `tasks_list`, and `calendar_list_events` do), cap it the same way with
-  `epicurus_core.capped_listing(lines, noun="event")` instead of joining every line
+  bounded. If your tool hand-builds its own "Found N {noun}(s): ..." text, cap it the same
+  way with `epicurus_core.capped_listing(lines, noun="event")` instead of joining every line
   yourself — it defaults to the same `LIST_CAP`, so your text and the id block never
-  disagree about how much of a big result was actually shown.
+  disagree about how much of a big result was actually shown. `calendar_list_events` and
+  `mail_search` (#539) adopt it this way; `tasks_list` still hand-builds its own and is the
+  remaining follow-up.
 - **`EntityRef`** = `ref_id` · `module` · `kind` · `title` · `summary?` — enough to
   render the chip immediately.
 - **The hover-card** is fetched on demand from the module's **resolver**: declare

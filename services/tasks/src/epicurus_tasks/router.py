@@ -26,9 +26,10 @@ nothing is enabled or the core is unreachable (local-first).
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, tzinfo
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
 from epicurus_tasks.models import Task, TaskScope
@@ -42,9 +43,47 @@ _LOCAL_TITLE = "Personal"
 """Category label for the silent local default list (ADR-0036)."""
 
 
-def _utc_today() -> str:
-    """Today's date (UTC) as an ISO string — the default clock for materialization."""
+async def _utc_today() -> str:
+    """Today's date (UTC) as an ISO string — the clock default when no operator timezone
+    source is wired (#535); production wires :func:`operator_clock` instead."""
     return datetime.now(UTC).date().isoformat()
+
+
+TimezoneSource = Callable[[], Awaitable[str]]
+"""Returns the operator's configured IANA timezone (the core's, ADR-0039) — the same seam
+calendar's `_resolve_timezone` reads (#433), applied here to the recurrence clock (#535)."""
+
+
+async def _resolve_timezone(source: TimezoneSource | None) -> tzinfo:
+    """The zone the recurrence clock reads "today" in — the operator's, else UTC (#535).
+
+    Best-effort by design, mirroring calendar's `_resolve_timezone` (#433): an unreachable
+    core or an unknown zone name degrades to UTC (the pre-#535 behaviour) rather than
+    failing the read or materialization that depends on it.
+    """
+    if source is None:
+        return UTC
+    try:
+        return ZoneInfo(await source())
+    except Exception as exc:
+        log.warning("operator timezone unavailable; recurrence clock stays UTC", error=str(exc))
+        return UTC
+
+
+def operator_clock(source: TimezoneSource) -> Callable[[], Awaitable[str]]:
+    """Builds a `now` callable for :class:`TasksRouter` using the operator's timezone (#535).
+
+    Without this, the overdue sweep and materialization compute "today" in UTC regardless of
+    where the operator actually is — a UTC-negative operator had a task swept (rule retired,
+    successor spawned) up to the offset hours early; UTC-positive, late. The sweep made this
+    automatic rather than user-triggered (#515), so the skew now acts on its own instead of
+    being a one-off surprise on a manual action.
+    """
+
+    async def _today() -> str:
+        return datetime.now(await _resolve_timezone(source)).date().isoformat()
+
+    return _today
 
 
 class CollectionPrefsSource(Protocol):
@@ -67,14 +106,21 @@ class TasksRouter:
         local: TasksProvider,
         external: dict[str, TasksProvider],
         prefs: CollectionPrefsSource,
-        now: Callable[[], str] = _utc_today,
+        now: Callable[[], Awaitable[str]] = _utc_today,
     ) -> None:
         self._local = local
         self._external = external
         self._prefs = prefs
         # Clock for recurrence materialization (ADR-0082); injectable so tests are
-        # deterministic without freezing the wall clock.
+        # deterministic without freezing the wall clock. Defaults to UTC; production wires
+        # `operator_clock(platform.get_timezone)` instead (#535).
         self._now = now
+        # In-process guard against double-materializing the same anchor (#533) — see
+        # `_claim_materialize`/`_release_materialize`. Best-effort only: it is per-process
+        # memory, not shared/persisted state, so it narrows the race within one running
+        # instance rather than guaranteeing it across replicas. That is a deliberate scope
+        # limit (flagged for review), not an oversight — see the methods' docstrings.
+        self._materializing: set[tuple[str, str]] = set()
 
     def provider_name(self) -> str:
         return "tasks"
@@ -298,7 +344,7 @@ class TasksRouter:
         swept task's ``repeat`` reflected as cleared, so this same read is accurate rather than
         waiting for the next one to catch up.
         """
-        today = self._now()
+        today = await self._now()
         coll = ref.collection or None
         out: list[Task] = []
         fresh: list[Task] = []
@@ -334,19 +380,28 @@ class TasksRouter:
             # the sweep's skip) — this guard keeps that invariant, and the `str` narrowing
             # for `next_due`, inside the one function that relies on it.
             return None, False
+        key = (tenant_id, anchor.id)
+        if not self._claim_materialize(key):
+            # Someone else already has this anchor — a concurrent call (#533a) or a
+            # previously stuck one (#533b). Either way, treat this pass as a no-op: the
+            # caller sees the anchor unchanged, and the next read picks up wherever the
+            # in-flight (or stuck) attempt leaves things.
+            return None, False
         try:
-            upcoming = next_due(anchor.due, anchor.repeat, today=self._now())
+            upcoming = next_due(anchor.due, anchor.repeat, today=await self._now())
         except Exception as exc:
             log.warning(
                 "recurring task: could not compute next due; not materializing",
                 task_id=anchor.id,
                 error=str(exc),
             )
+            self._release_materialize(key, created=False, retired=False)
             return None, False
         if upcoming is None:
             # Series exhausted (COUNT/UNTIL) — still retire so the spent rule isn't
             # re-evaluated (or re-swept) again.
             retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
+            self._release_materialize(key, created=False, retired=retired)
             return None, retired
         try:
             created = await provider.add_task(
@@ -367,12 +422,62 @@ class TasksRouter:
                 task_id=anchor.id,
                 error=str(exc),
             )
+            self._release_materialize(key, created=False, retired=False)
             return None, False
         # Retire the rule on the source (add-before-retire, like a list move, so a failure
         # here never loses the recurrence outright — worst case is a residual live rule, not
         # a silently dropped one). "" clears it on both providers.
         retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
+        self._release_materialize(key, created=True, retired=retired)
         return created, retired
+
+    def _claim_materialize(self, key: tuple[str, str]) -> bool:
+        """Try to claim *key* (``(tenant_id, task_id)``) for materialization (#533).
+
+        Closes two holes in the on-read sweep flagged in the #517/#528 review: (a) two
+        simultaneous ``list_tasks`` calls double-materializing the same overdue anchor (no
+        lock/transaction), and (b) a persistently failing retire spawning a fresh duplicate
+        on every subsequent read instead of failing once.
+
+        Both callers of :meth:`_materialize` (the on-complete path and the overdue sweep)
+        pre-filter to repeating tasks, so by the time this is called the only question is:
+        is *key* already spoken for? Checking membership and adding to
+        ``self._materializing`` happen with no ``await`` in between, so — in this
+        single-process, cooperative-scheduling reality — the check-then-claim is atomic
+        against any other concurrent call reaching the same key; whichever call gets here
+        first wins the race, and every later one until release() sees it taken.
+
+        Args:
+            key: ``(tenant_id, task_id)`` identifying the anchor being materialized.
+
+        Returns:
+            ``True`` if the caller may proceed (the key is now claimed); ``False`` if it's
+            already claimed and the caller should treat this pass as a no-op.
+        """
+        if key in self._materializing:
+            return False
+        self._materializing.add(key)
+        return True
+
+    def _release_materialize(self, key: tuple[str, str], *, created: bool, retired: bool) -> None:
+        """Resolve a claim taken by :meth:`_claim_materialize` (#533).
+
+        A claim is released — so a later sweep/completion may retry this anchor — in every
+        case except one: a successor was *created* but the retire that should have cleared
+        the source's rule did not land. That case is kept claimed forever, which is what
+        stops the unbounded-duplicate amplification (#533b): the existing ``_retire_rule``
+        docstring already treats "retire failed twice" as terminal — "the operator can
+        always clear a stray rule by hand" — so no automatic recovery path is actually lost
+        by refusing to re-materialize an anchor stuck in that state.
+
+        Args:
+            key: the same ``(tenant_id, task_id)`` pair passed to `_claim_materialize`.
+            created: whether a successor was created this attempt.
+            retired: whether the source's rule was actually cleared this attempt.
+        """
+        if created and not retired:
+            return
+        self._materializing.discard(key)
 
     async def _retire_rule(
         self, tenant_id: str, provider: TasksProvider, task_id: str, *, coll: str | None

@@ -68,6 +68,15 @@ pass back. The block is model-only context: never rendered in chat, never part o
 text. The module-author side of this contract is in
 [the modules reference](../reference/modules.md).
 
+**The id block is capped at `LIST_CAP` (50) refs** (ADR-0084, #468): past that, it truncates
+with a "showing 50 of N — narrow the query/range or ask for more" note (logged with the
+tenant id) instead of echoing an unbounded list into the model's context — a large result
+(a wide search, RRULE-expanded calendar events over a long window) previously roughly
+doubled its context cost once every ref's id was echoed too. The full ref list still
+reaches the UI's chips (`AgentTurn.entity_refs`) unchanged; only the model-facing text is
+bounded. `epicurus_core.capped_listing` lets a module cap its own hand-built list text the
+same way — `calendar_list_events` is the first adopter.
+
 A turn **never ends silently empty.** A reasoning model sometimes emits its `<think>` block and
 then stops — no answer text, no tool call — which would persist as an empty turn and render as a
 silent "stop". The loop nudges such a step once to commit to an answer, then (if it still says

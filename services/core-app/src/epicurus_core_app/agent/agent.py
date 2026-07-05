@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from epicurus_core import Attachment, EntityRef, ToolEnvelope, get_logger
+from epicurus_core import LIST_CAP, Attachment, EntityRef, ToolEnvelope, get_logger
 from epicurus_core_app.agent.activity import (
     ActivityItem,
     MessageActivity,
@@ -126,7 +126,7 @@ class AgentTurn(BaseModel):
     activity: MessageActivity = Field(default_factory=MessageActivity)
 
 
-def _entity_refs_for_model(refs: list[EntityRef]) -> str:
+def _entity_refs_for_model(refs: list[EntityRef], *, tenant_id: str | None = None) -> str:
     """A compact, model-facing listing of a tool result's entity refs and their ids (#449).
 
     Modules return entity refs on an envelope for the UI to render as chips, but their text
@@ -137,22 +137,44 @@ def _entity_refs_for_model(refs: list[EntityRef]) -> str:
     bug for **every** module with refs (ADR-0079), not via a per-module workaround. The block is
     part of the tool *result* — model-only context, never rendered in chat — so unlike an inline
     marker in displayed text it needs no display-stripping.
+
+    A large ref list (RRULE-expanded calendar events, a wide search) roughly doubles its
+    context cost once each id is echoed here too, so the block itself is capped at
+    :data:`~epicurus_core.LIST_CAP` (#468) — independent of ``entity_refs`` on the envelope,
+    which stays uncapped and unchanged for the UI's chips. ``tenant_id`` is only for the
+    truncation log line; it plays no part in which refs are shown.
     """
-    lines = [f"- {ref.title} — id: {ref.ref_id} ({ref.module} {ref.kind})" for ref in refs]
-    return (
-        "\n\nReferenced items (pass an item's id to a tool that needs one — e.g. to open, edit, "
-        "or delete it):\n" + "\n".join(lines)
-    )
+    capped = refs[:LIST_CAP]
+    lines = [f"- {ref.title} — id: {ref.ref_id} ({ref.module} {ref.kind})" for ref in capped]
+    if len(refs) > LIST_CAP:
+        log.warning(
+            "entity-ref id block truncated for the model",
+            tenant_id=tenant_id,
+            total=len(refs),
+            shown=LIST_CAP,
+        )
+        intro = (
+            f"\n\nReferenced items — showing {LIST_CAP} of {len(refs)} (pass an item's id to"
+            " a tool that needs one — e.g. to open, edit, or delete it; narrow the query/range"
+            " or ask for more to see the rest):\n"
+        )
+    else:
+        intro = (
+            "\n\nReferenced items (pass an item's id to a tool that needs one — e.g. to open, "
+            "edit, or delete it):\n"
+        )
+    return intro + "\n".join(lines)
 
 
-def _extract_entities(output: str) -> tuple[str, list[EntityRef]]:
+def _extract_entities(output: str, *, tenant_id: str | None = None) -> tuple[str, list[EntityRef]]:
     """Split a tool's output into (text for the model, entity references).
 
     A tool may return a JSON :class:`ToolEnvelope` (``{text, entity_refs}``); if so the text is
     fed back to the model — with a compact listing of the refs' ids appended so the model can act
     on them (:func:`_entity_refs_for_model`, #449) — and the refs are lifted onto the turn for the
     UI's chips. Anything else — plain text, an ``error:`` string, or unrelated JSON — is returned
-    unchanged with no refs, so existing tools keep working.
+    unchanged with no refs, so existing tools keep working. ``tenant_id`` only threads through to
+    the id block's truncation log (#468).
     """
     try:
         data = json.loads(output)
@@ -170,7 +192,8 @@ def _extract_entities(output: str) -> tuple[str, list[EntityRef]]:
         return output, []
     if not envelope.entity_refs:
         return envelope.text, envelope.entity_refs
-    return envelope.text + _entity_refs_for_model(envelope.entity_refs), envelope.entity_refs
+    block = _entity_refs_for_model(envelope.entity_refs, tenant_id=tenant_id)
+    return envelope.text + block, envelope.entity_refs
 
 
 class _RefCollector:
@@ -417,7 +440,7 @@ class Agent:
                     detail = _tool_detail(arguments)
                     yield AgentEvent(type="tool", tool=name, status="running", detail=detail)
                     output, is_error = await self._invoke(name, arguments, route, tenant=tenant)
-                    text, found = _extract_entities(output)
+                    text, found = _extract_entities(output, tenant_id=tenant)
                     refs.add(found)
                     status = "error" if is_error else "ok"
                     yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
@@ -786,7 +809,7 @@ class Agent:
                 name, arguments, call_id = _parse_tool_call(call)
                 tools_used.append(name)
                 output, is_error = await self._invoke(name, arguments, route, tenant=call_tenant)
-                text, found = _extract_entities(output)
+                text, found = _extract_entities(output, tenant_id=call_tenant)
                 refs.add(found)
                 status = "error" if is_error else "ok"
                 append_tool(timeline, name, status, _tool_detail(arguments))

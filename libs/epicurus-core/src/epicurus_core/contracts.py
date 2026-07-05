@@ -86,6 +86,28 @@ def tool_envelope(text: str, entity_refs: list[EntityRef] | None = None) -> str:
     return ToolEnvelope(text=text, entity_refs=entity_refs or []).model_dump_json()
 
 
+# A large list-style result inflates model context two ways: a module's own envelope text
+# (one line per item) and the entity-ref id block the core appends to it (ADR-0079). Both
+# share this one default cap so they never disagree about how much of a big result was
+# actually shown (#468) — the id block is capped in the agent loop; `capped_listing` below
+# lets a module cap its own text the same way, with one call instead of reinventing it.
+LIST_CAP = 50
+
+
+def capped_listing(items: list[str], *, limit: int = LIST_CAP, noun: str = "item") -> str:
+    """A "Found N {noun}(s):\\n- ...\\n- ..." listing, capped to *limit* lines (#468).
+
+    *items* are pre-formatted lines (e.g. ``f"- {e.title} ({when})"``); past *limit* a
+    trailing note says how many were left out, so the model isn't told a result was
+    exhaustive when it wasn't.
+    """
+    shown = items[:limit]
+    body = "\n".join(shown)
+    if len(items) > limit:
+        body += f"\n… and {len(items) - limit} more — narrow the range or ask for more."
+    return f"Found {len(items)} {noun}(s):\n{body}"
+
+
 AttachmentSource = Literal["module", "file", "chat"]
 
 

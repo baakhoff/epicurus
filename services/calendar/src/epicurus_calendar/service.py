@@ -42,6 +42,7 @@ from epicurus_core import (
     HoverCardDetail,
     PageSpec,
     UiSection,
+    capped_listing,
     get_logger,
     tool_envelope,
 )
@@ -199,7 +200,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.14.0",
+        version="0.14.1",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -254,7 +255,9 @@ def build_module(
         Returns the events as entity-reference chips (ADR-0019): hover a chip for
         the event's hover-card, click it to open the event in the side panel. Each
         chip carries the event id, so you can refer to an event later without
-        listing again. The accompanying text lists each event's title and time.
+        listing again. The accompanying text lists each event's title and time —
+        past the first `LIST_CAP` events (#468) it is truncated with a note, so
+        narrow *range_days* or ask again for the rest of a busy window.
 
         Args:
             range_days: How many days ahead to look (1-90).
@@ -272,7 +275,10 @@ def build_module(
             f"- {e.title} ({_format_when(e)})" + (f" @ {e.location}" if e.location else "")
             for e in events
         ]
-        text = f"Found {len(events)} event(s):\n" + "\n".join(lines)
+        # Capped the same way as the entity-ref id block the core appends (both default to
+        # LIST_CAP, #468) — a long window with RRULE-expanded recurring events (#443) can
+        # otherwise inflate the text with hundreds of lines.
+        text = capped_listing(lines, noun="event")
         return tool_envelope(text, refs)
 
     @module.tool()

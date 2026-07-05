@@ -42,7 +42,7 @@ owns its own scroll, and a wheel over the static side rail can't drag the whole 
 **edge fades** (left/right, only while content remains that way), so the horizontal scroll
 is discoverable instead of silently cutting off Calendar/Tasks/Settings (#480). The main
 column stacks header · routed screen · bottom tab bar, alongside
-the right panel and the download tray.
+the right panel and the shared corner notification stack (`CornerStack`, #510 — below).
 
 `#root` is sized to the **dynamic viewport** (`height: 100dvh`, anchored at `top: 0`) and the
 shell fills it with `h-full` — one viewport measurement, shared. This is deliberate: pinning
@@ -76,7 +76,14 @@ The `--ep-*` tokens (`src/index.css`) carry a **WCAG AA guarantee**: every text-
 (`text`, `text-dim`, `text-faint`, `ok`, `warn`, `danger`) holds **≥ 4.5:1 against all three
 backgrounds** (`canvas`, `surface`, `surface-2`) in **both themes**, and each accent family's
 `-strong` member clears the badge worst case (its own translucent `-dim` fill composited over
-`surface-2`). `src/test/contrast.test.ts` parses the CSS and enforces exactly this, plus the
+`surface-2`). **Accent-as-fill** carries its own pair (#505): `on-accent` is the label on an
+accent fill (Button primary, ActionControl's primary segment, the calendar *today* pip) and
+`accent-hover` the hovered fill beneath that same label — `accent-strong` is **not** a fill
+token (in the light theme it is text-grade badge ink, far too dark to sit under the label).
+Both accent families (gold awake / moon paused) hold ≥ 4.5:1 at rest *and* under hover in
+both themes; the light theme forces a near-black label on gold but a **white** one on the
+paused moon fill — a mid-tone that neither near-black (4.0:1) nor the paper canvas (4.2:1)
+can clear. `src/test/contrast.test.ts` parses the CSS and enforces exactly this, plus the
 `faint < dim < text` quietness hierarchy — change a token and the suite tells you whether it
 still complies. Two consequences worth knowing: the light theme's muted pair is deliberately
 compressed (paper backgrounds leave little luminance room under the AA floor), and the light
@@ -97,6 +104,12 @@ registered in the **capture phase** with `stopPropagation`, so a Confirm stacked
 open Sheet (e.g. delete-session over the sessions sheet) closes alone instead of taking the
 sheet with it.
 
+`useModalFocus` is **exported** for the hand-rolled `role="dialog"` overlays that live
+outside the kit: the calendar archetype's **EventDetail** adopted it (#512), so Sheet,
+Confirm, and the event detail all honor the one keyboard contract. Any new dialog must
+either build on `Sheet`/`Confirm` or wire this hook — `SuggestionReviewModal` is the known
+remaining hand-rolled exception.
+
 ### Toasts & confirmations (#488)
 
 Native browser dialogs are **banned** in the shell — an ESLint
@@ -104,9 +117,8 @@ Native browser dialogs are **banned** in the shell — an ESLint
 `window.alert`/`window.confirm` at lint time. In their place:
 
 - **Toasts** (`src/stores/toasts.ts` + `src/components/Toaster.tsx`): a zustand-driven
-  stack rendered once in the shell — bottom-anchored above the phone tab bar, bottom-right
-  on wide screens, themed via the `--ep-*` tokens, above the Confirm layer (`z-70`) so a
-  failure raised from a dialog action is never hidden. Any code path raises one
+  stack rendered once in the shell as flow children of the **CornerStack** (below), themed
+  via the `--ep-*` tokens. Any code path raises one
   imperatively — `toast.error(msg)` / `toast.info(msg)` — no hook needed, so a mutation's
   `onError` can call it directly. Each card is a `role="status"` live region (polite
   announcement), closable by hand, auto-dismissed on a per-tone clock (errors 8 s, info
@@ -114,6 +126,16 @@ Native browser dialogs are **banned** in the shell — an ESLint
 - **Confirmations** route through the shared `<Confirm>` primitive (`src/components/ui.tsx`)
   with `danger` styling for destructive actions — the editor's delete-file / delete-folder /
   restore-version prompts hold the pending action in state until the dialog resolves it.
+
+**The corner region — `CornerStack` (#510).** Every bottom-corner transient — the toast
+cards, the *new version ready* update prompt, the model **download tray** — renders as a
+flow child of one positioned column (`src/components/CornerStack.tsx`): bottom-anchored
+above the phone tab bar, bottom-right on wide screens, above the Confirm layer (`z-70`) so
+a failure raised from a dialog action is never hidden. Corner surfaces must never pin their
+own `fixed` box — independent fixed boxes at the same coordinates *occlude* (z-index picks
+a winner and the rest sit invisible underneath) rather than stack; as column children, a
+toast, the update prompt, and a download pill all show at once. Add any future corner
+surface as a `CornerStack` child, never as a new `fixed` element.
 
 ### Models — per-model rows (#328)
 
@@ -274,7 +296,12 @@ over the chat column shows a themed **"Drop to attach"** hint (a depth counter k
 from flickering across child boundaries; non-file drags never trigger it) and uploads on
 drop. In-flight uploads render as spinner pills (`PendingAttachmentPill`) beside the real
 ones; failures surface as an error toast carrying the server's 413/415 size/type message,
-so the limit messaging stays single-sourced with the picker's.
+so the limit messaging stays single-sourced with the picker's. While a **modal overlay** is
+open (a Sheet, a Confirm, the review window — anything `aria-modal`), the drop surface is
+**inert** (#511): a backdrop blocks clicks but not native drag events, so a drag used to pop
+the hint and upload *underneath* the layer the user was looking at. Suppression is the
+least-surprise call; the drop is still swallowed (never handed back to the browser, which
+would navigate away to the file) and the drag cursor reads *not-allowed* while suppressed.
 
 ### Reviewing suggested changes (#KB-refactor, ADR-0033)
 
@@ -381,7 +408,8 @@ service worker so streams always hit the network.
 
 The shared primitive kit is one file — `src/components/ui.tsx` (`Button`, `Badge`, `Card`,
 the text fields `TextInput` / `NumberInput` / `TextArea`, the styled `Select`, `Switch`,
-`Sheet`, `Confirm`, `Tooltip`). **Every form control routes through these**, so none falls
+`Sheet`, `Confirm`, `Tooltip`, and the exported `useModalFocus` hook — the modal keyboard
+contract any hand-rolled dialog adopts, #512). **Every form control routes through these**, so none falls
 back to the browser-default (white-bordered) control: `TextInput` / `NumberInput` / `Select`
 all carry the one themed look — an `--color-edge` border on `--color-surface-2`, with `min-w-0`
 so a native date/`datetime-local` picker or a select can't overflow a narrow mobile sheet

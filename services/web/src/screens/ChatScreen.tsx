@@ -1000,14 +1000,23 @@ export function ChatScreen() {
   // Only real file drags count — a text selection or an in-app drag must neither show
   // the overlay nor swallow the drop.
   const isFileDrag = (e: DragEvent<HTMLDivElement>) => e.dataTransfer.types.includes("Files");
+  // Suppress-under-overlay (#511): a Sheet's backdrop blocks clicks but not native drag
+  // events, so a drag used to pop the hint and upload *underneath* the layer the user
+  // was looking at. While any aria-modal overlay is open, the drop surface is inert.
+  // DOM-checked rather than lifted state so overlays this screen doesn't own (the
+  // model sheet, a Confirm, a module dialog) count too.
+  const overlayOpen = () => document.querySelector('[aria-modal="true"]') != null;
   const onDragEnter = (e: DragEvent<HTMLDivElement>) => {
-    if (!isFileDrag(e)) return;
+    if (!isFileDrag(e) || overlayOpen()) return;
     dragDepth.current += 1;
     setDragActive(true);
   };
   const onDragOver = (e: DragEvent<HTMLDivElement>) => {
     if (!isFileDrag(e)) return;
-    e.preventDefault(); // required — without it the browser navigates to the file on drop
+    // Always claim the drop target — otherwise the browser navigates to the file on
+    // drop. Suppression is enforced in onDrop; the cursor just signals it here.
+    e.preventDefault();
+    if (overlayOpen()) e.dataTransfer.dropEffect = "none";
   };
   const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
     if (!isFileDrag(e)) return;
@@ -1016,9 +1025,10 @@ export function ChatScreen() {
   };
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     if (!isFileDrag(e)) return;
-    e.preventDefault();
+    e.preventDefault(); // swallow it even when suppressed — never let the browser open the file
     dragDepth.current = 0;
     setDragActive(false);
+    if (overlayOpen()) return; // #511: no upload beneath an open overlay
     uploadFiles(Array.from(e.dataTransfer.files));
   };
 

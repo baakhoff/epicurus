@@ -20,10 +20,10 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { isExternalHref } from "@/components/CardLink";
-import { EmptyState, Spinner, cn } from "@/components/ui";
+import { EmptyState, Spinner, cn, useModalFocus } from "@/components/ui";
 import { api } from "@/lib/api";
 import {
   CalendarData,
@@ -578,7 +578,7 @@ function MonthView({
                   className={cn(
                     "flex size-5 items-center justify-center rounded-full text-xs",
                     today_
-                      ? "bg-accent font-medium text-canvas"
+                      ? "bg-accent font-medium text-on-accent"
                       : inMonth
                         ? "text-ink-dim"
                         : "text-ink-faint",
@@ -667,7 +667,7 @@ function WeekView({
               <div
                 className={cn(
                   "mx-auto mt-0.5 flex size-6 items-center justify-center rounded-full text-sm",
-                  today_ ? "bg-accent font-medium text-canvas" : "text-ink",
+                  today_ ? "bg-accent font-medium text-on-accent" : "text-ink",
                 )}
               >
                 {day.getDate()}
@@ -819,6 +819,13 @@ function EventDetail({
   pageId: string;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // The modal focus contract (#512): the same machinery as Sheet/Confirm — focus moves
+  // into the dialog on open, Tab wraps inside it, and the chip that opened it regains
+  // focus when the overlay unmounts. `open` is literally true: the component only
+  // mounts while an event is selected, so mount/unmount are the open/close edges.
+  useModalFocus(dialogRef, true);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -829,11 +836,13 @@ function EventDetail({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/40" />
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label={ev.title}
         onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-md rounded-(--radius-card) border border-edge bg-surface p-5 shadow-(--ep-shadow)"
+        className="relative w-full max-w-md rounded-(--radius-card) border border-edge bg-surface p-5 outline-none shadow-(--ep-shadow)"
       >
         <button
           aria-label="Close"

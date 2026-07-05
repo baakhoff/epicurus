@@ -27,7 +27,7 @@ type ButtonVariant = "primary" | "ghost" | "outline" | "danger";
 
 const buttonStyles: Record<ButtonVariant, string> = {
   primary:
-    "bg-accent text-canvas font-medium hover:bg-accent-strong disabled:opacity-50",
+    "bg-accent text-on-accent font-medium hover:bg-accent-hover disabled:opacity-50",
   ghost: "text-ink-dim hover:text-ink hover:bg-surface-2",
   outline:
     "border border-edge-strong text-ink hover:border-accent hover:text-accent-strong",
@@ -225,7 +225,7 @@ export function Switch({
         "relative inline-block h-6 w-11 shrink-0 cursor-pointer rounded-full",
         "border-2 border-transparent transition-colors",
         "disabled:cursor-not-allowed disabled:opacity-50",
-        checked ? "bg-accent hover:bg-accent-strong" : "bg-edge-strong hover:bg-ink-faint",
+        checked ? "bg-accent hover:bg-accent-hover" : "bg-edge-strong hover:bg-ink-faint",
       )}
     >
       <span
@@ -261,8 +261,10 @@ const FOCUSABLE =
  * stealing from a search/rename field would pop the phone keyboard shut). While open,
  * Tab/Shift+Tab wrap inside the dialog. On close, hand focus back to the element that
  * had it at open. Hand-rolled over querySelectorAll — the kit stays dependency-free.
+ * Exported for the hand-rolled `role="dialog"` overlays living outside this kit
+ * (CalendarView's EventDetail, #512) — every modal in the app honors one contract.
  */
-function useModalFocus(
+export function useModalFocus(
   container: RefObject<HTMLDivElement | null>,
   open: boolean,
   initialFocus?: RefObject<HTMLElement | null>,

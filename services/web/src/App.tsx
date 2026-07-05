@@ -4,6 +4,7 @@ import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router
 import { useRegisterSW } from "virtual:pwa-register/react";
 
 import { SURFACES, modulePageNavs, type ModulePageNav } from "@/app/registry";
+import { CornerStack } from "@/components/CornerStack";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
 import { PanelHost } from "@/components/Panel";
@@ -114,14 +115,13 @@ function UpdateToast() {
     updateServiceWorker,
   } = useRegisterSW();
   if (!needRefresh) return null;
+  // A flow child of the shell's CornerStack (#510) — no fixed pinning of its own.
   return (
-    <div className="fixed inset-x-4 bottom-20 z-50 sm:bottom-6 sm:left-auto sm:right-6 sm:w-80">
-      <div className="flex items-center justify-between gap-3 rounded-(--radius-card) border border-edge bg-surface p-3 shadow-(--ep-shadow)">
-        <p className="text-sm text-ink-dim">A new epicurus is ready.</p>
-        <Button variant="primary" onClick={() => updateServiceWorker(true)}>
-          Refresh
-        </Button>
-      </div>
+    <div className="pointer-events-auto flex items-center justify-between gap-3 rounded-(--radius-card) border border-edge bg-surface p-3 shadow-(--ep-shadow)">
+      <p className="text-sm text-ink-dim">A new epicurus is ready.</p>
+      <Button variant="primary" onClick={() => updateServiceWorker(true)}>
+        Refresh
+      </Button>
     </div>
   );
 }
@@ -133,8 +133,9 @@ function DownloadTray() {
   const pulls = Object.values(active);
   // The Models screen renders its own detailed progress.
   if (pulls.length === 0 || location.pathname === "/models") return null;
+  // A flow child of the shell's CornerStack (#510); the pills wrap inside its column.
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-20 z-40 flex justify-center sm:bottom-6">
+    <div className="flex flex-wrap justify-center gap-2">
       {pulls.map((pull) => {
         const pct =
           pull.total && pull.completed != null
@@ -239,9 +240,13 @@ export function Shell() {
 
       <PanelHost />
 
-      <DownloadTray />
-      <UpdateToast />
-      <Toaster />
+      {/* Every corner-anchored transient surface stacks in ONE positioned column —
+          simultaneity instead of z-index occlusion (#510). */}
+      <CornerStack>
+        <DownloadTray />
+        <UpdateToast />
+        <Toaster />
+      </CornerStack>
     </div>
   );
 }

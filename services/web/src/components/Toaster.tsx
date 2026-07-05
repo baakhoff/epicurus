@@ -1,9 +1,10 @@
 /**
- * The shell's toast stack (#488) — bottom-anchored cards in the UpdateToast idiom:
- * above the phone tab bar, bottom-right on wide screens, themed via the --ep-* tokens.
- * Each card is a `role="status"` live region (implicit polite announcement) with a
- * manual close; errors linger longer than info before auto-dismissing. Sits above the
- * Confirm layer (z-60) so a failure raised from a dialog action is never hidden by it.
+ * The shell's toast stack (#488) — cards in the UpdateToast idiom, themed via the
+ * --ep-* tokens. Each card is a `role="status"` live region (implicit polite
+ * announcement) with a manual close; errors linger longer than info before
+ * auto-dismissing. The cards render as flow children of the shell's CornerStack
+ * (#510) — the region owns the corner and its above-Confirm z order, so no fixed
+ * pinning here.
  */
 import { useEffect } from "react";
 import { CircleAlert, Info, X } from "lucide-react";
@@ -49,10 +50,10 @@ function ToastCard({ toast }: { toast: Toast }) {
 export function Toaster() {
   const toasts = useToasts((s) => s.toasts);
   return (
-    <div className="pointer-events-none fixed inset-x-4 bottom-20 z-70 flex flex-col gap-2 sm:inset-x-auto sm:bottom-6 sm:right-6 sm:w-80">
+    <>
       {toasts.map((t) => (
         <ToastCard key={t.id} toast={t} />
       ))}
-    </div>
+    </>
   );
 }

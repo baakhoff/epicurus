@@ -846,7 +846,7 @@ export function ChatScreen() {
   // The model this chat will actually use (the per-chat choice, else the core default). If it's
   // a local one, check whether it can call tools so we can warn that it's chat-only.
   const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
-  const effectiveIsLocal = Boolean(effectiveModel) && !effectiveModel!.includes("/");
+  const effectiveIsLocal = Boolean(effectiveModel) && !isHostedModelId(effectiveModel!);
   const modelDetails = useQuery({
     queryKey: ["modelDetails", effectiveModel],
     queryFn: () => api.modelDetails(effectiveModel!),

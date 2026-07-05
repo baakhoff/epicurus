@@ -14,6 +14,26 @@ images to GHCR.
 
 ### Added
 
+- **Web: offline / backend-unreachable banner** (#494) — the PWA now says when the backend can't
+  be reached instead of failing silently. A transport-level detector (`epFetch`, wrapping every API
+  fetch site) marks the core unreachable on network errors and 502/504 — 503 is deliberately
+  excluded (a paused house is not an outage) — and any healthy response clears it. PowerOrb's
+  existing 15 s power poll doubles as the heartbeat, so there is no new polling (and none while the
+  tab is hidden). A moonlight banner appears (offline wording wins when the device itself is
+  offline), the composer keeps the draft but gates Send, and recovery refetches vitals and
+  invalidates queries once per outage. `web` 0.77.0→0.78.0.
+
+- **Web: AA accent fills, one notification corner, drop gating, EventDetail focus**
+  (#505, #510, #511, #512) — four overlay-polish fixes in one pass. A new
+  `--ep-on-accent`/`--ep-accent-hover` token pair gives every accent-filled control an AA-passing
+  label and hover fill in both themes and both power states, asserted by `contrast.test.ts` against
+  the live CSS (the light "paused" label is white — the issue's ink estimate computed to 4.25:1).
+  Toaster, UpdateToast, and DownloadTray now stack in one fixed `CornerStack` column instead of
+  overlapping (rule: never add a new fixed corner element). Drag-drop attach is suppressed while
+  any `aria-modal` overlay is open — `dragover` still `preventDefault`s so the browser can't
+  navigate away. And the calendar's EventDetail overlay adopts the shared `useModalFocus` trap.
+  `web` 0.76.0→0.77.0.
+
 - **Recurring tasks + a friendly repeat picker** (#471, ADR-0082) — tasks can now **repeat**, on
   both providers, even though the Google Tasks API has **no recurrence field** (repeat is UI-only).
   A task carries an optional RRULE; **completing it materializes the next instance** with the next

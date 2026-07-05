@@ -3,6 +3,7 @@
  * chat / model pulls stream from POST endpoints. The GET form is used to *re-attach*
  * to an in-flight turn after a disconnect (#376).
  */
+import { epFetch } from "@/lib/http";
 
 export interface SseMessage {
   event: string;
@@ -41,7 +42,7 @@ export async function* sseRequest(path: string, init: SseInit = {}): AsyncGenera
   const method = init.method ?? "POST";
   const headers: Record<string, string> = { Accept: "text/event-stream" };
   if (method === "POST") headers["Content-Type"] = "application/json";
-  const response = await fetch(path, {
+  const response = await epFetch(path, {
     method,
     headers,
     body: method === "POST" ? JSON.stringify(init.body) : undefined,

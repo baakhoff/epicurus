@@ -21,6 +21,7 @@ import {
   Square,
   SendHorizonal,
   Trash2,
+  WifiOff,
   Wrench,
 } from "lucide-react";
 import {
@@ -78,6 +79,7 @@ import {
 } from "@/lib/format";
 import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
 import { useChat, type ActivityItem } from "@/stores/chat";
+import { useConnection } from "@/stores/connection";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
 import { toast } from "@/stores/toasts";
@@ -776,6 +778,10 @@ export function ChatScreen() {
   const queryClient = useQueryClient();
   const chat = useChat();
   const model = usePrefs((s) => s.model);
+  // Offline / core-unreachable (#494): the shell banner explains which; here the composer
+  // keeps the draft (it already persists) and disables Send instead of letting the message
+  // fail into an error card.
+  const connectionLost = useConnection((s) => s.coreDown || !s.online);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   // Paste/drop uploads in flight (#489): rendered as spinner pills until the server
@@ -891,7 +897,8 @@ export function ChatScreen() {
 
   const send = () => {
     const text = chat.draft.trim();
-    if (!text || chat.streaming) return;
+    // The connection gate also covers Enter-to-send, not just the disabled button (#494).
+    if (!text || chat.streaming || connectionLost) return;
     const sent = attachments;
     setAttachments([]); // chat.send clears the draft itself
     pin();
@@ -1266,6 +1273,12 @@ export function ChatScreen() {
 
       {/* composer */}
       <div className="border-t border-edge px-4 py-3 pb-safe">
+        {connectionLost && (
+          <div className="mx-auto mb-2 flex max-w-2xl items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
+            <WifiOff size={12} className="shrink-0 text-ink-faint" />
+            <span>can't send right now — your draft is kept until epicurus is reachable.</span>
+          </div>
+        )}
         {toolless && (
           <div className="mx-auto mb-2 flex max-w-2xl items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
             <Wrench size={12} className="shrink-0 text-ink-faint" />
@@ -1330,7 +1343,7 @@ export function ChatScreen() {
               variant="primary"
               aria-label="Send"
               onClick={send}
-              disabled={!chat.draft.trim()}
+              disabled={!chat.draft.trim() || connectionLost}
               className="h-[42px]"
             >
               <SendHorizonal size={16} />

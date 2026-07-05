@@ -29,6 +29,7 @@ from epicurus_core import (
     HoverCardDetail,
     PageSpec,
     UiSection,
+    capped_listing,
     get_logger,
     tool_envelope,
 )
@@ -149,7 +150,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.15.0",
+        version="0.15.1",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -212,7 +213,10 @@ def build_module(
             return tool_envelope("No open tasks.", [])
         refs = [task_entity_ref(t) for t in tasks]
         lines = [f"- {t.title}" + (f" (due {t.due[:10]})" if t.due else "") for t in tasks]
-        text = f"Found {len(tasks)} open task(s):\n" + "\n".join(lines)
+        # Capped the same way as the entity-ref id block the core appends (both default to
+        # LIST_CAP, #468) — a long backlog can otherwise inflate the text with hundreds of
+        # lines (#539, matching calendar's #522 adoption).
+        text = capped_listing(lines, noun="task")
         return tool_envelope(text, refs)
 
     @module.tool()
@@ -369,7 +373,9 @@ def build_module(
             title: New title.  Omit to leave it unchanged.
             notes: New free-text notes.  Omit to leave them unchanged; pass ``""`` to clear.
             due: New due date as an ISO date string, e.g. ``"2025-01-15"``.  Omit
-                to leave it unchanged; pass ``""`` to clear it.
+                to leave it unchanged; pass ``""`` to clear it — rejected if the task has a
+                live ``repeat`` rule and this call doesn't also touch ``repeat``, since
+                clearing the anchor would strand the recurrence (#534).
             priority: New priority (``"low"``/``"medium"``/``"high"``).  Omit to
                 leave unchanged.  Google Tasks ignores this field.
             tags: New comma-separated tags, e.g. ``"work, urgent"``.  Omit to leave
@@ -429,6 +435,22 @@ def build_module(
                         "a recurring task needs a due date to anchor the repeat rule —"
                         ' pass due="YYYY-MM-DD" in this update, or set one first'
                     )
+        elif due == "" and repeat is None:
+            # The symmetric hole (#534): repeat is untouched (None) in *this* call — not
+            # explicitly cleared too (repeat="", handled by simply not raising here) — but if
+            # the task's rule is currently live, clearing due strands it exactly like the
+            # #515 case above — the sweep skips a due-less task (`not task.due`) and a later
+            # completion's `_materialize` can't compute a next occurrence with no anchor, so
+            # the recurrence silently dies with no successor. The board form never hits this
+            # (it always resends the current repeat alongside due), so it's the direct/agent
+            # tool path that needs the guard.
+            current = await provider.get_task(tenant_id, task_id, list_id=list_id)
+            if current is not None and current.repeat:
+                raise RuntimeError(
+                    "this task has a live repeat rule — clearing its due date would strand"
+                    ' the recurrence; pass repeat="" too to end the series, or give it a'
+                    " new due date instead"
+                )
         tag_list = _parse_tags(tags) if tags is not None else None
         try:
             return await provider.update_task(

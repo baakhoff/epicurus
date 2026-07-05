@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import CONTRACT_VERSION, Collection, CollectionPrefs, CollectionRef
+from epicurus_core import CONTRACT_VERSION, LIST_CAP, Collection, CollectionPrefs, CollectionRef
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.local_provider import LocalTasksProvider
@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.15.0"
+    assert manifest.version == "0.15.1"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -106,6 +106,24 @@ async def test_tasks_add_and_list(module_fixture: object) -> None:
     assert ref.module == "tasks"
     assert ref.kind == TASK_KIND
     assert ref.title == "Deploy to prod"
+
+
+async def test_tasks_list_text_truncates_past_the_cap_but_chips_stay_full(
+    module_fixture: object,
+) -> None:
+    # A long backlog shouldn't inflate the envelope text with hundreds of lines (#539,
+    # matching calendar's #522/#468 adoption of the same shared cap) — but the chips
+    # (entity_refs) are a UI concern and stay uncapped.
+    mod = module_fixture
+    total = LIST_CAP + 5
+    for i in range(total):
+        await mod.mcp.call_tool("tasks_add", {"title": f"Task {i}"})  # type: ignore[attr-defined]
+    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == total  # chips: every task, uncapped
+    assert envelope.text.startswith(f"Found {total} task(s):")
+    assert envelope.text.count("- Task ") == LIST_CAP  # only the first LIST_CAP lines shown
+    assert "more" in envelope.text
 
 
 async def test_tasks_complete(module_fixture: object) -> None:
@@ -304,6 +322,53 @@ async def test_tasks_update_accepts_repeat_when_due_supplied_in_the_same_call(
     )
     assert updated["repeat"] == "FREQ=WEEKLY"
     assert updated["due"] == "2026-08-01"
+
+
+async def test_tasks_update_rejects_clearing_due_on_a_task_with_a_live_repeat(
+    module_fixture: object,
+) -> None:
+    """The symmetric hole to the check above (#534): clearing due with repeat left untouched
+    would strand a live rule (the sweep skips a due-less task; a later completion can't
+    compute a next occurrence with no anchor) — reject like a due-less `repeat` set does."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Recurring", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
+    )
+    with pytest.raises(Exception, match="live repeat rule"):
+        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+            "tasks_update", {"task_id": task["id"], "due": ""}
+        )
+
+
+async def test_tasks_update_clearing_due_and_repeat_together_is_allowed(
+    module_fixture: object,
+) -> None:
+    """Clearing both at once is a coherent, intentional "end the series entirely" — only an
+    *omitted* `repeat` alongside a cleared `due` is the silent-strand hazard (#534)."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "Recurring", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
+    )
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "due": "", "repeat": ""}
+    )
+    assert updated["due"] is None
+    assert updated["repeat"] is None
+
+
+async def test_tasks_update_clearing_due_on_a_non_recurring_task_is_unaffected(
+    module_fixture: object,
+) -> None:
+    """The new guard only looks at a *live* repeat rule — an ordinary due clear on a
+    one-off task is untouched (#534)."""
+    mod = module_fixture
+    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_add", {"title": "One-off", "due": "2026-07-06"}
+    )
+    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        "tasks_update", {"task_id": task["id"], "due": ""}
+    )
+    assert updated["due"] is None
 
 
 # ── Chat-attachment source helpers (ADR-0019) ─────────────────────────────────

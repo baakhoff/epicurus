@@ -18,18 +18,23 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   BookOpen,
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
   Download,
+  FileText,
   Folder,
+  Image,
+  Loader2,
   Pencil,
   Search,
+  Upload,
   X,
 } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { Button, EmptyState, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
+import { Button, EmptyState, Sheet, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
@@ -41,6 +46,18 @@ import { toast } from "@/stores/toasts";
  * surface (e.g. the Files screen). The view appends `[currentPath, activeQuery]` to
  * `queryKey` for caching and invalidates `queryKey` after a move.
  */
+/**
+ * Optional upload capability for a browser surface (#479). When present, the toolbar
+ * offers **Upload** into the current directory — behind a camera / gallery / document
+ * source menu on phones, straight to the file dialog on wide screens — and the listing
+ * accepts external file drops. `send` uploads ONE file into `dir` (the view sequences a
+ * multi-pick itself, for per-file progress) and throws `ApiError` on rejection, so a
+ * 413/415 from the #175 caps renders as that file's failure, never a raw request error.
+ */
+export interface BrowserUpload {
+  send: (file: File, dir: string) => Promise<unknown>;
+}
+
 export interface BrowserSource {
   /** Base react-query key; the view appends `[currentPath, activeQuery]`. */
   queryKey: unknown[];
@@ -50,6 +67,16 @@ export interface BrowserSource {
   readText: (path: string) => Promise<{ path: string; name: string; content: string }>;
   /** Move or rename an item (`from` → `to`). */
   move: (from: string, to: string) => Promise<unknown>;
+  /** Uploads into the surface (#479) — the core Files screen wires this; module pages don't. */
+  upload?: BrowserUpload;
+}
+
+/** One in-flight/settled upload rendered as a pill above the listing (#479). */
+interface UploadItem {
+  key: string;
+  name: string;
+  status: "sending" | "done" | "error";
+  detail?: string;
 }
 
 /** File extensions the Files browser can open inline in the split-screen reader (req 6). */
@@ -104,6 +131,14 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   const [renameValue, setRenameValue] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  // Upload state (#479): the pill strip, the phone source menu, and the hidden pickers.
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const uploadSeq = useRef(0);
+  const galleryRef = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
+  const documentRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   // Guards a folder tap against a double-fired click (touchend + click on Android
   // PWA, #428) — a real second tap on a *different* row is never this close together.
@@ -216,6 +251,77 @@ export function BrowserView({ source }: { source: BrowserSource }) {
     move.mutate({ from: selected.id, to: joinPath(parentPath(selected.id), name) });
   }
 
+  // Send picked/dropped files one at a time into the directory the user is looking at —
+  // sequential, so each pill settles on its own and a failure names its own file (#479).
+  async function sendFiles(files: File[]) {
+    const upload = source.upload;
+    if (!upload || files.length === 0) return;
+    const dir = currentPath; // capture: navigation during the batch must not redirect it
+    const batch = files.map((file) => ({
+      file,
+      key: String(++uploadSeq.current),
+    }));
+    setUploads((u) => [
+      ...u,
+      ...batch.map(({ file, key }) => ({ key, name: file.name, status: "sending" as const })),
+    ]);
+    for (const { file, key } of batch) {
+      try {
+        await upload.send(file, dir);
+        setUploads((u) => u.map((it) => (it.key === key ? { ...it, status: "done" } : it)));
+        // The new entry must show with no reload — refresh the listing per success.
+        void qc.invalidateQueries({ queryKey: source.queryKey });
+        window.setTimeout(() => {
+          setUploads((u) => u.filter((it) => !(it.key === key && it.status === "done")));
+        }, 2500);
+      } catch (err) {
+        const detail = err instanceof ApiError ? err.detail : "upload failed";
+        setUploads((u) =>
+          u.map((it) => (it.key === key ? { ...it, status: "error", detail } : it)),
+        );
+        toast.error(`Could not upload ${file.name}: ${detail}`);
+      }
+    }
+  }
+
+  function onPicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file
+    void sendFiles(files);
+  }
+
+  function requestUpload() {
+    // Phones get the source menu (photo/video, camera, document — the pickers behind it
+    // open the matching native surface); wide screens go straight to the file dialog.
+    // jsdom has no matchMedia — treat that as wide.
+    const wide =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(min-width: 640px)").matches
+        : true;
+    if (wide) documentRef.current?.click();
+    else setSourceMenuOpen(true);
+  }
+
+  // External file drops upload into the current directory (#479). Internal move-drags
+  // (dragId set) keep their own row/breadcrumb targets — those don't carry "Files".
+  const externalDropProps = source.upload
+    ? {
+        onDragOver: (e: React.DragEvent) => {
+          if (dragId || !e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy" as const;
+          setFileDragOver(true);
+        },
+        onDragLeave: () => setFileDragOver(false),
+        onDrop: (e: React.DragEvent) => {
+          if (dragId || e.defaultPrevented) return; // a row target already took it
+          e.preventDefault();
+          setFileDragOver(false);
+          void sendFiles(Array.from(e.dataTransfer.files));
+        },
+      }
+    : {};
+
   // Drop-target props shared by folder rows and breadcrumb segments.
   function dropProps(targetDir: string) {
     return {
@@ -235,8 +341,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* toolbar: breadcrumbs + optional search */}
-      {(breadcrumbs.length > 0 || data.search_enabled) && (
+      {/* toolbar: breadcrumbs + optional search + optional upload */}
+      {(breadcrumbs.length > 0 || data.search_enabled || source.upload) && (
         <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-1.5">
           {/* breadcrumbs */}
           {breadcrumbs.length > 0 && (
@@ -305,17 +411,89 @@ export function BrowserView({ source }: { source: BrowserSource }) {
               </div>
             </form>
           )}
+
+          {/* upload into the current directory (#479) */}
+          {source.upload && (
+            <>
+              <Button
+                size="sm"
+                onClick={requestUpload}
+                className={cn("shrink-0", !data.search_enabled && "ml-auto")}
+                aria-label="Upload"
+              >
+                <Upload size={13} /> Upload
+              </Button>
+              {/* eslint-disable-next-line no-restricted-syntax -- hidden file input (#394 carve-out): the gallery picker behind the Upload affordance */}
+              <input
+                ref={galleryRef}
+                type="file"
+                accept="image/*,video/*"
+                multiple
+                hidden
+                onChange={onPicked}
+                aria-label="Photo or video files"
+              />
+              {/* eslint-disable-next-line no-restricted-syntax -- hidden file input (#394 carve-out): the camera capture behind the Upload affordance */}
+              <input
+                ref={cameraRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                hidden
+                onChange={onPicked}
+                aria-label="Camera capture"
+              />
+              {/* eslint-disable-next-line no-restricted-syntax -- hidden file input (#394 carve-out): the document picker behind the Upload affordance */}
+              <input
+                ref={documentRef}
+                type="file"
+                multiple
+                hidden
+                onChange={onPicked}
+                aria-label="Document files"
+              />
+            </>
+          )}
+        </div>
+      )}
+
+      {/* per-file upload progress pills (#479) — click one to dismiss it */}
+      {uploads.length > 0 && (
+        <div className="flex shrink-0 flex-wrap gap-2 border-b border-edge px-3 py-2">
+          {uploads.map((u) => (
+            <button
+              key={u.key}
+              onClick={() => setUploads((prev) => prev.filter((it) => it.key !== u.key))}
+              title={u.detail ?? u.name}
+              className={cn(
+                "flex items-center gap-1.5 rounded-full border border-edge bg-surface px-3 py-1 text-xs",
+                u.status === "error" ? "text-danger" : "text-ink-dim",
+              )}
+            >
+              {u.status === "sending" && <Loader2 size={12} className="animate-spin" />}
+              {u.status === "done" && <Check size={12} className="text-ok" />}
+              {u.status === "error" && <X size={12} />}
+              <span className="max-w-40 truncate">{u.name}</span>
+              {u.status === "error" && u.detail && (
+                <span className="max-w-56 truncate">— {u.detail}</span>
+              )}
+            </button>
+          ))}
         </div>
       )}
 
       {/* two-pane body */}
       <div className="grid min-h-0 flex-1 sm:grid-cols-[minmax(0,20rem)_1fr]">
-        {/* list pane — hidden on phone once an item is open */}
+        {/* list pane — hidden on phone once an item is open; accepts external file
+            drops as uploads into the current directory when the source allows (#479) */}
         <div
+          data-testid="browser-list-pane"
           className={cn(
             "min-h-0 overflow-y-auto border-edge sm:border-r",
             selected && "hidden sm:block",
+            fileDragOver && "bg-accent-dim ring-1 ring-inset ring-accent",
           )}
+          {...externalDropProps}
         >
           {data.items.length === 0 ? (
             <EmptyState quote={activeQuery ? "No matches." : "Nothing here yet."} />
@@ -465,6 +643,48 @@ export function BrowserView({ source }: { source: BrowserSource }) {
           )}
         </div>
       </div>
+
+      {/* The phone source menu (#479): pick what kind of thing first, Telegram-style —
+          each option opens the matching native surface via its hidden input. */}
+      {source.upload && (
+        <Sheet open={sourceMenuOpen} onClose={() => setSourceMenuOpen(false)} title="Upload">
+          <div className="flex flex-col gap-1">
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              onClick={() => {
+                setSourceMenuOpen(false);
+                galleryRef.current?.click();
+              }}
+            >
+              <Image size={16} /> Photo or video
+            </Button>
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              onClick={() => {
+                setSourceMenuOpen(false);
+                cameraRef.current?.click();
+              }}
+            >
+              <Camera size={16} /> Camera
+            </Button>
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              onClick={() => {
+                setSourceMenuOpen(false);
+                documentRef.current?.click();
+              }}
+            >
+              <FileText size={16} /> Document
+            </Button>
+          </div>
+          <p className="mt-3 text-xs text-ink-faint">
+            Files land in the current folder{currentPath ? ` — ${currentPath}` : ""}.
+          </p>
+        </Sheet>
+      )}
     </div>
   );
 }

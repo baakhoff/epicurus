@@ -526,6 +526,28 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ src, dst }),
     }),
+  // Upload one file into the core file space at `dir` — the Files page's upload (#479).
+  // Multipart (like uploadAttachment); a 413/415 surfaces as ApiError with the server's
+  // detail so the caller can render it per file.
+  filesUpload: async (file: File, dir: string): Promise<{ path: string; name: string }> => {
+    const form = new FormData();
+    form.append("file", file);
+    const query = dir ? `?dir=${encodeURIComponent(dir)}` : "";
+    const response = await epFetch(`/platform/v1/files/upload${query}`, {
+      method: "POST",
+      body: form,
+    });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(response.status, detail);
+    }
+    return z.object({ path: z.string(), name: z.string() }).parse(await response.json());
+  },
 
   // Upload a file to attach to a chat turn; returns its core-side handle (ADR-0019).
   // Multipart, so it bypasses the JSON `request` helper.

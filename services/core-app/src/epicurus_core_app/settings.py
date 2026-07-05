@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import field_validator
 
@@ -215,6 +216,21 @@ class CoreAppSettings(CoreSettings):
     def module_base_urls(self) -> list[str]:
         """The module base URLs parsed from ``module_urls``."""
         return [u.strip().rstrip("/") for u in self.module_urls.split(",") if u.strip()]
+
+    @property
+    def module_hostnames(self) -> list[str]:
+        """The bare module hostnames from ``module_urls`` (e.g. ``knowledge``).
+
+        By convention (ADR-0063) a module's hostname is also the top-level file-space
+        folder it owns — the Files page treats those subtrees as locked: not movable
+        from the UI and not an upload destination (#479).
+        """
+        hosts: list[str] = []
+        for base in self.module_base_urls:
+            host = urlparse(base).hostname
+            if host:
+                hosts.append(host)
+        return hosts
 
     @property
     def module_mcp_urls(self) -> list[str]:

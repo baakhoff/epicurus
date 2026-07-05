@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserView, type BrowserSource } from "@/components/archetypes/BrowserView";
+import { ApiError } from "@/lib/api";
 import { usePanel } from "@/stores/panel";
+import { useToasts } from "@/stores/toasts";
 
 vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {
@@ -190,5 +192,153 @@ describe("BrowserView", () => {
     fireEvent.drop(folder, { dataTransfer });
 
     await waitFor(() => expect(source.move).toHaveBeenCalledWith("a.md", "docs/a.md"));
+  });
+});
+
+/* ── Uploading into the surface (#479) ──────────────────────────────────────── */
+
+describe("BrowserView upload (#479)", () => {
+  const txt = (name: string) => new File(["body"], name, { type: "text/plain" });
+
+  function uploadSource(send = vi.fn().mockResolvedValue({ path: "x", name: "x" })) {
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        search_enabled: true,
+        items: [{ id: "docs", title: "docs", nav_path: "docs" }],
+      }),
+      upload: { send },
+    });
+    return { source, send };
+  }
+
+  beforeEach(() => {
+    useToasts.setState({ toasts: [] });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("offers Upload only when the source can", async () => {
+    const { source } = uploadSource();
+    const { unmount } = render(<BrowserView source={source} />, { wrapper });
+    expect(await screen.findByRole("button", { name: "Upload" })).toBeInTheDocument();
+    unmount();
+
+    render(<BrowserView source={fakeSource()} />, { wrapper });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Upload" })).toBeNull());
+  });
+
+  it("carries the issue's picker contract on the hidden inputs", async () => {
+    const { source } = uploadSource();
+    render(<BrowserView source={source} />, { wrapper });
+    await screen.findByRole("button", { name: "Upload" });
+
+    const gallery = screen.getByLabelText("Photo or video files") as HTMLInputElement;
+    expect(gallery.accept).toBe("image/*,video/*");
+    expect(gallery.multiple).toBe(true);
+
+    const camera = screen.getByLabelText("Camera capture") as HTMLInputElement;
+    expect(camera.accept).toBe("image/*");
+    expect(camera.getAttribute("capture")).toBe("environment");
+
+    const doc = screen.getByLabelText("Document files") as HTMLInputElement;
+    expect(doc.accept).toBe("");
+    expect(doc.multiple).toBe(true);
+  });
+
+  it("opens the plain file dialog directly on wide screens", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
+    const clicks = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    const { source } = uploadSource();
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
+    expect(clicks).toHaveBeenCalledTimes(1);
+    const picked = clicks.mock.instances[0] as HTMLInputElement;
+    expect(picked.getAttribute("aria-label")).toBe("Document files");
+    expect(screen.queryByRole("dialog")).toBeNull(); // no source menu on desktop
+  });
+
+  it("opens the source menu on phones; each option fires its native picker", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    const clicks = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    const { source } = uploadSource();
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
+    const sheet = await screen.findByRole("dialog", { name: "Upload" });
+    expect(sheet).toHaveTextContent("Photo or video");
+    expect(sheet).toHaveTextContent("Camera");
+    expect(sheet).toHaveTextContent("Document");
+
+    fireEvent.click(screen.getByRole("button", { name: /Camera/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull()); // menu closed
+    expect(clicks).toHaveBeenCalledTimes(1);
+    const picked = clicks.mock.instances[0] as HTMLInputElement;
+    expect(picked.getAttribute("capture")).toBe("environment");
+  });
+
+  it("uploads picked files sequentially into the current directory and refreshes", async () => {
+    const order: string[] = [];
+    const send = vi.fn(async (file: File, dir: string) => {
+      order.push(`${dir}/${file.name}`);
+      return { path: `${dir}/${file.name}`, name: file.name };
+    });
+    const { source } = uploadSource(send);
+    render(<BrowserView source={source} />, { wrapper });
+
+    // Drill into docs first — uploads land where the user is looking. The view shows a
+    // spinner mid-navigation; wait for the toolbar to come back before picking files.
+    fireEvent.click(await screen.findByText("docs"));
+    await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("docs", ""));
+    await screen.findByRole("button", { name: "Upload" });
+    const fetches = (source.fetchPage as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    fireEvent.change(screen.getByLabelText("Document files"), {
+      target: { files: [txt("a.txt"), txt("b.txt")] },
+    });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(order).toEqual(["docs/a.txt", "docs/b.txt"]);
+    // Each success invalidates the listing so the new entries appear with no reload.
+    await waitFor(() =>
+      expect(
+        (source.fetchPage as ReturnType<typeof vi.fn>).mock.calls.length,
+      ).toBeGreaterThan(fetches),
+    );
+  });
+
+  it("renders a failed file's server detail and keeps going", async () => {
+    const send = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(413, "file exceeds the 8-byte limit"))
+      .mockResolvedValueOnce({ path: "big.bin", name: "big.bin" });
+    const { source } = uploadSource(send);
+    render(<BrowserView source={source} />, { wrapper });
+    await screen.findByRole("button", { name: "Upload" });
+
+    fireEvent.change(screen.getByLabelText("Document files"), {
+      target: { files: [txt("big.bin"), txt("ok.txt")] },
+    });
+
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2)); // the failure didn't stop the batch
+    expect(await screen.findByText(/file exceeds the 8-byte limit/)).toBeInTheDocument();
+    expect(
+      useToasts.getState().toasts.some((t) => t.message.includes("big.bin")),
+    ).toBe(true);
+  });
+
+  it("uploads external file drops into the current directory", async () => {
+    const { source, send } = uploadSource();
+    render(<BrowserView source={source} />, { wrapper });
+    const pane = await screen.findByTestId("browser-list-pane");
+
+    const dropped = txt("dropped.txt");
+    fireEvent.drop(pane, {
+      dataTransfer: { types: ["Files"], files: [dropped], dropEffect: "" },
+    });
+    await waitFor(() => expect(send).toHaveBeenCalledWith(dropped, ""));
   });
 });

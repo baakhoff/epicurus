@@ -28,6 +28,7 @@ SEARCH = "/platform/v1/files/search"
 READ = "/platform/v1/files/read"
 DOWNLOAD = "/platform/v1/files/download"
 MOVE = "/platform/v1/files/move"
+UPLOAD = "/platform/v1/files/upload"
 
 
 class FakeObjects:
@@ -104,7 +105,15 @@ async def _make_client(
 
     app = FastAPI()
     app.include_router(
-        create_files_router(store, default_tenant=TENANT, index=index, objects=objects)
+        create_files_router(
+            store,
+            default_tenant=TENANT,
+            index=index,
+            objects=objects,
+            # Production locks each module's top-level folder (settings.module_hostnames);
+            # mirror that so movability and the upload guard assert the real rule (#479).
+            locked_prefixes=frozenset({"knowledge", "notes"}),
+        )
     )
     client = AsyncClient(
         transport=ASGITransport(app=app),  # type: ignore[arg-type]
@@ -128,9 +137,11 @@ async def test_page_root_merges_file_space_and_objects(tmp_path: Path, fake: Fak
     # Dirs first (file-space knowledge/notes + object uploads), then the file.
     assert names == ["knowledge", "notes", "uploads", "top.txt"]
     by_name = {it["title"]: it for it in data["items"]}
-    # File-space entries are read-only in the UI; only object entries are movable.
+    # Module subtrees and directories are read-only in the UI; object entries and
+    # operator-space files are movable (#479).
     assert by_name["knowledge"]["movable"] is False
     assert by_name["uploads"]["movable"] is True
+    assert by_name["top.txt"]["movable"] is True
     # Files carry a core download href; directories do not.
     assert by_name["top.txt"]["href"] == "/platform/v1/files/download?path=top.txt"
     assert by_name["knowledge"]["href"] is None
@@ -204,6 +215,32 @@ async def test_move_file_space_updates_index(tmp_path: Path, fake: FakeObjects) 
     assert resp.status_code == 200 and resp.json()["path"] == "knowledge/readme2.md"
     # The index is updated immediately so the moved file is findable without waiting for a rescan.
     assert await index.get(tenant=TENANT, path="knowledge/readme2.md") is not None
+
+
+async def test_upload_is_indexed_and_listed_immediately(tmp_path: Path, fake: FakeObjects) -> None:
+    client, index, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        up = await client.post(
+            UPLOAD, params={"dir": "inbox"}, files={"file": ("report.txt", b"q3", "text/plain")}
+        )
+        assert up.status_code == 200 and up.json()["path"] == "inbox/report.txt"
+        # Listed in its directory, movable (operator space), downloadable — no rescan needed.
+        page = (await client.get(PAGE, params={"path": "inbox"})).json()
+        hits = (await client.get(SEARCH, params={"q": "report"})).json()["entries"]
+    items = {it["title"]: it for it in page["items"]}
+    assert items["report.txt"]["movable"] is True
+    assert items["report.txt"]["href"] == "/platform/v1/files/download?path=inbox/report.txt"
+    assert [h["path"] for h in hits] == ["inbox/report.txt"]
+    assert await index.get(tenant=TENANT, path="inbox/report.txt") is not None
+
+
+async def test_search_marks_module_files_read_only(tmp_path: Path, fake: FakeObjects) -> None:
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        page = (await client.get(PAGE, params={"q": "readme"})).json()
+    items = {it["id"]: it for it in page["items"]}
+    # A module-owned file surfaces in search but stays read-only (#479).
+    assert items["knowledge/readme.md"]["movable"] is False
 
 
 async def test_degrades_without_object_backend(tmp_path: Path) -> None:

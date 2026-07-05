@@ -473,6 +473,10 @@ def create_app() -> FastAPI:
             default_tenant=settings.default_tenant_id,
             index=file_index,
             objects=file_objects,
+            # The Files-page upload door shares the chat-attachment caps (#175 → #479).
+            max_upload_bytes=settings.attachment_max_bytes,
+            allowed_upload_types=settings.attachment_allowed_type_list,
+            locked_prefixes=frozenset(settings.module_hostnames),
         )
     )
     app.include_router(

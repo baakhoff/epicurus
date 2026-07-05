@@ -14,6 +14,23 @@ images to GHCR.
 
 ### Added
 
+- **Files: upload from the Files page — with a mobile source menu** (#479) — the Files page
+  could browse, move, rename, and download, but nothing could be *put in* from the UI. A new
+  core endpoint (`POST /platform/v1/files/upload?dir=`) lands one file per request through the
+  FileStore seam (local-FS ↔ S3, constraint #3), tenant-scoped, **indexed immediately** so it's
+  listed and searchable with no rescan, and bounded by the **shared #175 caps** (`ATTACHMENT_MAX_BYTES`
+  → 413, `ATTACHMENT_ALLOWED_TYPES` → 415; nginx's `/platform/` 12 MiB body cap already fronts it).
+  A name collision suffixes (`photo-2.jpg`) rather than overwrites; module-owned destinations are
+  refused. The web's Files toolbar gains **Upload into the current directory**: phones get a
+  Telegram-style bottom-sheet **source menu** (Photo or video → gallery, Camera → capture,
+  Document → file manager), wide screens go straight to the file dialog, and the listing accepts
+  **external file drops**. Multi-file picks upload sequentially with per-file progress pills —
+  a rejected file pins the server's own 413/415 detail and raises a toast — and the listing
+  refreshes per success. Movability in the Files view now follows the real ownership rule:
+  **operator-space files are movable like object uploads; module-owned subtrees (the module
+  hostnames — `knowledge/…`, `notes/…`) and directories stay read-only.** `core-app`
+  0.60.0→0.61.0, `web` 0.82.0→0.83.0.
+
 - **Cmd+K command palette** (#491) — the wayfinding capstone on #480: one keyboard-first
   overlay over everything the shell already knows. Ctrl/Cmd+K toggles it on every screen
   (a "Search… ⌘K" affordance in the side rail opens it by pointer); typing fuzzy-filters

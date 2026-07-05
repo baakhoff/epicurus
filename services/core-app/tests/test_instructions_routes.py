@@ -11,7 +11,10 @@ from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
     AgentInstructionsStore,
 )
-from epicurus_core_app.agent.instructions_routes import create_instructions_router
+from epicurus_core_app.agent.instructions_routes import (
+    MAX_INSTRUCTIONS_CHARS,
+    create_instructions_router,
+)
 
 
 async def _fresh_store(default: str = DEFAULT_AGENT_INSTRUCTIONS) -> AgentInstructionsStore:
@@ -53,6 +56,25 @@ async def test_put_persists_and_flags_not_default() -> None:
     assert put.status_code == 200
     assert put.json()["is_default"] is False
     assert get.json() == {"instructions": "Be terse.", "is_default": False}
+
+
+async def test_put_over_length_is_422_and_leaves_stored_prompt_alone() -> None:
+    # The prompt leads every turn and compaction never trims it (ADR-0083) — a runaway
+    # value must be rejected at the API, not stored. At the cap is fine; one over is not.
+    store = await _fresh_store()
+    app = _app(store)
+    async with _client(app) as c:
+        await c.put("/platform/v1/agent/instructions", json={"instructions": "Be terse."})
+        at_cap = await c.put(
+            "/platform/v1/agent/instructions", json={"instructions": "x" * MAX_INSTRUCTIONS_CHARS}
+        )
+        over = await c.put(
+            "/platform/v1/agent/instructions",
+            json={"instructions": "x" * (MAX_INSTRUCTIONS_CHARS + 1)},
+        )
+    assert at_cap.status_code == 200
+    assert over.status_code == 422
+    assert await store.get_raw("local") == "x" * MAX_INSTRUCTIONS_CHARS  # the 422 stored nothing
 
 
 async def test_put_null_resets_to_default() -> None:

@@ -164,8 +164,10 @@ of every turn (chat and headless bridge turns alike), ahead of recalled memory a
 context, where the compaction leading-prefix rule protects it from being trimmed. `GET` returns
 `{instructions, is_default}`: the effective prompt (the stored value, else the shipped default)
 and whether it is the default (so the editor can offer *Reset to default*). `PUT {instructions}`
-sets it; a `null`/blank body **resets** to the default. Both take an optional `tenant_id`.
-Resolved per turn, so an edit takes effect on the next message with no restart. Edited in the web
+sets it; a `null`/blank body **resets** to the default, and a prompt over **32,000 characters**
+is rejected with a `422` (the prompt leads every turn and is never compacted away, so a runaway
+value must not be storable). Both take an optional `tenant_id`. Resolved per turn, so an edit
+takes effect on the next message with no restart. Edited in the web
 **Settings → Assistant instructions** card.
 
 ---

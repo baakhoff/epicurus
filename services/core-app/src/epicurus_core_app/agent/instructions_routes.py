@@ -7,12 +7,18 @@ and injected as the first system message of every agent turn. Mirrors the timezo
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
     AgentInstructionsStore,
 )
+
+# Hard server-side bound on the stored prompt (the Settings editor soft-warns at 4,000
+# chars; this is the platform-API backstop). The prompt is injected ahead of every turn
+# and the compaction leading-prefix rule never trims it (ADR-0083), so a runaway value —
+# a stray paste — would crowd out or garble every turn until corrected.
+MAX_INSTRUCTIONS_CHARS = 32_000
 
 
 class InstructionsResponse(BaseModel):
@@ -25,9 +31,12 @@ class InstructionsResponse(BaseModel):
 
 
 class SetInstructionsRequest(BaseModel):
-    """Body for ``PUT /platform/v1/agent/instructions``. ``null``/blank resets to the default."""
+    """Body for ``PUT /platform/v1/agent/instructions``. ``null``/blank resets to the default.
 
-    instructions: str | None
+    Over-long prompts are rejected with a 422 (``MAX_INSTRUCTIONS_CHARS``).
+    """
+
+    instructions: str | None = Field(max_length=MAX_INSTRUCTIONS_CHARS)
 
 
 def create_instructions_router(

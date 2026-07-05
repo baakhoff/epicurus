@@ -92,6 +92,7 @@ class TasksRouter:
         if list_id is not None:
             target, ref = self._resolve_collection(list_id, prefs)
             tasks = await target.list_tasks(tenant_id, list_id=ref.collection or None, scope=scope)
+            tasks = await self._sweep_overdue(tenant_id, target, ref, tasks)
             titles = await self._title_map(tenant_id, [ref])
             return self._stamp(tasks, ref=ref, title=titles.get((ref.account, ref.collection)))
         targets = prefs.enabled or [_LOCAL_REF]
@@ -113,6 +114,7 @@ class TasksRouter:
                     error=str(exc),
                 )
                 continue
+            tasks = await self._sweep_overdue(tenant_id, provider, ref, tasks)
             out.extend(self._stamp(tasks, ref=ref, title=titles.get((ref.account, ref.collection))))
         out.sort(key=_sort_key)
         return out
@@ -264,48 +266,148 @@ class TasksRouter:
     ) -> Task | None:
         """Create the next instance of a just-completed recurring task (ADR-0082).
 
-        No-op for a one-off task (no ``repeat``). Computes the next due date from the rule; if
-        the series is exhausted (a ``COUNT``/``UNTIL`` rule yields no later occurrence) or the
-        completed task had no due date to anchor, nothing is created. The new instance carries
-        the rule and content forward, opens fresh, and lands in the **same** list. Either way
-        the rule is **retired on the completed instance** so re-completing it can't double-fire
-        and an exhausted series stops cleanly (the recurrence lives on exactly one open task).
-
-        Provider-agnostic: it only reads ``done.repeat`` and calls the seam, so local and
-        Google materialize identically — each having already persisted/returned the rule its
-        own way. Returns the new instance, or ``None`` when none was created.
+        No-op for a one-off task (no ``repeat``). The actual "compute due, spawn a successor,
+        retire the rule" mechanics are shared with the overdue sweep (#515) — see
+        :meth:`_materialize`.
         """
         if not done.repeat:
             return None
+        created, _retired = await self._materialize(
+            tenant_id, provider, coll=ref.collection or None, anchor=done
+        )
+        return created
+
+    async def _sweep_overdue(
+        self, tenant_id: str, provider: TasksProvider, ref: CollectionRef, tasks: list[Task]
+    ) -> list[Task]:
+        """Materialize a fresh instance for any open, overdue recurring task in *tasks* (#515).
+
+        On-complete materialization (:meth:`_materialize_next`) is the only trigger otherwise,
+        so a recurring task nobody ever completes just sits overdue forever. This runs lazily
+        on every read instead of a periodic job — simpler (no scheduler/lifespan wiring to
+        add/shut down), and reads (the board, ``tasks_list``) are frequent enough that staleness
+        is bounded to "until the next read". Naturally idempotent: materializing retires the
+        swept task's rule via :meth:`_materialize`, so it is never swept twice.
+
+        Judgment call (flagged, easy to change): the overdue task itself is left exactly as it
+        is — still open, still overdue — only its *recurrence* moves on to a fresh successor.
+        This mirrors the skip-missed policy already governing a *late completion*: the series
+        advances regardless of lateness, but unlike completing, a sweep never marks a task done
+        on the operator's behalf — whether to still do the overdue one (or delete it) stays
+        their call. Returns *tasks* with any newly materialized successors appended, and any
+        swept task's ``repeat`` reflected as cleared, so this same read is accurate rather than
+        waiting for the next one to catch up.
+        """
+        today = self._now()
         coll = ref.collection or None
+        out: list[Task] = []
+        fresh: list[Task] = []
+        for task in tasks:
+            if task.completed or not task.repeat or not task.due or task.due[:10] >= today:
+                out.append(task)
+                continue
+            created, retired = await self._materialize(tenant_id, provider, coll=coll, anchor=task)
+            # Only reflect the clear in-memory if the retire write actually landed — if it
+            # didn't (logged in `_retire_rule`), this read still truthfully shows the live rule.
+            out.append(task.model_copy(update={"repeat": None}) if retired else task)
+            if created is not None:
+                fresh.append(created)
+        return [*out, *fresh]
+
+    async def _materialize(
+        self, tenant_id: str, provider: TasksProvider, *, coll: str | None, anchor: Task
+    ) -> tuple[Task | None, bool]:
+        """Spawn *anchor*'s next occurrence and retire its rule — shared core (#515).
+
+        Used by both on-complete materialization and the overdue sweep: either way, once
+        *anchor* has fired (completed or swept), its rule must move to the new successor so
+        *anchor* itself is never materialized again — that is what makes both callers
+        double-fire-safe. Computes the next due date from the rule; if the series is exhausted
+        (a ``COUNT``/``UNTIL`` rule yields no later occurrence) or the computation itself fails,
+        nothing is created — a genuine parse issue leaves the rule in place so it can be
+        retried rather than silently dropping the recurrence, and a materialization failure
+        must never break the caller (a completion or a read). Returns ``(created, retired)``:
+        the new instance (or ``None``), and whether the source's rule was actually cleared.
+        """
+        if not anchor.repeat:
+            # Both callers pre-filter to repeating tasks (_materialize_next's early return,
+            # the sweep's skip) — this guard keeps that invariant, and the `str` narrowing
+            # for `next_due`, inside the one function that relies on it.
+            return None, False
         try:
-            upcoming = next_due(done.due, done.repeat, today=self._now())
+            upcoming = next_due(anchor.due, anchor.repeat, today=self._now())
         except Exception as exc:
-            # A stored rule is validated at write time, so this is defensive: leave the rule in
-            # place (don't retire) so a genuine parse issue can be retried, and never let a
-            # materialization failure break the completion itself.
             log.warning(
                 "recurring task: could not compute next due; not materializing",
-                task_id=done.id,
+                task_id=anchor.id,
                 error=str(exc),
             )
-            return None
-        created: Task | None = None
-        if upcoming is not None:
+            return None, False
+        if upcoming is None:
+            # Series exhausted (COUNT/UNTIL) — still retire so the spent rule isn't
+            # re-evaluated (or re-swept) again.
+            retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
+            return None, retired
+        try:
             created = await provider.add_task(
                 tenant_id,
-                done.title,
-                notes=done.notes,
+                anchor.title,
+                notes=anchor.notes,
                 due=upcoming,
-                priority=done.priority,
-                tags=done.tags,
-                repeat=done.repeat,
+                priority=anchor.priority,
+                tags=anchor.tags,
+                repeat=anchor.repeat,
                 list_id=coll,
             )
-        # Retire the rule on the completed instance (add-before-retire, like a move, so a
-        # failure never loses the recurrence). "" clears it on both providers.
-        await provider.update_task(tenant_id, done.id, repeat="", list_id=coll)
-        return created
+        except Exception as exc:
+            # Same principle as the next_due failure above: leave the rule in place so this
+            # is retried on the next completion/sweep rather than silently losing it (#515).
+            log.warning(
+                "recurring task: could not create the next instance; not retiring the rule",
+                task_id=anchor.id,
+                error=str(exc),
+            )
+            return None, False
+        # Retire the rule on the source (add-before-retire, like a list move, so a failure
+        # here never loses the recurrence outright — worst case is a residual live rule, not
+        # a silently dropped one). "" clears it on both providers.
+        retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
+        return created, retired
+
+    async def _retire_rule(
+        self, tenant_id: str, provider: TasksProvider, task_id: str, *, coll: str | None
+    ) -> bool:
+        """Clear a materialized task's repeat rule, retrying once before giving up (#515).
+
+        This write lands *after* the successor already exists — the dangerous failure mode:
+        if it doesn't land, the rule survives on *task_id* and a later re-completion or
+        overdue sweep would spawn a duplicate successor (the exact double-fire this write
+        exists to prevent). One retry absorbs a transient blip; if it still fails, this logs
+        at error level and gives up rather than raising or looping further — a materialization
+        side-effect must never fail the caller's completion or read, and the operator can
+        always clear a stray rule by hand (an idempotent ``tasks_update(repeat="")``). Returns
+        whether the write ultimately landed, so a caller can keep its in-memory view honest.
+        """
+        try:
+            await provider.update_task(tenant_id, task_id, repeat="", list_id=coll)
+            return True
+        except Exception as exc:
+            log.warning(
+                "recurring task: retire write failed; retrying once",
+                task_id=task_id,
+                error=str(exc),
+            )
+        try:
+            await provider.update_task(tenant_id, task_id, repeat="", list_id=coll)
+            return True
+        except Exception as exc:
+            log.error(
+                "recurring task: could not retire the repeat rule after a retry — a"
+                " duplicate successor is possible on the next completion/sweep",
+                task_id=task_id,
+                error=str(exc),
+            )
+            return False
 
     async def get_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None

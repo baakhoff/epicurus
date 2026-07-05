@@ -14,6 +14,22 @@ images to GHCR.
 
 ### Added
 
+- **Tasks: overdue recurrence sweep** (#515) — a recurring task nobody ever completed used to
+  sit overdue forever (materialization was on-complete only). Every read (`tasks_list`, the
+  board) now also materializes a fresh instance for an open, overdue recurring task: the
+  overdue task itself stays open and untouched — only its rule retires, moving the recurrence
+  to a new successor (skip-missed, like a late completion). Also: a materialize failure (next-due
+  computation, successor creation, or rule retirement) is logged and never breaks the
+  completion/read that triggered it, with one retry on the retire write before giving up;
+  `tasks_update` now rejects setting `repeat` on a task with no due date (matching `tasks_add`);
+  and the shared board `SchemaForm` now sends an explicit clear for an optional field that had
+  a value and was blanked — on a task, "Does not repeat" over an existing rule actually clears
+  it now instead of being silently dropped. The **calendar** edit form deliberately ignores a
+  blanked repeat picker for now (`""` means "leave the series unchanged", the pre-existing
+  behaviour): calendar has no clear-recurrence contract yet, and passing the blank through
+  would reach Google as a bare `RRULE:` (API 400). `tasks` 0.14.0→0.15.0, `calendar`
+  0.14.1→0.14.2, `web` 0.80.0→0.80.1.
+
 - **Bound the entity-ref id block and a module's list text for large results** (#468,
   ADR-0084) — a large ref list (a wide search, RRULE-expanded calendar events over a long
   window, #443) previously echoed every ref's id into the model's context uncapped, roughly

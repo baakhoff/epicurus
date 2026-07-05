@@ -276,4 +276,28 @@ describe("SchemaForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(onSubmit).toHaveBeenCalledWith({});
   });
+
+  it("sends an explicit clear when 'Does not repeat' replaces an existing rule (#515)", () => {
+    const onSubmit = vi.fn();
+    render(<SchemaForm schema={rruleSchema} initial={{ repeat: "FREQ=WEEKLY" }} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByLabelText("Repeat"), { target: { value: "none" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // Previously this silently dropped `repeat` (indistinguishable from "leave it alone"), so
+    // an existing rule could never be cleared from the board form.
+    expect(onSubmit).toHaveBeenCalledWith({ repeat: "" });
+  });
+
+  it("sends an explicit clear for any optional field blanked after having a value, not just repeat", () => {
+    const onSubmit = vi.fn();
+    render(
+      <SchemaForm
+        schema={{ type: "object", properties: { notes: { type: "string", title: "Notes" } } }}
+        initial={{ notes: "buy milk" }}
+        onSubmit={onSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Notes" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ notes: "" });
+  });
 });

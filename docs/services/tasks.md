@@ -109,10 +109,39 @@ boundary); the board card shows a **Repeats weekly** badge and the hover-card a 
 The web form renders `repeat` as a **friendly repeat picker** (the shared `format: rrule` widget)
 rather than a raw RRULE box — the agent tool still takes a raw RRULE. The next due date uses a
 **skip-missed** policy: a task completed late rolls forward to the next *future* occurrence, not
-an already-overdue one. Google caveats: the rule is invisible in Google's own UI; a task changed
+an already-overdue one. Month-end rules follow RFC 5545: a monthly task due on the 31st **skips**
+months without a 31st (Feb, Apr, …) rather than clamping to their last day — the next occurrence
+after Jan 31 is Mar 31. Google caveats: the rule is invisible in Google's own UI; a task changed
 directly in Google is reconciled on our next refresh; deleting it in Google retires the rule (GC
-on miss). Materialization is **on-complete only** — a scheduled sweep for overdue-uncompleted
-policies is a deliberate follow-up.
+on miss).
+
+**v0.15.0** closes out the #471 follow-ups (#515):
+
+- **Overdue sweep.** Materialization was on-complete only — a recurring task nobody ever
+  completed just sat overdue forever. Every read (`tasks_list`, the board) now also
+  materializes a fresh instance for any open, overdue recurring task: the overdue task itself
+  stays open and untouched (still the operator's call whether to still do it, or delete it) —
+  only its *rule* retires, moving the recurrence to a new successor due on the next occurrence
+  (skip-missed, exactly like a late completion). Lazy and on-read by design, not a periodic
+  background job — simpler, and reads are frequent enough that staleness is bounded to "until
+  the next read."
+- **Materialize failure paths.** A failure computing the next due date, creating the successor,
+  or retiring the source's rule is logged and never breaks the completion or read that
+  triggered it — a genuine parse/write issue leaves the rule in place so it can be retried
+  rather than silently dropping the recurrence. The one dangerous case — the successor already
+  exists but retiring the source's rule fails — gets one retry before being logged at error
+  level and given up on; the residual risk (a duplicate successor on the *next*
+  completion/sweep) is accepted rather than adding an unbounded retry loop, and the operator can
+  always clear a stray rule by hand.
+- **Due-less repeat now rejects.** `tasks_add` already required a `due` to anchor a repeat rule;
+  `tasks_update` gained the same check — setting `repeat` on a task with no due (and none
+  supplied in the same call) raises instead of silently storing a rule that can never
+  materialize.
+- **Board-form clearing.** The shared `SchemaForm` (tasks and calendar) previously dropped
+  *any* blanked optional field from the submission, so "Does not repeat" (or clearing due/notes)
+  from the board's edit form could never reach the tool — indistinguishable from leaving the
+  field alone. It now sends an explicit `""` when a field that *had* a value is blanked, while a
+  field left blank throughout is still omitted.
 
 ## The contract it exposes
 

@@ -193,7 +193,10 @@ def build_module(
         Returns the tasks as entity-reference chips (ADR-0019): hover a chip for the
         task's hover-card, click it to open the task in the side panel. Each chip
         carries the task id, so you can refer to a task later without listing again.
-        The accompanying text lists each task's title and due date.
+        The accompanying text lists each task's title and due date. Reading the list
+        also runs the overdue-recurrence sweep (#515): any open repeating task whose
+        due date has passed spawns its next occurrence (the rule moves to the new
+        task) before the list is returned.
 
         Args:
             list_id: Provider-specific list identifier.  Omit to use the
@@ -378,7 +381,9 @@ def build_module(
             to_list_id: Move the task to this list.  Omit to leave it where it is; when
                 equal to its current list it's a no-op move (a normal edit).
             repeat: New RFC 5545 RRULE (e.g. ``"FREQ=WEEKLY"``).  Omit to leave unchanged;
-                pass ``""`` to remove an existing rule (#471, ADR-0082).
+                pass ``""`` to remove an existing rule (#471, ADR-0082).  Setting a rule
+                requires the task to have (or be given in the same call) a due date to
+                anchor it — otherwise the update is rejected.
 
         Returns the updated :class:`Task`.
         """

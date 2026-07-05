@@ -329,6 +329,11 @@ class TasksRouter:
         must never break the caller (a completion or a read). Returns ``(created, retired)``:
         the new instance (or ``None``), and whether the source's rule was actually cleared.
         """
+        if not anchor.repeat:
+            # Both callers pre-filter to repeating tasks (_materialize_next's early return,
+            # the sweep's skip) — this guard keeps that invariant, and the `str` narrowing
+            # for `next_due`, inside the one function that relies on it.
+            return None, False
         try:
             upcoming = next_due(anchor.due, anchor.repeat, today=self._now())
         except Exception as exc:

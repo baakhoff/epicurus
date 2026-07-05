@@ -109,7 +109,9 @@ boundary); the board card shows a **Repeats weekly** badge and the hover-card a 
 The web form renders `repeat` as a **friendly repeat picker** (the shared `format: rrule` widget)
 rather than a raw RRULE box — the agent tool still takes a raw RRULE. The next due date uses a
 **skip-missed** policy: a task completed late rolls forward to the next *future* occurrence, not
-an already-overdue one. Google caveats: the rule is invisible in Google's own UI; a task changed
+an already-overdue one. Month-end rules follow RFC 5545: a monthly task due on the 31st **skips**
+months without a 31st (Feb, Apr, …) rather than clamping to their last day — the next occurrence
+after Jan 31 is Mar 31. Google caveats: the rule is invisible in Google's own UI; a task changed
 directly in Google is reconciled on our next refresh; deleting it in Google retires the rule (GC
 on miss).
 

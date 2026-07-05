@@ -22,10 +22,13 @@ images to GHCR.
   computation, successor creation, or rule retirement) is logged and never breaks the
   completion/read that triggered it, with one retry on the retire write before giving up;
   `tasks_update` now rejects setting `repeat` on a task with no due date (matching `tasks_add`);
-  and the shared board `SchemaForm` (tasks + calendar) now sends an explicit clear for an
-  optional field that had a value and was blanked — "Does not repeat" over an existing rule
-  actually clears it now, instead of being silently dropped. `tasks` 0.14.0→0.15.0, `web`
-  0.76.0→0.76.1.
+  and the shared board `SchemaForm` now sends an explicit clear for an optional field that had
+  a value and was blanked — on a task, "Does not repeat" over an existing rule actually clears
+  it now instead of being silently dropped. The **calendar** edit form deliberately ignores a
+  blanked repeat picker for now (`""` means "leave the series unchanged", the pre-existing
+  behaviour): calendar has no clear-recurrence contract yet, and passing the blank through
+  would reach Google as a bare `RRULE:` (API 400). `tasks` 0.14.0→0.15.0, `calendar`
+  0.14.0→0.14.1, `web` 0.76.0→0.76.1.
 
 - **Recurring tasks + a friendly repeat picker** (#471, ADR-0082) — tasks can now **repeat**, on
   both providers, even though the Google Tasks API has **no recurrence field** (repeat is UI-only).

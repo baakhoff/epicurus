@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -20,6 +21,7 @@ from epicurus_core_app.agent.live_runs import (
     RunAlreadyActiveError,
     RunStreamFactory,
 )
+from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory, MemoryItem
@@ -75,6 +77,22 @@ class ResumeRequest(BaseModel):
     answer: str
 
 
+class DraftDecision(BaseModel):
+    """Body for POST /runs/{run_id}/draft — the operator's Confirm/Decline of a draft (ADR-0085).
+
+    ``send`` transmits the reviewed draft; ``decline`` sends nothing. ``reason`` is an optional
+    short note carried back to the model on Decline for steering (ignored on ``send``).
+    """
+
+    decision: Literal["send", "decline"]
+    reason: str | None = None
+
+
+# Transmit a confirmed draft via a module's ``POST /send`` → the provider message id, or raise
+# ``HTTPException`` with the module's hint (ADR-0085). Wired to ``ModuleRegistry.send_draft``.
+SendDraft = Callable[[str, dict[str, Any]], Awaitable[str]]
+
+
 class AttachmentUploaded(BaseModel):
     """The handle the composer keeps for an uploaded file (ADR-0019)."""
 
@@ -125,6 +143,8 @@ def create_agent_router(
     probe: ReadinessProbe | None = None,
     *,
     suspended: SuspendedRunStore | None = None,
+    pending_drafts: PendingDraftStore | None = None,
+    send_draft: SendDraft | None = None,
     live_runs: LiveRunRegistry | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
@@ -351,6 +371,64 @@ def create_agent_router(
             session_id=run.session_id,
             readiness_model=run.model,
             lead_readiness=False,  # a resume continues a warm turn; no warming bar needed
+        )
+
+    async def _send_confirmed_draft(run: PendingDraft) -> str:
+        """Transmit a confirmed draft and format the tool result the model sees (ADR-0085).
+
+        A module failure (e.g. a Gmail scope / rate-limit 403 relayed as a hint) is caught and
+        returned as an ``error:`` tool result rather than failing the resume — the model then tells
+        the user it could not send, and the draft is already consumed so they simply re-ask.
+        """
+        if send_draft is None:
+            return "error: sending is unavailable right now; tell the user it was not sent."
+        try:
+            message_id = await send_draft(run.module, run.draft)
+        except HTTPException as exc:
+            log.warning("confirmed draft send failed", module=run.module, detail=str(exc.detail))
+            return f"error: the message was NOT sent — {exc.detail}"
+        return f"Sent. Provider message id: {message_id}."
+
+    @router.post("/runs/{run_id}/draft")
+    async def resolve_draft(run_id: str, request: DraftDecision) -> StreamingResponse:
+        """Confirm (send) or Decline a draft paused for review (ADR-0085, #563).
+
+        Takes the pending draft (consuming it, so a double-submit can't send twice). On ``send``
+        the core transmits it via the module's ``POST /send`` and appends the outcome (``Sent.`` +
+        the provider message id, or the module's error hint) as the compose call's tool result; on
+        ``decline`` it appends a "not sent" result carrying any reason. Either way the turn
+        continues as a fresh durable run (#376) on the same SSE protocol as ``/chat/stream``.
+        Emits an ``error`` event if the draft is unknown / expired / already resolved. Confirm and
+        Decline are connection-gated client-side (#530); the ``run_id`` is the DB pause token,
+        distinct from a live run's id used for ``/runs/{id}/stream`` re-attach."""
+        run = (
+            None
+            if pending_drafts is None
+            else await pending_drafts.take(tenant=tenant, run_id=run_id)
+        )
+        if run is None:
+            detail = "this draft has expired or was already resolved"
+            return _one_off(AgentEvent(type="error", detail=detail))
+        if request.decision == "send":
+            content = await _send_confirmed_draft(run)
+        else:
+            reason = (request.reason or "").strip()
+            content = "The user declined to send this draft; it was NOT sent." + (
+                f" Their reason: {reason}" if reason else ""
+            )
+        convo = [ChatMessage.model_validate(m) for m in run.conversation]
+        convo.append(
+            ChatMessage(
+                role="tool", tool_call_id=run.pending_call_id, name=run.tool, content=content
+            )
+        )
+        return await _start_turn_response(
+            lambda: agent.run_stream(
+                [], model=run.model, session_id=run.session_id, resume_convo=convo
+            ),
+            session_id=run.session_id,
+            readiness_model=run.model,
+            lead_readiness=False,
         )
 
     @router.get("/runs/{run_id}/stream")

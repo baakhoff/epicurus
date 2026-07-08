@@ -9,15 +9,17 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core_app.agent import routes as agent_routes
 from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
 from epicurus_core_app.agent.live_runs import LiveRun, LiveRunRegistry
+from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
@@ -345,6 +347,8 @@ def _runs_app(
     registry: LiveRunRegistry,
     probe: object | None = None,
     suspended: object | None = None,
+    pending_drafts: object | None = None,
+    send_draft: object | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
@@ -355,6 +359,8 @@ def _runs_app(
             object(),  # attachment store — unused  # type: ignore[arg-type]
             probe=probe,  # type: ignore[arg-type]
             suspended=suspended,  # type: ignore[arg-type]
+            pending_drafts=pending_drafts,  # type: ignore[arg-type]
+            send_draft=send_draft,  # type: ignore[arg-type]
             live_runs=registry,
         )
     )
@@ -568,4 +574,130 @@ async def test_resume_unknown_run_emits_error() -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         resp = await client.post("/platform/v1/agent/runs/nope/resume", json={"answer": "x"})
+    assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
+
+
+# ── draft-first send Confirm / Decline (ADR-0085, #563) ───────────────────────
+
+
+class _CapturingAgent:
+    """Captures the resume_convo it is handed, then streams a one-frame done turn."""
+
+    def __init__(self) -> None:
+        self.resume_convo: list[Any] | None = None
+
+    async def run_stream(
+        self, messages: object = None, *, resume_convo: Any = None, **_kw: object
+    ) -> AsyncIterator[AgentEvent]:
+        self.resume_convo = resume_convo
+        yield AgentEvent(type="done", turn=None)
+
+
+async def _draft_run(store: PendingDraftStore) -> str:
+    return await store.save(
+        tenant="local",
+        session_id="s1",
+        model="m",
+        pending_call_id="c1",
+        tool="mail_send",
+        module="mail",
+        summary="Email to bob@x.com — Hi",
+        draft={"to": "bob@x.com", "subject": "Hi", "body": "Hello"},
+        conversation=[{"role": "user", "content": "email bob"}],
+    )
+
+
+async def test_draft_confirm_transmits_the_reviewed_draft_and_resumes() -> None:
+    store = PendingDraftStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await _draft_run(store)
+    sent: dict[str, Any] = {}
+
+    async def send_draft(module: str, draft: dict[str, Any]) -> str:
+        sent["module"] = module
+        sent["draft"] = draft
+        return "gmail-42"
+
+    agent = _CapturingAgent()
+    app = _runs_app(agent, registry=LiveRunRegistry(), pending_drafts=store, send_draft=send_draft)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/draft", json={"decision": "send"}
+        )
+    assert [event for event, _ in _parse_sse(resp.text)] == ["done"]
+    # Exactly one send, with the reviewed draft byte-for-byte.
+    assert sent == {
+        "module": "mail",
+        "draft": {"to": "bob@x.com", "subject": "Hi", "body": "Hello"},
+    }
+    # The turn resumed with the send outcome as the compose call's tool result.
+    assert agent.resume_convo is not None
+    last = agent.resume_convo[-1]
+    assert last.tool_call_id == "c1" and last.name == "mail_send"
+    assert "Sent" in (last.content or "") and "gmail-42" in (last.content or "")
+    # The suspension was consumed (a double-submit can't send twice).
+    assert await store.take(tenant="local", run_id=run_id) is None
+
+
+async def test_draft_decline_resumes_without_transmitting() -> None:
+    store = PendingDraftStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await _draft_run(store)
+    calls: list[str] = []
+
+    async def send_draft(module: str, draft: dict[str, Any]) -> str:
+        calls.append(module)  # must never be reached on a Decline
+        return "should-not-happen"
+
+    agent = _CapturingAgent()
+    app = _runs_app(agent, registry=LiveRunRegistry(), pending_drafts=store, send_draft=send_draft)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/draft",
+            json={"decision": "decline", "reason": "wrong recipient"},
+        )
+    assert [event for event, _ in _parse_sse(resp.text)] == ["done"]
+    assert calls == []  # Decline never transmits
+    assert agent.resume_convo is not None
+    content = agent.resume_convo[-1].content or ""
+    assert "declined" in content and "wrong recipient" in content
+    assert await store.take(tenant="local", run_id=run_id) is None  # consumed
+
+
+async def test_draft_confirm_send_failure_resumes_with_the_hint() -> None:
+    store = PendingDraftStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await _draft_run(store)
+
+    async def send_draft(module: str, draft: dict[str, Any]) -> str:
+        raise HTTPException(status_code=403, detail="Reconnect Google to grant send.")
+
+    agent = _CapturingAgent()
+    app = _runs_app(agent, registry=LiveRunRegistry(), pending_drafts=store, send_draft=send_draft)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/draft", json={"decision": "send"}
+        )
+    # The turn still resumes (the model relays the failure); the draft is consumed.
+    assert [event for event, _ in _parse_sse(resp.text)] == ["done"]
+    assert agent.resume_convo is not None
+    content = agent.resume_convo[-1].content or ""
+    assert content.startswith("error:") and "Reconnect Google" in content
+    assert await store.take(tenant="local", run_id=run_id) is None
+
+
+async def test_draft_unknown_run_emits_error() -> None:
+    store = PendingDraftStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    app = _runs_app(_FakeAgent(), registry=LiveRunRegistry(), pending_drafts=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/agent/runs/nope/draft", json={"decision": "send"})
     assert [event for event, _ in _parse_sse(resp.text)] == ["error"]

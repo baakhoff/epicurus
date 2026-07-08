@@ -334,6 +334,11 @@ export const AgentEvent = z.object({
   // Present on `awaiting_input` — the suspended run to resume + the question (ADR-0053).
   run_id: z.string().nullish(),
   question: z.string().nullish(),
+  // Present on `awaiting_input` for a draft-review pause (ADR-0085, #563): `"draft_review"` plus
+  // the composed `draft` to render in the split-pane for Confirm/Decline. Additive — a stale,
+  // service-worker-cached PWA ignores the new fields and keeps parsing the stream (ADR-0055).
+  awaiting_kind: z.string().nullish(),
+  draft: z.record(z.string(), z.unknown()).nullish(),
 });
 export type AgentEvent = z.infer<typeof AgentEvent>;
 
@@ -915,6 +920,18 @@ export const EmailMessage = z.object({
   actions: z.array(BoardAction).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
+
+/** A composed outbound email shown in the split-pane for Confirm/Decline (ADR-0085, #563).
+ *  The same payload the module's transmit endpoint sends, so what is reviewed is what goes out. */
+export const EmailDraft = z.object({
+  to: z.string().default(""),
+  cc: z.string().nullish(),
+  subject: z.string().default("(no subject)"),
+  body: z.string().default(""),
+  /** For a reply, the original this answers ("sender — subject") — shown as thread context. */
+  reply_to_original: z.string().nullish(),
+});
+export type EmailDraft = z.infer<typeof EmailDraft>;
 
 /** A text file's contents for the right-panel `doc-reader` view (#KB-refactor, req 6). */
 export const FileText = z.object({

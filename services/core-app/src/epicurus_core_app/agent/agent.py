@@ -15,11 +15,12 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Coroutine
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from epicurus_core import LIST_CAP, Attachment, EntityRef, ToolEnvelope, get_logger
+from epicurus_core import LIST_CAP, Attachment, DraftReview, EntityRef, ToolEnvelope, get_logger
 from epicurus_core_app.agent.activity import (
     ActivityItem,
     MessageActivity,
@@ -30,6 +31,7 @@ from epicurus_core_app.agent.activity import (
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
+from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
@@ -196,6 +198,50 @@ def _extract_entities(output: str, *, tenant_id: str | None = None) -> tuple[str
     return envelope.text + block, envelope.entity_refs
 
 
+def _parse_draft(output: str) -> DraftReview | None:
+    """A tool's output as a :class:`DraftReview`, or ``None`` if it isn't one (ADR-0085).
+
+    A *compose* tool (mail's ``mail_send`` / ``mail_reply``) returns a JSON ``DraftReview``
+    (``{kind, module, draft, …}``) to request the outbound-approval pause; the loop recognizes it
+    the way :func:`_extract_entities` recognizes a ``ToolEnvelope`` and suspends instead of feeding
+    the result back to the model. Anything else — plain text, an ``error:`` hint (a compose that
+    failed, e.g. a missing scope), a ``ToolEnvelope`` — returns ``None``, so every other tool is
+    unaffected.
+    """
+    try:
+        data = json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not (
+        isinstance(data, dict)
+        and isinstance(data.get("kind"), str)
+        and isinstance(data.get("module"), str)
+        and isinstance(data.get("draft"), dict)
+    ):
+        return None
+    try:
+        return DraftReview.model_validate(data)
+    except ValidationError:
+        return None
+
+
+@dataclass
+class _Pending:
+    """A tool call that pauses the turn — an ``ask_user`` question or a compose-tool draft.
+
+    At most one per step (the loop gates on ``pending is None``): the first suspend-requesting
+    call in a step wins and the turn suspends after its siblings run, so the conversation stays
+    valid (every tool call gets a result or is the single deferred one). ``draft`` is set for a
+    ``kind == "draft"`` pending; ``question`` for ``"ask_user"``.
+    """
+
+    call_id: str
+    kind: str  # "ask_user" | "draft"
+    tool: str
+    question: str = ""
+    draft: DraftReview | None = None
+
+
 class _RefCollector:
     """Accumulates entity references across a turn's tool calls, de-duplicated."""
 
@@ -225,7 +271,12 @@ class AgentEvent(BaseModel):
     ends a failed stream. A ``readiness`` event may *lead* the stream (warming
     progress; emitted by the route, not the loop) — see ADR-0027. ``awaiting_input``
     ends the stream when the model calls ``ask_user``: it carries the ``question`` and a
-    ``run_id`` the client posts the answer to, to resume the turn (ADR-0053).
+    ``run_id`` the client posts the answer to, to resume the turn (ADR-0053). The same
+    ``awaiting_input`` frame carries a draft-review pause (ADR-0085, #563) when ``awaiting_kind``
+    is ``"draft_review"``: it then carries the composed ``draft`` to render in the split-pane, and
+    the ``run_id`` is confirmed/declined via ``POST /runs/{run_id}/draft``. Reusing the existing
+    event type (rather than a new one) keeps a stale, service-worker-cached PWA parsing the stream
+    — every new field is additive (ADR-0055).
     """
 
     type: str  # "delta" | "tool" | "done" | "error" | "readiness" | "awaiting_input"
@@ -238,6 +289,10 @@ class AgentEvent(BaseModel):
     # awaiting_input (ask_user, ADR-0053): the question to put to the user + the run to resume.
     run_id: str | None = None
     question: str | None = None
+    # awaiting_input, draft-review flavour (ADR-0085): ``"draft_review"`` + the composed draft the
+    # shell renders in the split-pane for Confirm/Decline. Absent for an ``ask_user`` pause.
+    awaiting_kind: str | None = None
+    draft: dict[str, Any] | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -275,6 +330,7 @@ class Agent:
         recall_timeout_s: float = _DEFAULT_RECALL_TIMEOUT_S,
         prefs: LlmPrefsStore | None = None,
         suspended: SuspendedRunStore | None = None,
+        pending_drafts: PendingDraftStore | None = None,
         instructions: AgentInstructionsStore | None = None,
     ) -> None:
         self._gateway = gateway
@@ -297,6 +353,9 @@ class Agent:
         # Suspend store for ask_user pause/resume (ADR-0053). None disables pausing (the loop
         # then degrades: ask_user gets an instruction to proceed rather than suspending).
         self._suspended = suspended
+        # Pending-draft store for draft-first send Confirm/Decline (ADR-0085). None disables the
+        # pause (the loop then degrades: a compose tool is told it cannot present a draft to send).
+        self._pending_drafts = pending_drafts
         # Editable base system prompt (#497, ADR-0083). None disables it (the agent runs with no
         # base prompt, as it did before this store existed); resolved per turn in ``_assemble``.
         self._instructions = instructions
@@ -412,7 +471,7 @@ class Agent:
                         role="assistant", content=result.content, tool_calls=result.tool_calls
                     )
                 )
-                pending: tuple[str, str] | None = None  # (call_id, question) for ask_user
+                pending: _Pending | None = None  # the one turn-pausing call this step, if any
                 for call in result.tool_calls:
                     name, arguments, call_id = _parse_tool_call(call)
                     if name == ASK_USER_TOOL:
@@ -420,19 +479,22 @@ class Agent:
                         # suspend until this step's other calls have run, so every tool_call
                         # gets a result and the conversation stays valid on resume.
                         if pending is None:
-                            pending = (call_id, str(arguments.get("question") or "").strip())
+                            question = str(arguments.get("question") or "").strip()
+                            pending = _Pending(
+                                call_id=call_id, kind="ask_user", tool=name, question=question
+                            )
                             tools_used.append(name)
                             append_tool(timeline, name, "ok", _tool_detail(arguments))
                             yield AgentEvent(
-                                type="tool", tool=name, status="ok", detail=pending[1] or None
+                                type="tool", tool=name, status="ok", detail=question or None
                             )
-                        else:  # a second ask_user in one step — stub it so the convo stays valid
+                        else:  # a second pause in one step — stub it so the convo stays valid
                             convo.append(
                                 ChatMessage(
                                     role="tool",
                                     tool_call_id=call_id,
                                     name=name,
-                                    content="(answered together with the question above)",
+                                    content="(answered together with the pause above)",
                                 )
                             )
                         continue
@@ -442,6 +504,30 @@ class Agent:
                     output, is_error = await self._invoke(name, arguments, route, tenant=tenant)
                     text, found = _extract_entities(output, tenant_id=tenant)
                     refs.add(found)
+                    draft = None if is_error else _parse_draft(output)
+                    if draft is not None:
+                        # The tool composed an outbound draft for review (ADR-0085): suspend the
+                        # turn instead of feeding the envelope back to the model. Its tool result
+                        # is filled on Confirm (sent) / Decline (not sent). Only the first pause in
+                        # a step suspends; a later one is stubbed so the conversation stays valid.
+                        if pending is None:
+                            pending = _Pending(
+                                call_id=call_id, kind="draft", tool=name, draft=draft
+                            )
+                            append_tool(timeline, name, "ok", draft.summary or None)
+                            yield AgentEvent(
+                                type="tool", tool=name, status="ok", detail=draft.summary or None
+                            )
+                        else:
+                            convo.append(
+                                ChatMessage(
+                                    role="tool",
+                                    tool_call_id=call_id,
+                                    name=name,
+                                    content="(not shown — another review is pending above)",
+                                )
+                            )
+                        continue
                     status = "error" if is_error else "ok"
                     yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
                     append_tool(timeline, name, status, detail)
@@ -449,26 +535,36 @@ class Agent:
                         ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                     )
                 if pending is not None:
-                    call_id, question = pending
-                    run_id = await self._suspend(
-                        convo=convo,
-                        model=model,
-                        tenant=tenant,
-                        session_id=session_id,
-                        pending_call_id=call_id,
-                        question=question,
+                    run_id = await self._suspend_pending(
+                        pending, convo=convo, model=model, tenant=tenant, session_id=session_id
                     )
                     if run_id is not None:
-                        # Pause the turn: the client posts the answer to resume (no `done`).
-                        yield AgentEvent(type="awaiting_input", run_id=run_id, question=question)
+                        # Pause the turn (no `done`): ask_user posts an answer to /resume; a draft
+                        # is confirmed/declined via /runs/{run_id}/draft (ADR-0053/ADR-0085).
+                        if pending.kind == "draft" and pending.draft is not None:
+                            yield AgentEvent(
+                                type="awaiting_input",
+                                run_id=run_id,
+                                awaiting_kind="draft_review",
+                                draft=pending.draft.draft,
+                            )
+                        else:
+                            yield AgentEvent(
+                                type="awaiting_input", run_id=run_id, question=pending.question
+                            )
                         return
                     # No suspend store wired — degrade: give the model a result and keep going.
                     convo.append(
                         ChatMessage(
                             role="tool",
-                            tool_call_id=call_id,
-                            name=ASK_USER_TOOL,
-                            content="error: cannot pause for input; use your best assumption",
+                            tool_call_id=pending.call_id,
+                            name=pending.tool,
+                            content=(
+                                "error: cannot present a draft to send right now; tell the user you"
+                                " could not send it and to try again."
+                                if pending.kind == "draft"
+                                else "error: cannot pause for input; use your best assumption"
+                            ),
                         )
                     )
             else:  # steps exhausted — stream one final answer without tools
@@ -619,6 +715,75 @@ class Agent:
             )
         except Exception as exc:  # a failed persist must not crash the turn
             log.warning("suspend persist failed; proceeding without pause", error=str(exc))
+            return None
+
+    async def _suspend_pending(
+        self,
+        pending: _Pending,
+        *,
+        convo: list[ChatMessage],
+        model: str | None,
+        tenant: str,
+        session_id: str | None,
+    ) -> str | None:
+        """Persist a turn-pausing call to the store for its kind; return the run id (or ``None``).
+
+        Dispatches an ``ask_user`` pause to the suspended-run store (ADR-0053) and a compose-tool
+        draft to the pending-draft store (ADR-0085); ``None`` (no store wired) degrades to a
+        proceed/notice tool result at the call site.
+        """
+        if pending.kind == "draft":
+            assert pending.draft is not None
+            return await self._suspend_draft(
+                convo=convo,
+                model=model,
+                tenant=tenant,
+                session_id=session_id,
+                pending_call_id=pending.call_id,
+                tool=pending.tool,
+                draft=pending.draft,
+            )
+        return await self._suspend(
+            convo=convo,
+            model=model,
+            tenant=tenant,
+            session_id=session_id,
+            pending_call_id=pending.call_id,
+            question=pending.question,
+        )
+
+    async def _suspend_draft(
+        self,
+        *,
+        convo: list[ChatMessage],
+        model: str | None,
+        tenant: str,
+        session_id: str | None,
+        pending_call_id: str,
+        tool: str,
+        draft: DraftReview,
+    ) -> str | None:
+        """Persist the run + composed draft so a Confirm/Decline can resume it (ADR-0085).
+
+        Returns the run id, or ``None`` when no pending-draft store is wired — the caller then
+        degrades (tells the model it could not present the draft) instead of pausing.
+        """
+        if self._pending_drafts is None:
+            return None
+        try:
+            return await self._pending_drafts.save(
+                tenant=tenant,
+                session_id=session_id,
+                model=model,
+                pending_call_id=pending_call_id,
+                tool=tool,
+                module=draft.module,
+                summary=draft.summary,
+                draft=draft.draft,
+                conversation=[m.model_dump(exclude_none=True) for m in convo],
+            )
+        except Exception as exc:  # a failed persist must not crash the turn
+            log.warning("draft suspend persist failed; proceeding without pause", error=str(exc))
             return None
 
     async def _expand_attachments(
@@ -812,6 +977,19 @@ class Agent:
                 text, found = _extract_entities(output, tenant_id=call_tenant)
                 refs.add(found)
                 status = "error" if is_error else "ok"
+                if not is_error and _parse_draft(output) is not None:
+                    # A compose tool returned an outbound draft for review (ADR-0085), but this
+                    # non-streaming path (POST /chat, the messaging bridge) has no split-pane to
+                    # Confirm/Decline in — the draft can't be sent here. Tell the model honestly
+                    # rather than feeding back the raw envelope, which it would likely misreport as
+                    # "sent". The transmit path is unreachable regardless, so nothing is ever sent;
+                    # this only keeps the model from claiming otherwise.
+                    text = (
+                        "error: composed a draft, but it can't be sent from this channel — outbound"
+                        " sends need review and Confirm in the chat UI, which isn't available here."
+                        " Tell the user it was not sent."
+                    )
+                    status = "error"
                 append_tool(timeline, name, status, _tool_detail(arguments))
                 convo.append(
                     ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)

@@ -86,6 +86,42 @@ def tool_envelope(text: str, entity_refs: list[EntityRef] | None = None) -> str:
     return ToolEnvelope(text=text, entity_refs=entity_refs or []).model_dump_json()
 
 
+class DraftReview(BaseModel):
+    """An outbound artifact a module composed for the operator to approve before it is sent
+    (ADR-0085).
+
+    A module's *compose* tool (mail's ``mail_send`` / ``mail_reply``, and any future outbound
+    channel such as a Phase-4 chat bridge) returns this — via :func:`draft_review` — instead of
+    transmitting. The agent loop recognizes it the way it recognizes a :class:`ToolEnvelope`, and
+    **suspends the turn**: the shell renders ``draft`` in a review pane, and only the operator's
+    Confirm makes the core POST ``draft`` back to the module's transmit endpoint (``POST /send``).
+    The MCP surface therefore exposes *no* tool that transmits — the model can compose but can
+    never send. On Decline nothing is sent and the model is told so (with an optional reason), so
+    it can revise. The guarantee is the contract, not a prompt.
+
+    ``kind`` is the render/channel discriminator the shell switches on (``"mail"`` selects the
+    email-reader pane). ``module`` names the module whose transmit endpoint sends ``draft``.
+    ``summary`` is a one-line human/log label (e.g. ``"Email to bob@… — Re: Lunch"``). ``draft``
+    is an opaque, channel-specific dict that is **both** what the pane shows and what the transmit
+    endpoint sends, so what the operator approves is byte-for-byte what goes out.
+    """
+
+    kind: str
+    module: str
+    summary: str = ""
+    draft: dict[str, Any] = Field(default_factory=dict)
+
+
+def draft_review(*, kind: str, module: str, draft: dict[str, Any], summary: str = "") -> str:
+    """Serialize a compose tool's pending-draft result (ADR-0085) — see :class:`DraftReview`.
+
+    A module returns the result of this from a compose tool (``mail_send`` / ``mail_reply``) so
+    the core suspends the turn for the operator to Confirm/Decline, rather than sending inline.
+    """
+
+    return DraftReview(kind=kind, module=module, summary=summary, draft=draft).model_dump_json()
+
+
 # A large list-style result inflates model context two ways: a module's own envelope text
 # (one line per item) and the entity-ref id block the core appends to it (ADR-0079). Both
 # share this one default cap so they never disagree about how much of a big result was

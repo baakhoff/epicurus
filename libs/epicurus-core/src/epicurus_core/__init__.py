@@ -21,6 +21,7 @@ from epicurus_core.contracts import (
     Collection,
     CollectionPrefs,
     CollectionRef,
+    DraftReview,
     EntityRef,
     HoverCard,
     HoverCardDetail,
@@ -30,6 +31,7 @@ from epicurus_core.contracts import (
     Role,
     ToolEnvelope,
     capped_listing,
+    draft_review,
     tool_envelope,
 )
 from epicurus_core.events import Event, EventBus, EventHandler, Payload, Replier
@@ -99,6 +101,7 @@ __all__ = [
     "CollectionRef",
     "CollectionsSpec",
     "CoreSettings",
+    "DraftReview",
     "EntityRef",
     "Environment",
     "EpicurusModule",
@@ -145,6 +148,7 @@ __all__ = [
     "configure_logging",
     "create_ops_router",
     "current_tenant",
+    "draft_review",
     "get_logger",
     "get_tracer",
     "is_valid_tenant_id",

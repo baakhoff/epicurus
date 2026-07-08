@@ -94,6 +94,9 @@ class CoreAppSettings(CoreSettings):
     # How long a turn paused by `ask_user` (ADR-0053) waits for an answer before its suspended
     # run is reaped (hours). If it expires the model can simply ask again on the next turn.
     ask_user_ttl_hours: int = 24
+    # How long a draft paused for review (ADR-0085, #563) waits for the operator's Confirm/Decline
+    # before its pending-draft run is reaped (hours). If it expires the model can compose again.
+    draft_review_ttl_hours: int = 24
     # How long a *finished* in-flight run (#376) stays re-attachable in memory before it is
     # reaped (seconds). A reconnecting client within this window replays the buffered turn;
     # after it, the client falls back to the durable transcript. Pure cache — the answer is

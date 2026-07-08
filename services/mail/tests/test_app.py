@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -206,3 +207,62 @@ class TestStatus:
         resp = self._status_client(available=False).get("/status")
         assert resp.status_code == 200
         assert resp.json() == {"gmail_connected": False}
+
+
+class TestSend:
+    """POST /send transmits an operator-confirmed draft — the module's only send path (ADR-0085)."""
+
+    def _send_client(self, provider: MailProvider, bus: AsyncMock) -> TestClient:
+        with (
+            patch("epicurus_mail.app.GmailProvider", return_value=provider),
+            patch("epicurus_mail.app.EventBus.from_settings", return_value=bus),
+        ):
+            from epicurus_mail.app import create_app
+
+            app = create_app()
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_transmits_the_reviewed_draft_and_returns_id(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.transmit = AsyncMock(return_value="sent-123")
+        client = self._send_client(provider, AsyncMock())
+        resp = client.post("/send", json={"to": "bob@x.com", "subject": "Hi", "body": "Hello"})
+        assert resp.status_code == 200
+        assert resp.json() == {"id": "sent-123"}
+        # Transmitted byte-identical to what was reviewed (ADR-0085).
+        sent = provider.transmit.call_args.args[0]  # type: ignore[attr-defined]
+        assert (sent.to, sent.subject, sent.body) == ("bob@x.com", "Hi", "Hello")
+
+    def test_publishes_mail_sent(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.transmit = AsyncMock(return_value="sent-123")
+        bus = AsyncMock()
+        client = self._send_client(provider, bus)
+        client.post("/send", json={"to": "bob@x.com", "subject": "Hi", "body": "Hello"})
+        bus.publish.assert_awaited_once()
+        assert bus.publish.call_args.args[0] == "mail.sent"
+
+    def test_403_returns_reconnect_hint(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.transmit = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "403 Forbidden",
+                request=httpx.Request("POST", "http://gmail/send"),
+                response=httpx.Response(403),
+            )
+        )
+        client = self._send_client(provider, AsyncMock())
+        resp = client.post("/send", json={"to": "bob@x.com", "subject": "Hi", "body": "Hello"})
+        assert resp.status_code == 403
+        assert "Reconnect Google" in resp.json()["detail"]
+
+    def test_a_bus_failure_does_not_fail_a_completed_send(self) -> None:
+        # The mail already went out; a bus hiccup must not turn a success into a 500.
+        provider = AsyncMock(spec=MailProvider)
+        provider.transmit = AsyncMock(return_value="sent-123")
+        bus = AsyncMock()
+        bus.publish = AsyncMock(side_effect=Exception("bus down"))
+        client = self._send_client(provider, bus)
+        resp = client.post("/send", json={"to": "b@x.com", "subject": "s", "body": "b"})
+        assert resp.status_code == 200
+        assert resp.json() == {"id": "sent-123"}

@@ -16,12 +16,14 @@ from epicurus_core import (
     Collection,
     CollectionPrefs,
     CollectionRef,
+    DraftReview,
     EntityRef,
     HoverCard,
     PlatformChatResponse,
     PlatformMessage,
     ToolEnvelope,
     capped_listing,
+    draft_review,
     tool_envelope,
 )
 
@@ -93,6 +95,34 @@ def test_tool_envelope_round_trips() -> None:
     restored = ToolEnvelope.model_validate(data)
     assert restored.entity_refs[0].ref_id == "e1"
     assert restored.entity_refs[0].summary == "9am"
+
+
+# ── draft-review envelope (ADR-0085) ──────────────────────────────────────────
+
+
+def test_draft_review_types_are_exported() -> None:
+    assert {"DraftReview", "draft_review"} <= set(epicurus_core.__all__)
+
+
+def test_draft_review_round_trips() -> None:
+    serialized = draft_review(
+        kind="mail",
+        module="mail",
+        summary="Email to bob@x.com — Hi",
+        draft={"to": "bob@x.com", "subject": "Hi", "body": "Hello"},
+    )
+    data = json.loads(serialized)
+    assert data["kind"] == "mail"
+    assert data["module"] == "mail"
+    restored = DraftReview.model_validate(data)
+    assert restored.summary == "Email to bob@x.com — Hi"
+    assert restored.draft == {"to": "bob@x.com", "subject": "Hi", "body": "Hello"}
+
+
+def test_draft_review_defaults_summary_and_draft() -> None:
+    dr = DraftReview(kind="mail", module="mail")
+    assert dr.summary == ""
+    assert dr.draft == {}
 
 
 # ── capped_listing (#468) ──────────────────────────────────────────────────────

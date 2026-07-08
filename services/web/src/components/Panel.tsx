@@ -4,15 +4,26 @@
  * core-defined** set of views (`entity-detail`, `email-reader`) from the data a
  * caller passes through the panel store — no module markup ever runs here.
  */
-import { ChevronLeft, X } from "lucide-react";
-import { createElement, Fragment, useCallback, useRef, useState, type PointerEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { ChevronLeft, WifiOff, X } from "lucide-react";
+import {
+  createElement,
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent,
+} from "react";
 
 import { CardLink } from "@/components/CardLink";
 import { Markdown } from "@/components/Markdown";
 import { Button, Sheet } from "@/components/ui";
 import { api } from "@/lib/api";
-import { EmailMessage, FileText, HoverCard, type BoardAction } from "@/lib/contracts";
+import { EmailDraft, EmailMessage, FileText, HoverCard, type BoardAction } from "@/lib/contracts";
 import { moduleIcon } from "@/lib/icons";
+import { useChat } from "@/stores/chat";
+import { useConnection } from "@/stores/connection";
 import { usePanel, usePanelCurrent, usePanelDepth, type PanelEntry } from "@/stores/panel";
 
 /** Whether a file name reads as markdown (rendered) vs. plain text (shown verbatim). */
@@ -125,6 +136,95 @@ function EmailReaderView({ payload }: { payload: unknown }) {
 }
 
 /**
+ * The `email-draft` view (ADR-0085, #563): a message the agent composed, shown for the operator
+ * to **Confirm** (send) or **Decline** in the split-pane. Nothing was sent to compose this — the
+ * agent cannot send on its own; the operator is the send button. Renders through the same message
+ * shape as `email-reader`. Confirm is danger-styled and gated on the connection (#530); Esc
+ * declines (the destructive path is never the default), and Decline takes initial focus.
+ */
+function EmailDraftView({ payload }: { payload: unknown }) {
+  const draft = EmailDraft.parse(payload);
+  const streaming = useChat((s) => s.streaming);
+  const resolveDraft = useChat((s) => s.resolveDraft);
+  const sessionId = useChat((s) => s.sessionId);
+  const queryClient = useQueryClient();
+  // The same connection gate as the composer + ask_user prompt (#494/#530): Confirm is as
+  // send-adjacent as Send, so it fails the same way if fired while the core is unreachable.
+  const connectionLost = useConnection((s) => s.coreDown || !s.online);
+  const declineRef = useRef<HTMLButtonElement>(null);
+
+  const onDone = useCallback(async () => {
+    await queryClient.refetchQueries({ queryKey: ["session", sessionId] });
+    void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }, [queryClient, sessionId]);
+
+  const resolve = useCallback(
+    (decision: "send" | "decline") => {
+      if (streaming || (decision === "send" && connectionLost)) return;
+      void resolveDraft(decision, onDone);
+    },
+    [streaming, connectionLost, resolveDraft, onDone],
+  );
+
+  // Shell dialog conventions (#487): focus the safe action (Decline) on open, and let Esc decline
+  // — Esc must never send, so the destructive path stays opt-in. Capture-phase + stopPropagation
+  // so it resolves this pane without also triggering any outer handler.
+  useEffect(() => {
+    declineRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || streaming) return;
+      e.stopPropagation();
+      resolve("decline");
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [resolve, streaming]);
+
+  return (
+    <article>
+      <p className="text-[11px] font-medium tracking-wide text-ink-faint uppercase">
+        Review before sending
+      </p>
+      {draft.reply_to_original && (
+        <p className="mt-1 text-xs text-ink-dim">Replying to {draft.reply_to_original}</p>
+      )}
+      <h3 className="mt-2 font-serif text-lg text-ink">{draft.subject}</h3>
+      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+        <dt className="text-ink-dim">To</dt>
+        <dd className="text-ink">{draft.to}</dd>
+        {draft.cc && (
+          <>
+            <dt className="text-ink-dim">Cc</dt>
+            <dd className="text-ink">{draft.cc}</dd>
+          </>
+        )}
+      </dl>
+      <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">{draft.body}</p>
+      <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-edge pt-4">
+        <Button
+          variant="danger"
+          disabled={streaming || connectionLost}
+          onClick={() => resolve("send")}
+        >
+          Confirm &amp; send
+        </Button>
+        <Button ref={declineRef} variant="outline" disabled={streaming} onClick={() => resolve("decline")}>
+          Decline
+        </Button>
+      </div>
+      {connectionLost && (
+        <p className="mt-2 flex items-center gap-1.5 text-[11px] text-ink-dim">
+          <WifiOff size={12} className="shrink-0 text-ink-faint" />
+          can&apos;t send right now — the draft is kept until epicurus is reachable.
+        </p>
+      )}
+    </article>
+  );
+}
+
+/**
  * The `doc-reader` view (#KB-refactor, req 6): a file opened from the Files browser, read
  * in the split-screen panel — markdown rendered, anything else shown verbatim.
  */
@@ -152,6 +252,8 @@ function PanelBody({ entry }: { entry: PanelEntry }) {
       return <EntityDetailView payload={entry.payload} />;
     case "email-reader":
       return <EmailReaderView payload={entry.payload} />;
+    case "email-draft":
+      return <EmailDraftView payload={entry.payload} />;
     case "doc-reader":
       return <DocReaderView payload={entry.payload} />;
     default:

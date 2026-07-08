@@ -82,6 +82,7 @@ import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useConnection } from "@/stores/connection";
 import { useDownloads } from "@/stores/downloads";
+import { usePanel } from "@/stores/panel";
 import { usePrefs } from "@/stores/prefs";
 import { toast } from "@/stores/toasts";
 
@@ -884,6 +885,27 @@ export function ChatScreen() {
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [chat.segments, chat.pendingUser, chat.awaiting, history.data]);
 
+  // Mirror a draft-review pause (ADR-0085, #563) into the right panel: while `awaitingDraft` is set,
+  // keep the composed email in the split-pane for Confirm/Decline — open it when the pause begins,
+  // and **re-open it if the panel is dismissed while the draft is still pending** (the panel's
+  // generic Close / backdrop must not strand a live draft; the decision is Confirm/Decline, and a
+  // fresh chat message is still the escape hatch). Subscribing to the panel's top view is what makes
+  // a manual close reactive. Reset to *exactly* the draft (close-then-open) rather than pushing, so
+  // repeated re-opens can't grow the stack. Driven off the persisted `awaitingDraft`, so a reload
+  // mid-review re-opens the pane on mount. The stores stay decoupled — this effect is the seam.
+  const panelTop = usePanel((s) => s.stack[s.stack.length - 1]?.view ?? null);
+  useEffect(() => {
+    const panel = usePanel.getState();
+    if (chat.awaitingDraft) {
+      if (panelTop !== "email-draft") {
+        panel.close();
+        panel.open("email-draft", chat.awaitingDraft.draft, "Review email");
+      }
+    } else if (panelTop === "email-draft") {
+      panel.back();
+    }
+  }, [chat.awaitingDraft, panelTop]);
+
   // Re-attach to an in-flight turn after a reload / reconnect / app-resume (#376): the turn
   // keeps running server-side, so recover it instead of leaving a stale spinner or showing a
   // network error. Fires on mount, when the tab becomes visible again, and when the network
@@ -947,7 +969,11 @@ export function ChatScreen() {
   const lastUserIdx = messages.reduce((a, m, i) => (m.role === "user" ? i : a), -1);
   // While a clarifying question is pending, the answer input is the focus — hide Edit/Regenerate.
   const turnControlsVisible =
-    !chat.streaming && !showPending && editingIdx === null && chat.awaiting === null;
+    !chat.streaming &&
+    !showPending &&
+    editingIdx === null &&
+    chat.awaiting === null &&
+    chat.awaitingDraft === null;
 
   const onTurnDone = async () => {
     await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });

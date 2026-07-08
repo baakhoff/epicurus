@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `awaiting_input` (the turn paused on `ask_user` — carries `{run_id, question}`, ADR-0053) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563 — an additive shape a stale client ignores) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. |
 | `GET /platform/v1/agent/sessions/{id}/active-run` | The session's in-flight run to re-attach to — `{run_id, last_seq}` or `null` if none is live (ADR-0055). How a client rediscovers a turn after a reload/reconnect. |
@@ -48,6 +48,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message, then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace the last user message with `{content}` (and `{model?}`) and re-answer it in place — edits the message, truncates the tail, then streams. An `error` event on empty content or no user turn (#302). |
 | `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
+| `POST /platform/v1/agent/runs/{run_id}/draft` | **Confirm/Decline a draft-first send** (ADR-0085, #563). Body `{decision: "send" \| "decline", reason?}`. Consumes the pending draft; on `send` the core transmits it via the owning module's `POST /send` and appends the outcome (`Sent.` + id, or a relayed error hint) as the compose call's tool result, on `decline` it appends a "not sent" result (carrying any `reason`) — then continues the same turn (same SSE protocol as `/chat/stream`). An `error` event if the draft is unknown / expired / already resolved. Confirm/Decline is connection-gated client-side (#530); the `run_id` is the DB pause token, distinct from a live-run id. |
 | `GET /platform/v1/agent/runs/{run_id}/stream?after_seq=N` | **Re-attach** to an in-flight turn (ADR-0055), replaying buffered events after `N` (or `Last-Event-ID`) then tailing live — same SSE protocol as `/chat/stream`, no readiness prelude. A `gone` event if the run is unknown / finished-and-reaped (the client then falls back to the durable transcript). Note: this `run_id` is a **live-run** id (in-memory, for re-attach), distinct from the suspended-run id used by `/resume`. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
@@ -133,6 +134,22 @@ per-tool disable filter as module tools.
   the answer as the tool result. The suspended run is consumed on resume and reaped after
   `ASK_USER_TTL_HOURS`. With no suspend store wired the loop degrades — the model is told to
   proceed with its best assumption rather than pausing.
+
+The same pause machinery powers **draft-first outbound sends** (ADR-0085, #563) — but triggered by
+a *module* tool, not a core built-in. When a compose tool (mail's `mail_send` / `mail_reply`)
+returns a `DraftReview` envelope (`epicurus_core.draft_review`), the loop recognizes it the way it
+lifts `entity_refs` from a `ToolEnvelope` and **suspends the turn** instead of feeding it back to
+the model: it persists the run + composed draft to `agent_pending_drafts` (a sibling of
+`agent_suspended_runs`, reaped after `DRAFT_REVIEW_TTL_HOURS`) and emits `awaiting_input` with
+`awaiting_kind: "draft_review"` + the draft. The operator's **Confirm** (`POST …/runs/{id}/draft`,
+`{decision: "send"}`) makes the core transmit the exact draft via the module's `POST /send`
+(`ModuleRegistry.send_draft`) and resume with the outcome; **Decline** resumes with a "not sent"
+result (+ any reason). The MCP surface exposes **no** transmitting tool, so the model can compose
+but can never send — the guarantee is structural. Any future outbound channel (Phase-4 chat
+bridges) opts in by returning the same envelope and serving its own `/send`. Only the interactive
+streaming path can present a draft; the **non-streaming** loop (`POST /chat`, the messaging bridge)
+has no review pane, so it degrades — the model is told the draft can't be sent from that channel
+rather than being fed the raw envelope (nothing is transmitted regardless).
 
 ### LLM gateway (ADR-0010)
 
@@ -477,6 +494,7 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `MESSAGING_INBOUND_ENABLED` | `true` | Run the inbound-messaging consumer (chat bridges, ADR-0058). |
 | `MESSAGING_MODEL` | — | Optional dedicated model for bridge turns; blank = the default chat model. |
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
+| `DRAFT_REVIEW_TTL_HOURS` | `24` | How long a turn paused on a draft-first send waits for Confirm/Decline before its pending draft is reaped (ADR-0085, #563). |
 | `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
@@ -542,6 +560,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `agent_suspended_runs`** — a turn paused by `ask_user` (ADR-0053): `id` (run_id),
   `tenant`, `session_id`, `model`, `pending_call_id`, `question`, `conversation` (JSON),
   `created_at`. Written on suspend, **consumed** on resume, reaped after `ASK_USER_TTL_HOURS`.
+- **Postgres `agent_pending_drafts`** — a turn paused on a draft-first send (ADR-0085, #563):
+  `id` (run_id), `tenant`, `session_id`, `model`, `pending_call_id`, `tool`, `module`, `summary`,
+  `draft` (JSON — the composed message), `conversation` (JSON), `created_at`. A **sibling** of
+  `agent_suspended_runs` (a separate table, so `create_all` builds it with no migration and the two
+  consume-on-resume paths can't cross). Written on suspend, **consumed** on Confirm/Decline, reaped
+  after `DRAFT_REVIEW_TTL_HOURS`.
 - **In-memory live runs** (`LiveRunRegistry`, ADR-0055) — *not* persisted: each in-flight turn's
   detached task + its seq-tagged event buffer, keyed by `run_id` and indexed by `(tenant,
   session_id)`. Disposable cache for re-attach; the authoritative answer lands in `agent_messages`.

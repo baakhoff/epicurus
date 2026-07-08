@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import email
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,11 +12,13 @@ import pytest
 from epicurus_core import PlatformClient
 from epicurus_mail.gmail import (
     GmailProvider,
-    _build_reply_mime,
+    _build_mime,
+    _compose_reply,
     _extract_body,
     _parse_message,
     _reply_subject,
 )
+from epicurus_mail.provider import ComposedMessage
 
 
 def _b64(text: str) -> str:
@@ -161,63 +162,101 @@ def test_reply_subject_empty_becomes_no_subject() -> None:
     assert _reply_subject("") == "Re: (no subject)"
 
 
-# ── _build_reply_mime ─────────────────────────────────────────────────────────
+# ── _compose_reply (derive the ComposedMessage from the original's headers) ───
 
 
-def test_build_reply_mime_addresses_the_original_sender() -> None:
-    msg = _build_reply_mime({"from": "alice@example.com", "subject": "Hi"}, "body")
-    assert msg["To"] == "alice@example.com"
-    assert msg["Subject"] == "Re: Hi"
-    assert msg.get_payload(decode=True) == b"body"
+def test_compose_reply_addresses_the_original_sender() -> None:
+    msg = _compose_reply({"from": "alice@example.com", "subject": "Hi"}, "t1", "body")
+    assert msg.to == "alice@example.com"
+    assert msg.subject == "Re: Hi"
+    assert msg.body == "body"
+    assert msg.thread_id == "t1"
 
 
-def test_build_reply_mime_prefers_reply_to_over_from() -> None:
+def test_compose_reply_prefers_reply_to_over_from() -> None:
     # A newsletter/support-desk pattern: From is the sending address, Reply-To routes
     # replies elsewhere — the reply must go where the sender asked, not where it came
     # from (#513).
     headers = {"from": "noreply@list.example", "reply-to": "support@list.example", "subject": "Hi"}
-    msg = _build_reply_mime(headers, "body")
-    assert msg["To"] == "support@list.example"
+    assert _compose_reply(headers, "t1", "body").to == "support@list.example"
 
 
-def test_build_reply_mime_falls_back_to_from_with_empty_reply_to() -> None:
+def test_compose_reply_falls_back_to_from_with_empty_reply_to() -> None:
     # A blank Reply-To header must not win over a real From address.
     headers = {"from": "alice@example.com", "reply-to": "", "subject": "Hi"}
-    msg = _build_reply_mime(headers, "body")
-    assert msg["To"] == "alice@example.com"
+    assert _compose_reply(headers, "t1", "body").to == "alice@example.com"
 
 
-def test_build_reply_mime_falls_back_to_from_with_whitespace_only_reply_to() -> None:
+def test_compose_reply_falls_back_to_from_with_whitespace_only_reply_to() -> None:
     # A Reply-To header that is present but only whitespace is still a non-empty (truthy)
     # Python string — without stripping first it would "win" over From and produce an
     # unroutable blank recipient (#538).
     headers = {"from": "alice@example.com", "reply-to": "   ", "subject": "Hi"}
-    msg = _build_reply_mime(headers, "body")
-    assert msg["To"] == "alice@example.com"
+    assert _compose_reply(headers, "t1", "body").to == "alice@example.com"
 
 
-def test_build_reply_mime_sets_in_reply_to_and_references() -> None:
+def test_compose_reply_sets_in_reply_to_and_references() -> None:
     headers = {"from": "a@x.com", "subject": "Hi", "message-id": "<orig@mail>"}
-    msg = _build_reply_mime(headers, "body")
-    assert msg["In-Reply-To"] == "<orig@mail>"
-    assert msg["References"] == "<orig@mail>"
+    msg = _compose_reply(headers, "t1", "body")
+    assert msg.in_reply_to == "<orig@mail>"
+    assert msg.references == "<orig@mail>"
 
 
-def test_build_reply_mime_chains_existing_references() -> None:
+def test_compose_reply_chains_existing_references() -> None:
     headers = {
         "from": "a@x.com",
         "subject": "Hi",
         "message-id": "<orig@mail>",
         "references": "<earlier@mail>",
     }
-    msg = _build_reply_mime(headers, "body")
-    assert msg["References"] == "<earlier@mail> <orig@mail>"
+    assert _compose_reply(headers, "t1", "body").references == "<earlier@mail> <orig@mail>"
 
 
-def test_build_reply_mime_omits_threading_headers_without_message_id() -> None:
-    msg = _build_reply_mime({"from": "a@x.com", "subject": "Hi"}, "body")
-    assert msg["In-Reply-To"] is None
-    assert msg["References"] is None
+def test_compose_reply_omits_threading_without_message_id() -> None:
+    msg = _compose_reply({"from": "a@x.com", "subject": "Hi"}, "t1", "body")
+    assert msg.in_reply_to is None
+    assert msg.references is None
+
+
+def test_compose_reply_carries_thread_context() -> None:
+    # The pane shows "Replying to <sender> — <subject>"; presentation only, never sent.
+    msg = _compose_reply({"from": "alice@example.com", "subject": "Hi"}, "t1", "body")
+    assert msg.reply_to_original == "alice@example.com — Hi"
+
+
+# ── _build_mime (assemble outgoing MIME from a ComposedMessage) ───────────────
+
+
+def test_build_mime_sets_to_subject_and_body() -> None:
+    mime = _build_mime(ComposedMessage(to="bob@x.com", subject="Hi", body="body"))
+    assert mime["To"] == "bob@x.com"
+    assert mime["Subject"] == "Hi"
+    assert mime.get_payload(decode=True) == b"body"
+
+
+def test_build_mime_sets_threading_headers_when_present() -> None:
+    mime = _build_mime(
+        ComposedMessage(
+            to="a@x.com",
+            subject="Re: Hi",
+            body="body",
+            in_reply_to="<orig@mail>",
+            references="<earlier@mail> <orig@mail>",
+        )
+    )
+    assert mime["In-Reply-To"] == "<orig@mail>"
+    assert mime["References"] == "<earlier@mail> <orig@mail>"
+
+
+def test_build_mime_omits_threading_headers_for_a_fresh_send() -> None:
+    mime = _build_mime(ComposedMessage(to="a@x.com", subject="Hi", body="body"))
+    assert mime["In-Reply-To"] is None
+    assert mime["References"] is None
+
+
+def test_build_mime_sets_cc_when_present() -> None:
+    mime = _build_mime(ComposedMessage(to="a@x.com", cc="c@x.com", subject="Hi", body="body"))
+    assert mime["Cc"] == "c@x.com"
 
 
 # ── GmailProvider (httpx patched via provider internals) ─────────────────────
@@ -291,22 +330,21 @@ async def test_read_fetches_token_and_full_message() -> None:
         ("Re: long subject with spaces", "x@y.z", "Multi\nline\nbody"),
     ],
 )
-async def test_send_encodes_mime_and_calls_api(subject: str, to: str, body: str) -> None:
-    """send() builds a MIME message, base64-encodes it, and POSTs to Gmail."""
+async def test_transmit_encodes_mime_and_calls_api(subject: str, to: str, body: str) -> None:
+    """transmit() builds MIME from a ComposedMessage, base64-encodes it, and POSTs to Gmail."""
     platform = _make_platform("tok_send")
     provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
 
     captured: dict[str, Any] = {}
 
-    async def fake_send_request(path: str, *, json: dict[str, Any]) -> MagicMock:
-        captured["raw"] = json["raw"]
+    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
+        captured["url"] = url
+        captured["raw"] = kwargs["json"]["raw"]
+        captured["json"] = kwargs["json"]
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.json = MagicMock(return_value={"id": "sent_id"})
         return resp
-
-    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
-        return await fake_send_request(url, **kwargs)
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -314,15 +352,40 @@ async def test_send_encodes_mime_and_calls_api(subject: str, to: str, body: str)
     mock_client.post = AsyncMock(side_effect=fake_post)
     provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
 
-    sent_id = await provider.send(to=to, subject=subject, body=body)
+    sent_id = await provider.transmit(ComposedMessage(to=to, subject=subject, body=body))
     assert sent_id == "sent_id"
-    assert "raw" in captured
-    # Verify the raw payload decodes back to valid RFC 2822 message containing the subject
+    assert captured["url"] == "/users/me/messages/send"
+    # A fresh send carries no threadId.
+    assert "threadId" not in captured["json"]
     decoded = base64.urlsafe_b64decode(captured["raw"] + "==").decode("utf-8", errors="replace")
     assert to in decoded
 
 
-# ── reply() ───────────────────────────────────────────────────────────────────
+async def test_transmit_includes_thread_id_for_a_reply() -> None:
+    """A ComposedMessage carrying a thread_id sends it so a confirmed reply threads (#461)."""
+    platform = _make_platform("tok_send")
+    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    captured: dict[str, Any] = {}
+
+    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
+        captured["json"] = kwargs["json"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={"id": "reply_id"})
+        return resp
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = AsyncMock(side_effect=fake_post)
+    provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
+
+    msg = ComposedMessage(to="a@x.com", subject="Re: Hi", body="body", thread_id="thread-abc")
+    assert await provider.transmit(msg) == "reply_id"
+    assert captured["json"]["threadId"] == "thread-abc"
+
+
+# ── compose_reply() ────────────────────────────────────────────────────────────
 
 
 def _original_message(
@@ -340,8 +403,12 @@ def _original_message(
     return data
 
 
-async def test_reply_fetches_original_and_sends_threaded() -> None:
-    """reply() fetches the original message's headers, then sends threaded via RFC-2822."""
+async def test_compose_reply_fetches_original_and_derives_fields() -> None:
+    """compose_reply() fetches the original's headers and derives a threaded ComposedMessage.
+
+    It is a **read** — a metadata GET, no send POST — so the returned draft can be reviewed
+    before anything is transmitted (ADR-0085).
+    """
     platform = _make_platform("tok_reply")
     provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
     captured: dict[str, Any] = {}
@@ -354,46 +421,30 @@ async def test_reply_fetches_original_and_sends_threaded() -> None:
         resp.json = MagicMock(return_value=_original_message())
         return resp
 
-    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
-        captured["post_url"] = url
-        captured["post_json"] = kwargs["json"]
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.json = MagicMock(return_value={"id": "reply_id"})
-        return resp
-
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.get = AsyncMock(side_effect=fake_get)
-    mock_client.post = AsyncMock(side_effect=fake_post)
+    mock_client.post = AsyncMock()  # must NOT be called — compose never sends
     provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
 
-    sent_id = await provider.reply("m1", "My reply body")
+    msg = await provider.compose_reply("m1", "My reply body")
 
-    assert sent_id == "reply_id"
     assert captured["get_url"] == "/users/me/messages/m1"
     assert captured["get_params"]["format"] == "metadata"
-    assert captured["post_url"] == "/users/me/messages/send"
-    assert captured["post_json"]["threadId"] == "thread-abc"
-    decoded = base64.urlsafe_b64decode(captured["post_json"]["raw"] + "==").decode(
-        "utf-8", errors="replace"
-    )
-    assert "To: alice@example.com" in decoded
-    assert "Subject: Re: Hello" in decoded
-    assert "In-Reply-To: <orig@mail>" in decoded
-    assert "References: <orig@mail>" in decoded
-    # The body itself is base64 content-transfer-encoded inside the MIME part; parse it
-    # rather than looking for the plain text verbatim in the outer decoded raw message.
-    sent_msg = email.message_from_string(decoded)
-    assert sent_msg.get_payload(decode=True) == b"My reply body"
+    mock_client.post.assert_not_called()  # compose is read-only — no transmit
+    assert msg.to == "alice@example.com"
+    assert msg.subject == "Re: Hello"
+    assert msg.body == "My reply body"
+    assert msg.in_reply_to == "<orig@mail>"
+    assert msg.references == "<orig@mail>"
+    assert msg.thread_id == "thread-abc"
 
 
-async def test_reply_omits_thread_id_when_original_has_none() -> None:
-    """A Gmail response with no threadId must not send a null/empty threadId."""
+async def test_compose_reply_thread_id_none_when_original_has_none() -> None:
+    """A Gmail response with no threadId yields a draft with thread_id=None (transmit omits it)."""
     platform = _make_platform("tok_reply2")
     provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
-    captured: dict[str, Any] = {}
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
         resp = MagicMock()
@@ -401,22 +452,14 @@ async def test_reply_omits_thread_id_when_original_has_none() -> None:
         resp.json = MagicMock(return_value=_original_message(thread_id=None))
         return resp
 
-    async def fake_post(url: str, **kwargs: Any) -> MagicMock:
-        captured["post_json"] = kwargs["json"]
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.json = MagicMock(return_value={"id": "reply_id2"})
-        return resp
-
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.get = AsyncMock(side_effect=fake_get)
-    mock_client.post = AsyncMock(side_effect=fake_post)
     provider._make_client = MagicMock(return_value=mock_client)  # type: ignore[method-assign]
 
-    await provider.reply("m2", "body")
-    assert "threadId" not in captured["post_json"]
+    msg = await provider.compose_reply("m2", "body")
+    assert msg.thread_id is None
 
 
 @pytest.mark.parametrize(

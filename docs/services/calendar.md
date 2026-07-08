@@ -66,17 +66,23 @@ Since **v0.13** (#444) event creation can attach a **Google Meet** video-call li
 just authors the same RRULE string, so the agent tool surface and everything below the form is
 unchanged (the `recurrence` parameter still takes a bare RRULE).
 
+Since **v0.15** (#559) every read-path agent-facing surface — `calendar_list_events`, the
+hover-card resolver, and the chat-attachment excerpt — renders event times in the **operator's
+configured timezone** instead of the UTC instant every event normalizes to internally, and
+**names the zone** in the text; `calendar_find_free`'s returned slots carry the same offset.
+See *Timezones*, below.
+
 ## Contract
 
 ### MCP tools
 
 | Tool | Description |
 |------|-------------|
-| `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time; its listing text truncates past `LIST_CAP` (50, ADR-0084/#468) with a "…and N more" note — the chips still carry every matching event. |
+| `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time; its listing text truncates past `LIST_CAP` (50, ADR-0084/#468) with a "…and N more" note — the chips still carry every matching event. Times are shown in the **operator's configured timezone**, named in the text (e.g. `(Europe/Belgrade)`) — #559. |
 | `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?, add_meet=false)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list; `add_meet` (#444) attaches a Google Meet link — Google-only, a no-op on the local store. Returns the created event (`meet_url` set when a Meet link was attached). |
 | `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` is `"this"` (#432, default — just the named occurrence), `"following"` (#445 — this occurrence and every later one, splitting the series in two), or `"all"` (#432 — the whole series); `recurrence` is only honoured with `edit_scope="all"` or `"following"` (raises with `"this"` — an instance can't carry its own rule; omitted with `"following"`, the new tail series just continues the existing pattern). Returns the updated event; raises if absent. |
 | `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` mirrors update: `"this"` (#432) removes just the named occurrence, `"following"` (#445) removes it and every later occurrence (truncating the series), `"all"` (#432) removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
-| `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows. |
+| `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows, in the operator's configured timezone offset (#559). |
 
 All tools are provider-agnostic and route through the operator's selection (ADR-0030):
 `calendar_list_events` overlays every enabled calendar (or local); `calendar_create_event`
@@ -117,6 +123,18 @@ agent writing the operator's "3 PM" as `2026-07-02T15:00:00`) is read as wall ti
 `PlatformClient.get_timezone()` per write. An unreachable core or an unknown zone name
 degrades to UTC (the pre-#433 behaviour) rather than failing the write. The web create/edit
 forms are unaffected — they always submit offset-carrying instants.
+
+**Reading events back (#559).** Every stored event normalizes to a UTC instant (see *Recurring
+events*, below) — so all agent-facing text derived from it (`calendar_list_events`'s listing,
+the hover-card's *When*, the chat-attachment excerpt) converts that instant to the **operator's
+configured timezone** before formatting and **names the zone** (e.g. `"Tue 07 Jul 2026,
+15:00–16:00 (Europe/Belgrade)"`), mirroring the `now` tool (#267) — the agent is never left to
+guess what clock it's reading. The same core-unreachable → UTC fallback as the write path
+applies, also named (`"(UTC)"`). All-day events are floating dates with no clock component and
+are never converted or zone-named. `calendar_find_free`'s returned slots use the same
+operator-timezone offset. `calendar_list_events`'s own query window stays UTC-anchored — a
+plain instant-plus-duration range with no day-boundary snapping, so the matched events are
+identical regardless of which zone the bound is expressed in.
 
 **All-day events** carry `all_day: true` and represent a *floating* date range: internally
 `start`/`end` are UTC-midnight day boundaries with `end` **exclusive** (the day after the last

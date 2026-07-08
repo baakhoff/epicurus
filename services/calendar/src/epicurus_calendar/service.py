@@ -159,25 +159,29 @@ _ATTACH_LIMIT = 50
 TimezoneSource = Callable[[], Awaitable[str]]
 
 
-async def _resolve_timezone(source: TimezoneSource | None) -> tuple[tzinfo, str]:
-    """The zone naive tool inputs are read in — the operator's timezone, else UTC (#433) —
-    paired with its IANA name, persisted on a new recurring series as its RRULE expansion
-    anchor (#446).
+async def resolve_timezone(source: TimezoneSource | None) -> tuple[tzinfo, str]:
+    """The operator's configured timezone, else UTC — paired with its IANA name.
+
+    Two uses share this one resolution: a write reads a naive tool input as the
+    operator's local wall time (#433; persisted on a new recurring series as its RRULE
+    expansion anchor, #446), and a read converts a stored UTC instant back to the
+    operator's clock before ``_format_when`` renders it (#559) — the single place both
+    sides agree on what timezone an event is shown in.
 
     Best-effort by design — an unreachable core or an unknown zone name degrades to UTC
-    (the pre-#433 behaviour) rather than failing the write.
+    (the pre-#433 behaviour) rather than failing the call.
     """
     if source is None:
         return UTC, "UTC"
     try:
         name = await source()
     except Exception as exc:
-        log.warning("operator timezone unavailable; reading naive times as UTC", error=str(exc))
+        log.warning("operator timezone unavailable; using UTC", error=str(exc))
         return UTC, "UTC"
     try:
         return ZoneInfo(name), name
     except Exception:
-        log.warning("unknown operator timezone; reading naive times as UTC", timezone=name)
+        log.warning("unknown operator timezone; using UTC", timezone=name)
         return UTC, "UTC"
 
 
@@ -200,7 +204,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.14.2",
+        version="0.15.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -265,14 +269,23 @@ def build_module(
         Returns a tool envelope whose chips reference the matching events.
         """
         capped = min(max(range_days, 1), 90)
+        tz, tz_name = await resolve_timezone(timezone)
+        # The query window stays UTC-anchored even though *tz* is resolved above: the
+        # window is a plain instant + duration (no day-boundary snapping), so the query
+        # results are identical either way — but the local provider's SQLite-backed test
+        # store compares ``DateTime(timezone=True)`` bounds as ISO strings, not true
+        # instants, so a non-UTC offset here can silently misorder against UTC-stored
+        # rows. UTC keeps the comparison safe on every backend; *tz*/*tz_name* below are
+        # for display only.
         now = datetime.now(tz=UTC)
         time_range = DateTimeRange(start=now, end=now + timedelta(days=capped))
         events = await provider.list_events(tenant_id=tenant_id, time_range=time_range)
         if not events:
             return tool_envelope(f"No events in the next {capped} day(s).", [])
-        refs = [event_entity_ref(e) for e in events]
+        refs = [event_entity_ref(e, tz=tz, tz_name=tz_name) for e in events]
         lines = [
-            f"- {e.title} ({_format_when(e)})" + (f" @ {e.location}" if e.location else "")
+            f"- {e.title} ({_format_when(e, tz=tz, tz_name=tz_name)})"
+            + (f" @ {e.location}" if e.location else "")
             for e in events
         ]
         # Capped the same way as the entity-ref id block the core appends (both default to
@@ -336,7 +349,7 @@ def build_module(
         Returns the created event dict with all fields populated (``meet_url`` set when a
         Meet link was attached).
         """
-        tz, tz_name = await _resolve_timezone(timezone)
+        tz, tz_name = await resolve_timezone(timezone)
         start_dt, end_dt = _parse_bounds(start, end, all_day=all_day, tz=tz)
         if recurrence:
             _validate_recurrence(recurrence, dtstart=start_dt)
@@ -423,7 +436,7 @@ def build_module(
 
         Returns the updated event dict. Raises if no such event exists.
         """
-        tz, tz_name = await _resolve_timezone(timezone)
+        tz, tz_name = await resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
         if recurrence == "":
             # The shared board form sends "" when the repeat picker is blanked (web 0.76.1
@@ -506,8 +519,8 @@ def build_module(
             duration_minutes: Minimum slot length in minutes (default 60).
             range_days: How many days ahead to search (1-90, default 7).
 
-        Returns a list of ``{start, end}`` dicts (ISO-8601 strings) for each
-        available window, ordered chronologically.
+        Returns a list of ``{start, end}`` dicts (ISO-8601 strings, in the operator's
+        configured timezone — #559) for each available window, ordered chronologically.
         """
         capped_range = min(max(range_days, 1), 90)
         capped_dur = min(max(duration_minutes, 1), 1440)
@@ -518,7 +531,13 @@ def build_module(
             time_range=time_range,
             duration_minutes=capped_dur,
         )
-        return [s.model_dump(mode="json") for s in slots]
+        tz, _tz_name = await resolve_timezone(timezone)
+        return [
+            DateTimeRange(start=s.start.astimezone(tz), end=s.end.astimezone(tz)).model_dump(
+                mode="json"
+            )
+            for s in slots
+        ]
 
     return module
 
@@ -530,17 +549,25 @@ class EventNotFound(Exception):
     """Raised when an event id does not resolve for the active provider/tenant."""
 
 
-def _format_when(event: Event) -> str:
-    """A compact, human ``when`` line for an event (chips, hover-cards, excerpts)."""
+def _format_when(event: Event, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> str:
+    """A compact, human ``when`` line for an event (chips, hover-cards, excerpts).
+
+    A timed event is converted to *tz* and names the zone (e.g. ``"(Europe/Belgrade)"``),
+    mirroring the ``now`` tool (#267) so the agent never has to guess what clock it's
+    reading (#559). An all-day event is a floating date (#433) with no clock component —
+    it is left unconverted and unnamed, so a UTC-midnight boundary never shifts across a
+    day for a non-UTC operator.
+    """
     start, end = event.start, event.end
     if event.all_day:
         last = (end - _DAY).date()  # exclusive end → inclusive last day
         if start.date() >= last:
             return f"{start:%a %d %b %Y} · All day"
         return f"{start:%a %d %b %Y} → {last:%a %d %b %Y} · All day"
+    start, end = start.astimezone(tz), end.astimezone(tz)
     if start.date() == end.date():
-        return f"{start:%a %d %b %Y, %H:%M}-{end:%H:%M}"
-    return f"{start:%a %d %b %Y %H:%M} → {end:%a %d %b %Y %H:%M}"
+        return f"{start:%a %d %b %Y, %H:%M}-{end:%H:%M} ({tz_name})"
+    return f"{start:%a %d %b %Y %H:%M} → {end:%a %d %b %Y %H:%M} ({tz_name})"
 
 
 def _date_to_utc_midnight(value: str) -> datetime:
@@ -639,9 +666,9 @@ def _is_recurring(event: Event) -> bool:
     return bool(event.recurrence or event.recurring_event_id)
 
 
-def event_entity_ref(event: Event) -> EntityRef:
+def event_entity_ref(event: Event, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> EntityRef:
     """The chip an agent turn carries for a listed event (ADR-0019)."""
-    summary = _format_when(event)
+    summary = _format_when(event, tz=tz, tz_name=tz_name)
     if event.location:
         summary = f"{summary} · {event.location}"
     if event.recurrence:
@@ -655,13 +682,13 @@ def event_entity_ref(event: Event) -> EntityRef:
     )
 
 
-def event_hover_card(event: Event) -> dict[str, Any]:
+def event_hover_card(event: Event, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> dict[str, Any]:
     """The core hover-card / entity-detail envelope for an event (ADR-0019).
 
     Core-owned, uniform shape: the module supplies the data, the shell renders the
     inline hover-card and the panel's entity-detail view from it.
     """
-    details = [HoverCardDetail(label="When", value=_format_when(event))]
+    details = [HoverCardDetail(label="When", value=_format_when(event, tz=tz, tz_name=tz_name))]
     if event.location:
         details.append(HoverCardDetail(label="Location", value=event.location))
     details.append(HoverCardDetail(label="Calendar", value=event.provider))
@@ -679,9 +706,9 @@ def event_hover_card(event: Event) -> dict[str, Any]:
     ).model_dump()
 
 
-def event_excerpt(event: Event) -> str:
+def event_excerpt(event: Event, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> str:
     """A short plain-text rendering of an event for the agent's turn context."""
-    lines = [event.title, _format_when(event)]
+    lines = [event.title, _format_when(event, tz=tz, tz_name=tz_name)]
     if event.location:
         lines.append(f"Location: {event.location}")
     if event.recurrence:
@@ -700,9 +727,9 @@ def event_attachment_item(event: Event) -> dict[str, str]:
     return {"ref_id": event.id, "kind": EVENT_KIND, "title": event.title}
 
 
-def event_attachment(event: Event) -> dict[str, str]:
+def event_attachment(event: Event, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> dict[str, str]:
     """The resolve payload the agent injects when an attached event is expanded."""
-    return {"title": event.title, "excerpt": event_excerpt(event)}
+    return {"title": event.title, "excerpt": event_excerpt(event, tz=tz, tz_name=tz_name)}
 
 
 async def fetch_event(provider: CalendarProvider, *, tenant_id: str, ref_id: str) -> Event:

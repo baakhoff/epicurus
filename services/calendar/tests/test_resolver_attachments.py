@@ -128,6 +128,9 @@ class TestResolveEntity:
         assert body["description"] == "Daily sync"
         details = {d["label"]: d["value"] for d in body["details"]}
         assert "When" in details
+        # No core reachable at this test's platform_url — the timezone resolution (#559)
+        # degrades to UTC, named, rather than failing the request.
+        assert "(UTC)" in details["When"]
         assert details["Location"] == "Room 4"
         assert details["Calendar"] == "local"
 
@@ -154,6 +157,8 @@ class TestAttachments:
         assert body["title"] == "Standup"
         assert "Daily sync" in body["excerpt"]
         assert "Room 4" in body["excerpt"]
+        # Same UTC-fallback naming as the hover-card resolver (#559).
+        assert "(UTC)" in body["excerpt"]
 
     def test_resolve_missing_is_404(self, client: TestClient) -> None:
         resp = client.get("/attachments/nope")

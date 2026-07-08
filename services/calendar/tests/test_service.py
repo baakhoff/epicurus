@@ -55,6 +55,19 @@ def _dt(hour: int) -> datetime:
     return datetime(2025, 6, 15, hour, 0, 0, tzinfo=UTC)
 
 
+def _future_weekly_series_start() -> datetime:
+    """A safe anchor for a 4-occurrence weekly series's first occurrence.
+
+    A day ahead of whenever the suite actually runs, so a forward-only
+    ``calendar_list_events`` window always sees every occurrence — a fixed calendar
+    date (the previous form of this helper's callers) eventually lands in the past
+    and silently drops occurrences one by one as real time passes.
+    """
+    return (datetime.now(tz=UTC) + timedelta(days=1)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+
+
 def _extract(structured: dict[str, Any] | None) -> Any:
     """Unwrap the MCP call_tool result."""
     if structured is None:
@@ -709,7 +722,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.14.2"
+    assert manifest.version == "0.15.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -1281,19 +1294,20 @@ async def test_calendar_update_event_tool_following_splits_the_series(
     local_provider: LocalCalendarProvider,
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
+    start = _future_weekly_series_start()
     _content, created_structured = await module.mcp.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
-            "start": "2026-07-06T09:00:00+00:00",
-            "end": "2026-07-06T09:30:00+00:00",
-            "recurrence": "FREQ=WEEKLY;COUNT=4",  # 6, 13, 20, 27
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=30)).isoformat(),
+            "recurrence": "FREQ=WEEKLY;COUNT=4",  # +0, +7, +14, +21 days
         },
     )
     from epicurus_calendar.db import instance_id
 
     series_id = _extract(created_structured)["id"]
-    iid = instance_id(series_id, datetime(2026, 7, 20, 9, 0, tzinfo=UTC))
+    iid = instance_id(series_id, start + timedelta(days=14))  # the 3rd occurrence
     _content, structured = await module.mcp.call_tool(
         "calendar_update_event",
         {"event_id": iid, "title": "Standup (async)", "edit_scope": "following"},
@@ -1313,19 +1327,20 @@ async def test_calendar_delete_event_tool_following_removes_tail(
     local_provider: LocalCalendarProvider,
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
+    start = _future_weekly_series_start()
     _content, created_structured = await module.mcp.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
-            "start": "2026-07-06T09:00:00+00:00",
-            "end": "2026-07-06T09:30:00+00:00",
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=30)).isoformat(),
             "recurrence": "FREQ=WEEKLY;COUNT=4",
         },
     )
     from epicurus_calendar.db import instance_id
 
     series_id = _extract(created_structured)["id"]
-    iid = instance_id(series_id, datetime(2026, 7, 20, 9, 0, tzinfo=UTC))
+    iid = instance_id(series_id, start + timedelta(days=14))  # the 3rd occurrence
     _content, structured = await module.mcp.call_tool(
         "calendar_delete_event", {"event_id": iid, "edit_scope": "following"}
     )
@@ -1639,17 +1654,18 @@ async def test_delete_event_tool_this_scope_removes_one_occurrence(
     from epicurus_calendar.db import instance_id
 
     module = build_module(local_provider, tenant_id="t1")
+    start = _future_weekly_series_start()
     _content, created_structured = await module.mcp.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
-            "start": "2026-07-06T09:00:00+00:00",
-            "end": "2026-07-06T09:30:00+00:00",
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=30)).isoformat(),
             "recurrence": "FREQ=WEEKLY;COUNT=4",
         },
     )
     series_id = _extract(created_structured)["id"]
-    iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
+    iid = instance_id(series_id, start + timedelta(days=7))  # the 2nd occurrence
     _content, structured = await module.mcp.call_tool("calendar_delete_event", {"event_id": iid})
     assert _extract(structured)["deleted"] is True
     listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
@@ -1923,6 +1939,152 @@ async def test_create_event_reads_naive_start_in_operator_timezone_in_winter(
     assert stored is not None
     assert stored.start == datetime(2026, 1, 15, 14, 0, tzinfo=UTC)
     assert stored.end == datetime(2026, 1, 15, 15, 0, tzinfo=UTC)
+
+
+# ── Operator-timezone handling for READS (#559) ─────────────────────────────────
+
+
+def test_format_when_converts_a_timed_event_to_the_operator_timezone() -> None:
+    # 13:00 UTC is 15:00 in Europe/Belgrade (CEST, UTC+2) in July — the agent must read
+    # the operator's wall clock, not the stored UTC instant.
+    from epicurus_calendar.service import _format_when
+
+    event = _event(
+        start=datetime(2026, 7, 7, 13, 0, tzinfo=UTC), end=datetime(2026, 7, 7, 14, 0, tzinfo=UTC)
+    )
+    text = _format_when(event, tz=ZoneInfo("Europe/Belgrade"), tz_name="Europe/Belgrade")
+    assert "15:00" in text and "16:00" in text
+    assert "13:00" not in text
+    assert "(Europe/Belgrade)" in text
+
+
+def test_format_when_defaults_to_utc_and_names_it() -> None:
+    # A caller that doesn't resolve a timezone (most existing tests here) still gets a
+    # correctly-labelled UTC rendering, never a bare unlabelled time.
+    from epicurus_calendar.service import _format_when
+
+    assert "(UTC)" in _format_when(_event())
+
+
+def test_format_when_all_day_is_never_shifted_or_named() -> None:
+    # A floating date must not move across a day boundary for a non-UTC operator, and
+    # naming a zone against a dateless event would be meaningless.
+    from epicurus_calendar.service import _format_when
+
+    all_day = _event(
+        start=datetime(2026, 6, 15, tzinfo=UTC),
+        end=datetime(2026, 6, 16, tzinfo=UTC),
+        all_day=True,
+    )
+    utc_text = _format_when(all_day, tz=UTC, tz_name="UTC")
+    belgrade_text = _format_when(all_day, tz=ZoneInfo("Europe/Belgrade"), tz_name="Europe/Belgrade")
+    assert utc_text == belgrade_text
+    assert "15 Jun 2026" in utc_text
+    assert "(" not in utc_text  # no zone suffix on a floating date
+
+
+def test_event_hover_card_when_reflects_operator_timezone() -> None:
+    event = _event(
+        start=datetime(2026, 7, 7, 13, 0, tzinfo=UTC), end=datetime(2026, 7, 7, 14, 0, tzinfo=UTC)
+    )
+    card = event_hover_card(event, tz=ZoneInfo("Europe/Belgrade"), tz_name="Europe/Belgrade")
+    labels = {d["label"]: d["value"] for d in card["details"]}
+    assert "15:00" in labels["When"]
+    assert "(Europe/Belgrade)" in labels["When"]
+
+
+def test_event_excerpt_reflects_operator_timezone() -> None:
+    event = _event(
+        start=datetime(2026, 7, 7, 13, 0, tzinfo=UTC), end=datetime(2026, 7, 7, 14, 0, tzinfo=UTC)
+    )
+    excerpt = event_excerpt(event, tz=ZoneInfo("Europe/Belgrade"), tz_name="Europe/Belgrade")
+    assert "15:00" in excerpt
+    assert "(Europe/Belgrade)" in excerpt
+
+
+def test_event_attachment_excerpt_reflects_operator_timezone() -> None:
+    event = _event(
+        start=datetime(2026, 7, 7, 13, 0, tzinfo=UTC), end=datetime(2026, 7, 7, 14, 0, tzinfo=UTC)
+    )
+    payload = event_attachment(event, tz=ZoneInfo("Europe/Belgrade"), tz_name="Europe/Belgrade")
+    assert "15:00" in payload["excerpt"]
+
+
+async def test_calendar_list_events_tool_names_the_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # A local-provider event stored as a UTC instant reads back in Belgrade wall time,
+    # both in the listing text and the chip summary.
+    await local_provider.create_event(
+        tenant_id="t1",
+        title="Standup",
+        start=datetime.now(tz=UTC) + timedelta(hours=1),
+        end=datetime.now(tz=UTC) + timedelta(hours=2),
+    )
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    content, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    envelope = _parse_envelope(content)
+    assert "(Europe/Belgrade)" in envelope.text
+    assert len(envelope.entity_refs) == 1
+    assert "(Europe/Belgrade)" in (envelope.entity_refs[0].summary or "")
+
+
+async def test_calendar_list_events_tool_google_event_uses_operator_timezone_too() -> None:
+    # Every Event is normalized to a UTC instant on construction (#467), so a Google
+    # event reads back in the operator's zone exactly like a local one — never the
+    # calendar's own zone, and never bare UTC.
+    mock_provider = _MockGoogleProvider()
+    future = datetime.now(tz=UTC) + timedelta(hours=2)
+    mock_provider.events = [
+        Event(
+            id="g-1",
+            title="Video call",
+            start=future,
+            end=future + timedelta(hours=1),
+            provider="google",
+        )
+    ]
+    module = build_module(mock_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    content, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    envelope = _parse_envelope(content)
+    assert "(Europe/Belgrade)" in envelope.text
+
+
+async def test_calendar_list_events_tool_unreachable_core_names_utc_fallback(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    async def broken() -> str:
+        raise RuntimeError("core down")
+
+    await local_provider.create_event(
+        tenant_id="t1",
+        title="Standup",
+        start=datetime.now(tz=UTC) + timedelta(hours=1),
+        end=datetime.now(tz=UTC) + timedelta(hours=2),
+    )
+    module = build_module(local_provider, tenant_id="t1", timezone=broken)
+    content, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    envelope = _parse_envelope(content)
+    assert "(UTC)" in envelope.text
+
+
+async def test_calendar_find_free_slots_reflect_operator_timezone(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # A slot's start/end carry the operator's own offset, not a bare +00:00, so the agent
+    # reads a free window in the same clock as everything else it's shown.
+    now = datetime.now(tz=UTC)
+    await local_provider.create_event(
+        tenant_id="t1", title="Busy", start=now, end=now + timedelta(hours=1)
+    )
+    module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
+    _content, structured = await module.mcp.call_tool(
+        "calendar_find_free", {"duration_minutes": 30, "range_days": 1}
+    )
+    result = _extract(structured)
+    assert isinstance(result, list)
+    assert len(result) >= 1
+    assert all("+02:00" in slot["start"] and "+02:00" in slot["end"] for slot in result)
 
 
 # ── Recurring series timezone anchor threaded through the tools (#446) ─────────

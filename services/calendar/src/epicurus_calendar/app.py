@@ -30,6 +30,7 @@ from epicurus_calendar.service import (
     event_attachment,
     event_hover_card,
     fetch_event,
+    resolve_timezone,
 )
 from epicurus_calendar.settings import CalendarSettings
 from epicurus_core import (
@@ -175,11 +176,13 @@ def create_app() -> FastAPI:
 
         Calendar only references events; an unknown *kind* is a 404. Returns the
         uniform HoverCard envelope the shell renders inline and in the entity-detail
-        panel — start/end, location, and the calendar (provider) name.
+        panel — start/end (in the operator's timezone, named, #559), location, and the
+        calendar (provider) name.
         """
         if kind != EVENT_KIND:
             raise HTTPException(status_code=404, detail=f"unknown entity kind {kind!r}")
-        return event_hover_card(await _require_event(ref_id))
+        tz, tz_name = await resolve_timezone(platform.get_timezone)
+        return event_hover_card(await _require_event(ref_id), tz=tz, tz_name=tz_name)
 
     @app.get("/attachments")
     async def list_attachments() -> list[dict[str, str]]:
@@ -189,7 +192,8 @@ def create_app() -> FastAPI:
     @app.get("/attachments/{ref_id}")
     async def get_attachment(ref_id: str) -> dict[str, str]:
         """Resolve an attached event to the text the agent injects (ADR-0019)."""
-        return event_attachment(await _require_event(ref_id))
+        tz, tz_name = await resolve_timezone(platform.get_timezone)
+        return event_attachment(await _require_event(ref_id), tz=tz, tz_name=tz_name)
 
     app.mount("/mcp", mcp_app)
 

@@ -13,6 +13,13 @@ been fetched (cold start, or an air-gapped build with ``LLM_CATALOG_ENABLED=fals
 catalog serves a small built-in **seed** so the browser is never empty. The catalog is
 global, not tenant-scoped — it mirrors a public registry, holds no tenant data, and is
 identical for every tenant (like the provider registry).
+
+On-disk sizes (#571): the index page publishes none, so the refresh alone leaves every
+live entry's ``size_gb`` empty. A background **size fill** backfills them from each
+family's *tags page* — the same fetch the quant-variant lookup (#330) already does,
+shared through its per-family cache — one family per ``size_fill_seconds``, most-popular
+first, so the refresh itself stays exactly one upstream request and the fill is polite.
+A tags-page failure just leaves that family size-less; it never blocks the catalog.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ import httpx
 from pydantic import BaseModel
 
 from epicurus_core import get_logger
+from epicurus_core_app.llm.variants import TagInfo
 
 log = get_logger("epicurus_core_app.llm.catalog")
 
@@ -39,8 +47,10 @@ KNOWN_TAGS: tuple[str, ...] = (
     "multilingual",
     "vision",
     "tools",
+    "thinking",
     "embedding",
     "small",
+    "cloud",
 )
 
 # A model is "small" when its largest-listed parameter count is under this many billions.
@@ -59,6 +69,10 @@ _SIZE = re.compile(r"x-test-size[^>]*>([^<]+)<")
 _CAP = re.compile(r"x-test-capability[^>]*>([^<]+)<")
 _PULLS = re.compile(r"x-test-pull-count[^>]*>([^<]+)<")
 _TAG = re.compile(r"<[^>]+>")
+# The library's "cloud" pill is styled apart from the capability chips and carries *no*
+# ``x-test-capability`` hook (verified live 2026-07-09), so it needs its own match: an element
+# whose entire text is "cloud". Kept alongside ``_CAP`` in case upstream ever adds the hook.
+_CLOUD_PILL = re.compile(r">\s*cloud\s*<")
 
 
 class CatalogEntry(BaseModel):
@@ -67,7 +81,8 @@ class CatalogEntry(BaseModel):
     id: str  # pullable ref, e.g. "llama3.1:8b" or (size-less) "nomic-embed-text"
     family: str  # display/group name, e.g. "llama3.1"
     params: str = ""  # size label, e.g. "8b"; "" for a size-less family
-    # The library does not publish on-disk size; None unless the seed supplies it.
+    # On-disk size in GB. The library *index* does not publish it, so a fresh parse leaves it
+    # None; the seed and the tags-page size fill (#571) supply it. Always None for cloud rows.
     size_gb: float | None = None
     description: str = ""
     tags: list[str] = []
@@ -207,6 +222,13 @@ def _derive_tags(name: str, description: str, caps: set[str], params: str) -> li
         tags.add("vision")
     if "tools" in caps:
         tags.add("tools")
+    if "thinking" in caps:
+        tags.add("thinking")
+    # "cloud" marks an entry with no local weights — only the *size-less* row of a
+    # cloud-pilled family qualifies. Hybrid families (gemma3, gpt-oss, …) carry the pill
+    # too, but their size-expanded rows are ordinary downloadable builds and stay untagged.
+    if "cloud" in caps and not params:
+        tags.add("cloud")
     haystack = f"{name} {description}".lower()
     if re.search(r"cod(?:e|er|ing)", haystack):
         tags.add("code")
@@ -245,6 +267,8 @@ def _parse_block(block: str, order: int) -> _RawModel | None:
         if size and size not in sizes:
             sizes.append(size)
     caps = {c.strip().lower() for c in _CAP.findall(block) if c.strip()}
+    if _CLOUD_PILL.search(block):
+        caps.add("cloud")
     pulls_match = _PULLS.search(block)
     pulls = pulls_match.group(1).strip() if pulls_match else None
     return _RawModel(
@@ -323,6 +347,11 @@ def _httpx_fetcher(timeout: float) -> Fetcher:
     return fetch
 
 
+# The size fill's source of tags-page rows — ``VariantLookup.family_tags`` in the app.
+# Injected as a callable so the catalog stays decoupled from (and testable without) the lookup.
+TagSource = Callable[[str], Awaitable[list[TagInfo]]]
+
+
 class ModelCatalog:
     """Owns the model list: refreshes it from upstream on a loop, serves a cached snapshot.
 
@@ -335,6 +364,10 @@ class ModelCatalog:
         fetch: The page fetcher; injected in tests. Defaults to an httpx GET.
         timeout: Per-request timeout for the default fetcher.
         clock: Returns "now"; injected in tests for a deterministic ``updated_at``.
+        tag_source: Per-family tags-page rows for the GB size fill (#571) — the variant
+            lookup's cached ``family_tags`` in the app. None disables all size enrichment.
+        size_fill_seconds: Pause between background size-fill lookups (rate limit); 0
+            disables the background fill (on-demand enrichment still works).
     """
 
     def __init__(
@@ -348,6 +381,8 @@ class ModelCatalog:
         fetch: Fetcher | None = None,
         timeout: float = 15.0,
         clock: Callable[[], datetime] | None = None,
+        tag_source: TagSource | None = None,
+        size_fill_seconds: float = 30.0,
     ) -> None:
         self._source = source_url
         self._refresh_seconds = max(60.0, refresh_seconds)
@@ -355,11 +390,19 @@ class ModelCatalog:
         self._enabled = enabled
         self._fetch = fetch or _httpx_fetcher(timeout)
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._tag_source = tag_source
+        self._size_fill_seconds = max(0.0, size_fill_seconds)
         self._lock = asyncio.Lock()
         # Start on the seed, flagged stale until the first successful parse lands.
         self._entries: list[CatalogEntry] = list(seed if seed is not None else SEED_CATALOG)
         self._updated_at: datetime | None = None
         self._stale = True
+        # Size-fill bookkeeping: each successful refresh bumps the generation, which restarts
+        # the fill pass; families already attempted this pass are skipped so a family whose
+        # tags page yields no sizes (cloud-only) can't wedge the walk.
+        self._generation = 0
+        self._fill_generation = -1
+        self._fill_attempted: set[str] = set()
 
     async def refresh(self) -> bool:
         """Fetch + parse the source once, swapping in the result on success.
@@ -387,9 +430,20 @@ class ModelCatalog:
             )
             return False
         async with self._lock:
+            # Carry known sizes across the swap: a fresh index parse has size_gb=None
+            # everywhere, and dropping the enriched values would blank every GB label
+            # until the fill pass reaches each family again (#571).
+            known = {e.id: e.size_gb for e in self._entries if e.size_gb is not None}
+            entries = [
+                e.model_copy(update={"size_gb": known[e.id]})
+                if e.size_gb is None and e.id in known and "cloud" not in e.tags
+                else e
+                for e in entries
+            ]
             self._entries = entries
             self._updated_at = self._clock()
             self._stale = False
+            self._generation += 1
         log.info("model catalog refreshed", source=self._source, entries=len(entries))
         return True
 
@@ -402,6 +456,103 @@ class ModelCatalog:
                 updated_at=self._updated_at,
                 stale=self._stale,
             )
+
+    async def enrich_family(self, family: str) -> bool:
+        """Backfill ``family``'s entries' ``size_gb`` from its tags-page rows (#571).
+
+        Pulls the rows through the injected ``tag_source`` (the variant lookup's per-family
+        cache, so a lookup the UI just did costs no second request). Never raises — a fetch
+        or parse failure leaves the entries as they are. Returns whether anything changed.
+        """
+        if self._tag_source is None or not family:
+            return False
+        try:
+            tags = await self._tag_source(family)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("catalog size lookup failed", family=family, error=str(exc))
+            return False
+        return await self._apply_sizes(family, tags)
+
+    async def _apply_sizes(self, family: str, tags: list[TagInfo]) -> bool:
+        """Fold tags-page sizes into ``family``'s entries; True when an entry changed.
+
+        A sized row (``params`` set) takes its bare tag's size — the default build. A
+        size-less downloadable row takes ``latest`` (its pullable alias), falling back to
+        the first sized tag. Cloud rows are skipped — no local weights, no size, by design.
+        """
+        sizes = {t.tag.strip().lower(): t.size_gb for t in tags if t.size_gb is not None}
+        if not sizes:
+            return False
+        fallback = sizes["latest"] if "latest" in sizes else next(iter(sizes.values()))
+        changed = False
+        async with self._lock:
+            updated = list(self._entries)
+            for i, entry in enumerate(updated):
+                if entry.family != family or "cloud" in entry.tags:
+                    continue
+                size = sizes.get(entry.params) if entry.params else fallback
+                if size is not None and size != entry.size_gb:
+                    updated[i] = entry.model_copy(update={"size_gb": size})
+                    changed = True
+            if changed:
+                self._entries = updated
+        return changed
+
+    async def fill_step(self) -> None:
+        """One size-fill step: enrich the most-popular family still missing a size.
+
+        Entries are already popularity-ordered, so "first missing" is "most popular
+        missing". Every attempted family is remembered for the current catalog generation —
+        success or not — so a family with nothing to offer (cloud-only) is visited once per
+        pass instead of wedging the walk.
+        """
+        async with self._lock:
+            if self._generation != self._fill_generation:
+                self._fill_generation = self._generation
+                self._fill_attempted.clear()
+            family = next(
+                (
+                    e.family
+                    for e in self._entries
+                    if e.size_gb is None
+                    and "cloud" not in e.tags
+                    and e.family not in self._fill_attempted
+                ),
+                None,
+            )
+        if family is None:
+            return  # pass complete — idle until a refresh swaps in a new list
+        self._fill_attempted.add(family)
+        await self.enrich_family(family)
+        async with self._lock:
+            pending = {
+                e.family
+                for e in self._entries
+                if e.size_gb is None
+                and "cloud" not in e.tags
+                and e.family not in self._fill_attempted
+            }
+        if pending:
+            log.debug("catalog size fill", family=family, pending=len(pending))
+        else:
+            log.info("catalog size fill pass complete", last_family=family)
+
+    async def run_size_fill(self) -> None:
+        """Backfill GB sizes in the background, one family per ``size_fill_seconds`` (#571).
+
+        Launched as its own task next to :meth:`run_periodic`. Deliberately not an eager
+        crawl: one rate-limited tags-page lookup at a time (shared with the variant lookup's
+        cache), restarting the walk only when a refresh lands a new list. Disabled catalogs
+        (air-gapped) and missing sources never fetch.
+        """
+        if not self._enabled or self._tag_source is None or self._size_fill_seconds <= 0:
+            log.info("catalog size fill disabled", source=self._source)
+            return
+        while True:
+            await asyncio.sleep(self._size_fill_seconds)
+            await self.fill_step()
 
     async def run_periodic(self) -> None:
         """Refresh now, then every ``refresh_seconds`` until cancelled (app shutdown).

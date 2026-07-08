@@ -62,6 +62,11 @@ class CoreAppSettings(CoreSettings):
     # When false, no outbound fetch happens and the built-in seed is served as-is
     # (air-gapped builds). The endpoint and seed still work; only the refresh is skipped.
     llm_catalog_enabled: bool = True
+    # Pause between the background GB-size fill's tags-page lookups (#571). The index page
+    # publishes no on-disk sizes, so the fill walks the families most-popular-first, one
+    # rate-limited request at a time (shared with the quant-variant lookup's per-family
+    # cache). 0 disables the fill; sizes then arrive only via on-demand variant lookups.
+    llm_catalog_size_fill_seconds: float = 30.0
     # Comma-separated module base URLs. Each module serves its MCP tools at
     # <base>/mcp (the agent calls these) and its manifest at <base>/manifest
     # (the registry + web shell read these).

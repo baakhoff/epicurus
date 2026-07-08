@@ -157,6 +157,32 @@ Backed by the tenant-scoped `saved_models` table. The chat picker renders this l
 on use), the Models page lists it (remove / set-as-default), and module model slots offer it
 (ADR-0029). Mutations **503** when the store is unavailable.
 
+## `GET /platform/v1/llm/catalog` · `GET /platform/v1/llm/catalog/variants`
+
+The browsable model catalog the core parses from an upstream library on a schedule (#269), and
+the on-demand quant-variant lookup that complements it (#330). Shell-facing; global, not
+tenant-scoped (both mirror a public registry).
+
+- **`GET /llm/catalog`** → `{entries, source, updated_at, stale}`, the cached snapshot (never
+  blocks on the network). Each entry is
+  `{id, family, params, size_gb, description, tags, pulls}`:
+  `id` is the pullable ref (`llama3.1:8b`, or the bare family for a size-less model); `size_gb`
+  is the **real on-disk size** backfilled from the family's tags page (#571) — `null` until the
+  background size fill or a variant lookup reaches the family, and always `null` for cloud rows;
+  `tags` is a loose string array from the parser's vocabulary (`general`, `code`,
+  `multilingual`, `vision`, `tools`, `thinking`, `embedding`, `small`, `cloud`) — unknown future
+  tags must be ignored, not rejected. A `cloud` tag marks a **cloud-only** model: no local
+  weights (its only upstream tag is a cloud alias) — the UI badges it, offers no Pull, and skips
+  fit. `stale` flags a seed / last-good snapshot after a failed or skipped refresh.
+- **`GET /llm/catalog/variants?model=…`** → `{model, variants: [{tag, quant, size_gb}]}`, the
+  pullable quantizations of the given model (`model` is a query param — names carry `:`).
+  `quant` is the parsed quant label (`q8_0`, `fp16`, … — `""` for the default build) and
+  `size_gb` the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a
+  cloud alias). Best-effort: any failure returns an empty list. A successful lookup also folds
+  the family's sizes into the catalog snapshot (the same per-family cache feeds both).
+
+---
+
 ## `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions`
 
 The agent's editable **base system prompt** (#497, ADR-0083) — injected as the **first** message

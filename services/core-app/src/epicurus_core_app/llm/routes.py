@@ -179,12 +179,18 @@ def create_llm_router(
     @router.get("/catalog/variants", response_model=ModelVariantsResponse)
     async def get_variants(model: str) -> ModelVariantsResponse:
         """The quant variants available for a model (#330), looked up on demand from the
-        registry. ``model`` is a query param (names carry ``:``). Best-effort: an empty list
-        means none were found / the lookup is unwired, and the UI falls back to the manual box.
+        registry, each with the real on-disk size its tags page shows (#571). ``model`` is a
+        query param (names carry ``:``). Best-effort: an empty list means none were found /
+        the lookup is unwired, and the UI falls back to the manual box.
         """
         if variants is None:
             return ModelVariantsResponse(model=model, variants=[])
-        return await variants.variants(model)
+        response = await variants.variants(model)
+        # Piggyback (#571): a successful lookup just cached this family's tag sizes — fold
+        # them into the catalog rows now rather than waiting for the background fill.
+        if catalog is not None and response.variants:
+            await catalog.enrich_family(model.partition(":")[0].strip())
+        return response
 
     @router.delete("/models")
     async def delete_model(name: str) -> dict[str, str]:

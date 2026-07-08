@@ -148,14 +148,21 @@ def create_app() -> FastAPI:
         model_settings=model_settings,
     )
 
+    # On-demand quant-variant lookup from each model's public library tags page (#330).
+    # Its per-family cache lives for one catalog refresh interval, so the catalog's GB size
+    # fill (#571) and the UI's variant lookups share a single upstream request per family.
+    variant_lookup = VariantLookup(
+        library_url=settings.llm_catalog_url,
+        cache_ttl_seconds=settings.llm_catalog_refresh_seconds,
+    )
     catalog = ModelCatalog(
         source_url=settings.llm_catalog_url,
         refresh_seconds=settings.llm_catalog_refresh_seconds,
         max_models=settings.llm_catalog_max_models,
         enabled=settings.llm_catalog_enabled,
+        tag_source=variant_lookup.family_tags,
+        size_fill_seconds=settings.llm_catalog_size_fill_seconds,
     )
-    # On-demand quant-variant lookup from each model's public library tags page (#330).
-    variant_lookup = VariantLookup(library_url=settings.llm_catalog_url)
 
     async def embed(texts: list[str]) -> list[list[float]]:
         # No explicit model → the gateway resolves the operator's Embedding-model pref
@@ -405,6 +412,9 @@ def create_app() -> FastAPI:
         # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
         # startup never blocks on the network; the task self-heals on transient failures.
         catalog_task = asyncio.create_task(catalog.run_periodic())
+        # Backfill GB sizes from each family's tags page, rate-limited (#571). Returns
+        # immediately when the catalog is disabled, so air-gapped builds never fetch.
+        catalog_size_task = asyncio.create_task(catalog.run_size_fill())
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
@@ -431,11 +441,14 @@ def create_app() -> FastAPI:
             # Stop accepting new inbound messages first, so no turn starts mid-teardown.
             await inbound_messaging.stop()
             catalog_task.cancel()
+            catalog_size_task.cancel()
             extraction_task.cancel()
             live_run_reaper.cancel()
             maintenance_task.cancel()
             with suppress(asyncio.CancelledError):
                 await catalog_task
+            with suppress(asyncio.CancelledError):
+                await catalog_size_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
             with suppress(asyncio.CancelledError):

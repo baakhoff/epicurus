@@ -145,8 +145,8 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | --- | --- |
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) from `/api/show` — opt-in (one call per model), so the Models page can badge them while the chat picker stays light. |
 | `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported). Backs the model-settings sheet and the chat "can't use tools" hint. `model` is a query param (names carry `:`/`/`). |
-| `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
-| `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant}]}`; best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. `model` is a query param. See **Model catalog** below. |
+| `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; each entry's `size_gb` is the **real on-disk size** backfilled from its family's tags page (#571; `null` until the size fill or a variant lookup reaches the family, and always `null` for `cloud` rows). `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
+| `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant, size_gb}]}` — `size_gb` is the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a cloud alias). Best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. A successful lookup also piggybacks its sizes onto the catalog snapshot. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `POST /platform/v1/llm/unload` | Drop model(s) from memory now (`keep_alive=0`) **without** changing power state (#331). Body `{model: str\|null}` — `null`/omitted unloads every loaded model, a name unloads just that one. Returns `{status, model}` (`"all"` when none given). The standalone unload the Models page calls; the `loaded` flag refreshes on the next poll. |
 | `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
@@ -181,16 +181,42 @@ no tenant data, and is identical for every tenant (like the provider registry). 
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
 
+**Cloud-only models** (#571): some upstream families publish no downloadable weights at all —
+their only tag is a `cloud` alias whose inference runs on the library vendor's cloud. The
+index marks them with a `cloud` pill (a plain styled span **without** the `x-test-capability`
+hook, so the parser matches it separately; verified live 2026-07-09). The parser adds `cloud`
+to the tag vocabulary (alongside the `thinking` capability, new in the same pass) — but only
+on a family's **size-less bare entry**: hybrid families (gemma3, gpt-oss, …) carry the pill
+too, yet their size-expanded rows are ordinary local builds and stay untagged. The web badges
+`cloud` rows, offers no Pull, and excludes them from fit — by design, with the reason in a
+tooltip.
+
 A **quant-variant lookup** (`llm/variants.py`, #330) complements the catalog: the catalog
 index lists a model's parameter *sizes* but not its *quantizations*, so to pull a different
 quant the operator used to have to type the exact tag. `VariantLookup` fetches the model's
 public **tags page** on demand (`<LLM_CATALOG_URL>/<family>/tags`, the same host the catalog
 parses) and pulls the `/library/<family>:<tag>` links for the requested size into a small
-`{tag, quant}` list the Models page renders as a pick-list. (The OCI registry's `tags/list`
-JSON endpoint is *not* used — `registry.ollama.ai` returns 404 for it; only the tags page
-enumerates a model's quants.) It is deliberately best-effort (any failure → empty list, UI
-falls back to the manual box; a model not in the public library logs at debug, not warning)
-and, like the catalog, global rather than tenant-scoped.
+`{tag, quant, size_gb}` list the Models page renders as a pick-list — `size_gb` is the
+**real on-disk size** shown on the tag's row (#571; `null` for cloud aliases, which publish
+none), so the pick-list and its fit badges use real sizes instead of bits-per-weight
+estimates. (The OCI registry's `tags/list` JSON endpoint is *not* used — `registry.ollama.ai`
+returns 404 for it; only the tags page enumerates a model's quants.) Parsed tag rows are
+**cached per family** (TTL = the catalog refresh interval), so repeated lookups cost one
+upstream request. It is deliberately best-effort (any failure → empty list, UI falls back to
+the manual box; a model not in the public library logs at debug, not warning) and, like the
+catalog, global rather than tenant-scoped.
+
+**GB size fill** (#571): the index page publishes no on-disk sizes, so a fresh catalog parse
+has `size_gb = null` everywhere — only the tags pages carry sizes. Rather than an eager crawl
+(the refresh stays **exactly one** upstream request), a background fill walks the families
+most-popular-first, **one rate-limited tags-page lookup per `LLM_CATALOG_SIZE_FILL_SECONDS`**
+(default 30 s; `0` disables), through the variant lookup's shared per-family cache. A sized
+row takes its bare `<size>` tag's size (the default build); a size-less downloadable family
+(embedding models) takes `latest`; `cloud` rows are skipped by design. Each successful
+refresh restarts the walk, and enriched sizes are **carried across refresh swaps** so GB
+labels never flap back to empty. A tags-page failure just leaves that family size-less until
+the next pass — it never blocks or empties the catalog. On-demand variant lookups piggyback
+their freshly cached sizes onto the catalog immediately, ahead of the walk.
 
 #### Re-embedding (#332/#436, ADR-0054/ADR-0074)
 

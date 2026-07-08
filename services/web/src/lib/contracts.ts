@@ -47,6 +47,9 @@ export const ModelVariant = z.object({
   tag: z.string(),
   // Parsed quant label ("q8_0" / "fp16"); "" for the default build (no quant token in the tag).
   quant: z.string().default(""),
+  // Real on-disk size parsed from the tags page (#571); null/absent when upstream shows none
+  // (cloud aliases) or the core predates the field — the UI then falls back to its estimate.
+  size_gb: z.number().nullish(),
 });
 export type ModelVariant = z.infer<typeof ModelVariant>;
 

@@ -529,6 +529,14 @@ export const BrowserItem = z.object({
    * itself goes through the shared `/pages/{pageId}/move` contract.
    */
   movable: z.boolean().nullish(),
+  /**
+   * When true the shell offers delete on this entry (#564). Broader than `movable`: it covers
+   * directories too (delete is recursive), and it is false/absent for module-owned subtrees
+   * whose lifecycle belongs to the owning page. The core Files surface sets it; module pages
+   * leave it absent. The delete goes through the core `DELETE /files/entry` door, re-checked
+   * server-side, so hiding the button is a courtesy, not the enforcement.
+   */
+  deletable: z.boolean().nullish(),
 });
 export type BrowserItem = z.infer<typeof BrowserItem>;
 

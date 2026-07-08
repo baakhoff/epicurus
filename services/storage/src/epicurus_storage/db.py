@@ -284,3 +284,24 @@ class FileIndex:
                 if row.path == dst:  # the moved root carries a new display name
                     row.name = dst.rsplit("/", 1)[-1]
             await session.commit()
+
+    async def delete_subtree(self, *, tenant: str, path: str) -> int:
+        """Drop the row at *path* and every descendant under ``<path>/`` (#564).
+
+        The index half of a delete: symmetric to :meth:`repath`, it removes the whole subtree
+        in one commit so a listing never sees it half-gone. The MinIO byte deletes are the
+        caller's job (:func:`~epicurus_storage.service.delete_item`). Empty *path* (the root)
+        removes nothing. Returns the number of rows deleted.
+        """
+        path = path.replace("\\", "/").rstrip("/")
+        if not path:
+            return 0
+        async with self._session() as session:
+            result = await session.execute(
+                delete(_StoredFile).where(
+                    _StoredFile.tenant == tenant,
+                    or_(_StoredFile.path == path, _StoredFile.path.like(path + "/%")),
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0

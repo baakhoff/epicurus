@@ -10,6 +10,8 @@
  *  - `href` on an item → a download link is shown in the detail pane.
  *  - `movable` on an item → the entry can be renamed (detail pane) and dragged onto a
  *    folder/breadcrumb to move it (#391), through the shared `/pages/{id}/move` contract.
+ *  - `deletable` on an item + a `remove` source → a delete affordance (row + detail pane),
+ *    behind the shell Confirm with a recursive-contents warning for folders (#564).
  *
  * Responsive: two panes side-by-side on wide screens; on phones the list fills the
  * view and selecting an item slides to its detail (with a back affordance).
@@ -29,12 +31,22 @@ import {
   Loader2,
   Pencil,
   Search,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { Button, EmptyState, Sheet, Spinner, TextInput, Tooltip, cn } from "@/components/ui";
+import {
+  Button,
+  Confirm,
+  EmptyState,
+  Sheet,
+  Spinner,
+  TextInput,
+  Tooltip,
+  cn,
+} from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { BrowserData, type BrowserItem } from "@/lib/contracts";
 import { usePanel } from "@/stores/panel";
@@ -67,6 +79,12 @@ export interface BrowserSource {
   readText: (path: string) => Promise<{ path: string; name: string; content: string }>;
   /** Move or rename an item (`from` → `to`). */
   move: (from: string, to: string) => Promise<unknown>;
+  /**
+   * Delete an item by path (#564) — recursive for a folder, hard (no undo). The core Files
+   * screen wires this; module pages don't (they leave `deletable` absent). Throws `ApiError`
+   * when the server refuses (e.g. a module-owned subtree), surfaced as a toast.
+   */
+  remove?: (path: string) => Promise<unknown>;
   /** Uploads into the surface (#479) — the core Files screen wires this; module pages don't. */
   upload?: BrowserUpload;
 }
@@ -116,6 +134,18 @@ function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
+/**
+ * The Confirm copy for deleting `item` (#564). A folder (it has a `nav_path`) must spell out
+ * that the whole subtree goes — the delete is recursive on the server — so the operator is
+ * never surprised. Both are hard deletes: there is no trash/undo in v1.
+ */
+function deleteMessage(item: BrowserItem | null): string {
+  if (!item) return "";
+  return item.nav_path
+    ? `Delete "${item.title}" and everything inside it? This can't be undone.`
+    : `Delete "${item.title}"? This can't be undone.`;
+}
+
 function ItemIcon({ item }: { item: BrowserItem }) {
   if (item.nav_path) return <Folder size={15} className="shrink-0 text-ink-faint" />;
   return null;
@@ -131,6 +161,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   const [renameValue, setRenameValue] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  // The entry awaiting a delete confirmation (#564); null when the Confirm is closed.
+  const [pendingDelete, setPendingDelete] = useState<BrowserItem | null>(null);
   // Upload state (#479): the pill strip, the phone source menu, and the hidden pickers.
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
@@ -168,6 +200,23 @@ export function BrowserView({ source }: { source: BrowserSource }) {
       toast.error(
         err instanceof ApiError ? `Could not move: ${err.detail}` : "Could not move this item.",
       ),
+  });
+
+  // Delete behind the shell Confirm (#564): hard, recursive for a folder. Clear the selection
+  // if the deleted entry was open, and refetch the listing so the row disappears at once.
+  const del = useMutation({
+    mutationFn: (path: string) => source.remove!(path),
+    onSuccess: (_res, path) => {
+      void qc.invalidateQueries({ queryKey: source.queryKey });
+      if (selectedId === path) setSelectedId(null);
+      setPendingDelete(null);
+    },
+    onError: (err) => {
+      setPendingDelete(null);
+      toast.error(
+        err instanceof ApiError ? `Could not delete: ${err.detail}` : "Could not delete this item.",
+      );
+    },
   });
 
   // Reset selection when the path or query changes — adjust state during render
@@ -503,7 +552,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                 const isFolder = !!item.nav_path;
                 const dropTarget = isFolder && !!dragId && dragId !== item.id;
                 return (
-                  <li key={item.id}>
+                  <li key={item.id} className="group flex items-center gap-1">
                     <button
                       draggable={!!item.movable}
                       onDragStart={(e) => {
@@ -527,7 +576,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                         }
                       }}
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
+                        "flex min-w-0 flex-1 items-center gap-2 rounded-(--radius-field) px-3 py-2 text-left transition-colors",
                         item.id === selectedId
                           ? "bg-accent-dim text-accent-strong"
                           : "text-ink hover:bg-surface-2",
@@ -548,6 +597,20 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       </span>
                       <ChevronRight size={15} className="shrink-0 text-ink-faint" />
                     </button>
+                    {/* Delete lives in the row (not just the detail pane) because a folder
+                        navigates on click and never opens a detail pane — the row is its only
+                        reach. Always visible on touch; hover/focus-revealed on wide screens. */}
+                    {source.remove && item.deletable && (
+                      <Tooltip label="Delete" side="top">
+                        <button
+                          onClick={() => setPendingDelete(item)}
+                          className="shrink-0 rounded-(--radius-field) p-1.5 text-ink-faint opacity-100 transition-colors hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                          aria-label={`Delete ${item.title}`}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </Tooltip>
+                    )}
                   </li>
                 );
               })}
@@ -599,6 +662,17 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       </button>
                     </Tooltip>
                   )}
+                  {source.remove && selected.deletable && (
+                    <Tooltip label="Delete" side="bottom">
+                      <button
+                        onClick={() => setPendingDelete(selected)}
+                        className="shrink-0 rounded-(--radius-field) p-1.5 text-ink-faint hover:bg-danger/10 hover:text-danger"
+                        aria-label="Delete"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </Tooltip>
+                  )}
                 </div>
               )}
               {selected.subtitle && (
@@ -643,6 +717,17 @@ export function BrowserView({ source }: { source: BrowserSource }) {
           )}
         </div>
       </div>
+
+      {/* Delete confirmation (#564) — danger-styled, focus-trapped (#487); a folder's copy
+          spells out that its contents go too. Rendered once, driven by `pendingDelete`. */}
+      <Confirm
+        open={pendingDelete !== null}
+        danger
+        confirmLabel="Delete"
+        message={deleteMessage(pendingDelete)}
+        onConfirm={() => pendingDelete && del.mutate(pendingDelete.id)}
+        onCancel={() => setPendingDelete(null)}
+      />
 
       {/* The phone source menu (#479): pick what kind of thing first, Telegram-style —
           each option opens the matching native surface via its hidden input. */}

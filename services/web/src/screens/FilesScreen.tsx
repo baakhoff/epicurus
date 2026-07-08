@@ -16,6 +16,7 @@ const filesSource: BrowserSource = {
   fetchPage: (path, q) => api.filesPage(path, q),
   readText: (p) => api.filesRead(p),
   move: (f, t) => api.filesMove(f, t),
+  remove: (p) => api.filesDelete(p),
   upload: { send: (file, dir) => api.filesUpload(file, dir) },
 };
 

@@ -26,6 +26,7 @@ DIR = "/platform/v1/files/dir"
 MOVE = "/platform/v1/files/move"
 UPLOAD = "/platform/v1/files/upload"
 ROOT = "/platform/v1/files"
+ENTRY = "/platform/v1/files/entry"
 
 
 @pytest.fixture
@@ -115,6 +116,40 @@ async def test_read_too_large_is_413(client: AsyncClient) -> None:
 async def test_write_and_delete_root_are_400(client: AsyncClient) -> None:
     assert (await client.put(WRITE, params={"path": ""}, json={"content": "x"})).status_code == 400
     assert (await client.request("DELETE", ROOT, params={"path": ""})).status_code == 400
+
+
+# ── The Files-page delete door (#564), the operator counterpart to the module DELETE ──
+
+
+async def test_entry_delete_removes_a_file(client: AsyncClient) -> None:
+    await client.put(WRITE, params={"path": "docs/a.md"}, json={"content": "x"})
+    resp = await client.request("DELETE", ENTRY, params={"path": "docs/a.md"})
+    assert resp.status_code == 200 and resp.json()["deleted"] is True
+    assert (await client.get(STAT, params={"path": "docs/a.md"})).status_code == 404
+
+
+async def test_entry_delete_root_is_400(client: AsyncClient) -> None:
+    assert (await client.request("DELETE", ENTRY, params={"path": ""})).status_code == 400
+
+
+async def test_entry_delete_missing_is_false(client: AsyncClient) -> None:
+    # No object backend wired here → a miss in the file space is a clean False, not a 404.
+    resp = await client.request("DELETE", ENTRY, params={"path": "ghost.txt"})
+    assert resp.status_code == 200 and resp.json()["deleted"] is False
+
+
+async def test_entry_delete_traversal_is_400(client: AsyncClient) -> None:
+    assert (await client.request("DELETE", ENTRY, params={"path": "../x"})).status_code == 400
+
+
+async def test_entry_delete_locked_prefix_is_400(capped_client: AsyncClient) -> None:
+    # The guard is server-side (the capped client locks "knowledge"): a crafted request is
+    # refused even though the UI would never offer the button (#479/#564).
+    await capped_client.put(WRITE, params={"path": "knowledge/n.md"}, json={"content": "x"})
+    resp = await capped_client.request("DELETE", ENTRY, params={"path": "knowledge/n.md"})
+    assert resp.status_code == 400 and "knowledge module" in resp.json()["detail"]
+    # Untouched — the module keeps its file (it deletes via its own module DELETE, unguarded).
+    assert (await capped_client.get(STAT, params={"path": "knowledge/n.md"})).status_code == 200
 
 
 async def test_tenant_isolation(client: AsyncClient) -> None:

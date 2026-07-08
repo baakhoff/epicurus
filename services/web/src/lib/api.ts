@@ -526,6 +526,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ src, dst }),
     }),
+  // Delete a file/folder/object from the unified Files view — the Files page's delete door
+  // (#564). Recursive for a folder, hard (no trash/undo). A module-owned subtree is refused
+  // (400 → ApiError) server-side; the UI hides the action there via `deletable`.
+  filesDelete: (path: string) =>
+    request(
+      z.object({ deleted: z.boolean() }),
+      `/platform/v1/files/entry?path=${encodeURIComponent(path)}`,
+      { method: "DELETE" },
+    ),
   // Upload one file into the core file space at `dir` — the Files page's upload (#479).
   // Multipart (like uploadAttachment); a 413/415 surfaces as ApiError with the server's
   // detail so the caller can render it per file.

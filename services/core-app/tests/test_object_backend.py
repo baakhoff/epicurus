@@ -61,6 +61,11 @@ async def test_move_raises_when_storage_down() -> None:
         await _down().move(tenant="local", src="uploads/a", dst="uploads/b")
 
 
+async def test_delete_raises_when_storage_down() -> None:
+    with pytest.raises(HTTPException):
+        await _down().delete(tenant="local", path="uploads/x.txt")
+
+
 # ── Endpoint URLs the backend calls on storage ───────────────────────────────
 
 
@@ -105,6 +110,10 @@ class _FakeClient:
         self._capture.update(method="POST", url=url, params=params, json=json)
         return self._resp
 
+    async def delete(self, url: str, params: dict[str, str] | None = None) -> _FakeResp:
+        self._capture.update(method="DELETE", url=url, params=params)
+        return self._resp
+
 
 def _patch(monkeypatch: pytest.MonkeyPatch, resp: _FakeResp, capture: dict[str, Any]) -> None:
     monkeypatch.setattr(
@@ -144,3 +153,12 @@ async def test_move_hits_objects_move_endpoint(monkeypatch: pytest.MonkeyPatch) 
     assert cap["method"] == "POST" and cap["url"] == "/objects/move"
     assert cap["json"] == {"from_path": "uploads/a", "to_path": "uploads/b"}
     assert entry.path == "uploads/b"
+
+
+async def test_delete_hits_objects_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap: dict[str, Any] = {}
+    _patch(monkeypatch, _FakeResp(body={"deleted": True}), cap)
+    deleted = await _up().delete(tenant="local", path="uploads/a")
+    assert cap["method"] == "DELETE" and cap["url"] == "/objects"
+    assert cap["params"] == {"tenant_id": "local", "path": "uploads/a"}
+    assert deleted is True

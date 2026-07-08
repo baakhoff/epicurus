@@ -75,6 +75,7 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 | --- | --- |
 | `GET /platform/v1/files/page?path=&q=&tenant_id=` | **Files browser page (ADR-0063).** `BrowserData` for the `browser` archetype — merges the file-space tree (the core file index) with the **storage module's objects** (chat uploads, agent-written files). `path` browses a directory (empty = root); `q` runs a name/path search. The shell renders the core-owned **Files** surface from this. **Movability (#479):** object entries and operator-space file-space *files* are `movable`; directories and anything under a module-owned top-level folder (the `module_urls` hostnames — `knowledge/…`, `notes/…`) are read-only in the UI. |
 | `POST /platform/v1/files/upload?dir=&tenant_id=` (multipart `file`) | **Upload into the file space (#479)** — the Files page's upload door (one file per request; the UI sequences multi-picks for per-file progress). Lands `dir/<filename>` through the FileStore seam and **indexes it immediately** (listed + searchable, no rescan). Enforces the shared #175 caps: **415** type not in `ATTACHMENT_ALLOWED_TYPES`, **413** over `ATTACHMENT_MAX_BYTES`. **400** traversal or a module-owned `dir`. A name collision gets a `-2`/`-3`… suffix, never an overwrite. Returns the written `FileEntry`. Operator-UI-facing: modules keep writing via `PUT …/write` / `PlatformClient.files_write`, so there is deliberately no `files_upload` client method. |
+| `DELETE /platform/v1/files/entry?path=&tenant_id=` | **Delete from the file space (#564)** — the Files page's delete door, the operator counterpart to the module-facing `DELETE …/files` (mirrors `upload` vs `write`). `{deleted}` — recursive for a folder, hard (no trash/undo). **File-space first**, else falls back to the storage object store (`DELETE /objects`) for object entries; **de-indexes immediately** (drops from search/listing at once, the #390 watcher is the backstop). **400** deleting the tenant root, **or** a path under a module-owned top-level folder (`knowledge/…`, `notes/…`) — that lifecycle belongs to the owning page (#216/#340), enforced server-side so a crafted request can't bypass the hidden button. Operator-UI-facing (`filesDelete` in the web app); modules keep deleting **inside their own subtrees** via the unguarded `DELETE …/files` / `PlatformClient.files_delete`, so there is deliberately no operator-guard on that door. |
 | `GET /platform/v1/files/search?q=&limit=&tenant_id=` | `{entries: [FileEntry]}` — name/path search over the core file index (merged with object names); backs `PlatformClient.files_search`. |
 | `GET /platform/v1/files/download?path=&tenant_id=` | Stream a file (binary-safe). **File-space first**, else proxies the storage object store (`GET /download` on the storage module) for object entries. **400** traversal, **404** missing. |
 | `GET /platform/v1/files/list?path=&tenant_id=` | `{entries: [FileEntry]}` — children of `path` (empty = root). |
@@ -85,10 +86,11 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 | `POST /platform/v1/files/dir?path=&tenant_id=` | Create a directory → `FileEntry`. |
 | `POST /platform/v1/files/move?tenant_id=` (body `{src, dst}`) | Move/rename → `FileEntry`. **File-space first**, else falls back to the storage object store (`POST /objects/move`) for object entries. **404** missing src, **409** dst exists, **400** root/traversal/into-itself. |
 
-> **`read`, `move`, and `download` fall back to the storage object store** for object entries
-> (chat uploads, agent-written files): the core tries the file space first, then proxies the
-> storage module (`GET /objects/read`, `POST /objects/move`, `GET /download`) so a unified Files
-> read / move / download spans both stores. `page`/`search` merge the two for listing.
+> **`read`, `move`, `download`, and `delete` fall back to the storage object store** for object
+> entries (chat uploads, agent-written files): the core tries the file space first, then proxies
+> the storage module (`GET /objects/read`, `POST /objects/move`, `GET /download`, `DELETE /objects`)
+> so a unified Files read / move / download / delete spans both stores. `page`/`search` merge the
+> two for listing.
 
 ### `PlatformClient` methods
 
@@ -163,4 +165,6 @@ shared `/data` volume, provisions the tenant root, and starts the file index (st
 `FILES_WATCH` watcher). A new backend implements `FileStore` and is selected in `build_file_store`.
 When adding a module-facing endpoint, extend the router and the matching `PlatformClient.files_*`
 method together so the contract stays symmetric (operator-UI-facing routes — `page`, `download`,
-`upload` — deliberately have no client method; modules never call them).
+`upload`, `entry` delete — deliberately have no client method; modules never call them). The two
+operator mutation doors (`upload`, `entry` delete) carry the #479 ownership guard their module
+twins (`write`, `DELETE …/files`) must not — modules write and delete inside their own subtrees.

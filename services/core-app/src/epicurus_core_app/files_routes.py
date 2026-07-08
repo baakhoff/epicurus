@@ -7,12 +7,18 @@ Two surfaces share one router and one swappable :class:`~epicurus_core.files.Fil
   ``delete`` / ``dir`` / ``move``. Modules consume these via ``PlatformClient.files_*`` instead
   of mounting the shared volume.
 * **Operator-facing Files UI** (Phase 2, ADR-0063) — ``page`` (the browser archetype's data),
-  ``search``, ``download``, and ``upload`` (#479, the Files page's way in — bounded by the
-  shared #175 caps). The Files page used to live in the storage module; it now lives
-  here, served from the core-owned file index over the FileStore, **merged** with the storage
-  module's object store (chat uploads / agent objects) via an injected :class:`ObjectBackend`.
-  ``read`` / ``move`` / ``download`` are file-space-first and fall back to the object store, so
-  the core is the single front door for the whole Files view.
+  ``search``, ``download``, ``upload`` (#479, the Files page's way in — bounded by the shared
+  #175 caps), and ``delete`` (#564, the Files page's way out). The Files page used to live in
+  the storage module; it now lives here, served from the core-owned file index over the
+  FileStore, **merged** with the storage module's object store (chat uploads / agent objects)
+  via an injected :class:`ObjectBackend`. ``read`` / ``move`` / ``download`` / ``delete`` are
+  file-space-first and fall back to the object store, so the core is the single front door for
+  the whole Files view.
+
+The operator ``upload`` and ``delete`` doors mirror the module-facing ``write`` and ``DELETE``:
+same underlying seam, but the operator doors add the #479 ownership guard (a module owns its
+top-level subtree; that lifecycle belongs to its own page) which the module doors must not have
+— modules write and delete *inside* their own subtrees through the platform contract.
 """
 
 from __future__ import annotations
@@ -89,7 +95,7 @@ _DOWNLOAD_BASE = "/platform/v1/files/download"
 
 
 def _browser_item(
-    *, path: str, name: str, kind: str, size: int, movable: bool
+    *, path: str, name: str, kind: str, size: int, movable: bool, deletable: bool
 ) -> dict[str, object]:
     """Shape one ``BrowserItem`` (ADR-0018) for the Files page."""
     is_dir = kind == "dir"
@@ -102,6 +108,7 @@ def _browser_item(
         "nav_path": path if is_dir else None,
         "href": f"{_DOWNLOAD_BASE}?path={quote(path)}" if not is_dir else None,
         "movable": movable,
+        "deletable": deletable,
     }
 
 
@@ -154,6 +161,18 @@ def create_files_router(
         """
         if kind != "file":
             return False
+        return path.split("/", 1)[0] not in locked_prefixes
+
+    def _deletable(path: str) -> bool:
+        """Whether an entry may be deleted from the Files UI (#564).
+
+        Broader than movability: *directories are deletable* (the delete seam is recursive —
+        a folder takes its whole subtree), and it spans both stores (file-space files and
+        object uploads). Only a module-owned top-level subtree (*locked_prefixes*) is off-limits
+        — that lifecycle belongs to the owning page (#216/#340). Every listed entry has a
+        non-empty path (the tenant root is never an item), and the ``delete`` door re-checks
+        this rule server-side so a crafted request cannot bypass the hidden button.
+        """
         return path.split("/", 1)[0] not in locked_prefixes
 
     # ── Module-facing I/O (Phase 1) ──────────────────────────────────────────────
@@ -353,6 +372,55 @@ def create_files_router(
                 )
         return entry
 
+    @router.delete("/entry", response_model=FileDeleteResponse)
+    async def delete_entry(
+        path: str = Query(..., description="Entry to delete (its whole subtree, if a folder)"),
+        tenant_id: str | None = Query(default=None),
+    ) -> FileDeleteResponse:
+        """Delete an entry from the unified Files view — the Files page's delete door (#564).
+
+        The operator counterpart to the module-facing ``DELETE`` (they mirror ``upload`` vs
+        ``write``): same FileStore seam, but this door adds the #479 ownership guard, an
+        object-store fallback, and immediate de-indexing.
+
+        * **Ownership guard.** A delete inside a module-owned top-level subtree
+          (*locked_prefixes*) is refused (400) — that lifecycle belongs to the owning page
+          (#216/#340). This is the same rule the UI hides behind ``deletable``, enforced here so
+          a crafted request cannot bypass the missing button (the module ``DELETE`` stays
+          unguarded precisely so modules *can* delete inside their own subtrees).
+        * **Object fallback.** ``store.delete`` returns ``False`` when the path is not in the
+          file space; then it may be a chat upload / agent object, so the delete falls through to
+          the object store (symmetric to ``move``).
+        * **De-index.** A file-space delete removes the entry (and its subtree) from the core
+          index at once, so it drops out of search/listing immediately; the #390 watcher is the
+          backstop. Best-effort — the on-disk delete already stands.
+
+        Delete is recursive (a folder takes its whole subtree) and hard — no trash/undo in v1.
+        The tenant root is refused by the seam (400). Returns ``{deleted}`` — ``False`` if
+        nothing was at *path*.
+        """
+        tenant = _tenant(tenant_id)
+        rel = _safe(path)
+        top = rel.split("/", 1)[0]
+        if top and top in locked_prefixes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{top}' belongs to the {top} module — delete it from its own page",
+            )
+        try:
+            deleted = await store.delete(tenant=tenant, path=rel)
+        except ValueError as exc:  # deleting the tenant root is rejected by the seam
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if deleted:
+            if index is not None:
+                with suppress(Exception):  # de-index is best-effort; the delete already stands
+                    await index.remove_subtree(tenant=tenant, path=rel)
+            return FileDeleteResponse(deleted=True)
+        # Not in the file space — it may be an object-store entry (chat upload / agent object).
+        if objects is not None:
+            return FileDeleteResponse(deleted=await objects.delete(tenant=tenant, path=rel))
+        return FileDeleteResponse(deleted=False)
+
     @router.get("/page")
     async def files_page(
         path: str = Query(default="", description="Directory to browse (empty = root)"),
@@ -380,6 +448,7 @@ def create_files_router(
                         kind=e.kind,
                         size=e.size,
                         movable=_fs_movable(e.path, e.kind),
+                        deletable=_deletable(e.path),
                     )
                 )
             title = f"Files — {query}"
@@ -393,6 +462,7 @@ def create_files_router(
                         kind=fe.kind,
                         size=fe.size,
                         movable=_fs_movable(fe.path, fe.kind),
+                        deletable=_deletable(fe.path),
                     )
                 )
             title = f"Files — {path}" if path else "Files"
@@ -401,7 +471,12 @@ def create_files_router(
             for oe in await objects.list(tenant=tenant, path=path, query=query):
                 items.append(
                     _browser_item(
-                        path=oe.path, name=oe.name, kind=oe.kind, size=oe.size, movable=True
+                        path=oe.path,
+                        name=oe.name,
+                        kind=oe.kind,
+                        size=oe.size,
+                        movable=True,
+                        deletable=_deletable(oe.path),
                     )
                 )
 

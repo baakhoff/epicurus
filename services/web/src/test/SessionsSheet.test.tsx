@@ -2,10 +2,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The conversations sheet groups by recency, filters by title, and never deletes without
-// confirming (#480). Sessions are pinned to "now"-relative moments so grouping is stable.
+// confirming (#480). Recency buckets compare *calendar days* in local time, so a fixture
+// timed "N hours ago" drifts into the wrong bucket near local midnight — "2h ago" is
+// yesterday at 00:30, so "Today" would never render. beforeEach pins the clock to local
+// noon (12h from either midnight) so the now-relative offsets below bucket identically at
+// any wall-clock time.
 // (Both fns are referenced from the hoisted vi.mock factory, so they must be vi.fn()s
 // whose behaviour is filled in beforeEach — plain consts are not yet initialized there.)
 const mockDeleteSession = vi.fn();
@@ -62,6 +66,12 @@ const day = 86_400_000;
 const at = (msAgo: number) => new Date(Date.now() - msAgo);
 
 beforeEach(() => {
+  // Pin to local noon before building the fixture: recency bucketing hinges on the local
+  // calendar day, and `at()` below reads this clock. Fake only Date so Testing Library's
+  // findBy/waitFor keep polling on real timers.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(2026, 0, 15, 12, 0, 0));
+
   mockDeleteSession.mockReset().mockResolvedValue({ deleted: 1 });
   mockSessionsList.mockReset().mockResolvedValue([
     { id: "s-today", title: "Fresh plans", message_count: 3, last_at: at(2 * hour) },
@@ -79,6 +89,8 @@ beforeEach(() => {
   });
   localStorage.clear();
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe("Conversations sheet (#480)", () => {
   it("groups sessions under recency headers", async () => {

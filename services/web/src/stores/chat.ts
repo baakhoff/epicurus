@@ -13,7 +13,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { api } from "@/lib/api";
-import { AgentEvent, type Attachment, type Readiness } from "@/lib/contracts";
+import { AgentEvent, type Attachment, EmailDraft, type Readiness } from "@/lib/contracts";
 import { sse, sseRequest, type SseMessage } from "@/lib/sse";
 
 export interface ToolRun {
@@ -123,6 +123,11 @@ interface ChatState {
    *  (unlike the rest of the live turn) so a refresh mid-question keeps the prompt — the
    *  suspended run stays durable server-side (24h). */
   awaiting: { runId: string; question: string } | null;
+  /** A composed email the turn paused on for Confirm/Decline (draft-first send, ADR-0085/#563):
+   *  the suspended `runId` to resolve + the `draft` to render in the split-pane. Null when nothing
+   *  is pending. Persisted like `awaiting` so a reload mid-review keeps the pane and the pending
+   *  draft — the suspended run stays durable server-side (24h). Mutually exclusive with `awaiting`. */
+  awaitingDraft: { runId: string; draft: EmailDraft } | null;
 
   setDraft: (text: string) => void;
   newSession: () => void;
@@ -157,6 +162,15 @@ interface ChatState {
   /** Answer the pending `ask_user` question (ADR-0053): POST the answer to resume the
    *  suspended run, then stream the continuation like any turn. A no-op if nothing is pending. */
   resume: (answer: string, onDone: () => Promise<void>) => Promise<void>;
+  /** Confirm (`"send"`) or Decline (`"decline"`) the pending draft (ADR-0085, #563): POST the
+   *  decision to resolve the suspended run, then stream the continuation like any turn. On send the
+   *  core transmits the reviewed draft; on decline nothing is sent. A no-op if nothing is pending
+   *  or a stream is live. `reason` is an optional short note carried back to the model on decline. */
+  resolveDraft: (
+    decision: "send" | "decline",
+    onDone: () => Promise<void>,
+    reason?: string,
+  ) => Promise<void>;
   stop: () => void;
   clearError: () => void;
 }
@@ -244,10 +258,19 @@ export const useChat = create<ChatState>()(
               return "error";
             } else if (event.type === "gone") return "gone";
             else if (event.type === "awaiting_input") {
-              // The turn paused on a clarifying question (ask_user, ADR-0053): capture the
-              // question + the suspended run to resume, so the UI can prompt; the answer drives
-              // `resume`. A blank question still pauses — the prompt shows a generic fallback.
-              if (event.run_id)
+              // The turn paused for the user. A `draft_review` pause (ADR-0085, #563) carries a
+              // composed email to Confirm/Decline in the split-pane; anything else is an ask_user
+              // clarifying question shown inline (ADR-0053). Either keeps the run durable
+              // server-side, so a refresh mid-pause can still resolve it. A blank question still
+              // pauses (the prompt shows a generic fallback).
+              if (event.run_id && event.awaiting_kind === "draft_review")
+                set({
+                  awaitingDraft: {
+                    runId: event.run_id,
+                    draft: EmailDraft.parse(event.draft ?? {}),
+                  },
+                });
+              else if (event.run_id)
                 set({ awaiting: { runId: event.run_id, question: event.question ?? "" } });
               return "awaiting_input";
             } else if (event.type === "done") return "done";
@@ -404,6 +427,7 @@ export const useChat = create<ChatState>()(
         set({
           segments: [],
           awaiting: null,
+          awaitingDraft: null,
           streaming: true,
           readiness: null,
           error: null,
@@ -453,6 +477,7 @@ export const useChat = create<ChatState>()(
         abort: null,
         lastSeq: 0,
         awaiting: null,
+        awaitingDraft: null,
 
         setDraft: (text) => set({ draft: text }),
 
@@ -461,6 +486,7 @@ export const useChat = create<ChatState>()(
           set({
             sessionId: freshId(),
             awaiting: null,
+            awaitingDraft: null,
             pendingUser: null,
             pendingAttachments: [],
             segments: [],
@@ -479,6 +505,7 @@ export const useChat = create<ChatState>()(
           set({
             sessionId: id,
             awaiting: null,
+            awaitingDraft: null,
             pendingUser: null,
             pendingAttachments: [],
             segments: [],
@@ -550,6 +577,22 @@ export const useChat = create<ChatState>()(
           );
         },
 
+        resolveDraft: async (decision, onDone, reason) => {
+          const awaitingDraft = get().awaitingDraft;
+          if (awaitingDraft === null || get().streaming) return;
+          set({ awaitingDraft: null });
+          // Continue the suspended turn: POST the decision. On `send` the core transmits the
+          // reviewed draft via the module's /send and appends the outcome; on `decline` nothing is
+          // sent (the model is told, with any reason). Reuse runTurn so the continuation streams +
+          // re-attaches like any turn (ADR-0085). A trimmed reason is omitted rather than sent blank.
+          const trimmed = reason?.trim();
+          await runTurn(
+            `/platform/v1/agent/runs/${encodeURIComponent(awaitingDraft.runId)}/draft`,
+            trimmed ? { decision, reason: trimmed } : { decision },
+            onDone,
+          );
+        },
+
         resumeIfActive: async (onDone, isConnectivitySignal) => {
           const abort = get().abort;
           // A live stream is already running (a fresh send) — don't open a competing one.
@@ -583,6 +626,7 @@ export const useChat = create<ChatState>()(
         sessionId: state.sessionId,
         draft: state.draft,
         awaiting: state.awaiting,
+        awaitingDraft: state.awaitingDraft,
       }),
     },
   ),

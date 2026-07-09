@@ -8,6 +8,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException
 
 from epicurus_core import (
@@ -19,7 +20,13 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_mail.gmail import GmailProvider
-from epicurus_mail.service import MODULE_NAME, build_module
+from epicurus_mail.provider import ComposedMessage
+from epicurus_mail.service import (
+    _SCOPE_HINT_SEND,
+    MODULE_NAME,
+    _describe_403,
+    build_module,
+)
 from epicurus_mail.settings import MailSettings
 
 
@@ -150,6 +157,40 @@ def create_app() -> FastAPI:
             "unread": message.unread,
             "actions": [toggle],
         }
+
+    @app.post("/send")
+    async def send_message(message: ComposedMessage) -> dict[str, str]:
+        """Transmit an operator-confirmed draft — the mail module's **only** send path (ADR-0085).
+
+        The core POSTs here after the operator Confirms a draft in the split-pane (#563); it is a
+        plain HTTP endpoint, **not** an MCP tool, so the agent can never reach it — the draft-first
+        guarantee is that the model can compose but only a human confirm sends. ``message`` is the
+        exact :class:`ComposedMessage` that was shown, so the bytes sent are byte-identical to the
+        reviewed draft. Publishes ``mail.sent`` (best-effort) and returns the provider message id.
+
+        A 403 from the provider maps to the same reconnect / rate-limit hint the tools surface
+        (#513/#538), raised as an HTTP 403 so the core can relay it to the turn.
+        """
+        try:
+            sent_id = await provider.transmit(message)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                raise HTTPException(
+                    status_code=403, detail=_describe_403(exc, _SCOPE_HINT_SEND)
+                ) from exc
+            raise
+        # Fulfil the declared ``mail.sent`` contract at the one point a message is actually sent.
+        # Tenant-scoped (constraint #1); best-effort — the mail already went out, so a bus hiccup
+        # must not fail the send or the resuming turn.
+        try:
+            await bus.publish(
+                "mail.sent",
+                {"id": sent_id, "to": message.to, "subject": message.subject},
+                tenant_id=settings.default_tenant_id,
+            )
+        except Exception as exc:  # a bus failure never fails a completed send
+            log.warning("mail.sent publish failed", error=str(exc), message_id=sent_id)
+        return {"id": sent_id}
 
     app.mount("/mcp", mcp_app)
 

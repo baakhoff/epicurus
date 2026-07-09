@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from epicurus_core import PlatformClient
-from epicurus_mail.provider import MailMessage, MailProvider
+from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
 
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
 
@@ -97,14 +97,21 @@ class GmailProvider(MailProvider):
         async with self._make_client(token) as client:
             return await self._fetch_message(client, message_id, full=True)
 
-    async def send(self, to: str, subject: str, body: str) -> str:
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["To"] = to
-        msg["Subject"] = subject
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    async def transmit(self, message: ComposedMessage) -> str:
+        """Send an already-composed message (ADR-0085) — the sole transmitting path.
+
+        Reachable only via the module's ``POST /send`` endpoint (the core calls it after the
+        operator confirms a draft), never from an MCP tool. Sends *message* verbatim, honoring
+        its reply threading (``In-Reply-To`` / ``References`` headers + the Gmail ``threadId``)
+        when present, so a confirmed reply lands in the original conversation (#461).
+        """
+        raw = base64.urlsafe_b64encode(_build_mime(message).as_bytes()).decode()
+        payload: dict[str, Any] = {"raw": raw}
+        if message.thread_id:
+            payload["threadId"] = message.thread_id
         token = await self._get_token()
         async with self._make_client(token) as client:
-            resp = await client.post("/users/me/messages/send", json={"raw": raw})
+            resp = await client.post("/users/me/messages/send", json=payload)
             resp.raise_for_status()
             return str(resp.json()["id"])
 
@@ -132,18 +139,18 @@ class GmailProvider(MailProvider):
         }
         return headers, str(data.get("threadId", ""))
 
-    async def reply(self, message_id: str, body: str) -> str:
+    async def compose_reply(self, message_id: str, body: str) -> ComposedMessage:
+        """Compose a reply from the original's headers (#461, ADR-0085) — a read, never a send.
+
+        Fetches the original message's threading headers (needs ``gmail.modify``) and derives
+        the recipient, subject, and RFC-2822 threading. The returned :class:`ComposedMessage` is
+        the draft the operator reviews and, on Confirm, exactly what :meth:`transmit` sends — so
+        Confirm re-fetches nothing and cannot drift from what was shown.
+        """
         token = await self._get_token()
         async with self._make_client(token) as client:
             headers, thread_id = await self._fetch_reply_headers(client, message_id)
-            msg = _build_reply_mime(headers, body)
-            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            payload: dict[str, Any] = {"raw": raw}
-            if thread_id:
-                payload["threadId"] = thread_id
-            resp = await client.post("/users/me/messages/send", json=payload)
-            resp.raise_for_status()
-            return str(resp.json()["id"])
+        return _compose_reply(headers, thread_id, body)
 
     async def set_unread(self, message_id: str, unread: bool) -> None:
         # Gmail tracks read state with the system ``UNREAD`` label: add it to mark unread,
@@ -212,8 +219,12 @@ def _reply_subject(original_subject: str) -> str:
     return subject if subject.strip().lower().startswith("re:") else f"Re: {subject}"
 
 
-def _build_reply_mime(headers: dict[str, str], body: str) -> MIMEText:
-    """The outgoing MIME message for a reply to a message with the given lowercased *headers*.
+def _compose_reply(headers: dict[str, str], thread_id: str, body: str) -> ComposedMessage:
+    """Derive the reply :class:`ComposedMessage` from a message's lowercased *headers* (#461).
+
+    This is the *composition* half of what used to be one send call (ADR-0085): it resolves the
+    recipient, subject, and threading but transmits nothing — :meth:`GmailProvider.transmit`
+    later sends the returned message verbatim, after the operator confirms it.
 
     Threads via RFC-2822 headers (#461): ``In-Reply-To`` is the original's ``Message-ID``;
     ``References`` is the original's own reference chain plus that same ``Message-ID`` (RFC
@@ -230,21 +241,42 @@ def _build_reply_mime(headers: dict[str, str], body: str) -> MIMEText:
 
     No self-reply guard: replying to a message the operator sent themselves addresses the
     operator (``Reply-To``/``From`` both resolve back to their own account). Deliberately
-    left unguarded (#513) — it is indistinguishable from legitimately mailing yourself a
-    note, ``mail_reply`` is already a confirm-gated danger action (ADR-0007) so nothing
-    fires without the operator seeing the recipient first, and detecting it would need an
-    extra profile lookup per reply for a case with no clear wrong answer to guard against.
+    left unguarded (#513) — it is indistinguishable from legitimately mailing yourself a note,
+    and every reply is now shown in the split-pane for Confirm/Decline (ADR-0085) so nothing
+    fires without the operator seeing the recipient first; detecting it would need an extra
+    profile lookup per reply for a case with no clear wrong answer to guard against.
     """
-    msg = MIMEText(body, "plain", "utf-8")
     reply_to = headers.get("reply-to", "").strip()
-    msg["To"] = reply_to or headers.get("from", "")
-    msg["Subject"] = _reply_subject(headers.get("subject", ""))
     original_message_id = headers.get("message-id", "")
-    if original_message_id:
-        msg["In-Reply-To"] = original_message_id
     references = " ".join(filter(None, [headers.get("references", ""), original_message_id]))
-    if references:
-        msg["References"] = references
+    sender = headers.get("from", "")
+    original_subject = headers.get("subject", "") or "(no subject)"
+    return ComposedMessage(
+        to=reply_to or sender,
+        subject=_reply_subject(headers.get("subject", "")),
+        body=body,
+        in_reply_to=original_message_id or None,
+        references=references or None,
+        thread_id=thread_id or None,
+        reply_to_original=f"{sender} — {original_subject}" if sender else original_subject,
+    )
+
+
+def _build_mime(message: ComposedMessage) -> MIMEText:
+    """Assemble the outgoing MIME for an already-composed *message* (the transmit half, #461).
+
+    Sets ``In-Reply-To`` / ``References`` only when the message carries reply threading, so a
+    fresh ``mail_send`` produces a plain message and a ``mail_reply`` threads correctly.
+    """
+    msg = MIMEText(message.body, "plain", "utf-8")
+    msg["To"] = message.to
+    if message.cc:
+        msg["Cc"] = message.cc
+    msg["Subject"] = message.subject
+    if message.in_reply_to:
+        msg["In-Reply-To"] = message.in_reply_to
+    if message.references:
+        msg["References"] = message.references
     return msg
 
 

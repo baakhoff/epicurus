@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
-from epicurus_core import LIST_CAP, Attachment, EntityRef, tool_envelope
+from epicurus_core import LIST_CAP, Attachment, EntityRef, draft_review, tool_envelope
 from epicurus_core_app.agent.agent import _ANSWER_NUDGE, _EMPTY_ANSWER_FALLBACK, Agent
 from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
@@ -99,6 +99,36 @@ async def test_agent_answers_without_tools() -> None:
     assert turn.content == "hello"
     assert turn.stopped == "completed"
     assert turn.tools_used == []
+
+
+async def test_agent_non_streaming_does_not_send_a_composed_draft() -> None:
+    # A compose tool (mail_send) returns a DraftReview on the non-streaming path (POST /chat, the
+    # messaging bridge) — which has no split-pane to Confirm/Decline in. The loop must NOT feed the
+    # raw envelope back (the model would misreport "sent"): it hands the model an honest
+    # "not sent from this channel" error, and nothing is transmitted (ADR-0085, #563).
+    draft = draft_review(
+        kind="mail", module="mail", draft={"to": "b@x.com", "subject": "Hi", "body": "yo"}
+    )
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("mail_send", "{}")]),
+            ChatResult(model="m", content="I couldn't send that from here."),
+        ]
+    )
+    mcp = _FakeMcp(
+        specs=[{"type": "function", "function": {"name": "mail_send"}}],
+        route={"mail_send": "http://mail:8080/mcp"},
+        outputs={"mail_send": draft},
+    )
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="email bob")])
+
+    tool_msgs = [m for m in gw.calls[1] if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    content = tool_msgs[0].content or ""
+    assert content.startswith("error:") and "not sent" in content.lower()
+    assert '"kind"' not in content  # the model never saw the raw draft envelope
+    # The step is recorded as not-ok in the activity timeline.
+    assert [s.status for s in turn.activity.steps] == ["error"]
 
 
 async def test_agent_calls_tool_then_answers() -> None:

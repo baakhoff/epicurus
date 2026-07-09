@@ -2,11 +2,17 @@
 
 ## What it is
 
-The **mail module** gives the agent the ability to search, read, send, and reply to
-mail on the user's behalf.  The module is **provider-agnostic**: tools are named and
-typed in terms of the mail domain (`mail_search`, `mail_read`, `mail_send`,
-`mail_reply`), and the underlying provider is pluggable via the `MailProvider`
-interface (ADR-0016).
+The **mail module** lets the agent search, read, and — **draft-first** — compose sends and
+replies on the user's behalf. The module is **provider-agnostic**: tools are named and typed in
+terms of the mail domain (`mail_search`, `mail_read`, `mail_send`, `mail_reply`), and the
+underlying provider is pluggable via the `MailProvider` interface (ADR-0016).
+
+The agent **never sends mail on its own** (ADR-0085, #563). `mail_send` / `mail_reply` *compose*
+a message and return it as a pending draft; the core pauses the turn, the shell shows the draft
+in a split-pane, and only the operator's **Confirm** triggers the actual send (**Decline** sends
+nothing). The MCP surface exposes **no** tool that transmits — the sole send path is the module's
+internal `POST /send` endpoint, which the core calls after Confirm. The guarantee is structural,
+not a prompt.
 
 Gmail is the v0.1 provider.  Tokens are fetched at runtime from the core's OAuth
 vault — the module never holds a client secret or refresh token (see
@@ -72,6 +78,20 @@ helper (#468/ADR-0084) instead of hand-rolling it, matching `calendar_list_event
 — a no-op in practice today since `max_results` is already clamped to the same 50-item cap,
 but it keeps the two modules from drifting apart on how a capped list reads.
 
+**v0.9.0** (#563, ADR-0085): **draft-first send/reply — the agent can no longer send mail directly.**
+`mail_send` / `mail_reply` stop calling the provider's send; they *compose* the full message (a
+reply still derives recipient/subject/`In-Reply-To`/`References`/`threadId` from the original, now
+a **read**) and return a `DraftReview` envelope (`epicurus_core.draft_review`). The core recognizes
+it, **pauses the turn** (the same durable machinery as `ask_user`, ADR-0053), and the shell renders
+the draft in the split-pane for **Confirm** / **Decline**. The only transmitting path is the new,
+internal **`POST /send`** endpoint — not an MCP tool, so the model cannot reach it; the core calls
+it on Confirm and appends the outcome to the turn. The provider seam swaps `send`/`reply` for
+`compose_reply` (read + derive) and `transmit` (send-only, the `/send` backing). The two
+Modules-page actions are reframed from one-tap danger sends to **compose-for-review** (no longer
+`intent="danger"`). `mail.sent` is now actually published — at `/send`, the one point a message
+is really sent. Where the pending draft lives (core-held, not a Gmail draft), why edit-before-send
+is deferred (#542), and the Decline-reason are all recorded in ADR-0085.
+
 ---
 
 ## Contract
@@ -84,33 +104,37 @@ All tools operate on the active `MailProvider` for the tenant.
 | --- | --- | --- | --- |
 | `mail_search` | `query: str`, `max_results: int = 10` | `ToolEnvelope` (text + entity refs) | Returns entity-ref chips; no body. Gmail query syntax. Max 50. |
 | `mail_read` | `message_id: str` | `str` (formatted text) | Subject, sender, date, and decoded plain-text body for the agent to reason on. |
-| `mail_send` | `to: str`, `subject: str`, `body: str` | `str` | **Danger action** — sends a real message. Returns `"sent:<id>"`. |
-| `mail_reply` | `message_id: str`, `body: str` | `str` | **Danger action** — replies in *message_id*'s thread (RFC-2822 `In-Reply-To`/`References` + provider thread association). Recipient and subject are derived from the original message. Returns `"sent:<id>"`. |
+| `mail_send` | `to: str`, `subject: str`, `body: str` | `DraftReview` | **Compose-only (draft-first, ADR-0085)** — does **not** send. Composes the message and returns a `DraftReview` envelope; the core pauses the turn for the operator's Confirm/Decline. Rejects a blank recipient. |
+| `mail_reply` | `message_id: str`, `body: str` | `DraftReview` | **Compose-only (draft-first)** — does **not** send. Composes a reply in *message_id*'s thread (RFC-2822 `In-Reply-To`/`References` + provider thread association; recipient/subject derived from the original) and returns a `DraftReview`. The compose-time metadata read needs `gmail.modify`. |
 | `mail_mark_read` | `message_id: str` | `str` | Clears the unread flag (`messages.modify`). Returns `"marked-read:<id>"`. Distinct from `mail_read` (which fetches the body). Idempotent. |
 | `mail_mark_unread` | `message_id: str` | `str` | Restores the unread flag. Returns `"marked-unread:<id>"`. Idempotent. |
 
 `mail_mark_read` / `mail_mark_unread` require the `gmail.modify` scope; on a 403 (a Google
 account connected before v0.7.0, lacking the scope) they return a reconnect hint instead of failing.
-`mail_send` / `mail_reply` require the `gmail.send` scope and return the equivalent reconnect
-hint on a 403, rather than raising (#513). A 403 caused by Gmail rate limiting (`usageLimits`,
-not a scope problem) returns a distinct "wait and try again" hint instead (#538) — the error
-body's reason decides which hint applies, so throttling is never misreported as a missing scope.
+`mail_reply`'s compose-time metadata read also needs `gmail.modify`, and returns the same reconnect
+hint on a 403 (it never sends, so it can never be a send-scope error). The **send** scope
+(`gmail.send`) is exercised only by `POST /send` (below), which returns the equivalent hint on a
+403. A 403 caused by Gmail rate limiting (`usageLimits`, not a scope problem) returns a distinct
+"wait and try again" hint instead (#538) — the error body's reason decides which hint applies, so
+throttling is never misreported as a missing scope.
 
-`mail_reply` sends the reply body **clean** — it is never auto-quoted with the original
-message's text — and addresses the original's `Reply-To` header when present, falling back
-to its sender (#513). Replying to a message the operator sent themselves is allowed with no
-special guard: it is indistinguishable from deliberately mailing yourself a note, and
-`mail_reply` is already a confirm-gated danger action (ADR-0007), so the operator sees the
-recipient before anything sends.
+`mail_reply` composes the reply body **clean** — it is never auto-quoted with the original
+message's text — and addresses the original's `Reply-To` header when present, falling back to its
+sender (#513). Replying to a message the operator sent themselves is allowed with no special guard:
+it is indistinguishable from deliberately mailing yourself a note, and every reply is shown in the
+split-pane for Confirm/Decline before anything sends (ADR-0085).
 
 `mail_search` returns a `ToolEnvelope` (ADR-0019): the `text` field is a human-readable
 summary; `entity_refs` carries one `EntityRef` per message (`module="mail"`,
 `kind="message"`) so the UI renders interactive chips — no body content is
 transferred to the model context.
 
-`mail_send` and `mail_reply` are each declared a **danger action** (ADR-0007): the web
-shell renders a confirmation prompt before invoking either, and each tool's docstring
-requires explicit user confirmation before it is called.
+`mail_send` / `mail_reply` return a **`DraftReview`** (ADR-0085) — `{kind: "mail", module: "mail",
+summary, draft}`, where `draft` is the composed `ComposedMessage` (`to`/`subject`/`body`, plus a
+reply's `cc`/`in_reply_to`/`references`/`thread_id`/`reply_to_original`). The core recognizes the
+envelope, persists the draft on the suspended run, and emits an `awaiting_input` frame with
+`awaiting_kind: "draft_review"` + the draft; on Confirm it POSTs that same draft to `/send`, so the
+bytes sent are byte-identical to what the operator reviewed.
 
 ### HTTP endpoints (internal)
 
@@ -121,15 +145,20 @@ proxies them to the web shell (the shell never calls the module directly).
 | --- | --- | --- | --- |
 | `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date, and unread status (a `Status: Unread` row, only when unread). No `href` — the chip's click opens the reader. |
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body, `module`/`message_id`, the `unread` state, and a one-element `actions` toggle (mark read/unread, ADR-0024). |
+| `POST` | `/send` | body: `ComposedMessage` → `{"id": str}` | **The module's only send path (ADR-0085, #563).** Transmits an operator-confirmed draft verbatim and publishes `mail.sent`. Not an MCP tool, so the agent cannot reach it — the core calls it after the operator Confirms a draft in the split-pane. A 403 maps to the same reconnect / rate-limit hint the tools use (#513/#538), as an HTTP 403. |
 | `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
 
 The core exposes these via:
 
 ```
-GET /platform/v1/modules/mail/resolve/message/{ref_id}   → HoverCard
-GET /platform/v1/modules/mail/messages/{ref_id}          → EmailMessage
-GET /platform/v1/modules/mail/status                     → status JSON
+GET  /platform/v1/modules/mail/resolve/message/{ref_id}   → HoverCard
+GET  /platform/v1/modules/mail/messages/{ref_id}          → EmailMessage
+GET  /platform/v1/modules/mail/status                     → status JSON
 ```
+
+`POST /send` is **not** proxied to the shell — it is the core-internal transmit hop invoked by the
+draft-review Confirm (`ModuleRegistry.send_draft`, ADR-0085). The future mail page (#550) reuses it
+for a human-initiated compose, with its own form-level confirm — but never the agent pane.
 
 #### `HoverCard` shape (from resolver)
 
@@ -182,9 +211,11 @@ through the core proxy and re-fetch itself afterwards.
 
 | Subject (base) | Direction | Payload | Condition |
 | --- | --- | --- | --- |
-| `mail.sent` | emitted | `{}` | After `mail_send` succeeds |
+| `mail.sent` | emitted | `{"id": str, "to": str, "subject": str}` | After a confirmed send succeeds (published by `POST /send`, best-effort — a bus hiccup never fails a completed send) |
 
-Subjects are tenant-scoped at runtime: `<tenant_id>.mail.sent`.
+Subjects are tenant-scoped at runtime: `<tenant_id>.mail.sent`. Before v0.9.0 this event was
+declared but never actually published; it is now emitted at `/send`, the one point a message is
+really sent (ADR-0085).
 
 ---
 
@@ -208,7 +239,9 @@ call time from the core's OAuth vault.
 
 The mail module holds **no persistent state**.  It is a pure pass-through to the
 provider API.  The access token is managed by the core's OpenBao vault
-(`oauth/tokens/google` — see [OAuth reference](../reference/oauth.md)).
+(`oauth/tokens/google` — see [OAuth reference](../reference/oauth.md)). A **pending draft**
+awaiting Confirm/Decline is held **core-side** on the suspended run (`agent_pending_drafts`,
+ADR-0085), not in the module — the module stays stateless.
 
 ---
 

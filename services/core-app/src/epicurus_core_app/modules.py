@@ -683,6 +683,41 @@ class ModuleRegistry:
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"{op} failed: module unreachable") from exc
 
+    async def _post_json(
+        self,
+        base: str,
+        path: str,
+        *,
+        json: Any,
+        timeout: float = 30,
+        op: str,
+    ) -> Any:
+        """POST JSON to a module, mapping any failure to a clean HTTP error (cf. :meth:`_get_json`).
+
+        Used by the draft-first send path (ADR-0085, #563). Unlike ``_get_json`` it **preserves a
+        4xx module's own ``detail``** (e.g. mail's reconnect / rate-limit hint on a Gmail 403), so
+        the resuming turn can relay that hint to the model rather than a generic message; a 5xx,
+        timeout, or connection failure still becomes a controlled ``502`` carrying *op*.
+        """
+        try:
+            async with httpx.AsyncClient(base_url=base, timeout=timeout) as client:
+                resp = await client.post(path, json=json)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if 400 <= code < 500:
+                try:
+                    detail = str(exc.response.json().get("detail") or f"{op} failed")
+                except (ValueError, AttributeError):
+                    detail = f"{op} failed: module returned {code}"
+                raise HTTPException(status_code=code, detail=detail) from exc
+            raise HTTPException(
+                status_code=502, detail=f"{op} failed: module returned {code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"{op} failed: module unreachable") from exc
+
     async def get_status(self, name: str) -> dict[str, Any]:
         """Proxy the module's declared ``status_url`` endpoint to the caller.
 
@@ -1066,6 +1101,19 @@ class ModuleRegistry:
             base, f"/messages/{ref_id}", op=f"{name} message"
         )
         return data
+
+    async def send_draft(self, name: str, draft: dict[str, Any]) -> str:
+        """Transmit an operator-confirmed draft via the module's ``POST /send`` (ADR-0085, #563).
+
+        The single point at which the core sends an outbound draft on the operator's behalf: after
+        a Confirm it POSTs the exact composed ``draft`` to the module (mail's transmit endpoint),
+        which sends it verbatim and returns the provider message id. It is a plain module endpoint,
+        never an MCP tool, so the agent cannot reach it — the draft-first guarantee. Raises
+        ``HTTPException`` carrying the module's own hint (e.g. a Gmail reconnect prompt) on failure.
+        """
+        base, _ = await self._resolve(name)
+        data: dict[str, Any] = await self._post_json(base, "/send", json=draft, op=f"{name} send")
+        return str(data.get("id", ""))
 
     async def all_suggestions(self) -> list[dict[str, Any]]:
         """Pending suggestions across every enabled module that declares a ``review`` page.

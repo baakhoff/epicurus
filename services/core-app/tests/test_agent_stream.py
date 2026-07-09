@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from epicurus_core import draft_review
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
     _EMPTY_ANSWER_FALLBACK,
@@ -18,6 +19,7 @@ from epicurus_core_app.agent.agent import (
     AgentEvent,
 )
 from epicurus_core_app.agent.mcp_host import ToolCallError
+from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
 
@@ -590,3 +592,161 @@ async def test_ask_user_runs_sibling_tools_before_suspending() -> None:
     # ask_user has no result yet — that arrives on resume.
     assert any(m.get("role") == "tool" and m.get("content") == "pong" for m in run.conversation)
     assert not any(m.get("tool_call_id") == "c2" for m in run.conversation)
+
+
+# ── draft-first send pause / resume (ADR-0085, #563) ──────────────────────────
+
+
+async def _draft_store() -> PendingDraftStore:
+    store = PendingDraftStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    return store
+
+
+def _draft_envelope(to: str = "bob@x.com", subject: str = "Hi", body: str = "Hello") -> str:
+    return draft_review(
+        kind="mail",
+        module="mail",
+        summary=f"Email to {to} — {subject}",
+        draft={"to": to, "subject": subject, "body": body},
+    )
+
+
+def _mail_send_call(call_id: str = "c1") -> dict[str, Any]:
+    args = json.dumps({"to": "bob@x.com", "subject": "Hi", "body": "Hello"})
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "mail_send", "arguments": args},
+    }
+
+
+class _DraftMcp:
+    """An MCP host whose ``mail_send`` tool returns a scripted result (a DraftReview or a hint)."""
+
+    def __init__(self, output: str) -> None:
+        self._output = output
+        self.calls: list[str] = []
+
+    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        specs = [{"type": "function", "function": {"name": "mail_send"}}]
+        return specs, {"mail_send": "http://mail:8080/mcp"}
+
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        self.calls.append(name)
+        return self._output
+
+
+async def test_draft_review_suspends_the_turn_without_transmitting() -> None:
+    store = await _draft_store()
+    gw = _FakeStreamGateway(
+        [([], ChatResult(model="m", content="", tool_calls=[_mail_send_call()]))]
+    )
+    mcp = _DraftMcp(_draft_envelope())
+    agent = Agent(gateway=gw, mcp=mcp, pending_drafts=store)  # type: ignore[arg-type]
+    events = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="email bob")], session_id="s1", model="m"
+        )
+    ]
+    types = [e.type for e in events]
+    assert "awaiting_input" in types  # the turn paused for review…
+    assert "done" not in types  # …and did not complete
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.awaiting_kind == "draft_review"
+    assert awaiting.draft == {"to": "bob@x.com", "subject": "Hi", "body": "Hello"}
+    assert awaiting.run_id
+    # The compose tool ran but nothing was transmitted — the draft is persisted, and the only
+    # send path (the module's /send, exercised at the route layer) was never reached here.
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    assert run.pending_call_id == "c1"
+    assert run.tool == "mail_send"
+    assert run.module == "mail"
+    assert run.draft == {"to": "bob@x.com", "subject": "Hi", "body": "Hello"}
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in run.conversation)
+    # The compose call has no tool result yet — it is filled on Confirm/Decline.
+    assert not any(
+        m.get("role") == "tool" and m.get("tool_call_id") == "c1" for m in run.conversation
+    )
+
+
+async def test_draft_resume_continues_the_turn() -> None:
+    store = await _draft_store()
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_mail_send_call()])),
+            (["done, ", "sent"], ChatResult(model="m", content="done, sent")),
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_DraftMcp(_draft_envelope()), pending_drafts=store)  # type: ignore[arg-type]
+    first = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="email bob")], session_id="s1", model="m"
+        )
+    ]
+    awaiting = next(e for e in first if e.type == "awaiting_input")
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    convo = [ChatMessage.model_validate(m) for m in run.conversation]
+    # The route appends the send outcome under the compose call id (here: a confirmed send).
+    convo.append(
+        ChatMessage(
+            role="tool",
+            tool_call_id=run.pending_call_id,
+            name=run.tool,
+            content="Sent. Provider message id: gmail-42.",
+        )
+    )
+    resumed = [
+        e async for e in agent.run_stream([], session_id="s1", model="m", resume_convo=convo)
+    ]
+    assert resumed[-1].type == "done"
+    assert resumed[-1].turn is not None
+    assert resumed[-1].turn.content == "done, sent"
+    # The model continued the same turn with the send outcome as the mail_send tool result.
+    assert any(m.role == "tool" and "Sent" in (m.content or "") for m in gw.calls[1])
+
+
+async def test_draft_without_store_degrades_and_answers() -> None:
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_mail_send_call()])),
+            (["cannot send"], ChatResult(model="m", content="cannot send")),
+        ]
+    )
+    # No pending-draft store wired → the loop degrades instead of pausing.
+    agent = Agent(gateway=gw, mcp=_DraftMcp(_draft_envelope()))  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="email bob")])]
+    assert "awaiting_input" not in [e.type for e in events]
+    assert events[-1].type == "done"
+    # Without a store the loop tells the model it could not present a draft, and continues.
+    assert any(
+        m.role == "tool" and m.name == "mail_send" and (m.content or "").startswith("error:")
+        for m in gw.calls[1]
+    )
+
+
+async def test_compose_error_string_does_not_suspend() -> None:
+    # A compose that fails (e.g. a missing scope) returns a plain hint, not a DraftReview — it must
+    # be fed back to the model as a normal tool result, never paused for review.
+    store = await _draft_store()
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_mail_send_call()])),
+            (["ok"], ChatResult(model="m", content="ok")),
+        ]
+    )
+    mcp = _DraftMcp("Couldn't reply: reconnect Google to grant the modify permission.")
+    agent = Agent(gateway=gw, mcp=mcp, pending_drafts=store)  # type: ignore[arg-type]
+    events = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="email bob")], session_id="s1", model="m"
+        )
+    ]
+    assert "awaiting_input" not in [e.type for e in events]
+    assert events[-1].type == "done"
+    assert any(m.role == "tool" and "reconnect Google" in (m.content or "") for m in gw.calls[1])

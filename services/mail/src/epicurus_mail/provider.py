@@ -28,6 +28,32 @@ class MailMessage(BaseModel):
     unread: bool = False
 
 
+class ComposedMessage(BaseModel):
+    """A fully-composed outbound message — provider-agnostic (ADR-0085).
+
+    This is both the draft the operator reviews in the split-pane *and* the exact content the
+    transmit step sends, so what is approved is byte-for-byte what goes out. ``mail_send`` builds
+    one directly from the model's arguments; ``mail_reply`` derives one via
+    :meth:`MailProvider.compose_reply` (recipient/subject/threading from the original, #461). The
+    reply-threading and ``reply_to_original`` fields are unset for a fresh ``mail_send``.
+    """
+
+    to: str
+    subject: str
+    body: str
+    # Optional Cc — unused by the current tools (no Cc argument) but carried so the pane and a
+    # future compose surface (#550) render/transmit it without a contract change.
+    cc: str | None = None
+    # RFC-2822 reply threading (#461), derived at compose time for a reply so Confirm need not
+    # re-fetch the original: ``In-Reply-To`` / ``References`` headers + the provider thread id.
+    in_reply_to: str | None = None
+    references: str | None = None
+    thread_id: str | None = None
+    # The original message a reply answers (``sender — subject``), shown as the pane's thread
+    # context. Presentation only — never placed on the wire.
+    reply_to_original: str | None = None
+
+
 class MailProvider(ABC):
     """Abstract mail provider — implemented by GmailProvider and future providers."""
 
@@ -40,19 +66,26 @@ class MailProvider(ABC):
         """Return the full message, including decoded body."""
 
     @abstractmethod
-    async def send(self, to: str, subject: str, body: str) -> str:
-        """Send a message and return the sent message ID."""
+    async def compose_reply(self, message_id: str, body: str) -> ComposedMessage:
+        """Compose (but do **not** send) a reply to *message_id* in its existing thread.
+
+        Derives the recipient and subject from the original message — replies to its sender
+        (honoring ``Reply-To`` when present) with its subject (``Re: ...``, not doubled if
+        already a reply) — and the RFC-2822 threading headers (``In-Reply-To`` / ``References``)
+        plus the native thread id, so a later :meth:`transmit` lands in the same conversation on
+        both ends (#461). The caller supplies only the new *body*. This is a **read** — it never
+        transmits; the returned :class:`ComposedMessage` is the draft the operator reviews and,
+        on Confirm, the exact content :meth:`transmit` sends (ADR-0085).
+        """
 
     @abstractmethod
-    async def reply(self, message_id: str, body: str) -> str:
-        """Reply to *message_id* in its existing thread; return the sent message ID.
+    async def transmit(self, message: ComposedMessage) -> str:
+        """Send an already-composed *message* and return the sent message ID.
 
-        The recipient and subject are derived from the original message — the provider
-        replies to its sender with its subject (``Re: ...``, not doubled if already a
-        reply) — so the caller supplies only the new body. The provider is responsible
-        for the RFC-2822 threading headers (``In-Reply-To`` / ``References``) and any
-        native thread association its API offers, so the reply lands in the same
-        conversation on both ends (#461).
+        The **only** transmitting method (ADR-0085). It is never reachable from an MCP tool —
+        the module exposes it solely through its ``POST /send`` endpoint, which the core invokes
+        after the operator confirms a draft. It sends *message* verbatim (including any reply
+        threading), so the bytes sent match the draft that was reviewed.
         """
 
     @abstractmethod

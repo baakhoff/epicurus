@@ -7,12 +7,15 @@ tool surface (the manifest declares Gmail's OAuth scopes for the connect flow, #
 ``mail_search`` returns a :func:`~epicurus_core.tool_envelope` so the UI renders
 each result as an entity-reference chip (ADR-0019): hover for the hover-card,
 click to open the full message in the right-panel email-reader.
-``mail_send`` and ``mail_reply`` are declared danger actions (ADR-0007): each sends
-a real message and cannot be undone, so the web shell displays a confirmation prompt
-before invoking either. ``mail_reply`` (#461) keeps the message in its existing
-conversation thread — RFC-2822 ``In-Reply-To``/``References`` plus the provider's
-native thread association — deriving the recipient and subject from the original
-message rather than taking them as arguments.
+``mail_send`` and ``mail_reply`` are **draft-first** (ADR-0085, #563): they *compose* a
+message and return a :func:`~epicurus_core.draft_review` envelope — they never transmit.
+The core suspends the turn and shows the draft in a split-pane; only the operator's Confirm
+triggers the actual send (the module's ``POST /send`` endpoint, invoked by the core). The MCP
+surface therefore exposes **no** tool that sends, so the agent cannot deliver mail on its own.
+``mail_reply`` (#461) composes a reply that stays in the original conversation thread —
+RFC-2822 ``In-Reply-To``/``References`` plus the provider's native thread association —
+deriving the recipient and subject from the original message rather than taking them as
+arguments.
 ``mail_mark_read`` / ``mail_mark_unread`` flip a message's read state; the
 ``email-reader`` panel also surfaces them as a tool-backed toggle (ADR-0024).
 """
@@ -27,10 +30,11 @@ from epicurus_core import (
     UiAction,
     UiSection,
     capped_listing,
+    draft_review,
     tool_envelope,
 )
 from epicurus_mail.gmail import GMAIL_API_SCOPES
-from epicurus_mail.provider import MailProvider
+from epicurus_mail.provider import ComposedMessage, MailProvider
 
 MODULE_NAME = "mail"
 
@@ -85,52 +89,46 @@ def _describe_403(exc: httpx.HTTPStatusError, scope_hint: str) -> str:
     return _RATE_LIMIT_HINT if reason in _RATE_LIMIT_REASONS else scope_hint
 
 
-def _reply_scope_hint(exc: httpx.HTTPStatusError) -> str:
-    """Which scope mail_reply's 403 actually names.
-
-    ``mail_reply`` makes two Gmail calls: a metadata GET for the original message (needs
-    ``gmail.modify``), then the send POST (needs ``gmail.send``). A blanket ``except``
-    around both couldn't tell which one 403'd, so every failure was reported as a missing
-    send scope even when the read lookup was what actually failed (#538) — the send
-    endpoint is the only one of the two whose path ends in ``/send``.
-    """
-    if exc.request.url.path.endswith("/send"):
-        return _SCOPE_HINT_SEND
-    return _SCOPE_HINT_REPLY_LOOKUP
+def _draft_summary(message: ComposedMessage) -> str:
+    """A one-line label for a composed draft — shown in the turn activity and logs (ADR-0085)."""
+    return f"Email to {message.to} — {message.subject or '(no subject)'}"
 
 
 def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.2",
+        version="0.9.0",
         description=(
-            "Provider-agnostic mail — search, read, send, and reply. Gmail is the v0.1 provider."
+            "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
+            " provider."
         ),
         ui=UiSection(
             icon="mail",
             summary=(
-                "Lets the agent search, read, and send mail via your connected"
-                " Google account. Requires Gmail scopes on the Google OAuth connection."
+                "Lets the agent search, read, and compose mail via your connected Google account."
+                " The agent never sends on its own — it composes a draft you Confirm or Decline"
+                " (ADR-0085). Requires Gmail scopes on the Google OAuth connection."
             ),
             status_url="/status",
+            # Draft-first (ADR-0085): these compose a draft the assistant shows for your review;
+            # they are no longer one-tap sends, so they are not danger actions (nothing is
+            # delivered until you Confirm the draft). The real send is the ``POST /send`` endpoint.
             actions=[
                 UiAction(
                     tool="mail_send",
-                    label="Send mail",
-                    description="Compose and send a message via the connected mail account.",
-                    intent="danger",
-                    confirm=(
-                        "Send this message? This will deliver a real email and cannot be undone."
+                    label="Compose mail",
+                    description=(
+                        "Compose a message. The assistant shows it for your review — nothing is"
+                        " sent until you confirm the draft."
                     ),
                 ),
                 UiAction(
                     tool="mail_reply",
-                    label="Reply",
-                    description="Send a reply in the same conversation thread.",
-                    intent="danger",
-                    confirm=(
-                        "Send this reply? This will deliver a real email and cannot be undone."
+                    label="Compose reply",
+                    description=(
+                        "Compose a reply in the same conversation thread. Shown for your review;"
+                        " nothing is sent until you confirm the draft."
                     ),
                 ),
             ],
@@ -207,52 +205,60 @@ def build_module(provider: MailProvider) -> EpicurusModule:
 
     @module.tool()
     async def mail_send(to: str, subject: str, body: str) -> str:
-        """Send a mail message.
+        """Compose an email for the user to review — this does **not** send it (ADR-0085).
 
-        **This action delivers a real message and cannot be undone.**
-        Only invoke after explicit user confirmation of recipient, subject,
-        and body.
+        There is no tool that sends. You compose the message; the user reviews it in a split-pane
+        and presses **Confirm** to send or **Decline** to drop it. Compose freely — the user is
+        the send button. On Decline you are told (with any reason they give) so you can revise and
+        compose again.
 
         Args:
             to: Recipient email address.
             subject: Message subject line.
             body: Plain-text message body.
 
-        Returns a confirmation string containing the sent message ID.
+        Pauses the turn to show the draft; the turn resumes once the user confirms or declines.
         """
-        try:
-            sent_id = await provider.send(to=to, subject=subject, body=body)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 403:
-                return _describe_403(exc, _SCOPE_HINT_SEND)
-            raise
-        return f"sent:{sent_id}"
+        recipient = to.strip()
+        if not recipient:
+            return "error: a recipient (`to`) is required to compose a message."
+        message = ComposedMessage(to=recipient, subject=subject, body=body)
+        return draft_review(
+            kind="mail",
+            module=MODULE_NAME,
+            summary=_draft_summary(message),
+            draft=message.model_dump(),
+        )
 
     @module.tool()
     async def mail_reply(message_id: str, body: str) -> str:
-        """Reply to a mail message, keeping it in the same conversation thread.
+        """Compose a reply for the user to review — this does **not** send it (ADR-0085).
 
-        **This action delivers a real message and cannot be undone.**
-        Only invoke after explicit user confirmation of the reply body — the
-        recipient and subject are derived from the original message (preferring
-        its ``Reply-To`` over its sender when the original carries one, and its
-        subject prefixed with "Re:" unless already a reply), so there is nothing
-        else to compose. The reply body is sent **clean**: it is not auto-quoted
-        with the original message's text.
+        Like ``mail_send`` this composes only. The reply stays in the original conversation
+        thread; the recipient and subject are derived from the original message (preferring its
+        ``Reply-To`` over its sender when it carries one, and its subject prefixed with "Re:"
+        unless already a reply), so you supply just the body. The user reviews the draft in a
+        split-pane and **Confirm**s or **Decline**s — no tool sends; the user is the send button.
+        The reply body is sent **clean**: it is not auto-quoted with the original message's text.
 
         Args:
             message_id: The message being replied to (from ``mail_search`` or ``mail_read``).
             body: Plain-text reply body.
 
-        Returns a confirmation string containing the sent message ID.
+        Pauses the turn to show the draft; the turn resumes once the user confirms or declines.
         """
         try:
-            sent_id = await provider.reply(message_id, body)
+            message = await provider.compose_reply(message_id, body)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
-                return _describe_403(exc, _reply_scope_hint(exc))
+                return _describe_403(exc, _SCOPE_HINT_REPLY_LOOKUP)
             raise
-        return f"sent:{sent_id}"
+        return draft_review(
+            kind="mail",
+            module=MODULE_NAME,
+            summary=_draft_summary(message),
+            draft=message.model_dump(),
+        )
 
     @module.tool()
     async def mail_mark_read(message_id: str) -> str:

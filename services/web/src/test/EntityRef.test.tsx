@@ -58,6 +58,33 @@ describe("EntityRefChip", () => {
     fireEvent.mouseEnter(screen.getByRole("button", { name: /Standup/ }).parentElement!);
     await waitFor(() => expect(mockResolve).toHaveBeenCalledWith("calendar", "event", "e1"));
   });
+
+  // #572: an unnamed `group-hover` matches ANY ancestor `.group`, not just the chip's own
+  // wrapper — so nesting the chip inside another group (a message row, a sessions list row)
+  // reveals the card on that ancestor's hover too. Naming the scope is the fix; pin the classes.
+  it("scopes the hover-card reveal to its own named group, not an unnamed ancestor group (#572)", () => {
+    render(<EntityRefChip entref={REF} />, { wrapper });
+    const chipWrapper = screen.getByRole("button", { name: /Standup/ }).parentElement!;
+    const wrapperClasses = chipWrapper.className.split(/\s+/);
+    expect(wrapperClasses).toContain("group/chip");
+    expect(wrapperClasses).not.toContain("group");
+
+    const card = chipWrapper.lastElementChild as HTMLElement;
+    const cardClasses = card.className.split(/\s+/);
+    expect(cardClasses).toEqual(
+      expect.arrayContaining([
+        "group-hover/chip:visible",
+        "group-hover/chip:opacity-100",
+        "group-focus-within/chip:visible",
+        "group-focus-within/chip:opacity-100",
+      ]),
+    );
+    // Regression pin: no unnamed group-* variant survives, which would match any ancestor group.
+    expect(cardClasses).not.toContain("group-hover:visible");
+    expect(cardClasses).not.toContain("group-hover:opacity-100");
+    expect(cardClasses).not.toContain("group-focus-within:visible");
+    expect(cardClasses).not.toContain("group-focus-within:opacity-100");
+  });
 });
 
 describe("SourcesPill (#333)", () => {
@@ -79,6 +106,20 @@ describe("SourcesPill (#333)", () => {
   it("renders nothing when there are no refs", () => {
     const { container } = render(<SourcesPill refs={[]} />, { wrapper });
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // #572: before the named-group fix, hovering the expanded pill (or any chip in the row)
+  // satisfied every chip's `group-hover`, fanning out one absolutely-positioned card per
+  // source, stacked over each other. Each chip must own exactly one card, in its own scope.
+  it("gives each chip exactly one hover-card container, scoped to its own group, when expanded (#572)", () => {
+    const { container } = render(<SourcesPill refs={REFS} />, { wrapper });
+    fireEvent.click(screen.getByRole("button", { name: /Sources \(2\)/ }));
+
+    const chipWrappers = Array.from(container.getElementsByClassName("group/chip"));
+    expect(chipWrappers).toHaveLength(REFS.length);
+    for (const chip of chipWrappers) {
+      expect(chip.getElementsByClassName("group-hover/chip:visible")).toHaveLength(1);
+    }
   });
 });
 

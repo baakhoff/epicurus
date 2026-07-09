@@ -170,6 +170,31 @@ describe("Copy an assistant turn (#480)", () => {
     await screen.findByText("two");
     expect(screen.getAllByLabelText("Copy message")).toHaveLength(2);
   });
+
+  // #572: the row wrapper used to carry an unnamed `group`, which an unnamed `group-hover`
+  // anywhere below it (e.g. an entity chip's hover-card) would also match — hovering the row
+  // revealed every nested chip's card, not just the one under the pointer. Naming the row's
+  // scope is half the fix (EntityRef.test.tsx pins the chip side); this pins the row side and
+  // confirms the rename didn't just remove the reveal.
+  it("names the message row's hover group instead of leaving it unnamed (#572)", async () => {
+    mockMessages.mockResolvedValue([
+      { role: "user", content: "a", created_at: new Date(), attachments: [], entity_refs: [] },
+      { role: "assistant", content: "one", created_at: new Date(), attachments: [], entity_refs: [] },
+      { role: "user", content: "b", created_at: new Date(), attachments: [], entity_refs: [] },
+      { role: "assistant", content: "two", created_at: new Date(), attachments: [], entity_refs: [] },
+    ]);
+    const { container } = render(<ChatScreen />, { wrapper });
+    await screen.findByText("two");
+
+    // No unnamed `group` scope survives in the transcript.
+    expect(container.getElementsByClassName("group")).toHaveLength(0);
+    expect(container.getElementsByClassName("group/msg").length).toBeGreaterThanOrEqual(2);
+
+    // Copy-on-hover still works for earlier turns — the row group was renamed, not removed.
+    const [earlierCopy, latestCopy] = screen.getAllByLabelText("Copy message");
+    expect(earlierCopy.className).toContain("group-hover/msg:opacity-100");
+    expect(latestCopy.className).not.toContain("group-hover/msg:opacity-100");
+  });
 });
 
 describe("Jump to latest (#480)", () => {

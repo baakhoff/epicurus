@@ -1,20 +1,34 @@
-"""Unit tests for the maintenance orchestrator (ADR-0060): registry, run, scope, containment."""
+"""Unit tests for the maintenance orchestrator (ADR-0060): registry, run, scope, containment.
+
+The crux of the #561 coverage is :func:`test_start_run_is_nonblocking_with_pending_progress`
+(a batch outlives the caller) and :func:`test_shutdown_cancels_inflight_and_marks_interrupted`
+(a batch is still cleanly interruptible at process shutdown) — the same two properties
+``agent/live_runs.py`` established for chat turns (#376), now for maintenance batches.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
+import pytest
+
+from epicurus_core_app import maintenance as maintenance_module
 from epicurus_core_app.maintenance import (
     JobStatus,
     MaintenanceJob,
     MaintenanceOrchestrator,
+    MaintenanceRunConflictError,
     extraction_drain_job,
     facts_reembed_job,
     module_reindex_job,
 )
 
 TENANT = "local"
+
+
+class _StopLoop(Exception):
+    """Breaks a `run_periodic` test out of its `while True` deterministically."""
 
 
 class _FakeBus:
@@ -59,6 +73,26 @@ def _orch(
         timezone=_tz,
         **kw,
     )
+
+
+def _gated_job(key: str, gate: asyncio.Event, *, nightly: bool = True) -> MaintenanceJob:
+    """A job that stays ``running`` until *gate* is set — for observing in-flight state."""
+
+    async def run() -> tuple[JobStatus, str]:
+        await gate.wait()
+        return "ok", f"{key} done"
+
+    return MaintenanceJob(key=key, label=key.title(), run=run, nightly=nightly)
+
+
+async def _until_idle(orch: MaintenanceOrchestrator, *, timeout: float = 2.0) -> None:
+    """Poll ``current_run`` to ``None`` — the public-API way to await a `start_run` completion."""
+
+    async def _poll() -> None:
+        while orch.current_run() is not None:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
 
 
 async def test_run_all_executes_every_job_and_publishes_tenant_scoped() -> None:
@@ -119,6 +153,123 @@ async def test_run_periodic_is_a_noop_when_disabled() -> None:
     orch = _orch([_job("a")], schedule_enabled=False)
     # Returns immediately rather than entering the sleep loop; wrap to fail loudly on a hang.
     await asyncio.wait_for(orch.run_periodic(), timeout=2)
+
+
+# ── in-flight tracking, background start, concurrent-run guard (#561) ──────────
+
+
+async def test_start_run_is_nonblocking_with_pending_progress() -> None:
+    gate = asyncio.Event()
+    orch = _orch([_gated_job("a", gate), _job("b")])
+    current = orch.start_run()
+    # start_run itself never awaits, so the driver hasn't taken its first step at return time.
+    assert [p.status for p in current.jobs] == ["pending", "pending"]
+    assert orch.current_run() is current
+    assert orch.last_run() is None
+
+    gate.set()
+    await _until_idle(orch)
+
+    assert orch.current_run() is None
+    last = orch.last_run()
+    assert last is not None
+    assert {r.key: r.status for r in last.jobs} == {"a": "ok", "b": "ok"}
+
+
+async def test_current_run_shows_the_running_job_live_and_stays_sequenced() -> None:
+    gate = asyncio.Event()
+    orch = _orch([_gated_job("slow", gate), _job("fast")])
+    current = orch.start_run()
+    await asyncio.sleep(0)  # let the driver take its first step
+    assert current.jobs[0].status == "running"
+    assert current.jobs[1].status == "pending"  # sequenced — "fast" hasn't started yet
+    gate.set()
+    await _until_idle(orch)
+    assert [p.status for p in current.jobs] == ["ok", "ok"]
+
+
+async def test_start_run_conflicts_while_a_batch_is_in_flight() -> None:
+    gate = asyncio.Event()
+    orch = _orch([_gated_job("a", gate)])
+    current = orch.start_run()
+
+    with pytest.raises(MaintenanceRunConflictError) as excinfo:
+        orch.start_run()
+    assert excinfo.value.current is current
+
+    gate.set()
+    await _until_idle(orch)
+
+
+async def test_run_raises_conflict_while_a_batch_is_in_flight() -> None:
+    """The guard `run_periodic` relies on to skip (not double-run) an overlapping nightly window."""
+    gate = asyncio.Event()
+    orch = _orch([_gated_job("a", gate)])
+    current = orch.start_run()
+
+    with pytest.raises(MaintenanceRunConflictError) as excinfo:
+        await orch.run()
+    assert excinfo.value.current is current
+
+    gate.set()
+    await _until_idle(orch)
+
+
+async def test_run_periodic_skips_and_logs_when_a_manual_run_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def _fake_sleep(hour: int, timezone: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 1:  # break the `while True` deterministically after one skipped attempt
+            raise _StopLoop
+
+    monkeypatch.setattr(maintenance_module, "sleep_until_hour", _fake_sleep)
+
+    gate = asyncio.Event()
+    orch = _orch([_gated_job("a", gate)], schedule_enabled=True)
+    orch.start_run()  # a manual run already in flight when the nightly window hits
+
+    with pytest.raises(_StopLoop):
+        await asyncio.wait_for(orch.run_periodic(), timeout=2)
+
+    # Skipped, not double-run: still the same original in-flight run, untouched.
+    assert orch.current_run() is not None
+    gate.set()
+    await _until_idle(orch)
+
+
+async def test_shutdown_cancels_inflight_and_marks_interrupted() -> None:
+    gate = asyncio.Event()  # never set — the batch is wedged
+    orch = _orch([_gated_job("a", gate), _job("b")])
+    current = orch.start_run()
+
+    await asyncio.wait_for(orch.shutdown(), timeout=2)
+
+    assert orch.current_run() is None
+    assert current.jobs[0].status == "error" and "interrupted" in current.jobs[0].detail
+    assert current.jobs[1].status == "error"  # "b" never started; still marked interrupted
+    assert orch.last_run() is None  # a cancelled batch is discarded, not published
+
+
+async def test_shutdown_is_a_noop_when_idle() -> None:
+    orch = _orch([_job("a")])
+    await asyncio.wait_for(orch.shutdown(), timeout=2)  # must not raise or hang
+
+
+async def test_shutdown_allows_a_new_run_to_start() -> None:
+    gate = asyncio.Event()
+    orch = _orch([_gated_job("a", gate)])
+    orch.start_run()
+
+    await asyncio.wait_for(orch.shutdown(), timeout=2)
+
+    current2 = orch.start_run()  # the guard must not still think a run is active
+    assert current2.jobs[0].status == "pending"
+    gate.set()
+    await _until_idle(orch)
 
 
 # ── built-in jobs ─────────────────────────────────────────────────────────────

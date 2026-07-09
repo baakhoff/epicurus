@@ -14,6 +14,24 @@ images to GHCR.
 
 ### Added
 
+- **Maintenance: live progress + refresh-proof batches** (#561) — running maintenance showed no
+  progress beyond a spinner, and refreshing the page during a batch lost it entirely (the card's
+  running state was pure client mutation state). The batch itself was never at risk — verified
+  empirically (a real uvicorn server, a client disconnecting mid-request both gracefully and via a
+  hard reset) that this stack does not cancel a plain in-request `await` on client disconnect — but
+  the batch still had no way to be *observed* after a refresh, and nothing stopped a second manual
+  trigger (or an overlapping nightly window) from racing a duplicate batch. `POST /run` now starts
+  the batch as a **detached background task** (the same shape as chat turns, `agent/live_runs.py`,
+  #376) and returns **202** immediately with its live progress instead of holding the request open
+  for however long a full re-embed takes; the orchestrator tracks a `current_run` with per-job
+  `pending`/`running`/`ok`/`skipped`/`error` status as it sequences, exposed by `GET` alongside the
+  last *completed* run. A second `POST` while one is live responds **409** rather than double-running
+  — the nightly scheduler treats the same conflict as a benign skip — and `shutdown()` cancels an
+  in-flight batch cleanly at app teardown instead of orphaning it against infra about to close. The
+  Settings **Maintenance** card renders per-job progress from `current_run`, rehydrates onto it on
+  mount (a refresh mid-batch lands back on the same run), and polls a few seconds apart while one is
+  live. `core-app` 0.65.0→0.66.0, `web` 0.87.0→0.88.0.
+
 - **Models: real GB sizes everywhere + honest cloud-only rows** (#571) — the model browser
   never showed a download size (the library *index* the catalog parses publishes none, so
   `size_gb` was seed-only and blanked after the first live refresh), and **cloud-only** models

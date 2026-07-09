@@ -202,13 +202,27 @@ takes effect on the next message with no restart. Edited in the web
 
 The maintenance orchestrator (ADR-0060) — one coordinated batch over the core's background jobs
 (memory fact-extraction drain, module re-index fan-out). `GET` returns
-`{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run}` — the registered jobs,
-the opt-in nightly schedule, and the last run (or `null`). `POST /run` runs **every** job now
-(``scope: "all"``) and returns the `MaintenanceRun` `{ran_at, scope, jobs:[{key,label,status,detail}]}`
-— `status` is `ok`/`skipped`/`error` per job (one job's failure never aborts the rest). A
-tenant-scoped `maintenance.completed` NATS event carries the same summary. Driven by the web
-**Settings → Maintenance** card. The nightly schedule runs only `nightly` jobs and is off unless
-`MAINTENANCE_SCHEDULE_ENABLED` is set.
+`{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run, current_run}` — the
+registered jobs, the opt-in nightly schedule, the last *completed* run (or `null`), and any run
+**in flight** (or `null`).
+
+`POST /run` **starts** every job now (`scope: "all"`) as a background task and returns
+**immediately** — it does not wait for the batch, which can take minutes (#561). On success it's
+**202** with the just-started `MaintenanceCurrentRun`:
+`{started_at, scope, jobs:[{key,label,status,detail}]}`, where `status` is
+`pending`/`running`/`ok`/`skipped`/`error` per job (`pending`/`running` only ever appear here, live;
+a *completed* run's jobs — `last_run`, and the `maintenance.completed` event — are always
+`ok`/`skipped`/`error`). If a batch is **already running**, `POST /run` responds **409** instead of
+starting a second one — the body is a plain `{detail}` message, not a run; the caller re-`GET`s
+`/platform/v1/maintenance` to observe/join the in-flight run via `current_run`. This also covers an
+overlapping nightly window: the scheduled run is skipped (logged, not an error) rather than racing
+the manual trigger.
+
+A tenant-scoped `maintenance.completed` NATS event carries the completed run's summary — a batch
+interrupted by app shutdown is discarded, not published. Driven by the web **Settings →
+Maintenance** card: it rehydrates onto `current_run` on mount (a refresh mid-batch lands back on
+the same run) and polls a few seconds apart while one is live. The nightly schedule runs only
+`nightly` jobs and is off unless `MAINTENANCE_SCHEDULE_ENABLED` is set.
 
 ---
 

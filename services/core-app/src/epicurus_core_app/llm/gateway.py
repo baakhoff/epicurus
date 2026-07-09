@@ -347,6 +347,26 @@ class LlmGateway:
             return settings.context_window
         return await self.effective_context_window(tenant_id)
 
+    async def _hosted_budget(self, model: str, tenant_id: str | None) -> int | None:
+        """The compaction budget for a hosted model: its per-model context window, else ``None``.
+
+        A hosted provider fixes the real window and *rejects* an over-window request, so the
+        operator's per-model setting is a **budget** — the size a long conversation is trimmed to
+        (:meth:`_fit_to_context`), which both averts that rejection and caps per-turn input spend
+        (#570). ``None`` means no budget: today's untouched behavior.
+
+        Deliberately **not** :meth:`_effective_num_ctx`: that falls through to the global Ollama
+        ``num_ctx`` pref, a *local* runtime allocation, and a stored 8k local value must never
+        silently over-compact a 200k hosted window. The lookup is **exact** (the full hosted id),
+        not the loose family match of :meth:`_settings_for`, so a local model's settings can't
+        bleed in either (a hosted ``custom/llama3.2`` must not inherit a local ``llama3.2:latest``
+        window).
+        """
+        if self._model_settings is None:
+            return None
+        settings = await self._model_settings.get(tenant_id or self._default_tenant, model)
+        return settings.context_window
+
     async def _fit_to_context(
         self,
         model: str,
@@ -354,21 +374,28 @@ class LlmGateway:
         tools: list[dict[str, Any]] | None,
         tenant_id: str | None,
     ) -> list[ChatMessage]:
-        """Trim ``messages`` to fit ``model``'s context window — local models only.
+        """Trim ``messages`` to fit ``model``'s context window before the call.
 
-        The local runtime silently drops tokens past ``num_ctx``, evicting the oldest (the
-        system prompt + recalled context). We pre-trim instead (see :mod:`compaction`): keep the
-        system prefix and the most-recent turns within ``num_ctx`` minus a reply reserve and the
-        tool schemas' footprint. Hosted providers (large contexts, handled server-side) and calls
-        with no known window are left untouched.
+        The window is a **runtime allocation** for local models (``num_ctx`` → KV-cache memory;
+        the runtime silently drops tokens past it, evicting the oldest — the system prompt +
+        recalled context — so we pre-trim) and a **budget** for hosted ones (the provider fixes
+        the real window and rejects an over-window request, so the per-model setting both prevents
+        that overflow and caps per-turn input spend, #570). Either way, when a window applies we
+        keep the system prefix and the most-recent turns within it minus a reply reserve and the
+        tool schemas' footprint (see :mod:`compaction`); with no window set, messages are untouched.
+
+        The two classes resolve the window differently: local is per-model → global pref → env
+        (:meth:`_effective_num_ctx`); hosted is the per-model setting **only**
+        (:meth:`_hosted_budget`) — never the global Ollama pref, which is a local-only knob.
         """
         _, provider = registry.resolve(model)
-        if not provider.is_local:
+        if provider.is_local:
+            window = await self._effective_num_ctx(model, tenant_id)
+        else:
+            window = await self._hosted_budget(model, tenant_id)
+        if not window:
             return messages
-        num_ctx = await self._effective_num_ctx(model, tenant_id)
-        if not num_ctx:
-            return messages
-        budget = num_ctx - reply_reserve(num_ctx) - estimate_tools_tokens(tools)
+        budget = window - reply_reserve(window) - estimate_tools_tokens(tools)
         return compact_messages(messages, budget=budget, note=_TRIM_NOTE)
 
     async def _complete(

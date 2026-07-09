@@ -90,3 +90,18 @@ async def test_device_round_trips() -> None:
     assert (await store.get("t1", "llama3.2:latest")).device == "cpu"
     # device alone is not empty (the row persists)
     assert "llama3.2:latest" in await store.list("t1")
+
+
+async def test_hosted_id_round_trips_and_is_distinct_from_a_local_row() -> None:
+    """A hosted id (``<provider>/<model>``) persists a context-window budget of its own (#570).
+
+    The store is keyed by the exact id, so the hosted ``custom/llama3.2`` row is independent of a
+    same-family local ``llama3.2:latest`` row — the gateway reads the hosted budget by exact id and
+    never confuses the two.
+    """
+    store, _ = await _fresh_store()
+    await store.set("t1", "llama3.2:latest", ModelSettings(context_window=2048))  # local
+    await store.set("t1", "custom/llama3.2", ModelSettings(context_window=200_000))  # hosted
+    assert (await store.get("t1", "custom/llama3.2")).context_window == 200_000
+    assert (await store.get("t1", "llama3.2:latest")).context_window == 2048
+    assert set(await store.list("t1")) == {"llama3.2:latest", "custom/llama3.2"}

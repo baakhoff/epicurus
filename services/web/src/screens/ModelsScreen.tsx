@@ -1116,6 +1116,116 @@ export function ModelSettingsSheet({
   );
 }
 
+/**
+ * Settings for a saved **hosted** model — the context-window field only (#570).
+ *
+ * On a hosted model the number is a *compaction budget*, not an Ollama `num_ctx`: the provider
+ * fixes the real window, so this caps how large a conversation we send (it's trimmed to fit before
+ * each request), which both averts the provider's over-window rejection and bounds per-turn input
+ * spend. Keep-alive, Run-on, and quantization are Ollama runtime concerns and stay hidden here; the
+ * global Ollama context pref never applies to a hosted call, so there is no "inherit" read-out —
+ * blank simply means no budget (send the whole conversation, up to the provider's own window).
+ */
+function HostedModelSettingsForm({ model, onSaved }: { model: string; onSaved: () => void }) {
+  const queryClient = useQueryClient();
+  const settings = useQuery({
+    queryKey: ["modelSettings", model],
+    queryFn: () => api.modelSettings(model),
+  });
+
+  // Seeded once when the stored settings arrive (adjust-state-during-render, per the local form).
+  const [ctx, setCtx] = useState("");
+  const [seeded, setSeeded] = useState(false);
+  if (settings.data && !seeded) {
+    setCtx(settings.data.context_window != null ? String(settings.data.context_window) : "");
+    setSeeded(true);
+  }
+
+  const save = useMutation({
+    // The budget is passed in explicitly (not read from `ctx` state) so "Clear" can save null in
+    // the same click without waiting for the state update to settle. keep_alive and device are
+    // local-only runtime options — always cleared for a hosted model.
+    mutationFn: (value: number | null) =>
+      api.setModelSettings(model, { context_window: value, keep_alive: null, device: null }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["modelSettings", model] });
+      onSaved();
+    },
+  });
+
+  const ctxNum = ctx.trim() === "" ? null : Number(ctx);
+  const hasBudget = settings.data?.context_window != null;
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div>
+        <Label hint="Compaction budget — a long conversation is trimmed to fit this many tokens before each request, so it can't overflow the provider's window. Also caps per-turn input spend. Leave blank to send the whole conversation.">
+          Context window
+        </Label>
+        <TextInput
+          type="number"
+          min={CTX_FLOOR}
+          step={CTX_STEP}
+          value={ctx}
+          placeholder="no budget"
+          aria-label="Hosted context window tokens"
+          className="w-40"
+          onChange={(e) => setCtx(e.target.value)}
+        />
+        <p className="mt-1.5 text-xs text-ink-dim">
+          {ctxNum != null ? (
+            <>
+              Conversations are trimmed to <strong>{ctxNum.toLocaleString()}</strong> tokens before
+              each request.
+            </>
+          ) : (
+            <>No budget set — the whole conversation is sent, up to the provider&apos;s own window.</>
+          )}
+        </p>
+      </div>
+
+      {save.isError && <p className="text-sm text-danger">{(save.error as Error).message}</p>}
+      <div className="flex items-center gap-2">
+        <Button variant="primary" busy={save.isPending} onClick={() => save.mutate(ctxNum)}>
+          Save
+        </Button>
+        {hasBudget && (
+          <Button
+            variant="ghost"
+            disabled={save.isPending}
+            onClick={() => {
+              setCtx("");
+              save.mutate(null);
+            }}
+          >
+            Clear budget
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The settings Sheet for a saved hosted model — the hosted analog of `ModelSettingsSheet`, showing
+ * the context field only (a compaction budget, #570). Renders nothing when no model is selected.
+ */
+export function HostedModelSettingsSheet({
+  model,
+  onClose,
+}: {
+  model: string | null;
+  onClose: () => void;
+}) {
+  if (model === null) return null;
+  return (
+    <Sheet open onClose={onClose} title="Hosted model settings">
+      <p className="-mt-1 mb-4 font-mono text-sm break-all text-ink">{model}</p>
+      <HostedModelSettingsForm model={model} onSaved={onClose} />
+    </Sheet>
+  );
+}
+
 // ── KV-cache type (global runtime setting) ──────────────────────────────────────
 
 const KV_CACHE_OPTIONS = [
@@ -1466,6 +1576,8 @@ export function SavedHostedModels() {
   const saved = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const globalDefault = llmPrefs.data?.global_default ?? null;
+  // The hosted id whose settings sheet is open (a context budget, #570), or null when closed.
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
 
   const setDefault = useMutation({
     mutationFn: (model: string | null) => api.setGlobalDefault(model),
@@ -1516,6 +1628,15 @@ export function SavedHostedModels() {
                         {id}
                       </span>
                       {isDefault && <Badge tone="accent">default</Badge>}
+                      <Tooltip label="Context budget">
+                        <Button
+                          variant="ghost"
+                          aria-label={`Settings for ${id}`}
+                          onClick={() => setSettingsFor(id)}
+                        >
+                          <SlidersHorizontal size={14} />
+                        </Button>
+                      </Tooltip>
                       <Tooltip label={isDefault ? "Default model" : "Set as default"}>
                         <Button
                           variant="ghost"
@@ -1547,6 +1668,7 @@ export function SavedHostedModels() {
           {((setDefault.error ?? remove.error) as Error)?.message}
         </p>
       )}
+      <HostedModelSettingsSheet model={settingsFor} onClose={() => setSettingsFor(null)} />
     </Card>
   );
 }

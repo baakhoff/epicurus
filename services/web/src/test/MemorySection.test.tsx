@@ -61,4 +61,18 @@ describe("MemorySection", () => {
     render(<MemorySection />, { wrapper });
     expect(await screen.findByText(/Nothing remembered yet/)).toBeInTheDocument();
   });
+
+  it("names the fact row's hover group instead of leaving it unnamed (#572)", async () => {
+    render(<MemorySection />, { wrapper });
+    await screen.findByText("Lives in Belgrade");
+    const forgetBtn = screen.getAllByLabelText("Forget this")[0];
+    const forgetClasses = forgetBtn.className.split(/\s+/);
+    expect(forgetClasses).toContain("group-hover/fact:opacity-100");
+    expect(forgetClasses).not.toContain("group-hover:opacity-100");
+
+    const row = forgetBtn.parentElement!;
+    const rowClasses = row.className.split(/\s+/);
+    expect(rowClasses).toContain("group/fact");
+    expect(rowClasses).not.toContain("group");
+  });
 });

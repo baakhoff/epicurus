@@ -37,6 +37,21 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 FileKind = Literal["file", "dir"]
 
 
+def _like_prefix(path: str) -> str:
+    r"""Escape SQL ``LIKE`` wildcards so a subtree match can't reach a sibling.
+
+    ``_`` and ``%`` are ``LIKE`` metacharacters, yet both are legal in a stored path
+    (``report_v2``, ``50%off``). Left unescaped, ``LIKE 'report_v2/%'`` also matches a sibling
+    ``report-v2/…``. Here that only churns index rows — the #390 watcher re-indexes the sibling
+    on its next pass — but it is the same latent bug the storage delete path carried before #574,
+    so escape with a backslash to confine the match to the prefix and its true descendants;
+    callers pair this with ``escape="\\"`` on ``.like(...)``. Order matters: escape ``\`` before
+    the wildcards. Read-only :meth:`FileIndex.browse` needs no escaping — it re-filters to direct
+    children in Python.
+    """
+    return path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class IndexedFile(BaseModel):
     """One row in the core file index, safe to return over the API."""
 
@@ -165,7 +180,10 @@ class FileIndex:
             result = await session.execute(
                 delete(_CoreFile).where(
                     _CoreFile.tenant == tenant,
-                    or_(_CoreFile.path == path, _CoreFile.path.like(path + "/%")),
+                    or_(
+                        _CoreFile.path == path,
+                        _CoreFile.path.like(_like_prefix(path) + "/%", escape="\\"),
+                    ),
                 )
             )
             await session.commit()

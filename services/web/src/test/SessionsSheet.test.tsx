@@ -152,4 +152,17 @@ describe("Conversations sheet (#480)", () => {
     await waitFor(() => expect(mockDeleteSession).toHaveBeenCalledWith("s-old"));
     expect(useChat.getState().sessionId).toBe("s-today");
   });
+
+  it("names the row's hover group instead of leaving it unnamed (#572)", async () => {
+    await openSheet();
+    const deleteBtn = screen.getByLabelText("Delete Balcony lamp");
+    const deleteClasses = deleteBtn.className.split(/\s+/);
+    expect(deleteClasses).toContain("group-hover/session:opacity-100");
+    expect(deleteClasses).not.toContain("group-hover:opacity-100");
+
+    const row = deleteBtn.parentElement!;
+    const rowClasses = row.className.split(/\s+/);
+    expect(rowClasses).toContain("group/session");
+    expect(rowClasses).not.toContain("group");
+  });
 });

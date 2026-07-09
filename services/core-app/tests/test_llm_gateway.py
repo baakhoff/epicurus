@@ -1099,14 +1099,85 @@ async def test_chat_does_not_trim_a_hosted_context(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
     prefs = await _fresh_prefs()
-    await prefs.set_context_window("local", 2048)
+    await prefs.set_context_window("local", 2048)  # a tight *local* pref — would trim if it applied
     secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
     convo = _long_convo(20)
     await _gateway(prefs=prefs, secrets=secrets).chat(
         convo, model="claude/claude-3-5-sonnet-latest"
     )
-    # Hosted providers have large contexts and handle overflow themselves — left untouched.
+    # No per-model budget set → hosted is untouched (today's behavior). Critically, the global
+    # Ollama pref (2048) — which would trim this convo on a local model — never reaches hosted.
     assert len(captured["messages"]) == len(convo)
+
+
+async def test_hosted_per_model_budget_trims_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    # A per-model budget on the hosted id — the operator's spend cap / overflow guard (#570).
+    await ms.set("local", "claude/claude-3-5-sonnet-latest", ModelSettings(context_window=2048))
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    convo = _long_convo(20)
+    await _gateway(model_settings=ms, secrets=secrets).chat(
+        convo, model="claude/claude-3-5-sonnet-latest"
+    )
+
+    sent = captured["messages"]
+    assert len(sent) < len(convo)  # the conversation was compacted to the budget
+    assert sent[0]["content"] == "INSTRUCTIONS"  # the system prompt survived
+    assert sent[-1]["content"].startswith("turn-19")  # the newest turn survived
+    assert any("trimmed to fit the context window" in m["content"] for m in sent)  # trim-note
+    assert "num_ctx" not in captured  # the budget is never sent as an Ollama runtime option
+
+
+async def test_hosted_budget_ignores_global_ollama_pref(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The explicit "8k global + 200k hosted" case: the global Ollama pref must not shrink a
+    # generously-budgeted hosted window (#570). A long convo that an 8k budget *would* trim is
+    # left whole because the per-model budget is 200k.
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "anthropic/c", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    prefs = await _fresh_prefs()
+    await prefs.set_context_window("local", 8192)  # small global Ollama pref
+    ms = await _fresh_model_settings()
+    await ms.set("local", "claude/claude-3-5-sonnet-latest", ModelSettings(context_window=200_000))
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    convo = _long_convo(100)  # ~10k tokens: over an 8k budget, far under 200k
+    await _gateway(prefs=prefs, model_settings=ms, secrets=secrets).chat(
+        convo, model="claude/claude-3-5-sonnet-latest"
+    )
+    assert len(captured["messages"]) == len(convo)  # untouched — the 8k global never applied
+
+
+async def test_hosted_budget_uses_exact_id_not_local_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A hosted id resolves its budget by *exact* match, never the loose family match locals use —
+    # so a local `llama3.2:latest` window can't bleed into a hosted `custom/llama3.2` call (#570).
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"model": "openai/llama3.2", "choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    ms = await _fresh_model_settings()
+    await ms.set("local", "llama3.2:latest", ModelSettings(context_window=2048))  # a *local* row
+    secrets = _FakeSecrets({"llm/custom": {"api_key": "k", "api_base": "http://host"}})
+    convo = _long_convo(20)
+    await _gateway(model_settings=ms, secrets=secrets).chat(convo, model="custom/llama3.2")
+    # The local family row is not the hosted budget → untouched (loose matching would have trimmed).
+    assert len(captured["messages"]) == len(convo)
+    assert "num_ctx" not in captured
 
 
 async def test_per_model_context_overrides_global_pref(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -176,7 +176,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
 | `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider}]}` (most-recent-first). `POST {model}` persists one, idempotent (**400** if it isn't a hosted `<provider>/` id, so a local `hf.co/…` can't land). `DELETE ?model=…` forgets one. Backs the chat picker (auto-saved on use), the Models page (remove / set-as-default), and module model slots; persisted in `saved_models`. Mutations **503** without the store. |
-| `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
+| `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Works for a **hosted** `<provider>/<model>` id too — there `context_window` is a **compaction budget** (`keep_alive`/`device` are local-only Ollama options). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 | `POST /platform/v1/llm/model-settings/suggest-context` | Compute **and persist** a recommended per-model context window for a freshly pulled model (#386), so it opens sized to itself instead of the global default. Body `{model}`. Reuses the `system/info` heuristic (VRAM-or-RAM + the named model's on-disk size + KV-cache type, capped at its trained length) but for *that* model rather than the active one. **Non-destructive** — an existing per-model context override is left untouched. Returns `{model, context_window, applied}` (`applied` is `false` when one was already set, or none could be computed — e.g. a hosted model with no local size). The web calls it when **any** pull finishes (catalog, variant, or manual tag). |
 | `GET /platform/v1/system/info` | Host spec + the context-window suggestion behind the Models page. Returns `{gpu, cpu, ram_total_mb, model:{name, size_mb, context_length, quantization}, suggested_context:{min, suggested, max}, kv_cache_type}`. The suggestion estimates how big a context the box can hold from VRAM (or RAM, no GPU), the active model's on-disk size, and the **KV-cache type** (a quantized cache `q8_0`/`q4_0` costs fewer bytes/token, so the same memory buys more context). Its ceiling is the model's **trained** `context_length` when known — no longer a flat 32k — so a long-context model on a roomy GPU is no longer clipped; 32768 remains only the fallback when the trained length is unknown. Best-effort: every probe degrades to `null`. |
 
@@ -277,12 +277,18 @@ for chat, `embed` for embeddings):
 - **`num_gpu`** — from `device`: `"cpu"` → `0` (all CPU), `"gpu"` → `999` (all layers,
   clamped by the runtime), `null`/auto → omitted (the runtime decides). Local models only.
 
-Lookup is loose: settings keyed by the runtime's tagged name (`llama3.2:latest`) still match
-a request for the bare default (`llama3.2`), and vice versa, by exact name → bare name →
-family. Quantization is **not** a runtime knob — it is baked in when a model is pulled, so
-the sheet shows it read-only (from `/api/show`) and offers a "pull a different variant"
-shortcut instead. Embedding settings are opt-in: with nothing set, the embed call is
-unchanged.
+Lookup is loose **for local models**: settings keyed by the runtime's tagged name
+(`llama3.2:latest`) still match a request for the bare default (`llama3.2`), and vice versa, by
+exact name → bare name → family. Quantization is **not** a runtime knob — it is baked in when a
+model is pulled, so the sheet shows it read-only (from `/api/show`) and offers a "pull a
+different variant" shortcut instead. Embedding settings are opt-in: with nothing set, the embed
+call is unchanged.
+
+A **hosted** model reuses the same row (keyed by its full `<provider>/<model>` id) for one knob
+only: `context_window`, read as a **compaction budget** rather than `num_ctx` — see
+[Context compaction](#context-compaction-fitting-the-prompt-to-the-window) (#570). `keep_alive`
+and `device` are Ollama runtime options and stay local-only; the Models-page settings sheet for
+a saved hosted model shows the context field alone.
 
 ### Context compaction (fitting the prompt to the window)
 
@@ -295,8 +301,22 @@ and the tool-schema footprint, drops older history first, never orphans a `tool`
 its `assistant` call, and always keeps at least the final message. When anything is dropped a
 short `system` note marks the cut so the model knows earlier turns existed. Token counts are a
 deliberately conservative character-based **estimate** (no tokenizer dependency, arbitrary
-local models). Hosted providers — large contexts, server-side overflow handling — are left
-untouched, as are calls with no known window. The common case (a short chat) is a no-op.
+local models). The common case (a short chat) is a no-op.
+
+The window means different things per provider class, so the two resolve it differently
+(`_fit_to_context`):
+
+- **Local** — a runtime *allocation* (`num_ctx` → KV-cache memory). The window is the
+  model's own `context_window` → the global pref → the env (`_effective_num_ctx`).
+- **Hosted** — a *budget* (#570). A hosted provider fixes the real window and **rejects** an
+  over-window request, so compacting to the operator's per-model `context_window` both prevents
+  that `context_length_exceeded` failure and caps per-turn input spend (every turn resends the
+  window). Resolved by **exact model id** from the same `model_settings` row — and **only**
+  that: never the global `context_window` pref (a *local* `num_ctx` knob; an 8k local value must
+  not silently over-compact a 200k hosted model) and never a loose family match (so a hosted
+  `custom/llama3.2` can't inherit a local `llama3.2:latest` window). With no per-model budget
+  set, hosted calls are left **untouched** — today's behavior. The budget never enters the
+  hosted API call; `num_ctx` stays local-only.
 
 ### Streamed tool calls
 

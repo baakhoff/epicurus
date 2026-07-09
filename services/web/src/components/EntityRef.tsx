@@ -94,7 +94,7 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
 
   return (
     <span
-      className="group relative inline-block align-baseline"
+      className="group/chip relative inline-block align-baseline"
       onMouseEnter={() => setActive(true)}
       onFocus={() => setActive(true)}
     >
@@ -110,7 +110,7 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
         <AtSign size={11} className="shrink-0" />
         {entref.title}
       </button>
-      <span className="invisible absolute top-full left-0 z-40 mt-1 block w-64 opacity-0 transition-opacity group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100">
+      <span className="invisible absolute top-full left-0 z-40 mt-1 block w-64 opacity-0 transition-opacity group-focus-within/chip:visible group-focus-within/chip:opacity-100 group-hover/chip:visible group-hover/chip:opacity-100">
         <HoverCardBody data={data} loading={card.isLoading} />
       </span>
     </span>

@@ -353,6 +353,14 @@ inline through the Markdown `a` slot; any remaining refs collapse into a single 
 **"Sources (N)"** pill beneath the message (`SourcesPill`, #333) that discloses the individual
 chips on click — keeping a multi-source row from crowding the chat.
 
+Each chip's hover-card reveals via a **named** Tailwind group (`group/chip` on the wrapper,
+`group-hover/chip:` / `group-focus-within/chip:` on the card) — never the unnamed `group`, whose
+`group-hover` variant matches *any* ancestor carrying `.group`, not just the nearest one, so an
+unnamed chip nested in an unnamed row group reveals on that row's hover too (#572). **Convention:**
+unnamed `group` is reserved for leaf scopes that can never contain another group; anything that
+wraps arbitrary content — a message row, a list row, a card with its own reveal — names its group,
+per the shared `Tooltip`'s `group/tip` (`ui.tsx`).
+
 ### Attachments in chat (ADR-0019)
 
 The composer's **attach** affordance (`src/components/AttachMenu.tsx`) lets the user add

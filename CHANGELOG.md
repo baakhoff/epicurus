@@ -30,7 +30,7 @@ images to GHCR.
   in-flight batch cleanly at app teardown instead of orphaning it against infra about to close. The
   Settings **Maintenance** card renders per-job progress from `current_run`, rehydrates onto it on
   mount (a refresh mid-batch lands back on the same run), and polls a few seconds apart while one is
-  live. `core-app` 0.64.0→0.65.0, `web` 0.86.0→0.87.0.
+  live. `core-app` 0.65.0→0.66.0, `web` 0.87.0→0.88.0.
 
 - **Models: real GB sizes everywhere + honest cloud-only rows** (#571) — the model browser
   never showed a download size (the library *index* the catalog parses publishes none, so

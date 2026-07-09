@@ -32,6 +32,16 @@ images to GHCR.
   mount (a refresh mid-batch lands back on the same run), and polls a few seconds apart while one is
   live. `core-app` 0.65.0→0.66.0, `web` 0.87.0→0.88.0.
 
+- **Models: a context budget for hosted models — long chats compact instead of overflowing** (#570) —
+  a saved hosted/API model had no context-window control and no compaction path: both readers of the
+  per-model setting sat behind an `is_local` guard, so a long conversation grew until the provider
+  rejected the turn with `context_length_exceeded`. Hosted rows now take the same per-model context
+  setting local models already have (#289/#328), read as a **compaction budget** rather than an Ollama
+  `num_ctx` — the size the history is trimmed to fit before the call, giving both overflow protection
+  and a per-turn input-spend cap. Resolved by **exact model id only** (never the global Ollama pref,
+  never the loose local-family match); an unset budget leaves behavior identical to today. `core-app`
+  0.64.1→0.65.0, `web` 0.86.1→0.87.0.
+
 - **Models: real GB sizes everywhere + honest cloud-only rows** (#571) — the model browser
   never showed a download size (the library *index* the catalog parses publishes none, so
   `size_gb` was seed-only and blanked after the first live refresh), and **cloud-only** models
@@ -744,6 +754,21 @@ images to GHCR.
   endpoints and never enable the profile. Infra-only; no component version change.
 
 ### Fixed
+
+- **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
+  unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
+  ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's
+  hover — expanding "Sources (N)" stacked every card open at once. Both scopes are now named
+  (`group/chip`, `group/msg`), following the existing `group/tip` precedent, and the remaining unnamed
+  leaf reveals were renamed in the same pass so the trap can't resurface. `web` 0.86.0→0.86.1.
+
+- **Files: de-indexing a folder no longer drops a wildcard-sibling's search rows** (#579) — the core
+  file index selected rows to delete with an **unescaped** `LIKE path + "/%"`, and `_`/`%` are SQL
+  LIKE wildcards legal in path segments, so de-indexing `data_2024` also matched a sibling
+  `data-2024/*` and dropped its index rows (non-destructive — the #390 reconcile watcher re-indexes on
+  its next pass — but a transient search/listing gap). A local `_like_prefix()` helper now escapes
+  `\`, `%`, `_` with `escape="\\"`, mirroring the storage object-delete fix (#574). `core-app`
+  0.64.0→0.64.1.
 
 - **CI: the wiki sync no longer fails red before the wiki's first page exists** (#540) — the
   workflow's `has_wiki` check only confirms the wiki *feature* is on; GitHub doesn't create the

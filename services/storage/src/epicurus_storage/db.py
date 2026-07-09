@@ -35,6 +35,21 @@ FileSource = Literal["fs", "object"]
 _ADDED_COLUMNS = ("source",)
 
 
+def _like_prefix(path: str) -> str:
+    r"""Escape SQL ``LIKE`` wildcards so a subtree match can't reach a sibling.
+
+    ``_`` and ``%`` are ``LIKE`` metacharacters, yet both are legal in a stored path
+    (``report_v2``, ``50%off``). Left unescaped, ``LIKE 'report_v2/%'`` also matches a sibling
+    ``report-v2/…`` — harmless when merely listing, but the delete path (#564) turns that
+    over-match into a hard delete of the sibling's bytes. Escaping with a backslash confines the
+    match to the prefix and its true descendants; callers pair this with ``escape="\\"`` on
+    ``.like(...)``. Order matters: escape ``\`` before the wildcards so the escapes we inject
+    aren't themselves re-escaped. Paths are ``/``-normalised before they reach here, so escaping
+    ``\`` is only defence in depth.
+    """
+    return path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class FileEntry(BaseModel):
     """One row in the file index, safe to return over the API."""
 
@@ -254,7 +269,10 @@ class FileIndex:
                 select(_StoredFile)
                 .where(
                     _StoredFile.tenant == tenant,
-                    or_(_StoredFile.path == path, _StoredFile.path.like(path + "/%")),
+                    or_(
+                        _StoredFile.path == path,
+                        _StoredFile.path.like(_like_prefix(path) + "/%", escape="\\"),
+                    ),
                 )
                 .order_by(_StoredFile.path)
             )
@@ -275,7 +293,10 @@ class FileIndex:
                 await session.scalars(
                     select(_StoredFile).where(
                         _StoredFile.tenant == tenant,
-                        or_(_StoredFile.path == src, _StoredFile.path.like(src + "/%")),
+                        or_(
+                            _StoredFile.path == src,
+                            _StoredFile.path.like(_like_prefix(src) + "/%", escape="\\"),
+                        ),
                     )
                 )
             )
@@ -300,7 +321,10 @@ class FileIndex:
             result = await session.execute(
                 delete(_StoredFile).where(
                     _StoredFile.tenant == tenant,
-                    or_(_StoredFile.path == path, _StoredFile.path.like(path + "/%")),
+                    or_(
+                        _StoredFile.path == path,
+                        _StoredFile.path.like(_like_prefix(path) + "/%", escape="\\"),
+                    ),
                 )
             )
             await session.commit()

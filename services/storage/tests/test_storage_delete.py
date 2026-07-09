@@ -147,3 +147,27 @@ async def test_delete_subtree_index_only_helper(
     removed = await index.delete_subtree(tenant=TENANT, path="d")
     assert removed == 3  # the "d" dir row + two files
     assert await index.browse(tenant=TENANT, path="") == []
+
+
+# ── sibling isolation: LIKE-wildcard escaping (#564) ───────────────────────────
+
+
+async def test_delete_does_not_sweep_a_wildcard_sibling(
+    index: FileIndex, objects: _FakeObjectStore
+) -> None:
+    # A folder name may contain ``_`` — a SQL LIKE wildcard that matches any single character.
+    # Deleting "data_2024" must not reach a sibling "data-2024" that differs only where the
+    # wildcard sits. Unescaped, ``LIKE 'data_2024/%'`` matches "data-2024/report.md" and hard-
+    # deletes its bytes; the escaped subtree query keeps the delete inside the named folder.
+    await _put(index, objects, "data_2024/report.md", "keep-me-safe")
+    await _put(index, objects, "data-2024/report.md", "innocent-bystander")
+
+    result = await delete_item(index=index, objects=objects, tenant=TENANT, path="data_2024")
+    assert result == {"deleted": True}
+
+    # The named folder is gone — row and bytes.
+    assert await index.get(tenant=TENANT, path="data_2024/report.md") is None
+    assert await objects.get(tenant=TENANT, key="data_2024/report.md") is None
+    # The sibling is untouched. This is the regression guard: an unescaped LIKE would nuke it.
+    assert await index.get(tenant=TENANT, path="data-2024/report.md") is not None
+    assert await objects.get(tenant=TENANT, key="data-2024/report.md") is not None

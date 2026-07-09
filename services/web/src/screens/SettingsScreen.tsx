@@ -18,7 +18,7 @@ import {
   Tooltip,
   cn,
 } from "@/components/ui";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type { ModuleSnapshot } from "@/lib/contracts";
 import { usePrefs } from "@/stores/prefs";
 
@@ -450,18 +450,37 @@ export function AssistantInstructionsCard() {
   );
 }
 
-/** Maintenance — run the core's background jobs as one coordinated batch (#383, ADR-0060). */
+/**
+ * Maintenance — run the core's background jobs as one coordinated batch (#383, ADR-0060).
+ *
+ * `POST /run` starts the batch server-side and returns immediately (#561): the card renders
+ * live per-job progress from `current_run` and polls a few seconds apart while one is running
+ * (the PowerOrb/ChatScreen poll pattern), and — since `current_run` comes from the same GET
+ * this card already fetches on mount — a page refresh mid-batch rehydrates onto it for free.
+ */
 export function MaintenanceCard() {
   const qc = useQueryClient();
-  const status = useQuery({ queryKey: ["maintenance"], queryFn: api.maintenanceStatus });
+  const status = useQuery({
+    queryKey: ["maintenance"],
+    queryFn: api.maintenanceStatus,
+    refetchInterval: (query) => (query.state.data?.current_run ? 3_000 : false),
+  });
   const run = useMutation({
     mutationFn: () => api.runMaintenance(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["maintenance"] }),
+    // Whether this call started the batch (202) or found one already running (409, joined),
+    // the GET is the source of truth afterward — refetch it either way.
+    onSettled: () => qc.invalidateQueries({ queryKey: ["maintenance"] }),
   });
-  // Prefer the run we just triggered; otherwise show the cached last run from status.
-  const result = run.data ?? status.data?.last_run ?? null;
-  const tone = (s: string): "ok" | "dim" | "danger" =>
-    s === "ok" ? "ok" : s === "skipped" ? "dim" : "danger";
+
+  const current = status.data?.current_run ?? null;
+  const last = status.data?.last_run ?? null;
+  const conflict = run.error instanceof ApiError && run.error.status === 409;
+  const tone = (s: string): "ok" | "dim" | "accent" | "danger" =>
+    s === "ok" ? "ok" : s === "running" ? "accent" : s === "error" ? "danger" : "dim";
+
+  const runningJob = current?.jobs.find((j) => j.status === "running");
+  const doneCount =
+    current?.jobs.filter((j) => j.status !== "pending" && j.status !== "running").length ?? 0;
 
   return (
     <Card>
@@ -475,9 +494,14 @@ export function MaintenanceCard() {
       ) : (
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" busy={run.isPending} onClick={() => run.mutate()}>
+            <Button
+              variant="outline"
+              busy={run.isPending}
+              disabled={current !== null}
+              onClick={() => run.mutate()}
+            >
               <RefreshCw size={14} />
-              Run maintenance now
+              {current ? "Running…" : "Run maintenance now"}
             </Button>
             <span className="text-xs text-ink-faint">
               {status.data?.schedule_enabled
@@ -485,20 +509,38 @@ export function MaintenanceCard() {
                 : "Manual only — nightly schedule off"}
             </span>
           </div>
-          {run.isError && <p className="text-sm text-danger">{(run.error as Error).message}</p>}
-          {result && (
+          {run.isError && !conflict && (
+            <p className="text-sm text-danger">{(run.error as Error).message}</p>
+          )}
+          {current ? (
             <div className="text-[11px] text-ink-dim">
-              Last run{result.scope === "nightly" ? " (nightly)" : ""}:
+              {runningJob ? `${runningJob.label} — running` : "Starting"} · {doneCount}/
+              {current.jobs.length} jobs
               <ul className="mt-1 flex flex-col gap-0.5">
-                {result.jobs.map((j) => (
+                {current.jobs.map((j) => (
                   <li key={j.key} className="flex items-center gap-1.5">
                     <Dot tone={tone(j.status)} />
                     <span className="text-ink">{j.label}</span>
-                    <span>· {j.detail}</span>
+                    {j.detail && <span>· {j.detail}</span>}
                   </li>
                 ))}
               </ul>
             </div>
+          ) : (
+            last && (
+              <div className="text-[11px] text-ink-dim">
+                Last run{last.scope === "nightly" ? " (nightly)" : ""}:
+                <ul className="mt-1 flex flex-col gap-0.5">
+                  {last.jobs.map((j) => (
+                    <li key={j.key} className="flex items-center gap-1.5">
+                      <Dot tone={tone(j.status)} />
+                      <span className="text-ink">{j.label}</span>
+                      <span>· {j.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )
           )}
         </div>
       )}

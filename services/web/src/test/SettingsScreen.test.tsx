@@ -17,27 +17,38 @@ vi.mock("@/components/MemorySection", () => ({
 }));
 
 const mockModules = vi.fn();
-vi.mock("@/lib/api", () => ({
-  api: {
-    info: () => Promise.resolve({ core_version: "0.0.0", contract_version: "0.1", tenant: "default" }),
-    modules: () => mockModules(),
-    oauthClientStatus: () => Promise.resolve({ configured: true }),
-    oauthStatus: () => Promise.resolve({ connected: false, scope: null }),
-    oauthConnect: vi.fn(),
-    oauthDisconnect: vi.fn(),
-    oauthSetClient: vi.fn(),
-    timezone: () => Promise.resolve({ timezone: "UTC" }),
-    moduleStatus: () => Promise.resolve({}),
-    setTimezone: vi.fn(),
-    llmPrefs: () => Promise.resolve({ global_agent_max_steps: null }),
-    setAgentMaxSteps: vi.fn(),
-    agentInstructions: () => Promise.resolve({ instructions: "Default prompt.", is_default: true }),
-    setAgentInstructions: vi.fn(),
-    maintenanceStatus: () =>
-      Promise.resolve({ schedule_enabled: false, schedule_hour: 3, jobs: [], last_run: null }),
-    runMaintenance: vi.fn(),
-  },
-}));
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return {
+    ApiError: actual.ApiError,
+    api: {
+      info: () => Promise.resolve({ core_version: "0.0.0", contract_version: "0.1", tenant: "default" }),
+      modules: () => mockModules(),
+      oauthClientStatus: () => Promise.resolve({ configured: true }),
+      oauthStatus: () => Promise.resolve({ connected: false, scope: null }),
+      oauthConnect: vi.fn(),
+      oauthDisconnect: vi.fn(),
+      oauthSetClient: vi.fn(),
+      timezone: () => Promise.resolve({ timezone: "UTC" }),
+      moduleStatus: () => Promise.resolve({}),
+      setTimezone: vi.fn(),
+      llmPrefs: () => Promise.resolve({ global_agent_max_steps: null }),
+      setAgentMaxSteps: vi.fn(),
+      agentInstructions: () =>
+        Promise.resolve({ instructions: "Default prompt.", is_default: true }),
+      setAgentInstructions: vi.fn(),
+      maintenanceStatus: () =>
+        Promise.resolve({
+          schedule_enabled: false,
+          schedule_hour: 3,
+          jobs: [],
+          last_run: null,
+          current_run: null,
+        }),
+      runMaintenance: vi.fn(),
+    },
+  };
+});
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });

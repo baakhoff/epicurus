@@ -1019,11 +1019,32 @@ export const MaintenanceRun = z.object({
 });
 export type MaintenanceRun = z.infer<typeof MaintenanceRun>;
 
-/** The maintenance surface: the schedule, the registered jobs, and the last run (#383). */
+/** One job's live status within an in-flight maintenance run (#561). */
+export const MaintenanceJobProgress = z.object({
+  key: z.string(),
+  label: z.string(),
+  status: z.enum(["pending", "running", "ok", "skipped", "error"]),
+  detail: z.string(),
+});
+export type MaintenanceJobProgress = z.infer<typeof MaintenanceJobProgress>;
+
+/**
+ * An in-flight maintenance batch — polled while live and rehydrated on mount, so a page refresh
+ * mid-batch lands back on the same run instead of losing it (#561).
+ */
+export const MaintenanceCurrentRun = z.object({
+  started_at: z.string(),
+  scope: z.string(),
+  jobs: z.array(MaintenanceJobProgress).default([]),
+});
+export type MaintenanceCurrentRun = z.infer<typeof MaintenanceCurrentRun>;
+
+/** The maintenance surface: the schedule, the registered jobs, the last run, and any live run. */
 export const MaintenanceStatus = z.object({
   schedule_enabled: z.boolean(),
   schedule_hour: z.number(),
   jobs: z.array(MaintenanceJob).default([]),
   last_run: MaintenanceRun.nullish(),
+  current_run: MaintenanceCurrentRun.nullish(),
 });
 export type MaintenanceStatus = z.infer<typeof MaintenanceStatus>;

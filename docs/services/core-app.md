@@ -446,16 +446,29 @@ same `reembed` fan-out as above), and **memory facts re-embed** (heavy, manual-o
 single GPU) and each is contained: one job's failure becomes an `error` result, never aborting
 the rest.
 
+A batch runs as a **detached background task**, decoupled from the request that started it (#561)
+— the same shape as chat turns (`agent/live_runs.py`, #376). `POST /run` starts it and returns
+immediately; the orchestrator tracks a **current run** with live `pending`/`running`/`ok`/
+`skipped`/`error` status per job as it sequences, exposed by `GET` alongside the last *completed*
+run. A second `POST` (or an overlapping nightly window) while one is in flight doesn't start a
+competing batch — it 409s, carrying nothing but a message, and the caller re-`GET`s to observe/join
+the run already going. `MaintenanceOrchestrator.shutdown()` cancels an in-flight batch cleanly at
+app shutdown (marking whatever hadn't finished `error`) rather than orphaning it against
+infra that's about to close.
+
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run}` — the registered jobs, the schedule, and the last run (or `null`). |
-| `POST /platform/v1/maintenance/run` | Run **every** job now (`scope: "all"`) → `MaintenanceRun` `{ran_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `ok`/`skipped`/`error`). |
+| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the schedule, the last *completed* run (or `null`), and the in-flight run (or `null`) with its live per-job progress. |
+| `POST /platform/v1/maintenance/run` | **202** — starts every job now (`scope: "all"`) as a background task and returns its live progress immediately: `MaintenanceCurrentRun` `{started_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `pending`/`running`/`ok`/`skipped`/`error`). **409** if a batch is already running — the body is a plain `{detail}` message; re-`GET` for the in-flight run. |
 
 The **manual** trigger (the web **Settings → Maintenance** card) is always available and runs all
-jobs. The **nightly schedule** (`run_periodic`, at `MAINTENANCE_HOUR`) runs only the `nightly` jobs
-and is **off by default** (`MAINTENANCE_SCHEDULE_ENABLED`) — the per-runner schedules already cover
-the unattended case, so this avoids redundant nightly work; consolidating those schedules onto the
-orchestrator is the named follow-up. Every run publishes a tenant-scoped `maintenance.completed`.
+jobs; the card rehydrates onto `current_run` on mount and polls a few seconds apart while one is
+live, so a page refresh mid-batch lands back on the same run instead of losing it. The **nightly
+schedule** (`run_periodic`, at `MAINTENANCE_HOUR`) runs only the `nightly` jobs and is **off by
+default** (`MAINTENANCE_SCHEDULE_ENABLED`) — the per-runner schedules already cover the unattended
+case, so this avoids redundant nightly work; consolidating those schedules onto the orchestrator is
+the named follow-up. Every *completed* run publishes a tenant-scoped `maintenance.completed`; a run
+interrupted by shutdown is discarded, not published.
 
 ### Events (NATS)
 

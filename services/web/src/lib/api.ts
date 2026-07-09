@@ -23,7 +23,7 @@ import {
   HoverCard,
   LlmPrefs,
   LogEntry,
-  MaintenanceRun,
+  MaintenanceCurrentRun,
   MaintenanceStatus,
   MemoryListing,
   MessageRecord,
@@ -125,11 +125,12 @@ export const api = {
       "/platform/v1/modules/reembed",
       { method: "POST" },
     ),
-  // Maintenance orchestrator (#383, ADR-0060): the registered jobs + schedule + last run, and
-  // the manual "run everything" trigger that fans the background jobs out as one batch.
+  // Maintenance orchestrator (#383, ADR-0060): the registered jobs + schedule + last run + any
+  // in-flight run, and the manual "run everything" trigger that starts the background jobs as
+  // one batch (202 + its live progress; 409 if one is already running, #561).
   maintenanceStatus: () => request(MaintenanceStatus, "/platform/v1/maintenance"),
   runMaintenance: () =>
-    request(MaintenanceRun, "/platform/v1/maintenance/run", { method: "POST" }),
+    request(MaintenanceCurrentRun, "/platform/v1/maintenance/run", { method: "POST" }),
   setContextWindow: (value: number | null) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
       method: "PUT",

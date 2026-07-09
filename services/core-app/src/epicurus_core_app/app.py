@@ -464,6 +464,10 @@ def create_app() -> FastAPI:
                 await live_run_reaper
             with suppress(asyncio.CancelledError):
                 await maintenance_task
+            # The nightly-schedule loop above is separate from an in-flight batch it (or a manual
+            # trigger) may have started — cancel that too so it isn't orphaned against infra about
+            # to close (#561).
+            await maintenance.shutdown()
             if file_watcher is not None and file_watch_task is not None:
                 file_watcher.stop()
                 file_watch_task.cancel()

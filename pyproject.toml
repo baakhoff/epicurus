@@ -25,7 +25,7 @@ exclude = ["services/web"]
 [dependency-groups]
 dev = [
     "ruff>=0.15.20",
-    "mypy>=1.13",
+    "mypy>=2.2.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",

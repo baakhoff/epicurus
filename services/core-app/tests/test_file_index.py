@@ -99,3 +99,27 @@ async def test_tenant_isolation() -> None:
         "top.txt",
     }
     assert {e.path for e in await index.browse(tenant="other", path="")} == {"secret.txt"}
+
+
+async def test_remove_subtree_does_not_sweep_a_wildcard_sibling() -> None:
+    # A folder name may contain ``_`` — a SQL LIKE wildcard matching any single character.
+    # De-indexing "data_2024" must not also drop a sibling "data-2024" that differs only where
+    # the wildcard sits. Unescaped, ``LIKE 'data_2024/%'`` matches "data-2024/report.md" and
+    # would remove it from search/listing until the #390 watcher re-indexed it.
+    index, _ = await _fresh()
+    await index.upsert_batch(
+        tenant=TENANT,
+        entries=[
+            _row("data_2024", "data_2024", "dir"),
+            _row("data_2024/report.md", "report.md", "file", 4),
+            _row("data-2024", "data-2024", "dir"),
+            _row("data-2024/report.md", "report.md", "file", 4),
+        ],
+    )
+    removed = await index.remove_subtree(tenant=TENANT, path="data_2024")
+    assert removed == 2  # the data_2024 dir row + its one file — never the sibling's rows
+    # The named folder is de-indexed…
+    assert await index.get(tenant=TENANT, path="data_2024/report.md") is None
+    # …and the sibling survives. This is the regression guard: unescaped LIKE would drop it.
+    assert await index.get(tenant=TENANT, path="data-2024/report.md") is not None
+    assert await index.get(tenant=TENANT, path="data-2024") is not None

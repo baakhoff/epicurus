@@ -288,7 +288,7 @@ function SessionRow({
   return (
     <div
       className={cn(
-        "group flex items-center gap-2 rounded-(--radius-field) px-2 py-2 hover:bg-surface-2",
+        "group/session flex items-center gap-2 rounded-(--radius-field) px-2 py-2 hover:bg-surface-2",
         current && "bg-accent-dim",
       )}
     >
@@ -310,7 +310,7 @@ function SessionRow({
       <button
         aria-label={`Delete ${session.title || "conversation"}`}
         onClick={onDelete}
-        className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100"
+        className="rounded p-1.5 text-ink-faint opacity-0 transition-opacity hover:text-danger group-hover/session:opacity-100 focus-visible:opacity-100"
       >
         <Trash2 size={15} />
       </button>
@@ -1202,7 +1202,7 @@ export function ChatScreen() {
                 </div>
               )
             ) : (
-              <div key={i} className="group">
+              <div key={i} className="group/msg">
                 <AssistantBlock
                   text={message.content}
                   timeline={activityTimeline(message.activity)}
@@ -1218,7 +1218,7 @@ export function ChatScreen() {
                         // hover or keyboard focus to keep the transcript quiet.
                         className={cn(
                           i !== lastAssistantIdx &&
-                            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+                            "opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100",
                         )}
                       />
                     )}

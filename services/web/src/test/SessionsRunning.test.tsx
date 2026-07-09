@@ -52,8 +52,12 @@ function wrapper({ children }: { children: ReactNode }) {
 
 // Scoped to the sheet: the chat header now names the open conversation too (#480), so an
 // unscoped title lookup would match twice when the current session is in the list.
+// SessionRow's hover group is named `group/session` (#572) — an attribute selector sidesteps
+// having to escape the `/` a plain `.group/session` class selector would require.
 const row = (text: string): HTMLElement =>
-  within(screen.getByRole("dialog")).getByText(text).closest(".group") as HTMLElement;
+  within(screen.getByRole("dialog"))
+    .getByText(text)
+    .closest('[class~="group/session"]') as HTMLElement;
 
 beforeEach(() => {
   mockActiveRuns.mockReset().mockResolvedValue({ session_ids: ["s1"] });

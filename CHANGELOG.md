@@ -14,6 +14,28 @@ images to GHCR.
 
 ### Added
 
+- **Models: real GB sizes everywhere + honest cloud-only rows** (#571) — the model browser
+  never showed a download size (the library *index* the catalog parses publishes none, so
+  `size_gb` was seed-only and blanked after the first live refresh), and **cloud-only** models
+  (`deepseek-v4-flash` — one upstream `cloud` tag, no weights) rendered as bare rows with a
+  plain **Pull** that couldn't do what it said. Now the per-family **tags page** — the same
+  page the quant-variant lookup (#330) already fetches — supplies real sizes end to end:
+  `ModelVariant` gains `size_gb` (the pick-list shows exact per-quant sizes and judges fit and
+  the *recommended* mark by them, estimates only as fallback), and a **background size fill**
+  backfills catalog rows most-popular-first, **one rate-limited lookup per
+  `LLM_CATALOG_SIZE_FILL_SECONDS`** (default 30 s; 0 disables) through the lookup's new
+  per-family TTL cache — the catalog refresh itself stays **exactly one** upstream request,
+  enriched sizes carry across refresh swaps, sized rows take their bare tag's size and
+  size-less downloadable families (embedding models) take `latest`, and any tags-page failure
+  just leaves that family size-less. On-demand variant lookups piggyback their sizes onto the
+  catalog immediately. The tag vocabulary gains **`thinking`** (chip only) and **`cloud`** on
+  *both* sides of the seam; `cloud` applies only to a pill-marked family's **size-less bare
+  entry** (hybrids like gemma3/gpt-oss keep their downloadable rows untagged — the pill has
+  *no* `x-test-capability` hook upstream, so the parser matches the pill span itself, verified
+  live 2026-07-09). Cloud rows are **badged with the reason on hover/touch, offer no Pull, and
+  show no fit verdict — by design**; cloud aliases in the variant list are labelled `cloud`
+  and never given an estimated size. `core-app` 0.62.0→0.63.0, `web` 0.84.0→0.85.0.
+
 - **Files: upload from the Files page — with a mobile source menu** (#479) — the Files page
   could browse, move, rename, and download, but nothing could be *put in* from the UI. A new
   core endpoint (`POST /platform/v1/files/upload?dir=`) lands one file per request through the

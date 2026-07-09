@@ -46,10 +46,11 @@ import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit, fitFilterOf, type FitFilter } from "@/lib/modelFit";
 import { recommendKvCache } from "@/lib/kvCacheFit";
 import {
-  estimateVariantSizeMb,
   formatVariantSize,
+  isCloudTag,
   recommendVariantTag,
   sortVariants,
+  variantSizeMb,
 } from "@/lib/quantVariants";
 import { useDownloads } from "@/stores/downloads";
 
@@ -258,6 +259,8 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
     activeFits.size === 0
       ? tagged
       : tagged.filter((e) => {
+          // Cloud-only rows have no local weights: excluded from fit by design (#571).
+          if (e.tags.includes("cloud")) return false;
           const sizeMb = e.size_gb != null ? Math.round(e.size_gb * 1024) : null;
           const bucket = fitFilterOf(assessFit(system.data, sizeMb, e.params));
           return bucket !== null && activeFits.has(bucket);
@@ -339,6 +342,8 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
             const dl = active[entry.id];
             const inProgress = dl && !dl.done;
             const isInstalled = installed.has(entry.id);
+            // No local weights: badge instead of Pull, no fit verdict — by design (#571).
+            const isCloud = entry.tags.includes("cloud");
 
             return (
               <div key={entry.id} className="flex items-start gap-3 py-3">
@@ -349,11 +354,13 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
                     {entry.size_gb != null && (
                       <span className="text-xs text-ink-faint">{formatGb(entry.size_gb)}</span>
                     )}
-                    <FitBadge
-                      system={system.data}
-                      sizeMb={entry.size_gb != null ? Math.round(entry.size_gb * 1024) : null}
-                      params={entry.params}
-                    />
+                    {!isCloud && (
+                      <FitBadge
+                        system={system.data}
+                        sizeMb={entry.size_gb != null ? Math.round(entry.size_gb * 1024) : null}
+                        params={entry.params}
+                      />
+                    )}
                     {entry.pulls && <span className="text-xs text-ink-faint">{entry.pulls} pulls</span>}
                   </div>
                   <p className="mt-0.5 text-xs leading-relaxed text-ink-dim">{entry.description}</p>
@@ -372,6 +379,15 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
                 <div className="shrink-0 pt-0.5">
                   {isInstalled ? (
                     <Badge tone="ok">Installed</Badge>
+                  ) : isCloud ? (
+                    /* Native title (not the hover Tooltip) so the reason is reachable on
+                       touch, mirroring the FitBadge (#327). */
+                    <span
+                      title="Runs on the model library's cloud — there are no local weights to download, so size, fit, and Pull don't apply."
+                      className="inline-flex cursor-help"
+                    >
+                      <Badge tone="warn">cloud-only</Badge>
+                    </span>
                   ) : (
                     <Button
                       variant="outline"
@@ -1021,15 +1037,19 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
             {variantList.map((v) => {
               const installed = v.tag === model;
               const recommended = v.tag === recommendedTag;
-              const sizeMb = estimateVariantSizeMb(paramSize, v.quant);
+              // Real tags-page size when the core supplied one (#571); estimate otherwise.
+              const sizeMb = variantSizeMb(v, paramSize);
               return (
                 <div key={v.tag} className="flex items-center gap-2 px-2.5 py-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-xs text-ink">{v.quant || "default"}</span>
-                      {/* Per-variant fit (#385): each quant's estimated size judged against the
-                          detected hardware — so a smaller quant can read "Fits" where the default
-                          build is "Tight". Renders nothing when the size can't be estimated. */}
+                      <span className="font-mono text-xs text-ink">
+                        {v.quant || (isCloudTag(v.tag) ? "cloud" : "default")}
+                      </span>
+                      {/* Per-variant fit (#385): each quant's size — real when known (#571),
+                          estimated otherwise — judged against the detected hardware, so a
+                          smaller quant can read "Fits" where the default build is "Tight".
+                          Renders nothing when the size is unknown (cloud aliases). */}
                       <FitBadge system={system.data} sizeMb={sizeMb} />
                       {recommended && (
                         <Badge tone="accent">
@@ -1040,7 +1060,9 @@ export function ModelSettingsForm({ model, onSaved }: { model: string; onSaved?:
                     </div>
                     <p className="truncate font-mono text-[10px] text-ink-faint">
                       {v.tag}
-                      {sizeMb != null ? ` · ${formatVariantSize(sizeMb)}` : ""}
+                      {sizeMb != null
+                        ? ` · ${v.size_gb != null ? formatGb(v.size_gb) : formatVariantSize(sizeMb)}`
+                        : ""}
                     </p>
                   </div>
                   {installed ? (

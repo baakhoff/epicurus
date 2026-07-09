@@ -11,6 +11,7 @@ import {
   CatalogResponse,
   LlmPrefs,
   MessageRecord,
+  ModelVariants,
   ModuleSnapshot,
   PageSpec,
   Readiness,
@@ -389,6 +390,43 @@ describe("contracts", () => {
     // params/description/tags fall back to their defaults for a sparse entry.
     expect(snap.entries[0].params).toBe("");
     expect(snap.entries[0].tags).toEqual([]);
+  });
+
+  it("keeps unknown catalog tags — a new upstream capability survives the seam (#571)", () => {
+    const snap = CatalogResponse.parse({
+      source: "https://ollama.com/library",
+      updated_at: null,
+      stale: false,
+      entries: [
+        {
+          id: "deepseek-v4-flash",
+          family: "deepseek-v4-flash",
+          tags: ["general", "thinking", "cloud", "some-future-tag"],
+        },
+      ],
+    });
+    // `tags` is a loose string array by design: nothing is dropped or rejected.
+    expect(snap.entries[0].tags).toContain("cloud");
+    expect(snap.entries[0].tags).toContain("some-future-tag");
+  });
+
+  it("parses variant sizes from the tags page, tolerating an older core (#571)", () => {
+    const withSizes = ModelVariants.parse({
+      model: "llama3.1:8b",
+      variants: [
+        { tag: "llama3.1:8b", quant: "", size_gb: 4.9 },
+        { tag: "llama3.1:8b-instruct-q8_0", quant: "q8_0", size_gb: 8.5 },
+        { tag: "deepseek-v4-flash:cloud", quant: "" }, // a cloud alias publishes no size
+      ],
+    });
+    expect(withSizes.variants[0].size_gb).toBe(4.9);
+    expect(withSizes.variants[2].size_gb ?? null).toBeNull();
+    // An older core omits the field entirely — the shape still parses (fallback: estimate).
+    const oldCore = ModelVariants.parse({
+      model: "llama3.1:8b",
+      variants: [{ tag: "llama3.1:8b", quant: "" }],
+    });
+    expect(oldCore.variants[0].size_gb ?? null).toBeNull();
   });
 
   it("parses LLM prefs including the context-window setting", () => {

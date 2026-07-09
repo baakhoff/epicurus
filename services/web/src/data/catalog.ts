@@ -16,8 +16,10 @@ export const ALL_TAGS = [
   "multilingual",
   "vision",
   "tools",
+  "thinking",
   "embedding",
   "small",
+  "cloud",
 ] as const;
 export type CatalogTag = (typeof ALL_TAGS)[number];
 
@@ -27,8 +29,12 @@ export const TAG_LABELS: Record<CatalogTag, string> = {
   multilingual: "Multilingual",
   vision: "Vision",
   tools: "Tools",
+  thinking: "Thinking",
   embedding: "Embedding",
   small: "Small (<2 GB)",
+  // A model with no local weights — it runs on the model library's cloud (#571). Badged on
+  // the row; excluded from fit and Pull by design.
+  cloud: "Cloud-only",
 };
 
 export const CATALOG: CatalogEntry[] = [

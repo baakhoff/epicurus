@@ -203,6 +203,41 @@ describe("ModelSettingsSheet", () => {
     expect(await screen.findByRole("img", { name: /Suitability:/i })).toBeInTheDocument();
   });
 
+  it("shows the real tags-page size on a variant row when the core supplies one (#571)", async () => {
+    mockModelVariants.mockResolvedValue({
+      model: "llama3.2:latest",
+      variants: [
+        { tag: "llama3.2:3b-instruct-q8_0", quant: "q8_0", size_gb: 3.3 },
+        { tag: "llama3.2:3b-instruct-q4_K_M", quant: "q4_K_M" }, // older core / no size
+      ],
+    });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    // The real size renders exact ("3.3 GB"); the size-less row keeps the "~" estimate.
+    expect(await screen.findByText(/llama3\.2:3b-instruct-q8_0 · 3\.3 GB/)).toBeInTheDocument();
+    expect(screen.getByText(/llama3\.2:3b-instruct-q4_K_M · ~/)).toBeInTheDocument();
+  });
+
+  it("labels a cloud alias 'cloud' and never invents a size or fit for it (#571)", async () => {
+    mockSystemInfo.mockResolvedValue({
+      gpu: { vendor: "nvidia", name: "Test GPU", vram_total_mb: 8 * 1024 },
+      ram_total_mb: 16 * 1024,
+    });
+    mockModelVariants.mockResolvedValue({
+      model: "llama3.2:latest",
+      variants: [{ tag: "llama3.2:cloud", quant: "" }],
+    });
+
+    render(<ModelSettingsSheet model="llama3.2:latest" onClose={() => {}} />, { wrapper });
+
+    // The quant cell says "cloud" (not "default"), the tag line carries no size, and no
+    // suitability icon is invented from the parameter-size estimate.
+    expect(await screen.findByText("cloud")).toBeInTheDocument();
+    expect(screen.getByText("llama3.2:cloud")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Suitability:/i })).not.toBeInTheDocument();
+  });
+
   it("renders nothing when no model is selected", () => {
     mockModelSettings.mockResolvedValue({ context_window: null, keep_alive: null });
     const { container } = render(<ModelSettingsSheet model={null} onClose={() => {}} />, {

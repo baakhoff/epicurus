@@ -118,6 +118,25 @@ describe("filterCatalog", () => {
   it("returns empty list when a tag excludes all matches", () => {
     expect(filterCatalog(CATALOG, "llama", tags("embedding"))).toHaveLength(0);
   });
+
+  it("filters by the cloud tag now that it's vocabulary (#571)", () => {
+    const entries = [
+      ...CATALOG,
+      {
+        id: "deepseek-v4-flash",
+        family: "deepseek-v4-flash",
+        params: "",
+        size_gb: null,
+        description: "Cloud-only preview model.",
+        tags: ["general", "thinking", "cloud"],
+      },
+    ];
+    const clouds = filterCatalog(entries, "", tags("cloud"));
+    expect(clouds).toHaveLength(1);
+    expect(clouds[0].id).toBe("deepseek-v4-flash");
+    // The thinking chip is vocabulary too — AND-composable like any other tag.
+    expect(filterCatalog(entries, "", tags("thinking", "cloud"))).toHaveLength(1);
+  });
 });
 
 // ── CatalogBrowser component ──────────────────────────────────────────────────
@@ -274,5 +293,80 @@ describe("CatalogBrowser", () => {
     fireEvent.click(await screen.findByRole("button", { name: /too big/i }));
     expect(screen.getByText("llama3.3:70b")).toBeInTheDocument();
     expect(screen.queryByText("smollm2:135m")).not.toBeInTheDocument();
+  });
+});
+
+// ── Cloud-only rows (#571) ────────────────────────────────────────────────────
+
+const CLOUD_ENTRY = {
+  id: "deepseek-v4-flash",
+  family: "deepseek-v4-flash",
+  params: "",
+  size_gb: null,
+  description: "A preview of the DeepSeek-V4 series for efficient reasoning.",
+  tags: ["general", "tools", "thinking", "cloud"],
+  pulls: "208.5K",
+};
+
+const SIZED_ENTRY = {
+  id: "llama3.1:8b",
+  family: "llama3.1",
+  params: "8b",
+  size_gb: 4.9,
+  description: "A general assistant with a real parsed size.",
+  tags: ["general", "tools"],
+  pulls: "116.3M",
+};
+
+describe("CatalogBrowser cloud-only rows (#571)", () => {
+  beforeEach(() => {
+    mockCatalog.mockResolvedValue(snapshot({ entries: [CLOUD_ENTRY, SIZED_ENTRY] }));
+  });
+
+  it("badges a cloud row instead of offering a bare Pull, with the reason on hover", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    expect(await screen.findByText("deepseek-v4-flash")).toBeInTheDocument();
+    // The badge replaces the Pull button…
+    expect(screen.getByText("cloud-only")).toBeInTheDocument();
+    // …the reason is discoverable (native title, so it also works on touch)…
+    expect(screen.getByTitle(/no local weights/i)).toBeInTheDocument();
+    // …and the only Pull on the page belongs to the ordinary row.
+    expect(screen.getAllByRole("button", { name: /^pull$/i })).toHaveLength(1);
+  });
+
+  it("shows no fit verdict for a cloud row — excluded by design", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    await screen.findByText("deepseek-v4-flash");
+    // The sized row gets a suitability icon; the cloud row must not.
+    const suitability = screen.getAllByRole("img", { name: /suitability/i });
+    expect(suitability).toHaveLength(1);
+    // 4.9 GB ≈ fits the 8 GB test GPU tightly-or-fine — either way it's the sized row's.
+    expect(screen.getByText("4.9 GB")).toBeInTheDocument();
+  });
+
+  it("a fit filter never matches a cloud row", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    await screen.findByText("deepseek-v4-flash");
+    for (const name of [/^fits$/i, /^tight$/i, /too big/i]) {
+      fireEvent.click(screen.getByRole("button", { name }));
+      expect(screen.queryByText("deepseek-v4-flash")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name })); // toggle back off
+    }
+  });
+
+  it("renders the Cloud-only vocabulary chip on the row and in the filter bar", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    await screen.findByText("deepseek-v4-flash");
+    // The filter chip (from ALL_TAGS) and the row's tag chip share the label.
+    expect(screen.getByRole("button", { name: "Cloud-only" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Thinking" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cloud-only" }));
+    expect(screen.getByText("deepseek-v4-flash")).toBeInTheDocument();
+    expect(screen.queryByText("llama3.1:8b")).not.toBeInTheDocument();
+  });
+
+  it("renders a parsed GB label for a live sized entry", async () => {
+    render(<CatalogBrowser installed={new Set()} />, { wrapper });
+    expect(await screen.findByText("4.9 GB")).toBeInTheDocument();
   });
 });

@@ -500,6 +500,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   holds the per-module review on/off toggle (#KB-refactor; NULL ⇒ on). A module with no row
   defaults to enabled, not-removed, core-default models, all tools on, review on, and the local
   default collection. Post-release columns are added in place at startup (no migration framework).
+- **Postgres `core_files`** — the core-owned **file index** over the swappable `FileStore`
+  (ADR-0063): a tenant-scoped catalogue of the file-space tree (`path`, `name`, `size`, `mtime`,
+  `kind`), built by the startup scan and kept current by the `FILES_WATCH` watcher; it backs the
+  unified **Files** page and search. The operator Files doors keep it in step immediately — an
+  **upload** upserts the entry, a **move** re-paths it, and a **delete** (#564) removes the entry
+  and its subtree (`FileIndex.remove_subtree`) — so a change shows in search/listing at once, with
+  the watcher as the backstop. Storage-module objects are merged in at request time, not stored
+  here (see [file space](../reference/files.md)).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):

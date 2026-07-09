@@ -1,6 +1,6 @@
 # storage — object store + chat-upload sink
 
-**`epicurus-storage`** v0.8.0 is a sidecar module that owns **app-managed object storage**
+**`epicurus-storage`** v0.9.0 is a sidecar module that owns **app-managed object storage**
 in MinIO — the durable sink for files the platform itself creates (chat uploads, exports,
 agent-written objects) — and exposes the agent's **file tools** (`storage_list` /
 `storage_search` / `storage_read`) over the **core file space**. Host port **8083**.
@@ -11,8 +11,9 @@ lives in the **core** (ADR-0063, building on ADR-0052): the core mounts the shar
 `GET /platform/v1/files/*`. Storage **no longer mounts `/data`** and no longer runs a
 directory scanner or watcher. Its agent file tools read the file space through the **core
 file API** via `PlatformClient`, and its object-only HTTP endpoints (`GET /objects`,
-`GET /objects/read`, `GET /download`, `POST /objects/move`) are proxied by the core, which
-merges the storage objects into the core Files page. See [file space](../reference/files.md).
+`GET /objects/read`, `GET /download`, `POST /objects/move`, `DELETE /objects`) are proxied by
+the core, which merges the storage objects into the core Files page. See
+[file space](../reference/files.md).
 
 **Private subtrees are hidden from the agent (#KB-refactor).** Some folders are
 operator-only: the `notes/` mirror holds **private** note bodies the agent must never read.
@@ -40,7 +41,7 @@ v0.8.0 hands the unified Files surface to the core (file-space migration Phase 2
 - **Storage keeps** the MinIO object store, the chat-upload sink (`POST /ingest`), the
   `storage_object_put` / `storage_object_get` tools, and exposes **object-only** endpoints
   the core proxies and merges into Files: `GET /objects`, `GET /objects/read`,
-  `GET /download`, `POST /objects/move`.
+  `GET /download`, `POST /objects/move`, `DELETE /objects`.
 
 Earlier history: v0.3.0 added the **chat upload sink** (`POST /ingest`, ADR-0025) — files
 attached in chat are durably persisted to the object store and appear under an **`uploads/`**
@@ -79,6 +80,7 @@ into the unified Files page; the operator never calls storage directly.
 | `GET /objects/read?path=…` | **Object text read.** Return a UTF-8 text object's contents → `{path, name, content}`. **400** traversal, **404** missing, **413** larger than 256 KB, **415** binary / non-UTF-8. The core calls this when a Files read targets a storage object. |
 | `GET /download?path=…` | **Object-only streaming** (binary-safe) — streams a catalogued object from MinIO with its stored content type. Path-traversal attempts → **HTTP 400**, **404** when the object is not catalogued. The core's `GET /platform/v1/files/download` proxies here for object entries (file-space files stream from the core's own store). |
 | `POST /objects/move` (body `{from_path, to_path}`) | **Rename/move an object (#381 / #391).** Object entries only. **404** missing src, **409** dst occupied, **400** traversal. Returns `{path}`. The core invokes this when a Files move targets a storage object. |
+| `DELETE /objects?path=…` | **Delete an object and its subtree (#564).** Object entries only. Returns `{deleted}` — idempotent (a missing object is a clean `false`, not a 404). **400** the root or a read-only (`source="fs"`) entry. The core's `DELETE /platform/v1/files/entry` falls back here when a Files-page delete targets a storage object (chat upload / agent object). |
 | `GET /health` · `GET /metrics` · `GET /manifest` | Ops + the module manifest. |
 
 > **Path safety.** Object paths are normalised and confined to the tenant bucket
@@ -133,6 +135,22 @@ core drives all three the same way through the unified Files page:
 - **Errors.** **404** missing source · **409** destination occupied · **400** traversal. A
   move into a brand-new folder creates its navigable dir rows.
 
+### Delete objects (#564)
+
+`DELETE /objects` (`service.delete_item`) removes a writable object and its subtree — the
+symmetric counterpart to move, the fallback the core's Files-page delete door uses when a path
+is not in the core file space:
+
+- **Object entries only.** Like move, only a catalogued object (chat upload / agent-written
+  file) is deletable; a read-only (`source="fs"`) entry is refused (**400**), and the file-space
+  root is refused (**400**). A file-space file's delete is handled by the core, not here.
+- **Byte store first, catalogue last.** `delete_item` drops every object's bytes from MinIO,
+  then removes the catalogue subtree (`FileIndex.delete_subtree`) in one commit. A crash between
+  steps leaves harmless orphan catalogue rows pointing at absent bytes — a rescan never revisits
+  `object` rows, so the operator simply deletes again; it never strands live, downloadable bytes.
+- **Idempotent.** Nothing at the path is a clean `{deleted: false}`, not a 404 — matching the
+  `FileStore.delete` seam, so the core can tell "nothing here" from a real failure.
+
 ## Configuration
 
 `StorageSettings` extends [`CoreSettings`](../reference/config.md):
@@ -183,11 +201,12 @@ knowledge, read-only); **notes** has also dropped its mount (#357/ADR-0065) and 
 mirror through the core file API — see [Infrastructure](../infrastructure/index.md#shared-file-space).
 
 Package `epicurus_storage`: `db.py` (`storage_files` catalogue + queries + `subtree`/`repath`
-for the move re-key), `object_store.py` (MinIO via aioboto3 — text **and** binary
-`put_bytes` / `get_object` + `copy` / `delete` for the object move), `service.py` (the MCP tools
-— the file tools call `PlatformClient.files_*`, the `hidden_prefixes` filter keeps private
-subtrees out of those tools — plus `ingest_object` / `put_object` / `load_object_download` /
-`load_object_text` / `move_item` over the object store; `put_object` is the catalogue-on-write the
-`storage_object_put` tool wraps), `app.py` (`/ingest` + `/objects` + `/objects/read` + `/download` +
-`/objects/move`; parses `STORAGE_AGENT_HIDDEN_PREFIXES` into the module's `hidden_prefixes` and
+for the move re-key + `delete_subtree` for the delete de-key), `object_store.py` (MinIO via
+aioboto3 — text **and** binary `put_bytes` / `get_object` + `copy` / `delete` for the object
+move and delete), `service.py` (the MCP tools — the file tools call `PlatformClient.files_*`, the
+`hidden_prefixes` filter keeps private subtrees out of those tools — plus `ingest_object` /
+`put_object` / `load_object_download` / `load_object_text` / `move_item` / `delete_item` over the
+object store; `put_object` is the catalogue-on-write the `storage_object_put` tool wraps),
+`app.py` (`/ingest` + `/objects` + `/objects/read` + `/download` + `/objects/move` +
+`DELETE /objects`; parses `STORAGE_AGENT_HIDDEN_PREFIXES` into the module's `hidden_prefixes` and
 constructs the `PlatformClient` from `PLATFORM_URL`).

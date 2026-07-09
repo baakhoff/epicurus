@@ -74,6 +74,12 @@ class ObjectBackend(Protocol):
     async def move(self, *, tenant: str, src: str, dst: str) -> ObjectEntry:
         """Move/rename the object at *src* to *dst*; raise ``HTTPException`` on failure."""
 
+    async def delete(self, *, tenant: str, path: str) -> bool:
+        """Delete the object (subtree) at *path*; return whether it existed.
+
+        Raise ``HTTPException`` on failure (e.g. storage unavailable, or a refused delete).
+        """
+
 
 class StorageObjectBackend:
     """An :class:`ObjectBackend` backed by the storage module via the registry proxy.
@@ -179,3 +185,16 @@ class StorageObjectBackend:
             # The move contract returns just the new path; shape it as the moved entry.
             new_path = str(resp.json()["path"])
             return ObjectEntry(path=new_path, name=new_path.rsplit("/", 1)[-1])
+
+    async def delete(self, *, tenant: str, path: str) -> bool:
+        base = await self._base(tenant)
+        if base is None:
+            raise HTTPException(status_code=502, detail="storage module unavailable")
+        async with httpx.AsyncClient(base_url=base, timeout=self._timeout) as http:
+            resp = await http.delete("/objects", params=self._params(tenant, path=path))
+            # Surface storage's own refusals verbatim (400 root / read-only); anything else 5xx
+            # raises. The delete is idempotent, so a missing object is a clean ``deleted=False``.
+            if 400 <= resp.status_code < 500:
+                raise HTTPException(status_code=resp.status_code, detail=resp.json().get("detail"))
+            resp.raise_for_status()
+            return bool(resp.json().get("deleted", False))

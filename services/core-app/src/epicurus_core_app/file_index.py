@@ -150,6 +150,27 @@ class FileIndex:
             deleted: int = cast("CursorResult[Any]", result).rowcount or 0
             return deleted
 
+    async def remove_subtree(self, *, tenant: str, path: str) -> int:
+        """Delete the row at *path* and every descendant under ``<path>/`` (#564).
+
+        The de-index half of a Files-page delete: symmetric to :meth:`upsert_batch`, it keeps the
+        index in step the moment a file or folder is removed, so the entry drops out of search and
+        the listing at once (the #390 watcher stays the backstop). The empty-path root is a no-op.
+        Returns the number of rows removed.
+        """
+        path = path.replace("\\", "/").rstrip("/")
+        if not path:
+            return 0
+        async with self._session() as session:
+            result = await session.execute(
+                delete(_CoreFile).where(
+                    _CoreFile.tenant == tenant,
+                    or_(_CoreFile.path == path, _CoreFile.path.like(path + "/%")),
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0
+
     async def browse(self, *, tenant: str, path: str) -> list[IndexedFile]:
         """List the direct children of *path* (empty string = root).
 

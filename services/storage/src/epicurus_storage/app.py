@@ -32,6 +32,7 @@ from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.service import (
     MODULE_NAME,
     build_module,
+    delete_item,
     ingest_object,
     load_object_download,
     move_item,
@@ -212,6 +213,19 @@ def create_app() -> FastAPI:
             from_path=body.from_path,
             to_path=body.to_path,
         )
+
+    @app.delete("/objects")
+    async def delete_object(
+        path: str = Query(..., description="Object path to delete (its subtree, if a folder)"),
+        tenant_id: str | None = Query(default=None),
+    ) -> dict[str, bool]:
+        """Delete a writable object-store entry and its subtree (#564); the core proxies this.
+
+        The core's Files-page delete falls back here when a path is not in the core file space —
+        a chat upload or agent-written object. Returns ``{"deleted": bool}`` (idempotent 404 →
+        ``False``); 400 for the root or a read-only entry.
+        """
+        return await delete_item(index=index, objects=objects, tenant=_tenant, path=path)
 
     return app
 

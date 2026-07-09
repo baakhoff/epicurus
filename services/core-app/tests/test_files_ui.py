@@ -29,6 +29,7 @@ READ = "/platform/v1/files/read"
 DOWNLOAD = "/platform/v1/files/download"
 MOVE = "/platform/v1/files/move"
 UPLOAD = "/platform/v1/files/upload"
+ENTRY = "/platform/v1/files/entry"
 
 
 class FakeObjects:
@@ -79,6 +80,13 @@ class FakeObjects:
         kind, body = self._tree.pop(src)
         self._tree[dst] = (kind, body)
         return ObjectEntry(path=dst, name=dst.rsplit("/", 1)[-1], kind=kind, size=len(body))
+
+    async def delete(self, *, tenant: str, path: str) -> bool:
+        # Remove the entry and its subtree; report whether anything was there (idempotent).
+        victims = [p for p in self._tree if p == path or p.startswith(f"{path}/")]
+        for p in victims:
+            del self._tree[p]
+        return bool(victims)
 
 
 def _tree(root: Path) -> None:
@@ -251,3 +259,92 @@ async def test_degrades_without_object_backend(tmp_path: Path) -> None:
     # No object backend → the page is the file-space tree alone, object reads 404.
     assert [it["title"] for it in data["items"]] == ["knowledge", "notes", "top.txt"]
     assert obj_read.status_code == 404
+
+
+# ── The Files-page delete door (#564) ────────────────────────────────────────────
+
+
+async def test_delete_file_space_file_deindexes(tmp_path: Path, fake: FakeObjects) -> None:
+    client, index, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.request("DELETE", ENTRY, params={"path": "top.txt"})
+        gone = (await client.get(SEARCH, params={"q": "top"})).json()["entries"]
+    assert resp.status_code == 200 and resp.json()["deleted"] is True
+    # Gone from disk and, immediately, from the index/search — no rescan needed (#390 is backup).
+    assert await store.stat(tenant=TENANT, path="top.txt") is None
+    assert await index.get(tenant=TENANT, path="top.txt") is None
+    assert gone == []
+
+
+async def test_delete_folder_removes_subtree_recursively(tmp_path: Path, fake: FakeObjects) -> None:
+    client, index, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        for name, body in (("a.txt", b"aa"), ("b.txt", b"bb")):
+            await client.post(
+                UPLOAD, params={"dir": "reports"}, files={"file": (name, body, "text/plain")}
+            )
+        resp = await client.request("DELETE", ENTRY, params={"path": "reports"})
+        left = (await client.get(SEARCH, params={"q": "reports"})).json()["entries"]
+    assert resp.status_code == 200 and resp.json()["deleted"] is True
+    # The whole subtree is gone on disk and de-indexed — the recursion is real (#564 acceptance).
+    assert await store.stat(tenant=TENANT, path="reports") is None
+    assert await index.get(tenant=TENANT, path="reports/a.txt") is None
+    assert await index.get(tenant=TENANT, path="reports/b.txt") is None
+    assert left == []
+
+
+async def test_delete_object_via_fallback(tmp_path: Path, fake: FakeObjects) -> None:
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.request("DELETE", ENTRY, params={"path": "uploads/note.txt"})
+    # Not in the file space → the delete falls through to the object store (symmetric to move).
+    assert resp.status_code == 200 and resp.json()["deleted"] is True
+    assert "uploads/note.txt" not in fake._tree
+
+
+async def test_delete_missing_is_deleted_false(tmp_path: Path, fake: FakeObjects) -> None:
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.request("DELETE", ENTRY, params={"path": "ghost.txt"})
+    # Nothing in either store — a clean False, not a 404 (idempotent, like the seam).
+    assert resp.status_code == 200 and resp.json()["deleted"] is False
+
+
+async def test_delete_module_subtree_is_refused(tmp_path: Path, fake: FakeObjects) -> None:
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        # A crafted request against a module file, and against the module folder itself.
+        file_resp = await client.request("DELETE", ENTRY, params={"path": "knowledge/readme.md"})
+        dir_resp = await client.request("DELETE", ENTRY, params={"path": "knowledge"})
+    assert file_resp.status_code == 400 and "knowledge module" in file_resp.json()["detail"]
+    assert dir_resp.status_code == 400
+    # The guard runs before the seam — the module's file is untouched.
+    assert await store.stat(tenant=TENANT, path="knowledge/readme.md") is not None
+
+
+async def test_delete_root_is_400(tmp_path: Path, fake: FakeObjects) -> None:
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.request("DELETE", ENTRY, params={"path": ""})
+    assert resp.status_code == 400
+
+
+async def test_delete_object_path_without_backend_is_false(tmp_path: Path) -> None:
+    client, _, _ = await _make_client(tmp_path, objects=None)
+    async with client:
+        resp = await client.request("DELETE", ENTRY, params={"path": "uploads/note.txt"})
+    # No object backend and not in the file space → no fallback, a clean False.
+    assert resp.status_code == 200 and resp.json()["deleted"] is False
+
+
+async def test_page_marks_deletable(tmp_path: Path, fake: FakeObjects) -> None:
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        data = (await client.get(PAGE)).json()
+    by_name = {it["title"]: it for it in data["items"]}
+    # Module-owned subtrees are not deletable from the Files UI; operator files/objects are —
+    # including directories, unlike movability (#564).
+    assert by_name["knowledge"]["deletable"] is False
+    assert by_name["notes"]["deletable"] is False
+    assert by_name["top.txt"]["deletable"] is True
+    assert by_name["uploads"]["deletable"] is True

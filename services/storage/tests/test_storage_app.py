@@ -261,6 +261,30 @@ async def test_move_missing_source_is_404(harness: _Harness) -> None:
     assert resp.status_code == 404
 
 
+# ── DELETE /objects (the core's Files-page delete fallback, #564) ─────────────────
+
+
+async def test_delete_removes_an_object(harness: _Harness) -> None:
+    await _seed_object(harness, "uploads/gone.md", "bye")
+    async with _client(harness) as client:
+        resp = await client.request("DELETE", "/objects", params={"path": "uploads/gone.md"})
+    assert resp.status_code == 200 and resp.json() == {"deleted": True}
+    assert await harness.objects.get(tenant=TENANT, key="uploads/gone.md") is None
+    assert await harness.index.get(tenant=TENANT, path="uploads/gone.md") is None
+
+
+async def test_delete_missing_is_deleted_false(harness: _Harness) -> None:
+    async with _client(harness) as client:
+        resp = await client.request("DELETE", "/objects", params={"path": "ghost.md"})
+    assert resp.status_code == 200 and resp.json() == {"deleted": False}
+
+
+async def test_delete_root_is_400(harness: _Harness) -> None:
+    async with _client(harness) as client:
+        resp = await client.request("DELETE", "/objects", params={"path": ""})
+    assert resp.status_code == 400
+
+
 # ── /ingest (chat upload sink, ADR-0025) ────────────────────────────────────────
 
 

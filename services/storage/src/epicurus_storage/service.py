@@ -250,6 +250,48 @@ async def move_item(
     return {"path": dst}
 
 
+# ── Delete (object store, #564) ──────────────────────────────────────────────
+
+
+async def delete_item(
+    *,
+    index: FileIndex,
+    objects: ObjectStore,
+    tenant: str,
+    path: str,
+) -> dict[str, bool]:
+    """Delete a writable object-store entry (and its subtree); the ``DELETE /objects`` route
+    wraps this. The core proxies here as the fallback for a Files-page delete whose path is not
+    in the core file space (a chat upload or agent-written object, #564).
+
+    Mirrors :func:`move_item`: only object-store entries are deletable — a read-only ``fs`` row
+    (400) belongs to whatever owns it, and the file-space root (empty path) is refused (400).
+    A missing entry is a clean ``{"deleted": False}`` (idempotent, like the FileStore seam), so
+    the core can distinguish "nothing here" from a real failure.
+
+    Byte-store first, index last, mirroring how the download resolves an object: the MinIO objects
+    are dropped, then the index subtree in one commit. A crash between steps leaves harmless orphan
+    index rows pointing at absent bytes — a rescan never revisits ``object`` rows, so the operator
+    simply deletes again; it never leaves bytes stranded with a live, downloadable row.
+    """
+    key = _normalize_key(path)
+    if not key:
+        raise HTTPException(status_code=400, detail="cannot delete the file-space root")
+    subtree = await index.subtree(tenant=tenant, path=key)
+    if not subtree:
+        return {"deleted": False}
+    if any(e.source != "object" for e in subtree):
+        raise HTTPException(
+            status_code=400,
+            detail="this entry is read-only — only uploaded or app-written files can be deleted",
+        )
+    for entry in subtree:
+        if entry.kind == "file":
+            await objects.delete(tenant=tenant, key=entry.path)
+    await index.delete_subtree(tenant=tenant, path=key)
+    return {"deleted": True}
+
+
 def build_module(
     index: FileIndex,
     objects: ObjectStore,
@@ -274,7 +316,7 @@ def build_module(
 
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.1",
+        version="0.9.0",
         description=(
             "Agent file tools over the core-owned file space (list, search, read), plus "
             "app-managed object storage via MinIO and durable chat-upload ingest. The Files "

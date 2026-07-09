@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -340,5 +340,109 @@ describe("BrowserView upload (#479)", () => {
       dataTransfer: { types: ["Files"], files: [dropped], dropEffect: "" },
     });
     await waitFor(() => expect(send).toHaveBeenCalledWith(dropped, ""));
+  });
+});
+
+/* ── Deleting from the surface (#564) ───────────────────────────────────────── */
+
+describe("BrowserView delete (#564)", () => {
+  beforeEach(() => {
+    useToasts.setState({ toasts: [] });
+  });
+
+  function deleteSource(items: unknown[], remove = vi.fn().mockResolvedValue({ deleted: true })) {
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({ title: "Files", items }),
+      remove,
+    });
+    return { source, remove };
+  }
+
+  it("deletes a file only after the Confirm is accepted", async () => {
+    const { source, remove } = deleteSource([
+      { id: "notes/draft.md", title: "draft.md", href: "/dl?path=notes/draft.md", deletable: true },
+    ]);
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete draft.md" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/Delete "draft\.md"\?/);
+    // Nothing happens until the destructive action is confirmed.
+    expect(remove).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("notes/draft.md"));
+  });
+
+  it("warns that a folder's contents go too (recursion)", async () => {
+    const { source, remove } = deleteSource([
+      { id: "proj", title: "proj", nav_path: "proj", deletable: true },
+    ]);
+    render(<BrowserView source={source} />, { wrapper });
+
+    // The folder's Delete button lives in its row — a folder never opens a detail pane.
+    fireEvent.click(await screen.findByRole("button", { name: "Delete proj" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/everything inside it/i);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("proj"));
+  });
+
+  it("does not delete when the Confirm is cancelled", async () => {
+    const { source, remove } = deleteSource([
+      { id: "a.txt", title: "a.txt", href: "/dl?path=a.txt", deletable: true },
+    ]);
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete a.txt" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("hides the delete affordance where the ownership rule forbids it", async () => {
+    // A remover is wired, but a module-owned entry is not `deletable` → no button.
+    const { source } = deleteSource([
+      { id: "knowledge/x.md", title: "x.md", href: "/dl?path=knowledge/x.md", deletable: false },
+    ]);
+    render(<BrowserView source={source} />, { wrapper });
+    await screen.findByText("x.md");
+    expect(screen.queryByRole("button", { name: /^Delete/ })).toBeNull();
+  });
+
+  it("offers no delete when the source cannot remove (e.g. a module page)", async () => {
+    // `deletable` is set but no `remove` is wired — module browser pages never get delete.
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        items: [{ id: "a.txt", title: "a.txt", deletable: true }],
+      }),
+    });
+    render(<BrowserView source={source} />, { wrapper });
+    await screen.findByText("a.txt");
+    expect(screen.queryByRole("button", { name: /^Delete/ })).toBeNull();
+  });
+
+  it("surfaces a server refusal as a toast and closes the dialog", async () => {
+    const remove = vi
+      .fn()
+      .mockRejectedValue(new ApiError(400, "'knowledge' belongs to the knowledge module"));
+    const { source } = deleteSource(
+      [{ id: "a.txt", title: "a.txt", href: "/dl?path=a.txt", deletable: true }],
+      remove,
+    );
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete a.txt" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(
+      useToasts.getState().toasts.some((t) => t.message.includes("Could not delete")),
+    ).toBe(true);
   });
 });

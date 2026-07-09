@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,7 @@ import { FilesScreen } from "@/screens/FilesScreen";
 const mockFilesPage = vi.fn();
 const mockFilesRead = vi.fn();
 const mockFilesMove = vi.fn();
+const mockFilesDelete = vi.fn();
 vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {
     constructor(
@@ -23,6 +24,7 @@ vi.mock("@/lib/api", () => ({
     filesPage: (...args: unknown[]) => mockFilesPage(...args),
     filesRead: (...args: unknown[]) => mockFilesRead(...args),
     filesMove: (...args: unknown[]) => mockFilesMove(...args),
+    filesDelete: (...args: unknown[]) => mockFilesDelete(...args),
   },
 }));
 
@@ -35,6 +37,7 @@ beforeEach(() => {
   mockFilesPage.mockReset();
   mockFilesRead.mockReset();
   mockFilesMove.mockReset();
+  mockFilesDelete.mockReset();
 });
 
 describe("FilesScreen", () => {
@@ -49,5 +52,27 @@ describe("FilesScreen", () => {
     expect(await screen.findByText("readme.md")).toBeInTheDocument();
     // It fetches through the core file-space source, not a module page proxy.
     expect(mockFilesPage).toHaveBeenCalledWith("", "");
+  });
+
+  it("wires delete to the core files delete endpoint (#564)", async () => {
+    mockFilesPage.mockResolvedValue({
+      title: "Files",
+      items: [
+        {
+          id: "old.txt",
+          title: "old.txt",
+          href: "/platform/v1/files/download?path=old.txt",
+          deletable: true,
+        },
+      ],
+    });
+    mockFilesDelete.mockResolvedValue({ deleted: true });
+    render(<FilesScreen />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete old.txt" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(mockFilesDelete).toHaveBeenCalledWith("old.txt"));
   });
 });

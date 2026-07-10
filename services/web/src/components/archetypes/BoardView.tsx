@@ -106,6 +106,9 @@ function BoardCardView({
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
+  // One combined slot for whichever action last failed, rendered below the full
+  // actions row rather than per-action inline (#472) — cleared on the next success.
+  const [actionError, setActionError] = useState<string | null>(null);
   return (
     <div
       draggable={draggable}
@@ -144,10 +147,13 @@ function BoardCardView({
               pageId={pageId}
               action={action}
               compact
+              onSuccess={() => setActionError(null)}
+              onError={setActionError}
             />
           ))}
         </div>
       )}
+      {actionError && <p className="mt-1.5 text-[11px] text-danger">{actionError}</p>}
     </div>
   );
 }
@@ -236,12 +242,16 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
           {(query.isFetching || move.isPending) && <Spinner className="size-3.5 text-ink-faint" />}
           {data.actions.length > 0 && (
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {/* iconOnlyNarrow drops the label below `sm`, matching the calendar
+                  toolbar's page action (#562) — this row already wraps as a fallback,
+                  but shrinking first keeps a single action on one line more often. */}
               {data.actions.map((action) => (
                 <ActionControl
                   key={action.tool + action.label}
                   module={module}
                   pageId={pageId}
                   action={action}
+                  iconOnlyNarrow
                 />
               ))}
             </div>

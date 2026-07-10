@@ -159,6 +159,9 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   // Inline rename (detail pane) and native drag-to-move (#391).
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  // A "/" or "\\" in a rename would relocate the file (server rejects a locked move, #554);
+  // catch it inline before it ever leaves the field.
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   // The entry awaiting a delete confirmation (#564); null when the Confirm is closed.
@@ -297,15 +300,23 @@ export function BrowserView({ source }: { source: BrowserSource }) {
       setRenaming(false);
       return;
     }
+    // A path separator would relocate the file rather than rename it — reject it here so a
+    // typo can't smuggle the file into another (possibly module-owned) folder (#554).
+    if (/[/\\]/.test(name)) {
+      setRenameError('A name can’t contain "/" or "\\".');
+      return;
+    }
     move.mutate({ from: selected.id, to: joinPath(parentPath(selected.id), name) });
   }
 
   // Send picked/dropped files one at a time into the directory the user is looking at —
   // sequential, so each pill settles on its own and a failure names its own file (#479).
-  async function sendFiles(files: File[]) {
+  async function sendFiles(files: File[], dirOverride?: string) {
     const upload = source.upload;
     if (!upload || files.length === 0) return;
-    const dir = currentPath; // capture: navigation during the batch must not redirect it
+    // Default target is the directory being viewed; a drop onto a folder row overrides it to
+    // that folder (#556). Captured so navigation during the batch can't redirect the upload.
+    const dir = dirOverride ?? currentPath;
     const batch = files.map((file) => ({
       file,
       key: String(++uploadSeq.current),
@@ -371,22 +382,51 @@ export function BrowserView({ source }: { source: BrowserSource }) {
       }
     : {};
 
-  // Drop-target props shared by folder rows and breadcrumb segments.
-  function dropProps(targetDir: string) {
-    return {
-      onDragOver: (e: React.DragEvent) => {
-        if (!dragId || !canDropInto(dragId, targetDir)) return;
+  // Drop-target props shared by folder rows and breadcrumb segments. Handles BOTH an internal
+  // move-drag (dragId set → move the item here) and an external file drop (no dragId, the OS drag
+  // carries "Files" → upload into this directory, #556). The target directory rides on the
+  // element's `data-dir`, so this is one stable handler set — not a fresh closure built per row
+  // during render — which keeps the upload path (it bumps an upload-seq ref) off the render path.
+  // Without the external branch the target's unconditional preventDefault swallowed the drop and
+  // the pane-level upload handler then bailed on `defaultPrevented`: a dropped file just vanished.
+  const dropProps = {
+    onDragOver: (e: React.DragEvent) => {
+      const dir = e.currentTarget.getAttribute("data-dir") ?? "";
+      if (dragId) {
+        if (!canDropInto(dragId, dir)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move" as const;
-        setDragOverPath(targetDir);
-      },
-      onDragLeave: () => setDragOverPath((p) => (p === targetDir ? null : p)),
-      onDrop: (e: React.DragEvent) => {
+        setDragOverPath(dir);
+        return;
+      }
+      if (source.upload && e.dataTransfer.types.includes("Files")) {
         e.preventDefault();
-        dropInto(targetDir);
-      },
-    };
-  }
+        e.stopPropagation(); // claim it: the pane highlights the *current* dir, this target wins
+        e.dataTransfer.dropEffect = "copy" as const;
+        setFileDragOver(false);
+        setDragOverPath(dir);
+      }
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      const dir = e.currentTarget.getAttribute("data-dir") ?? "";
+      setDragOverPath((p) => (p === dir ? null : p));
+    },
+    onDrop: (e: React.DragEvent) => {
+      const dir = e.currentTarget.getAttribute("data-dir") ?? "";
+      if (dragId) {
+        e.preventDefault();
+        dropInto(dir);
+        return;
+      }
+      if (source.upload && e.dataTransfer.types.includes("Files")) {
+        e.preventDefault();
+        e.stopPropagation(); // took it — don't let the pane also upload into the current dir
+        setDragOverPath(null);
+        void sendFiles(Array.from(e.dataTransfer.files), dir);
+      }
+      // No dragId and no files: do nothing, and don't preventDefault — nothing is swallowed.
+    },
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -413,7 +453,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                   dragOverPath === "" && "bg-accent-dim text-accent-strong",
                 )}
                 aria-label="root"
-                {...dropProps("")}
+                data-dir=""
+                {...dropProps}
               >
                 /
               </button>
@@ -426,7 +467,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       "max-w-[10rem] truncate rounded-(--radius-field) px-1 hover:text-ink",
                       dragOverPath === crumb.path && "bg-accent-dim text-accent-strong",
                     )}
-                    {...dropProps(crumb.path)}
+                    data-dir={crumb.path}
+                    {...dropProps}
                   >
                     {crumb.label}
                   </button>
@@ -550,7 +592,6 @@ export function BrowserView({ source }: { source: BrowserSource }) {
             <ul key={currentPath} className="flex flex-col p-2">
               {data.items.map((item) => {
                 const isFolder = !!item.nav_path;
-                const dropTarget = isFolder && !!dragId && dragId !== item.id;
                 return (
                   <li key={item.id} className="group flex items-center gap-1">
                     <button
@@ -564,7 +605,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                         setDragId(null);
                         setDragOverPath(null);
                       }}
-                      {...(isFolder ? dropProps(item.nav_path as string) : {})}
+                      {...(isFolder ? { "data-dir": item.nav_path as string, ...dropProps } : {})}
                       onClick={() => {
                         if (item.nav_path) {
                           const now = Date.now();
@@ -580,7 +621,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                         item.id === selectedId
                           ? "bg-accent-dim text-accent-strong"
                           : "text-ink hover:bg-surface-2",
-                        dropTarget &&
+                        isFolder &&
                           dragOverPath === item.nav_path &&
                           "bg-accent-dim ring-1 ring-accent ring-inset",
                         item.movable && "cursor-grab active:cursor-grabbing",
@@ -629,22 +670,33 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                 <ChevronLeft size={15} /> back
               </button>
               {renaming ? (
-                <form onSubmit={submitRename} className="flex items-center gap-2">
-                  <TextInput
-                    autoFocus
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
-                    className="min-w-0 flex-1 rounded-(--radius-field) border border-edge bg-surface-1 px-2 py-1 font-serif text-xl text-ink focus:outline-none focus:ring-1 focus:ring-accent"
-                    aria-label="New name"
-                  />
-                  <Button type="submit" variant="primary" busy={move.isPending}>
-                    <Check size={14} /> Save
-                  </Button>
-                  <Button type="button" variant="ghost" onClick={() => setRenaming(false)}>
-                    Cancel
-                  </Button>
-                </form>
+                <>
+                  <form onSubmit={submitRename} className="flex items-center gap-2">
+                    <TextInput
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => {
+                        setRenameValue(e.target.value);
+                        setRenameError(null);
+                      }}
+                      onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
+                      aria-invalid={renameError ? true : undefined}
+                      className="min-w-0 flex-1 rounded-(--radius-field) border border-edge bg-surface-1 px-2 py-1 font-serif text-xl text-ink focus:outline-none focus:ring-1 focus:ring-accent"
+                      aria-label="New name"
+                    />
+                    <Button type="submit" variant="primary" busy={move.isPending}>
+                      <Check size={14} /> Save
+                    </Button>
+                    <Button type="button" variant="ghost" onClick={() => setRenaming(false)}>
+                      Cancel
+                    </Button>
+                  </form>
+                  {renameError && (
+                    <p role="alert" className="mt-1.5 text-sm text-danger">
+                      {renameError}
+                    </p>
+                  )}
+                </>
               ) : (
                 <div className="flex items-start gap-2">
                   <h2 className="min-w-0 flex-1 font-serif text-xl text-ink">{selected.title}</h2>
@@ -653,6 +705,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       <button
                         onClick={() => {
                           setRenameValue(selected.title);
+                          setRenameError(null);
                           setRenaming(true);
                         }}
                         className="shrink-0 rounded-(--radius-field) p-1.5 text-ink-faint hover:bg-surface-2 hover:text-ink"

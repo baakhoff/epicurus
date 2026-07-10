@@ -78,7 +78,9 @@ export function ActionControl({
   action,
   compact = false,
   size,
+  iconOnlyNarrow = false,
   onSuccess,
+  onError,
 }: {
   module: string;
   pageId: string;
@@ -86,8 +88,25 @@ export function ActionControl({
   compact?: boolean;
   /** Passed through to the full (non-compact) Button — shrink a denser toolbar (#427). */
   size?: "sm" | "md";
+  /**
+   * Drop the full (non-compact) button's label below the `sm` breakpoint, keeping only
+   * the icon — the accessible name moves to `aria-label` + a Tooltip, same convention as
+   * a module-declared `icon_only` action (#334), but caller-driven and viewport-responsive
+   * rather than permanent. A no-op without `action.icon` — a label-less icon-only button
+   * would have no accessible content to shrink to (#562). Any toolbar packing several
+   * full-size actions into one row can opt in; desktop is unaffected either way.
+   */
+  iconOnlyNarrow?: boolean;
   /** Called after a successful invocation (e.g. to close an event-detail modal). */
   onSuccess?: () => void;
+  /**
+   * Called with the error message on a failed invocation, instead of rendering the
+   * inline error span. A caller that lays out several actions in one row (a board
+   * card, an event's Edit/Delete row) uses this to show one message below the full
+   * row rather than a per-action span splitting it mid-row (#472); a lone toolbar
+   * action that doesn't pass it keeps the self-contained inline rendering below.
+   */
+  onError?: (message: string) => void;
 }) {
   const queryClient = useQueryClient();
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -99,6 +118,7 @@ export function ActionControl({
       setSheetOpen(false);
       onSuccess?.();
     },
+    onError: (e) => onError?.(e instanceof Error ? e.message : String(e)),
   });
   const schema = useToolSchema(module, action.tool);
   const formSchema = useMemo(
@@ -130,6 +150,8 @@ export function ActionControl({
   // Icon-only (#337): a compact square button whose label lives in a tooltip + aria-label.
   // Only when the module both asks for it and supplies an icon to show.
   const iconOnly = action.icon_only && Boolean(action.icon);
+  // Responsive icon-only (#562): same guard, but caller-driven rather than module-declared.
+  const shrinkNarrow = iconOnlyNarrow && Boolean(action.icon);
 
   return (
     <>
@@ -173,6 +195,19 @@ export function ActionControl({
           )}
           {action.label}
         </button>
+      ) : shrinkNarrow ? (
+        <Tooltip label={action.label} side="bottom">
+          <Button
+            variant={fullVariant}
+            size={size}
+            busy={invoke.isPending}
+            onClick={onClick}
+            aria-label={action.label}
+          >
+            {createElement(moduleIcon(action.icon ?? undefined), { size: 15 })}
+            <span className="hidden sm:inline">{action.label}</span>
+          </Button>
+        </Tooltip>
       ) : (
         <Button variant={fullVariant} size={size} busy={invoke.isPending} onClick={onClick}>
           {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
@@ -180,7 +215,7 @@ export function ActionControl({
         </Button>
       )}
 
-      {!action.form && invoke.isError && (
+      {!action.form && !onError && invoke.isError && (
         <span className="text-[11px] text-danger">{(invoke.error as Error).message}</span>
       )}
 

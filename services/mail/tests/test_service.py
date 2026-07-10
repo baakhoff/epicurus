@@ -9,7 +9,12 @@ import pytest
 
 from epicurus_core.contracts import DraftReview, ToolEnvelope
 from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
-from epicurus_mail.service import build_module
+from epicurus_mail.service import (
+    _SCOPE_HINT,
+    _describe_403,
+    _describe_gmail_error,
+    build_module,
+)
 
 
 def _make_provider(*messages: MailMessage) -> MailProvider:
@@ -267,6 +272,123 @@ async def test_mail_reply_reraises_non_scope_errors() -> None:
         await module.mcp.call_tool("mail_reply", {"message_id": "msg1", "body": "Sounds good!"})
 
 
+# ── AIP-193 error shape + 429 rate limiting (#557) ─────────────────────────────
+
+
+def _http_error(
+    status: int,
+    *,
+    body: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.HTTPStatusError:
+    """A Gmail-style ``httpx.HTTPStatusError`` with the given status/body/headers."""
+    kwargs: dict[str, object] = {"headers": headers or {}}
+    if body is not None:
+        kwargs["json"] = body
+    response = httpx.Response(status, **kwargs)  # type: ignore[arg-type]
+    return httpx.HTTPStatusError(
+        f"{status} error", request=httpx.Request("GET", "http://gmail/x"), response=response
+    )
+
+
+# Both rate-limit shapes (legacy Gmail v1 `errors[].reason`, modern AIP-193 `status`/
+# `details[].reason`) and both permission shapes, by the expected outcome (#557).
+_LEGACY_RATE = {"error": {"errors": [{"reason": "userRateLimitExceeded"}]}}
+_LEGACY_SCOPE = {"error": {"errors": [{"reason": "insufficientPermissions"}]}}
+_AIP_RATE_STATUS = {"error": {"status": "RESOURCE_EXHAUSTED", "message": "quota exceeded"}}
+_AIP_RATE_DETAIL = {"error": {"code": 403, "details": [{"reason": "RATE_LIMIT_EXCEEDED"}]}}
+_AIP_SCOPE = {"error": {"status": "PERMISSION_DENIED", "message": "insufficient permission"}}
+
+
+@pytest.mark.parametrize(
+    ("body", "is_rate_limit"),
+    [
+        (_LEGACY_RATE, True),
+        (_LEGACY_SCOPE, False),
+        (_AIP_RATE_STATUS, True),
+        (_AIP_RATE_DETAIL, True),
+        (_AIP_SCOPE, False),
+    ],
+)
+def test_describe_403_recognizes_both_error_shapes(
+    body: dict[str, object], is_rate_limit: bool
+) -> None:
+    """A 403 in either the legacy or AIP-193 shape maps to the rate-limit hint when it names a
+    rate limit, and the scope hint otherwise (#538, #557)."""
+    hint = _describe_403(_http_error(403, body=body), _SCOPE_HINT)
+    if is_rate_limit:
+        assert "rate-limiting" in hint
+        assert hint != _SCOPE_HINT
+    else:
+        assert hint == _SCOPE_HINT
+
+
+def test_describe_403_non_string_reason_falls_back_to_scope_without_raising() -> None:
+    """A non-string `reason` (a nested object in an otherwise well-formed body) must not reach the
+    `in _RATE_LIMIT_REASONS` membership test, where an unhashable value would raise TypeError —
+    it falls back to the scope hint (#557)."""
+    body = {"error": {"errors": [{"reason": {"nested": "object"}}]}}
+    assert _describe_403(_http_error(403, body=body), _SCOPE_HINT) == _SCOPE_HINT
+
+
+def test_describe_403_unparseable_body_falls_back_to_scope() -> None:
+    assert _describe_403(_http_error(403), _SCOPE_HINT) == _SCOPE_HINT  # no JSON body
+
+
+def test_describe_gmail_error_429_is_always_rate_limit() -> None:
+    hint = _describe_gmail_error(_http_error(429), _SCOPE_HINT)
+    assert hint is not None
+    assert "rate-limiting" in hint
+
+
+def test_describe_gmail_error_429_surfaces_retry_after_seconds() -> None:
+    hint = _describe_gmail_error(_http_error(429, headers={"Retry-After": "30"}), _SCOPE_HINT)
+    assert hint is not None
+    assert "30 seconds" in hint
+
+
+def test_describe_gmail_error_403_delegates_to_describe_403() -> None:
+    hint = _describe_gmail_error(_http_error(403, body=_AIP_RATE_DETAIL), _SCOPE_HINT)
+    assert hint is not None
+    assert "rate-limiting" in hint
+
+
+def test_describe_gmail_error_other_status_returns_none() -> None:
+    # A 500 isn't one we soften — the caller re-raises it rather than inventing a hint.
+    assert _describe_gmail_error(_http_error(500), _SCOPE_HINT) is None
+
+
+@pytest.mark.parametrize("tool", ["mail_search", "mail_read"])
+async def test_mail_read_paths_429_return_rate_limit_hint_not_raw(tool: str) -> None:
+    """search/read had no HTTP-error handling at all — a 429 raised a raw traceback. Now both
+    return the wait-and-retry hint (#557)."""
+    provider = _make_provider(_sample())
+    err = _http_error(429)
+    provider.search = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+    provider.read = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+    module = build_module(provider)
+    args = {"query": "x"} if tool == "mail_search" else {"message_id": "msg1"}
+    content, _ = await module.mcp.call_tool(tool, args)
+    assert "rate-limiting" in str(content[0].text)  # type: ignore[attr-defined]
+
+
+async def test_mail_reply_429_returns_rate_limit_hint() -> None:
+    provider = _make_provider(_sample())
+    provider.compose_reply = AsyncMock(side_effect=_http_error(429))  # type: ignore[method-assign]
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_reply", {"message_id": "msg1", "body": "hi"})
+    assert "rate-limiting" in str(content[0].text)  # type: ignore[attr-defined]
+    provider.transmit.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_mail_search_reraises_a_non_rate_limit_http_error() -> None:
+    provider = _make_provider(_sample())
+    provider.search = AsyncMock(side_effect=_http_error(500))  # type: ignore[method-assign]
+    module = build_module(provider)
+    with pytest.raises(Exception, match="500"):
+        await module.mcp.call_tool("mail_search", {"query": "x"})
+
+
 async def test_mail_search_uses_capped_listing_format() -> None:
     # mail_search's listing text goes through the shared capped_listing helper (#539),
     # matching calendar's #522 adoption instead of hand-rolling its own "Found N ...:" text.
@@ -333,11 +455,11 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_9_0() -> None:
+async def test_manifest_version_is_0_9_1() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.9.0"
+    assert manifest.version == "0.9.1"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:

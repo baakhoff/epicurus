@@ -26,6 +26,7 @@ nothing is enabled or the core is unreachable (local-first).
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, tzinfo
 from typing import Protocol
@@ -70,7 +71,21 @@ async def _resolve_timezone(source: TimezoneSource | None) -> tzinfo:
         return UTC
 
 
-def operator_clock(source: TimezoneSource) -> Callable[[], Awaitable[str]]:
+_TZ_MEMO_TTL_SECONDS = 60.0
+"""How long `operator_clock` reuses a resolved timezone before re-fetching it (#553). A single
+read already resolves "today" once (see `TasksRouter.list_tasks`); this memo additionally
+collapses the fetch *across* reads in the same window — the board render and any chat-turn reads
+seconds apart share one `get_timezone` round trip rather than each paying its own — and caps
+core-down warnings to one per window instead of one per call. 60 s keeps a timezone change the
+operator makes visible within a minute."""
+
+
+def operator_clock(
+    source: TimezoneSource,
+    *,
+    ttl_seconds: float = _TZ_MEMO_TTL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> Callable[[], Awaitable[str]]:
     """Builds a `now` callable for :class:`TasksRouter` using the operator's timezone (#535).
 
     Without this, the overdue sweep and materialization compute "today" in UTC regardless of
@@ -78,10 +93,24 @@ def operator_clock(source: TimezoneSource) -> Callable[[], Awaitable[str]]:
     successor spawned) up to the offset hours early; UTC-positive, late. The sweep made this
     automatic rather than user-triggered (#515), so the skew now acts on its own instead of
     being a one-off surprise on a manual action.
+
+    The resolved zone is memoized for *ttl_seconds* (#553): ``PlatformClient.get_timezone`` is a
+    fresh HTTP round trip per call, and this clock is read on every task read (the sweep) and the
+    board render (#555), so an uncached clock cost one core call per read — C calls for C enabled
+    collections — plus a core-down warning each. The memo is best-effort (a concurrent miss may
+    fetch twice — harmless) and takes injectable *monotonic*/*ttl_seconds* so tests are
+    deterministic without sleeping.
     """
+    cached_zone: tzinfo | None = None
+    expires_at = 0.0
 
     async def _today() -> str:
-        return datetime.now(await _resolve_timezone(source)).date().isoformat()
+        nonlocal cached_zone, expires_at
+        clock = monotonic()
+        if cached_zone is None or clock >= expires_at:
+            cached_zone = await _resolve_timezone(source)
+            expires_at = clock + ttl_seconds
+        return datetime.now(cached_zone).date().isoformat()
 
     return _today
 
@@ -135,10 +164,17 @@ class TasksRouter:
         self, tenant_id: str, *, list_id: str | None = None, scope: TaskScope = "open"
     ) -> list[Task]:
         prefs = await self._load_prefs()
+        # Resolve "today" once per read, before any materialize claim (#553): the overdue sweep
+        # runs per enabled collection and each occurrence it materializes would otherwise re-fetch
+        # the operator timezone (C collections → C core calls, plus a fetch per anchor *inside* the
+        # claimed window). One resolution threaded down means one core call per read, a smaller
+        # claimed window (pure DB work), and one "today" the sweep and _materialize can't disagree
+        # on across a midnight tick.
+        today = await self._now()
         if list_id is not None:
             target, ref = self._resolve_collection(list_id, prefs)
             tasks = await target.list_tasks(tenant_id, list_id=ref.collection or None, scope=scope)
-            tasks = await self._sweep_overdue(tenant_id, target, ref, tasks)
+            tasks = await self._sweep_overdue(tenant_id, target, ref, tasks, today=today)
             titles = await self._title_map(tenant_id, [ref])
             return self._stamp(tasks, ref=ref, title=titles.get((ref.account, ref.collection)))
         targets = prefs.enabled or [_LOCAL_REF]
@@ -160,7 +196,7 @@ class TasksRouter:
                     error=str(exc),
                 )
                 continue
-            tasks = await self._sweep_overdue(tenant_id, provider, ref, tasks)
+            tasks = await self._sweep_overdue(tenant_id, provider, ref, tasks, today=today)
             out.extend(self._stamp(tasks, ref=ref, title=titles.get((ref.account, ref.collection))))
         out.sort(key=_sort_key)
         return out
@@ -318,15 +354,27 @@ class TasksRouter:
         """
         if not done.repeat:
             return None
+        # Resolve "today" once for this completion and thread it in, like the read path (#553),
+        # so materialization does no timezone fetch inside the claimed window.
         created, _retired = await self._materialize(
-            tenant_id, provider, coll=ref.collection or None, anchor=done
+            tenant_id, provider, coll=ref.collection or None, anchor=done, today=await self._now()
         )
         return created
 
     async def _sweep_overdue(
-        self, tenant_id: str, provider: TasksProvider, ref: CollectionRef, tasks: list[Task]
+        self,
+        tenant_id: str,
+        provider: TasksProvider,
+        ref: CollectionRef,
+        tasks: list[Task],
+        *,
+        today: str,
     ) -> list[Task]:
         """Materialize a fresh instance for any open, overdue recurring task in *tasks* (#515).
+
+        *today* is resolved once by the caller (:meth:`list_tasks`) and threaded in, so a
+        multi-collection read makes one operator-timezone fetch rather than one per collection,
+        and the sweep and :meth:`_materialize` key off the *same* day (#553).
 
         On-complete materialization (:meth:`_materialize_next`) is the only trigger otherwise,
         so a recurring task nobody ever completes just sits overdue forever. This runs lazily
@@ -344,7 +392,6 @@ class TasksRouter:
         swept task's ``repeat`` reflected as cleared, so this same read is accurate rather than
         waiting for the next one to catch up.
         """
-        today = await self._now()
         coll = ref.collection or None
         out: list[Task] = []
         fresh: list[Task] = []
@@ -352,7 +399,9 @@ class TasksRouter:
             if task.completed or not task.repeat or not task.due or task.due[:10] >= today:
                 out.append(task)
                 continue
-            created, retired = await self._materialize(tenant_id, provider, coll=coll, anchor=task)
+            created, retired = await self._materialize(
+                tenant_id, provider, coll=coll, anchor=task, today=today
+            )
             # Only reflect the clear in-memory if the retire write actually landed — if it
             # didn't (logged in `_retire_rule`), this read still truthfully shows the live rule.
             out.append(task.model_copy(update={"repeat": None}) if retired else task)
@@ -361,19 +410,26 @@ class TasksRouter:
         return [*out, *fresh]
 
     async def _materialize(
-        self, tenant_id: str, provider: TasksProvider, *, coll: str | None, anchor: Task
+        self, tenant_id: str, provider: TasksProvider, *, coll: str | None, anchor: Task, today: str
     ) -> tuple[Task | None, bool]:
         """Spawn *anchor*'s next occurrence and retire its rule — shared core (#515).
 
         Used by both on-complete materialization and the overdue sweep: either way, once
         *anchor* has fired (completed or swept), its rule must move to the new successor so
         *anchor* itself is never materialized again — that is what makes both callers
-        double-fire-safe. Computes the next due date from the rule; if the series is exhausted
-        (a ``COUNT``/``UNTIL`` rule yields no later occurrence) or the computation itself fails,
-        nothing is created — a genuine parse issue leaves the rule in place so it can be
-        retried rather than silently dropping the recurrence, and a materialization failure
-        must never break the caller (a completion or a read). Returns ``(created, retired)``:
-        the new instance (or ``None``), and whether the source's rule was actually cleared.
+        double-fire-safe. *today* (resolved once by the caller, #553) anchors the next-due
+        computation; if the series is exhausted (a ``COUNT``/``UNTIL`` rule yields no later
+        occurrence) or the computation itself fails, nothing is created — a genuine parse issue
+        leaves the rule in place so it can be retried rather than silently dropping the
+        recurrence, and a materialization failure must never break the caller (a completion or a
+        read). Returns ``(created, retired)``: the new instance (or ``None``), and whether the
+        source's rule was actually cleared.
+
+        Cancellation-safe (#553): the claim is taken synchronously before the ``try`` and every
+        ``await`` between claim and release runs under an ``except BaseException`` that releases
+        the claim and re-raises. A plain ``except Exception`` would sail past ``CancelledError``
+        (it is a ``BaseException``, not an ``Exception``, since 3.8), leaking the claim forever —
+        the anchor's recurrence would then never materialize again until a process restart.
         """
         if not anchor.repeat:
             # Both callers pre-filter to repeating tasks (_materialize_next's early return,
@@ -387,49 +443,66 @@ class TasksRouter:
             # caller sees the anchor unchanged, and the next read picks up wherever the
             # in-flight (or stuck) attempt leaves things.
             return None, False
+        # Whether add_task has already landed a successor. It flips the cancellation cleanup
+        # from "release the claim" to "keep it": a live rule on the anchor plus an existing
+        # successor is exactly the #533b state that re-materializes a duplicate on the next
+        # read, so a cancel after the add must keep the claim, not free it for a retry.
+        created_ok = False
         try:
-            upcoming = next_due(anchor.due, anchor.repeat, today=await self._now())
-        except Exception as exc:
-            log.warning(
-                "recurring task: could not compute next due; not materializing",
-                task_id=anchor.id,
-                error=str(exc),
-            )
-            self._release_materialize(key, created=False, retired=False)
-            return None, False
-        if upcoming is None:
-            # Series exhausted (COUNT/UNTIL) — still retire so the spent rule isn't
-            # re-evaluated (or re-swept) again.
+            try:
+                upcoming = next_due(anchor.due, anchor.repeat, today=today)
+            except Exception as exc:
+                log.warning(
+                    "recurring task: could not compute next due; not materializing",
+                    task_id=anchor.id,
+                    error=str(exc),
+                )
+                self._release_materialize(key, created=False, retired=False)
+                return None, False
+            if upcoming is None:
+                # Series exhausted (COUNT/UNTIL) — still retire so the spent rule isn't
+                # re-evaluated (or re-swept) again.
+                retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
+                self._release_materialize(key, created=False, retired=retired)
+                return None, retired
+            try:
+                created = await provider.add_task(
+                    tenant_id,
+                    anchor.title,
+                    notes=anchor.notes,
+                    due=upcoming,
+                    priority=anchor.priority,
+                    tags=anchor.tags,
+                    repeat=anchor.repeat,
+                    list_id=coll,
+                )
+            except Exception as exc:
+                # Same principle as the next_due failure above: leave the rule in place so this
+                # is retried on the next completion/sweep rather than silently losing it (#515).
+                log.warning(
+                    "recurring task: could not create the next instance; not retiring the rule",
+                    task_id=anchor.id,
+                    error=str(exc),
+                )
+                self._release_materialize(key, created=False, retired=False)
+                return None, False
+            created_ok = True
+            # Retire the rule on the source (add-before-retire, like a list move, so a failure
+            # here never loses the recurrence outright — worst case is a residual live rule, not
+            # a silently dropped one). "" clears it on both providers.
             retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
-            self._release_materialize(key, created=False, retired=retired)
-            return None, retired
-        try:
-            created = await provider.add_task(
-                tenant_id,
-                anchor.title,
-                notes=anchor.notes,
-                due=upcoming,
-                priority=anchor.priority,
-                tags=anchor.tags,
-                repeat=anchor.repeat,
-                list_id=coll,
-            )
-        except Exception as exc:
-            # Same principle as the next_due failure above: leave the rule in place so this
-            # is retried on the next completion/sweep rather than silently losing it (#515).
-            log.warning(
-                "recurring task: could not create the next instance; not retiring the rule",
-                task_id=anchor.id,
-                error=str(exc),
-            )
-            self._release_materialize(key, created=False, retired=False)
-            return None, False
-        # Retire the rule on the source (add-before-retire, like a list move, so a failure
-        # here never loses the recurrence outright — worst case is a residual live rule, not
-        # a silently dropped one). "" clears it on both providers.
-        retired = await self._retire_rule(tenant_id, provider, anchor.id, coll=coll)
-        self._release_materialize(key, created=True, retired=retired)
-        return created, retired
+            self._release_materialize(key, created=True, retired=retired)
+            return created, retired
+        except BaseException:
+            # A cancellation (client disconnect, core timeout) — or any other BaseException the
+            # inner `except Exception` handlers don't catch — struck between the claim and a
+            # normal release. Resolve the claim synchronously (never `await` on a cancellation
+            # path: the coroutine re-raises CancelledError on the next await, which would skip
+            # cleanup) and re-raise. Pass created_ok as `created`: not-yet-created releases for a
+            # retry; already-created keeps the claim, the #533b terminal state, so the still-live
+            # rule can't re-materialize a duplicate on the next read.
+            self._release_materialize(key, created=created_ok, retired=False)
+            raise
 
     def _claim_materialize(self, key: tuple[str, str]) -> bool:
         """Try to claim *key* (``(tenant_id, task_id)``) for materialization (#533).

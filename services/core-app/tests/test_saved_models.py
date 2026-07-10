@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -37,6 +39,15 @@ async def test_add_is_idempotent_no_duplicates() -> None:
     await store.add("t1", "gpt/gpt-4o")
     await store.add("t1", "gpt/gpt-4o")
     assert await store.list("t1") == ["gpt/gpt-4o"]
+
+
+async def test_concurrent_first_saves_upsert_to_one_row() -> None:
+    """Several concurrent first-saves of the same new id upsert to a single row instead of racing
+    between the get and the insert to a composite-PK IntegrityError (a 500) — the #537 fix. The
+    upsert must not raise, and exactly one row survives."""
+    store, _ = await _fresh()
+    await asyncio.gather(*(store.add("t1", "claude/opus-4") for _ in range(4)))
+    assert await store.list("t1") == ["claude/opus-4"]
 
 
 async def test_list_is_most_recent_first(monkeypatch: pytest.MonkeyPatch) -> None:

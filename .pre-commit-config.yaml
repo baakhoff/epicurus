@@ -17,9 +17,11 @@ repos:
       - id: check-merge-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    # Keep in lockstep with the exact `ruff==` pin in the root pyproject.toml so the
+    # pre-commit hook and CI's `uv run ruff` are the same binary (#514).
+    rev: v0.15.20
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 

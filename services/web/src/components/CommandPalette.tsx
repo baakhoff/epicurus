@@ -68,7 +68,7 @@ export function CommandPalette({
   // Toggle, so the same chord closes it (and never fires twice on key repeat).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.repeat) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.repeat) return;
       if (e.key.toLowerCase() !== "k") return;
       e.preventDefault();
       onOpenChange(!open);
@@ -141,12 +141,18 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
           navigate("/");
         },
       },
-      {
-        id: "action-power",
-        label: paused ? "Wake up" : "Pause — unload models",
-        icon: paused ? Sun : Moon,
-        run: () => togglePower.mutate(),
-      },
+      // Gated on the power query having resolved: `paused` reads `false` before it has,
+      // so a very fast open-and-click could otherwise send the wrong toggle.
+      ...(power.data
+        ? [
+            {
+              id: "action-power",
+              label: paused ? "Wake up" : "Pause — unload models",
+              icon: paused ? Sun : Moon,
+              run: () => togglePower.mutate(),
+            },
+          ]
+        : []),
       ...(notesPage
         ? [
             {
@@ -212,7 +218,22 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
         return { ...s, start };
       });
     return { sections: withStarts, flat: withStarts.flatMap((s) => s.entries) };
-  }, [modules.data, sessions.data, paused, query, navigate, newSession, openSession, togglePower]);
+    // togglePower.mutate (not the mutation object) — react-query keeps `.mutate` stable
+    // across renders, but returns a fresh mutation *object* each time, so depending on
+    // `togglePower` itself would make this memo recompute on every render regardless of
+    // the data it actually depends on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [
+    modules.data,
+    sessions.data,
+    power.data,
+    paused,
+    query,
+    navigate,
+    newSession,
+    openSession,
+    togglePower.mutate,
+  ]);
 
   // The keyboard cursor, clamped — a shrinking result list must never strand it.
   const cursor = Math.min(active, Math.max(flat.length - 1, 0));
@@ -236,6 +257,9 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       e.preventDefault();
       setActive(flat.length - 1);
     } else if (e.key === "Enter") {
+      // A committed IME composition (CJK input) also dispatches Enter — that keystroke
+      // commits the composed text, it must not also activate the highlighted entry.
+      if (e.nativeEvent.isComposing) return;
       e.preventDefault();
       const entry = flat[cursor];
       if (entry) run(entry);

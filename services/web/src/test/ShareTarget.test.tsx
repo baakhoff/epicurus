@@ -119,9 +119,11 @@ describe("Share target (#493)", () => {
     );
     fake.entries.set(
       SHARE_FILE_KEY,
-      // Content-Type set explicitly, mirroring src/sw.ts's own Response construction —
-      // relying on Blob-type auto-inference is inconsistent across fetch implementations.
-      new Response(new Blob(["bytes"]), {
+      // A raw byte body (not a Blob) so undici's Response ctor doesn't call Blob.stream() —
+      // jsdom's Blob doesn't implement it, and the Response ctor consumes a Blob body eagerly.
+      // Content-Type is set explicitly (the consumer reads the file's type from it via blob.type),
+      // mirroring how src/sw.ts tags the shared file's Response.
+      new Response(new TextEncoder().encode("bytes"), {
         headers: {
           "Content-Type": "image/jpeg",
           [SHARE_FILE_NAME_HEADER]: encodeURIComponent("photo.jpg"),

@@ -1,7 +1,7 @@
 {
   "name": "epicurus-web",
   "private": true,
-  "version": "0.88.1",
+  "version": "0.88.2",
   "type": "module",
   "description": "The epicurus web shell: chat, model manager, power toggle, and manifest-driven module UI.",
   "scripts": {

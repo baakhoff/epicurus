@@ -148,6 +148,23 @@ describe("BoardView", () => {
     );
   });
 
+  it("renders a failed action's error below the full actions row, not between the buttons (#472)", async () => {
+    mockModulePage.mockResolvedValue(BOARD);
+    mockInvoke.mockRejectedValue(new Error("NetworkError when attempting to fetch resource"));
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const completeBtn = await screen.findByRole("button", { name: "Complete" });
+    const row = completeBtn.closest("div")!;
+    fireEvent.click(completeBtn);
+
+    const error = await screen.findByText("NetworkError when attempting to fetch resource");
+    // The row still holds only its buttons — the error is not interposed between them.
+    expect(within(row).getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(within(row).queryByText(error.textContent!)).toBeNull();
+    // It renders as the row's next sibling, i.e. below the full row.
+    expect(row.nextElementSibling).toBe(error);
+  });
+
   it("opens a form for a form action and submits it through the tool", async () => {
     mockModulePage.mockResolvedValue(BOARD);
     mockInvoke.mockResolvedValue({ result: "{}" });

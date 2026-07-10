@@ -14,6 +14,31 @@ images to GHCR.
 
 ### Added
 
+- **PWA: share target + app shortcuts** (#493) — the installed app was inert to the OS around
+  it. Two manifest-level features, especially useful on Android: **share a link, text, or
+  file/photo from any app straight into a chat turn** (`manifest.share_target`, `POST`
+  `multipart/form-data`), and **long-press the icon → New chat / Calendar / Tasks**
+  (`manifest.shortcuts`). The share target needed a service worker that can intercept a POST
+  before the browser discards its body navigating away — something `vite-plugin-pwa`'s
+  auto-generated `generateSW` service worker has no way to express — so the service worker is
+  now a custom source file (`src/sw.ts`, `injectManifest` strategy) that reproduces the SPA
+  navigation fallback and the `registerType: "prompt"` update-skipWaiting wiring the old
+  declarative config gave for free (its own top comment explains both), plus the new
+  share-target `fetch` handler: it stashes the shared `title`/`text`/`url`/file in the Cache
+  API and 303-redirects to `/?share=1`; the chat screen prefills the composer (appended to a
+  draft already in progress, never clobbering it — the composer never sends on the operator's
+  behalf, the #480 starter-chip principle) and uploads any file through the same path a
+  paste/drop already uses. The Calendar/Tasks shortcuts reuse `ModulePageScreen`'s existing
+  "no such module page" empty state as their degrade when that module is off — no new code
+  needed there. `src/sw.ts` is excluded from `tsconfig.json` (a service worker's `WebWorker`
+  lib can't coexist with this project's `DOM` lib in one project) and from the `no-restricted-
+  globals` bare-`fetch` guard (#529) — it is its own global scope entirely, with no `epFetch`
+  to route through. `vite preview` also gained its own `proxy` block (it doesn't inherit
+  `server.proxy`), since a production build is the only way this whole surface ever runs —
+  verified live against one: the service worker registers and activates, a real POST to
+  `/share-target` is intercepted and redirects correctly, and the chat screen consumes the
+  staged payload end-to-end. `web` 0.88.0→0.89.0.
+
 - **Maintenance: live progress + refresh-proof batches** (#561) — running maintenance showed no
   progress beyond a spinner, and refreshing the page during a batch lost it entirely (the card's
   running state was pure client mutation state). The batch itself was never at risk — verified

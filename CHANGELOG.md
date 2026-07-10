@@ -755,6 +755,17 @@ images to GHCR.
 
 ### Fixed
 
+- **Calendar (PWA): the toolbar no longer overflows on a phone** (#562) — the calendar page's
+  top toolbar packed prev/next chevrons + the month/range label on the left and "New event" +
+  the Calendars menu + Today + the view switcher on the right into a row with no shrink or wrap
+  escape valve, so at ~380px width the right group clipped past the viewport edge. `ActionControl`
+  gains an opt-in `iconOnlyNarrow` capability — the same icon+`aria-label`+`Tooltip` treatment an
+  `icon_only` action already gets, but CSS-driven (`hidden sm:inline`) rather than
+  module-declared, so it only shrinks the label below the `sm` breakpoint and desktop is
+  unaffected; both the calendar toolbar's "New event" and the board toolbar's action opt in. The
+  month/range label now carries a short form ("Jul 2026") alongside the full one ("July 2026"),
+  CSS-swapped the same way, and the action row keeps a `flex-wrap` fallback for a still-wider
+  case (several connected calendars) rather than clipping. `web` 0.88.2→0.88.3.
 - **Board/calendar actions: a failed action's error no longer splits the row** (#472) — each
   `ActionControl` rendered its own inline error span as a sibling of its button inside the
   shared `flex flex-wrap` actions row, so a failing action (e.g. Complete on a task card)

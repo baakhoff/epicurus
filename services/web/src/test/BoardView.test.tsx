@@ -137,6 +137,19 @@ describe("BoardView", () => {
     expect(await screen.findByRole("dialog", { name: "Add task" })).toBeInTheDocument();
   });
 
+  // The toolbar-level action opts into the same responsive shrink as the calendar's page
+  // action (#562) — this asserts the DOM contract (aria-label, tooltip, label text kept in
+  // the DOM); the CSS breakpoint itself isn't observable in jsdom (checked live instead).
+  it("keeps the toolbar action's accessible name and label available at every width (#562)", async () => {
+    mockModulePage.mockResolvedValue(BOARD);
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const add = await screen.findByRole("button", { name: "Add task" });
+    expect(add).toHaveAttribute("aria-label", "Add task");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Add task");
+    expect(add).toHaveTextContent("Add task");
+  });
+
   it("invokes a card's one-tap action through the core with its fixed args", async () => {
     mockModulePage.mockResolvedValue(BOARD);
     mockInvoke.mockResolvedValue({ result: "{}" });

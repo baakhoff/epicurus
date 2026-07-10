@@ -168,6 +168,16 @@ on miss).
   adoption (#522/#468) for consistency — a long backlog no longer inflates the tool's text
   with an unbounded number of lines; the entity-reference chips stay uncapped regardless.
 
+**v0.15.2** finishes the v0.15.1 timezone work at the board's **display** call site (#555).
+The overdue sweep already computed "today" in the operator's zone (v0.15.1 above), but the
+board page still grouped its **Today / Overdue** columns by the UTC day — so within a single
+render the two clocks could disagree across the UTC/operator midnight: a task the sweep counted
+as due today could sit in the board's Overdue column. The page now reads the same
+operator-timezone clock the sweep runs on (one shared clock, `operator_clock`), so the grouping
+and the sweep always agree. Core unreachable → both degrade to UTC together. (The extra
+per-render timezone lookup this introduces is deduplicated by a short-TTL memo added alongside
+the sweep's cancellation hardening, #553.)
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -252,7 +262,10 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   single flat list). Empty columns are dropped, and each card carries a **category tag** naming
   the list it came from (ADR-0036). Layout is a pure function,
   `build_tasks_board(tasks, today=…, group_by=…, scope=…, lists=…, default_list_id=…)`, so it
-  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing.
+  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing. The
+  `today` the columns key off is the **operator's** day, resolved from the same operator-timezone
+  clock the overdue sweep runs on, so the Today/Overdue split and the sweep never disagree within
+  a render (#555); it degrades to UTC when the core is unreachable.
 - **View controls** (`controls` in the board data) are a **Group by** selector and a **Show**
   filter (Open / Completed / All), rendered by the shell as a toolbar; changing one re-fetches
   the page with a forwarded query param (`group` / `show`, each clamped to a known value). The

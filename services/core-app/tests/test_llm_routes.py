@@ -639,6 +639,19 @@ async def test_saved_models_rejects_local_id() -> None:
     assert get.json() == {"models": []}  # neither landed
 
 
+async def test_saved_models_rejects_provider_only_id() -> None:
+    """A provider prefix with no model part ("claude/") names a hosted provider but not a hosted
+    *model* — 400, and no junk ``claude/`` row is persisted (#537)."""
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/llm/saved-models", json={"model": "claude/"})
+        get = await client.get("/platform/v1/llm/saved-models")
+    assert resp.status_code == 400
+    assert get.json() == {"models": []}  # nothing landed
+
+
 async def test_saved_models_remove() -> None:
     store = await _fresh_saved_models()
     async with httpx.AsyncClient(

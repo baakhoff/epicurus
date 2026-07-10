@@ -204,7 +204,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.15.0",
+        version="0.16.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -398,7 +398,9 @@ def build_module(
                     _RECURRENCE_DESCRIPTION + " Only meaningful with edit_scope='all' or"
                     " 'following' (omitted there, the new tail series just continues the"
                     " existing pattern); setting it with edit_scope='this' (a single"
-                    " occurrence) raises an error."
+                    " occurrence) raises an error. Pass an empty string to CLEAR the rule:"
+                    " edit_scope='all' makes the whole series a one-off event, 'following'"
+                    " ends the series at this occurrence; clearing with 'this' is rejected."
                 ),
             ),
         ] = None,
@@ -428,7 +430,9 @@ def build_module(
                 directly; omit to search the enabled calendars.
             recurrence: New RFC 5545 RRULE for the whole series (edit_scope='all') or the
                 new tail series from this point on (edit_scope='following'); omit the
-                latter to keep the existing pattern.
+                latter to keep the existing pattern. Pass ``""`` to clear the rule — 'all'
+                makes the series a one-off event, 'following' ends it at this occurrence;
+                clearing a single occurrence ('this') is rejected.
             attendees: New comma-separated guest list, replacing the current one.
             edit_scope: For a recurring event, 'this' occurrence (default), 'following'
                 (this occurrence and every later one, splitting the series in two), or
@@ -438,13 +442,25 @@ def build_module(
         """
         tz, tz_name = await resolve_timezone(timezone)
         start_dt, end_dt = _parse_update_bounds(start, end, all_day=all_day, tz=tz)
-        if recurrence == "":
-            # The shared board form sends "" when the repeat picker is blanked (web 0.76.1
-            # clear-fields). Calendar has no ""-means-clear contract yet — Google would
-            # receive a bare "RRULE:" (API 400) and the local 'this' scope a misleading
-            # error — so treat it as "leave unchanged" (the pre-0.76.1 no-op) until
-            # clear-recurrence ships properly.
-            recurrence = None
+        # recurrence == "" is the explicit clear signal (#532, ADR-0086): the shared board form
+        # sends it only when an *existing* rule was blanked — a one-off event omits the field
+        # entirely (SchemaForm drops a field blank throughout) — so "" always means "drop this
+        # series' rule". None still means "leave the rule unchanged". Clearing is a series-level
+        # change, so it is rejected on a single occurrence (edit_scope='this'): a lone instance
+        # has no series rule of its own to drop. 'all' clears the master; 'following' ends the
+        # series at this occurrence. Providers are not symmetric here (ADR-0030) — each renders
+        # the clear in its own model (Google `recurrence: []`, the local store a NULL master
+        # rule) behind this one tool contract.
+        if recurrence == "" and edit_scope == "this":
+            current = await provider.get_event(
+                tenant_id=tenant_id, event_id=event_id, calendar_id=calendar_id
+            )
+            if current is not None and current.recurring_event_id is not None:
+                raise ValueError(
+                    "clearing the repeat rule changes the whole series, not a single"
+                    " occurrence — set the scope to 'all' to make the series one-off, or"
+                    " 'following' to end the series at this occurrence"
+                )
         if recurrence:
             _validate_recurrence(recurrence, dtstart=start_dt or datetime.now(tz=UTC))
         event = await provider.update_event(
@@ -459,7 +475,8 @@ def build_module(
             all_day=all_day,
             recurrence=recurrence,
             attendees=_parse_attendees(attendees),
-            recurrence_timezone=tz_name if recurrence is not None else None,
+            # A cleared or absent rule carries no wall-clock anchor zone; only a real rule does.
+            recurrence_timezone=tz_name if recurrence else None,
             edit_scope=edit_scope,
         )
         if event is None:

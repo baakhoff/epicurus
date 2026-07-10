@@ -22,6 +22,8 @@ arguments.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 from epicurus_core import (
@@ -62,13 +64,25 @@ _SCOPE_HINT_REPLY_LOOKUP = (
     " grant it."
 )
 
+# Shown when a read (``mail_search`` / ``mail_read``) is rejected for lack of scope — mail
+# needs ``gmail.modify`` (which covers reads); a bare 403 there means the operator hasn't
+# granted it. Read-context wording, distinct from the modify/send/reply hints above.
+_SCOPE_HINT_READ = (
+    "Couldn't reach Gmail: the connected Google account is missing the Gmail permission this"
+    " needs. Reconnect Google (Settings → Connect) to grant it."
+)
+
 # Gmail returns 403 both for a missing OAuth scope and for per-user/per-day rate limiting
-# (``usageLimits``) — the reasons below are Google's Discovery-API error codes for the
-# latter. Blaming every 403 on a missing scope misdirects an operator who is simply being
-# throttled (#538).
+# (``usageLimits``) — the reasons below are Google's **legacy** Discovery-API error codes for
+# the latter. Blaming every 403 on a missing scope misdirects an operator who is simply being
+# throttled (#538). Google's newer APIs report the same thing in the AIP-193 shape instead
+# (``error.status == "RESOURCE_EXHAUSTED"`` / ``error.details[].reason == "RATE_LIMIT_EXCEEDED"``);
+# :func:`_is_rate_limited` checks both so a shape migration doesn't silently misfire (#557).
 _RATE_LIMIT_REASONS = frozenset(
     {"rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded"}
 )
+_AIP_RATE_LIMIT_STATUS = "RESOURCE_EXHAUSTED"
+_AIP_RATE_LIMIT_REASON = "RATE_LIMIT_EXCEEDED"
 
 _RATE_LIMIT_HINT = (
     "Gmail is rate-limiting this account (too many requests in a short time, or the daily"
@@ -76,17 +90,77 @@ _RATE_LIMIT_HINT = (
 )
 
 
+def _is_rate_limited(error: dict[str, Any]) -> bool:
+    """Whether a Gmail error body names a rate-limit cause, in either shape (#538, #557).
+
+    Legacy (Gmail v1 today): ``error.errors[].reason`` ∈ :data:`_RATE_LIMIT_REASONS`. Modern
+    AIP-193 (if Gmail ever migrates): ``error.status == "RESOURCE_EXHAUSTED"`` or an
+    ``error.details[]`` entry whose ``reason`` is ``"RATE_LIMIT_EXCEEDED"``. Every field access
+    is defensive — a non-string ``reason`` (an otherwise well-formed body with a nested object
+    there) is skipped, not fed to the ``in`` membership test where it would raise ``TypeError``
+    on an unhashable value instead of falling back to the scope hint.
+    """
+    if error.get("status") == _AIP_RATE_LIMIT_STATUS:
+        return True
+    details = error.get("details")
+    if isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, dict) and detail.get("reason") == _AIP_RATE_LIMIT_REASON:
+                return True
+    errors = error.get("errors")
+    if isinstance(errors, list):
+        for item in errors:
+            if isinstance(item, dict):
+                reason = item.get("reason")
+                if isinstance(reason, str) and reason in _RATE_LIMIT_REASONS:
+                    return True
+    return False
+
+
+def _rate_limit_hint(response: httpx.Response) -> str:
+    """The rate-limit hint, extended with Gmail's ``Retry-After`` when it sends one (#557).
+
+    ``Retry-After`` is either a number of seconds or an HTTP-date; surface whichever it is so
+    the operator knows how long to wait rather than guessing.
+    """
+    retry_after = (response.headers.get("Retry-After") or "").strip()
+    if not retry_after:
+        return _RATE_LIMIT_HINT
+    if retry_after.isdigit():
+        return f"{_RATE_LIMIT_HINT} Gmail suggests waiting about {retry_after} seconds."
+    return f"{_RATE_LIMIT_HINT} Gmail asks you to retry after {retry_after}."
+
+
 def _describe_403(exc: httpx.HTTPStatusError, scope_hint: str) -> str:
-    """The user-facing hint for a Gmail 403: *scope_hint* unless the error body names one
-    of :data:`_RATE_LIMIT_REASONS`, in which case that's the real cause (#538). Falls back
-    to *scope_hint* whenever the body doesn't parse into Google's error shape too, since a
-    missing scope remains the far more common cause of an unparseable 403.
+    """The user-facing hint for a Gmail 403: *scope_hint* unless the error body names a
+    rate-limit cause (#538) — recognized in either the legacy or the AIP-193 shape (#557) — in
+    which case that's the real cause. Falls back to *scope_hint* whenever the body doesn't parse
+    into Google's error shape, since a missing scope is the far more common cause of an
+    unparseable 403.
     """
     try:
-        reason = exc.response.json()["error"]["errors"][0]["reason"]
-    except (ValueError, KeyError, IndexError, TypeError):
+        error = exc.response.json()["error"]
+    except (ValueError, KeyError, TypeError):
         return scope_hint
-    return _RATE_LIMIT_HINT if reason in _RATE_LIMIT_REASONS else scope_hint
+    if isinstance(error, dict) and _is_rate_limited(error):
+        return _rate_limit_hint(exc.response)
+    return scope_hint
+
+
+def _describe_gmail_error(exc: httpx.HTTPStatusError, scope_hint: str) -> str | None:
+    """A hint a tool can return in place of a raw exception for a Gmail HTTP error, or ``None``
+    to signal "not one we soften — re-raise" (#538, #557).
+
+    A **429** (Too Many Requests) is unambiguously rate limiting → the wait-and-retry hint
+    (honoring ``Retry-After``). A **403** may be a missing scope *or* a rate limit disguised as
+    ``usageLimits`` → :func:`_describe_403` disambiguates. Any other status returns ``None``.
+    """
+    status = exc.response.status_code
+    if status == httpx.codes.TOO_MANY_REQUESTS:
+        return _rate_limit_hint(exc.response)
+    if status == httpx.codes.FORBIDDEN:
+        return _describe_403(exc, scope_hint)
+    return None
 
 
 def _draft_summary(message: ComposedMessage) -> str:
@@ -98,7 +172,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.9.0",
+        version="0.9.1",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -156,7 +230,13 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             max_results: Maximum number of messages to return (1-50, default 10).
         """
         capped = max(1, min(max_results, 50))
-        messages = await provider.search(query, capped)
+        try:
+            messages = await provider.search(query, capped)
+        except httpx.HTTPStatusError as exc:
+            hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)
+            if hint is not None:
+                return hint  # a rate-limit (429/403) or missing-scope hint, not a raw traceback
+            raise
         if not messages:
             return tool_envelope("No messages found.", [])
         refs = [
@@ -194,7 +274,13 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         Args:
             message_id: The message ID returned by ``mail_search``.
         """
-        m = await provider.read(message_id)
+        try:
+            m = await provider.read(message_id)
+        except httpx.HTTPStatusError as exc:
+            hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)
+            if hint is not None:
+                return hint
+            raise
         parts = [f"Subject: {m.subject or '(no subject)'}"]
         parts.append(f"From: {m.sender}")
         if m.date:
@@ -250,8 +336,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         try:
             message = await provider.compose_reply(message_id, body)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 403:
-                return _describe_403(exc, _SCOPE_HINT_REPLY_LOOKUP)
+            hint = _describe_gmail_error(exc, _SCOPE_HINT_REPLY_LOOKUP)
+            if hint is not None:
+                return hint
             raise
         return draft_review(
             kind="mail",
@@ -274,8 +361,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         try:
             await provider.set_unread(message_id, unread=False)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 403:
-                return _describe_403(exc, _SCOPE_HINT)
+            hint = _describe_gmail_error(exc, _SCOPE_HINT)
+            if hint is not None:
+                return hint
             raise
         return f"marked-read:{message_id}"
 
@@ -292,8 +380,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         try:
             await provider.set_unread(message_id, unread=True)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 403:
-                return _describe_403(exc, _SCOPE_HINT)
+            hint = _describe_gmail_error(exc, _SCOPE_HINT)
+            if hint is not None:
+                return hint
             raise
         return f"marked-unread:{message_id}"
 

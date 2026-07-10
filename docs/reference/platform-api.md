@@ -147,11 +147,16 @@ the tenant across devices (unlike the browser's per-origin `recentModels` localS
 
 - **`GET`** → `{models: [{model, provider}]}`, most-recently-saved first. `provider` is the id's
   `<provider>/` prefix (for grouping on the Models page).
-- **`POST {model}`** persists one id, idempotent (a re-save bumps it to the front). **400**s
-  anything that isn't a *hosted* id — a known `<provider>/` prefix (`claude/…`, `gpt/…`, …) — so
-  a local `hf.co/org/model:tag` can never land here (the server-side half of the fix for the web
-  client's old `includes("/")` misclassification).
+- **`POST {model}`** persists one id, idempotent — an **atomic upsert** (a re-save bumps it to the
+  front; two concurrent first-saves of the same id can't race between the read and the write to a
+  500). **400**s anything that isn't a *hosted* id — a known `<provider>/` prefix followed by a
+  **non-empty model part** (`claude/…`, `gpt/…`, …) — so a local `hf.co/org/model:tag`, **or a
+  provider-only `claude/` with no model**, can never land here (the server-side half of the fix for
+  the web client's old `includes("/")` misclassification).
 - **`DELETE ?model=…`** (query param, since ids carry `/` and `:`) forgets one; a no-op if absent.
+  Removing the id that is the current `llm_prefs.global_default` is left as-is by design — the
+  default keeps pointing at it (still valid for inference, just no longer *listed*); change or clear
+  the default separately via `PUT …/prefs/default`.
 
 Backed by the tenant-scoped `saved_models` table. The chat picker renders this list (auto-saving
 on use), the Models page lists it (remove / set-as-default), and module model slots offer it

@@ -755,6 +755,15 @@ images to GHCR.
 
 ### Fixed
 
+- **Saved hosted models: atomic upsert + no junk provider-only rows** (#537) — `POST
+  /llm/saved-models`'s `add()` was get-then-insert, so two concurrent first-saves of the same id
+  could race in the gap to a composite-PK `IntegrityError` (a 500); it is now a single atomic
+  `INSERT … ON CONFLICT DO UPDATE`. And `is_hosted("claude/")` was True — a `/` was present but the
+  model part was empty — so a provider-only id persisted a junk `claude/` row; `is_hosted` now
+  requires a non-empty model part, so that `POST` is a clean **400**. (Removing a saved id that is
+  the current `llm_prefs.global_default` still deliberately leaves the default pointing at it —
+  valid for inference, just unlisted.) `core-app` 0.66.0→0.66.1.
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's

@@ -53,12 +53,15 @@ def resolve(model: str) -> tuple[str, Provider]:
 
 
 def is_hosted(model: str) -> bool:
-    """Whether ``model`` names a hosted provider — a known, non-local alias prefix.
+    """Whether ``model`` names a hosted provider model — a known non-local alias prefix
+    followed by a non-empty model part.
 
-    ``claude/…`` → True; a bare name, an unknown prefix (``hf.co/org/model:tag``), or the
-    explicit ``local/…`` alias → False. Mirrors :func:`resolve`'s classification so a local
-    model can never be mistaken for a hosted one — the fix for the web client's old
-    ``includes("/")`` heuristic that let ``hf.co/…`` locals pollute the hosted list (#496).
+    ``claude/opus-4`` → True; a bare name, an unknown prefix (``hf.co/org/model:tag``), the
+    explicit ``local/…`` alias, or a **provider-only** id with no model (``claude/``) → False.
+    Mirrors :func:`resolve`'s classification so a local model can never be mistaken for a hosted
+    one — the fix for the web client's old ``includes("/")`` heuristic that let ``hf.co/…`` locals
+    pollute the hosted list (#496) — and the non-empty model part keeps a junk ``claude/`` row out
+    of the saved-models table (#537).
     """
-    alias, sep, _ = model.partition("/")
-    return bool(sep) and alias in PROVIDERS and not PROVIDERS[alias].is_local
+    alias, sep, rest = model.partition("/")
+    return bool(sep) and bool(rest.strip()) and alias in PROVIDERS and not PROVIDERS[alias].is_local

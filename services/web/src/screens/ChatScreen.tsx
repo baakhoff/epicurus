@@ -358,6 +358,10 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
     mutationFn: api.deleteSession,
     onSuccess: (_result, id) => {
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // Drop any away-finished marker for the deleted session — openSession is the only other
+      // place it clears, and a marked session is never the current one, so without this a
+      // delete-while-unseen would strand the History dot + title prefix until a reload (#492).
+      useChat.getState().clearUnseenFinished(id);
       // Deleting the open conversation would leave the transcript orphaned on screen —
       // start fresh instead, exactly like the New-chat button.
       if (id === current) newSession();

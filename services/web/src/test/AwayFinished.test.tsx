@@ -188,4 +188,20 @@ describe("Finished-while-away UI (#492)", () => {
     await waitFor(() => expect(useChat.getState().unseenFinished.has("s1")).toBe(false));
     expect(screen.getByLabelText("Conversations")).toBeInTheDocument();
   });
+
+  it("clears the marker when an unseen-finished session is deleted, not only opened (#492)", async () => {
+    // A marked session is never the current one, and openSession was the sole clear path — so
+    // deleting it from its row (without opening it) used to strand the History dot + title
+    // prefix forever. The delete now prunes the marker too.
+    useChat.setState({ unseenFinished: new Set(["s1"]) });
+    render(<ChatScreen />, { wrapper });
+
+    fireEvent.click(screen.getByLabelText("Conversations (unseen answer)"));
+    fireEvent.click(await screen.findByLabelText("Delete Alpha"));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" })); // confirm the delete
+
+    await waitFor(() => expect(useChat.getState().unseenFinished.has("s1")).toBe(false));
+    // The "unseen answer" affordance (the History dot) is gone — no stranded indicator.
+    expect(screen.queryByLabelText("Conversations (unseen answer)")).toBeNull();
+  });
 });

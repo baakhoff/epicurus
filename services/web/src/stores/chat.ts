@@ -143,6 +143,10 @@ interface ChatState {
   /** Marks a session as having finished while unseen (#492) — called only by
    *  {@link useAwayFinishedWatch}'s poll diff, never directly by UI code. */
   markUnseenFinished: (id: string) => void;
+  /** Drops a session's away-finished marker regardless of which session is current — called when
+   *  a session is removed, so deleting an unseen-finished session can't strand a permanent
+   *  indicator ({@link openSession} only clears the session being opened). */
+  clearUnseenFinished: (id: string) => void;
   /** `onDone` must complete the server-history refetch — the live turn is
    *  cleared right after it resolves, so the transcript never doubles. */
   send: (
@@ -495,6 +499,14 @@ export const useChat = create<ChatState>()(
 
         markUnseenFinished: (id) =>
           set((s) => (s.unseenFinished.has(id) ? s : { unseenFinished: new Set(s.unseenFinished).add(id) })),
+
+        clearUnseenFinished: (id) =>
+          set((s) => {
+            if (!s.unseenFinished.has(id)) return s;
+            const next = new Set(s.unseenFinished);
+            next.delete(id);
+            return { unseenFinished: next };
+          }),
 
         newSession: () => {
           get().abort?.abort();

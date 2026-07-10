@@ -277,12 +277,15 @@ function SessionRow({
   session,
   current,
   running,
+  unseen,
   onOpen,
   onDelete,
 }: {
   session: SessionSummary;
   current: boolean;
   running: boolean;
+  /** Finished a turn while this wasn't the open session (#492) — cleared once opened. */
+  unseen: boolean;
   onOpen: () => void;
   onDelete: () => void;
 }) {
@@ -295,14 +298,22 @@ function SessionRow({
     >
       <button className="min-w-0 flex-1 text-left" onClick={onOpen}>
         <p className="flex items-center gap-1.5 font-serif text-sm text-ink">
-          {running && (
+          {running ? (
             <span
               title="Generating…"
               aria-label="Generating"
               className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
             />
+          ) : (
+            unseen && (
+              <span title="Finished — unseen" aria-label="Finished, unseen" className="shrink-0">
+                <Dot tone="accent" />
+              </span>
+            )
           )}
-          <span className="min-w-0 truncate">{session.title || "untitled"}</span>
+          <span className={cn("min-w-0 truncate", unseen && !running && "font-medium")}>
+            {session.title || "untitled"}
+          </span>
         </p>
         <p className="text-xs text-ink-faint">
           {relativeTime(session.last_at)} · {session.message_count} messages
@@ -325,6 +336,9 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   const newSession = useChat((s) => s.newSession);
   const current = useChat((s) => s.sessionId);
   const streaming = useChat((s) => s.streaming);
+  // Rows finished elsewhere while unseen (#492) — the shell-level watcher keeps this current
+  // regardless of whether this sheet has been open; `openSession` below clears each on open.
+  const unseenFinished = useChat((s) => s.unseenFinished);
   const [query, setQuery] = useState("");
   // Deleting a whole conversation from a hover-revealed icon is one misclick away from the
   // row's open-target, so it always confirms first (#480).
@@ -345,6 +359,10 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
     mutationFn: api.deleteSession,
     onSuccess: (_result, id) => {
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // Drop any away-finished marker for the deleted session — openSession is the only other
+      // place it clears, and a marked session is never the current one, so without this a
+      // delete-while-unseen would strand the History dot + title prefix until a reload (#492).
+      useChat.getState().clearUnseenFinished(id);
       // Deleting the open conversation would leave the transcript orphaned on screen —
       // start fresh instead, exactly like the New-chat button.
       if (id === current) newSession();
@@ -367,6 +385,7 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
       session={session}
       current={session.id === current}
       running={running.has(session.id)}
+      unseen={unseenFinished.has(session.id)}
       onOpen={() => {
         openSession(session.id);
         onClose();
@@ -1158,10 +1177,18 @@ export function ChatScreen() {
           <Tooltip label="Conversations" side="bottom">
             <button
               onClick={() => setSessionsOpen(true)}
-              aria-label="Conversations"
-              className="rounded-md p-1.5 text-ink-dim hover:bg-surface-2 hover:text-ink"
+              aria-label={
+                chat.unseenFinished.size > 0 ? "Conversations (unseen answer)" : "Conversations"
+              }
+              className="relative rounded-md p-1.5 text-ink-dim hover:bg-surface-2 hover:text-ink"
             >
               <History size={18} />
+              {/* A turn finished elsewhere while unseen (#492) — cleared once that session opens. */}
+              {chat.unseenFinished.size > 0 && (
+                <span className="absolute right-1 top-1">
+                  <Dot tone="accent" />
+                </span>
+              )}
             </button>
           </Tooltip>
           <Tooltip label="New chat" side="bottom">

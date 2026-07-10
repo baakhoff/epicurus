@@ -404,7 +404,9 @@ class LocalEventStore:
             description=description,
             location=location,
             all_day=all_day,
-            recurrence=recurrence,
+            # Normalize the clear sentinel "" to NULL (#532): a split-following tail that drops
+            # the rule creates a one-off master, never one carrying an empty RRULE string.
+            recurrence=recurrence or None,
             attendees=_dump_attendees(attendees),
             timezone=timezone,
         )
@@ -459,7 +461,12 @@ class LocalEventStore:
             if all_day is not None:
                 row.all_day = all_day
             if recurrence is not None:
-                row.recurrence = recurrence
+                # "" is the clear sentinel (#532, ADR-0086): store NULL, not an empty RRULE, and
+                # drop the now-meaningless wall-clock anchor zone. A real rule sets both (the
+                # timezone below); this runs first so a clear can't be undone by a stale zone.
+                row.recurrence = recurrence or None
+                if row.recurrence is None:
+                    row.timezone = None
             if attendees is not None:
                 row.attendees = _dump_attendees(attendees)
             if timezone is not None:

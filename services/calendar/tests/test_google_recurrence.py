@@ -302,6 +302,26 @@ async def test_update_all_resolution_falls_back_when_lookup_fails() -> None:
     assert url.endswith("/events/e1")  # fell back to the given id
 
 
+async def test_update_clear_recurrence_sends_an_empty_list_not_a_bare_rrule() -> None:
+    # Clearing the rule (#532, ADR-0086): Google represents "no recurrence" as recurrence: [],
+    # never a bare "RRULE:" (which 400s — the exact bug this contract fixes). edit_scope="all"
+    # on the series id patches the master directly.
+    prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
+    resp = _resp(
+        {
+            "id": "s1",
+            "summary": "Standup",
+            "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
+            "end": {"dateTime": "2026-07-06T09:30:00+00:00"},
+        }
+    )
+    cm, client = _client_cm(resp)
+    with patch("epicurus_calendar.providers.google.httpx.AsyncClient", return_value=cm):
+        await prov.update_event(tenant_id="t1", event_id="s1", recurrence="", edit_scope="all")
+    body = client.patch.call_args.kwargs["json"]
+    assert body["recurrence"] == []  # cleared as an empty list, not ["RRULE:"]
+
+
 async def test_delete_this_deletes_the_given_id_directly() -> None:
     prov = GoogleCalendarProvider(platform=_StubPlatform())  # type: ignore[arg-type]
     resp = MagicMock()

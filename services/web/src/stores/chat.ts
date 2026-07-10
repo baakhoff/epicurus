@@ -9,6 +9,8 @@
  * state (segments/streaming/abort) is deliberately *not* persisted — only `sessionId`, `draft`,
  * and any pending `ask_user` question (`awaiting`), whose suspended run is durable server-side.
  */
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -128,10 +130,23 @@ interface ChatState {
    *  is pending. Persisted like `awaiting` so a reload mid-review keeps the pane and the pending
    *  draft — the suspended run stays durable server-side (24h). Mutually exclusive with `awaiting`. */
   awaitingDraft: { runId: string; draft: EmailDraft } | null;
+  /** Sessions that finished a turn while this wasn't the open one (#492) — a background turn
+   *  the operator hasn't seen the answer to yet. One boolean marker per session (no counts,
+   *  no push notifications); cleared the moment the session opens. Not persisted: a reload
+   *  has no way to know what happened while the tab was closed, and {@link useAwayFinishedWatch}
+   *  re-establishes ground truth from the server within one poll anyway. */
+  unseenFinished: Set<string>;
 
   setDraft: (text: string) => void;
   newSession: () => void;
   openSession: (id: string) => void;
+  /** Marks a session as having finished while unseen (#492) — called only by
+   *  {@link useAwayFinishedWatch}'s poll diff, never directly by UI code. */
+  markUnseenFinished: (id: string) => void;
+  /** Drops a session's away-finished marker regardless of which session is current — called when
+   *  a session is removed, so deleting an unseen-finished session can't strand a permanent
+   *  indicator ({@link openSession} only clears the session being opened). */
+  clearUnseenFinished: (id: string) => void;
   /** `onDone` must complete the server-history refetch — the live turn is
    *  cleared right after it resolves, so the transcript never doubles. */
   send: (
@@ -478,8 +493,20 @@ export const useChat = create<ChatState>()(
         lastSeq: 0,
         awaiting: null,
         awaitingDraft: null,
+        unseenFinished: new Set(),
 
         setDraft: (text) => set({ draft: text }),
+
+        markUnseenFinished: (id) =>
+          set((s) => (s.unseenFinished.has(id) ? s : { unseenFinished: new Set(s.unseenFinished).add(id) })),
+
+        clearUnseenFinished: (id) =>
+          set((s) => {
+            if (!s.unseenFinished.has(id)) return s;
+            const next = new Set(s.unseenFinished);
+            next.delete(id);
+            return { unseenFinished: next };
+          }),
 
         newSession: () => {
           get().abort?.abort();
@@ -502,20 +529,30 @@ export const useChat = create<ChatState>()(
 
         openSession: (id) => {
           get().abort?.abort();
-          set({
-            sessionId: id,
-            awaiting: null,
-            awaitingDraft: null,
-            pendingUser: null,
-            pendingAttachments: [],
-            segments: [],
-            streaming: false,
-            readiness: null,
-            error: null,
-            reconnectable: false,
-            paused: false,
-            abort: null,
-            lastSeq: 0,
+          set((s) => {
+            // Opening a session is the one place "the operator has now seen it" is true
+            // regardless of how it was opened (sheet row, palette, hover-card) — clear its
+            // away-finished marker here rather than at each call site (#492).
+            const unseenFinished = s.unseenFinished.has(id)
+              ? new Set(s.unseenFinished)
+              : s.unseenFinished;
+            unseenFinished.delete(id);
+            return {
+              sessionId: id,
+              awaiting: null,
+              awaitingDraft: null,
+              pendingUser: null,
+              pendingAttachments: [],
+              segments: [],
+              streaming: false,
+              readiness: null,
+              error: null,
+              reconnectable: false,
+              paused: false,
+              abort: null,
+              lastSeq: 0,
+              unseenFinished,
+            };
           });
         },
 
@@ -631,3 +668,60 @@ export const useChat = create<ChatState>()(
     },
   ),
 );
+
+// A dot/count prefix on the document title while any answer is unseen, so a backgrounded
+// PWA/tab shows it too (#492) — restored the moment nothing is left unseen.
+const BASE_TITLE = document.title;
+
+/** Which of `prevActive` dropped out of `nowActive` and aren't `currentId` — sessions that
+ *  just finished a turn while unseen since the last poll (#492). A pure diff, exported for
+ *  focused testing independent of the poll/effect plumbing around it. */
+export function newlyFinished(
+  prevActive: Set<string>,
+  nowActive: Set<string>,
+  currentId: string,
+): string[] {
+  const out: string[] = [];
+  for (const id of prevActive) {
+    if (!nowActive.has(id) && id !== currentId) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Mounted once in the shell (#492): polls which sessions are generating
+ * (`["active-runs"]`, the same query {@link SessionsSheet} already used gated on being open,
+ * now always live) and diffs each result against the previous one via {@link newlyFinished}.
+ * Reusing the same query key lets this poll and the sheet's own (while open, on its own
+ * shorter interval) share one cache entry rather than compete.
+ *
+ * No manual visibility plumbing: `refetchInterval` already pauses while the tab is hidden
+ * (React Query's default), matching the PowerOrb's own poll (see `stores/connection.ts`).
+ */
+export function useAwayFinishedWatch(): void {
+  const sessionId = useChat((s) => s.sessionId);
+  const unseenFinished = useChat((s) => s.unseenFinished);
+  const markUnseenFinished = useChat((s) => s.markUnseenFinished);
+  const activeRuns = useQuery({
+    queryKey: ["active-runs"],
+    queryFn: api.activeRuns,
+    refetchInterval: 15_000,
+  });
+  // The previous poll's active set — undefined until the second poll, since a *transition*
+  // out of the active set (not just "currently inactive") is what "finished" means.
+  const prevActiveRef = useRef<Set<string> | undefined>(undefined);
+
+  useEffect(() => {
+    if (!activeRuns.data) return;
+    const nowActive = new Set(activeRuns.data.session_ids);
+    const prevActive = prevActiveRef.current;
+    if (prevActive) {
+      for (const id of newlyFinished(prevActive, nowActive, sessionId)) markUnseenFinished(id);
+    }
+    prevActiveRef.current = nowActive;
+  }, [activeRuns.data, sessionId, markUnseenFinished]);
+
+  useEffect(() => {
+    document.title = unseenFinished.size > 0 ? `• ${BASE_TITLE}` : BASE_TITLE;
+  }, [unseenFinished]);
+}

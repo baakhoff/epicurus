@@ -15,6 +15,7 @@ import { Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import { useViewportMirror } from "@/lib/viewport";
+import { useAwayFinishedWatch } from "@/stores/chat";
 import { useConnection, useConnectionWatch } from "@/stores/connection";
 import { useDownloads } from "@/stores/downloads";
 import { usePrefs } from "@/stores/prefs";
@@ -199,6 +200,10 @@ export function Shell() {
     }, [queryClient]),
     onRecovered: useCallback(() => void queryClient.invalidateQueries(), [queryClient]),
   });
+  // "Finished while you were away" (#492): alive regardless of which screen is showing, so
+  // a turn finishing while the operator is elsewhere in the shell still marks the session by
+  // the time they return to chat.
+  useAwayFinishedWatch();
   // Review pages are aggregated into the top-level Suggestions inbox (#KB-refactor), so they
   // no longer get their own per-module rail entry.
   const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");

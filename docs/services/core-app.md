@@ -584,7 +584,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   **upload** upserts the entry, a **move** re-paths it, and a **delete** (#564) removes the entry
   and its subtree (`FileIndex.remove_subtree`) — so a change shows in search/listing at once, with
   the watcher as the backstop. Storage-module objects are merged in at request time, not stored
-  here (see [file space](../reference/files.md)).
+  here — a node reported by both sources collapses to one row, the file-space entry winning so its
+  movability stays authoritative (#560; see [file space](../reference/files.md)).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):

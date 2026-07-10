@@ -130,6 +130,22 @@ def _reject_pathological(path: str) -> None:
             raise HTTPException(status_code=400, detail="name segment exceeds 255 bytes")
 
 
+def _dedupe_key(kind: str, path: str) -> tuple[str, str]:
+    """The identity of one browser row across the two listing sources (#560).
+
+    ``files_page`` merges the file-space tree with the object store; a folder (or file) present
+    in both would otherwise render twice. :func:`normalize_rel` is the single string that
+    addresses a node across the backend, the index, and the object store (see
+    ``epicurus_core.files``), so the same node from either source collapses to one key. A store
+    never emits a ``..`` path, but fall back to the raw path rather than 500 the listing if one
+    ever did.
+    """
+    try:
+        return (kind, normalize_rel(path))
+    except ValueError:
+        return (kind, path)
+
+
 def _disposition(name: str) -> str:
     """A ``Content-Disposition`` header that downloads as *name* (header-safe)."""
     safe = name.replace('"', "").replace("\\", "").replace("\r", "").replace("\n", "")
@@ -471,46 +487,64 @@ def create_files_router(
         tenant = _tenant(tenant_id)
         query = q.strip()
         items: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(
+            *, path: str, name: str, kind: str, size: int, movable: bool, deletable: bool
+        ) -> None:
+            # Dedupe the two sources by (kind, normalized path): a folder or file present in
+            # both the file space and the object store collapses to one row (#560). The file
+            # space is enumerated first, so it wins a collision — its ``movable`` reflects the
+            # #479 ownership rule, where an object duplicate would wrongly force ``movable=True``.
+            key = _dedupe_key(kind, path)
+            if key in seen:
+                return
+            seen.add(key)
+            items.append(
+                _browser_item(
+                    path=path,
+                    name=name,
+                    kind=kind,
+                    size=size,
+                    movable=movable,
+                    deletable=deletable,
+                )
+            )
+
         if query:
             fs_hits = await index.search(tenant=tenant, query=query, limit=200) if index else []
             for e in fs_hits:
-                items.append(
-                    _browser_item(
-                        path=e.path,
-                        name=e.name,
-                        kind=e.kind,
-                        size=e.size,
-                        movable=_fs_movable(e.path, e.kind),
-                        deletable=_deletable(e.path),
-                    )
+                _add(
+                    path=e.path,
+                    name=e.name,
+                    kind=e.kind,
+                    size=e.size,
+                    movable=_fs_movable(e.path, e.kind),
+                    deletable=_deletable(e.path),
                 )
             title = f"Files — {query}"
         else:
             rel = _safe(path)
             for fe in await store.list_dir(tenant=tenant, path=rel):
-                items.append(
-                    _browser_item(
-                        path=fe.path,
-                        name=fe.name,
-                        kind=fe.kind,
-                        size=fe.size,
-                        movable=_fs_movable(fe.path, fe.kind),
-                        deletable=_deletable(fe.path),
-                    )
+                _add(
+                    path=fe.path,
+                    name=fe.name,
+                    kind=fe.kind,
+                    size=fe.size,
+                    movable=_fs_movable(fe.path, fe.kind),
+                    deletable=_deletable(fe.path),
                 )
             title = f"Files — {path}" if path else "Files"
 
         if objects is not None:
             for oe in await objects.list(tenant=tenant, path=path, query=query):
-                items.append(
-                    _browser_item(
-                        path=oe.path,
-                        name=oe.name,
-                        kind=oe.kind,
-                        size=oe.size,
-                        movable=True,
-                        deletable=_deletable(oe.path),
-                    )
+                _add(
+                    path=oe.path,
+                    name=oe.name,
+                    kind=oe.kind,
+                    size=oe.size,
+                    movable=True,
+                    deletable=_deletable(oe.path),
                 )
 
         # Dirs before files, then by name — the merged view reads like one tree.

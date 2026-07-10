@@ -765,7 +765,16 @@ images to GHCR.
   pathological name (control char / NUL, or a segment over 255 bytes) is clamped to a clean **400**
   instead of a store-level 500. A scheme-less `module_urls` entry (its host parsed as the URL
   scheme, leaving `hostname` None) now recovers its host so the folder stays locked, warning rather
-  than silently unlocking. `core-app` 0.66.0→0.66.1, `web` 0.88.0→0.88.1.
+  than silently unlocking. `core-app` 0.66.1→0.66.2, `web` 0.88.0→0.88.1.
+
+- **Files: a folder present in both the file space and the object store renders once** (#560) — the
+  Files page (`GET /platform/v1/files/page`) merges two listing sources — the core file-space tree
+  (`store.list_dir` / `index.search`) and the storage module's objects (`objects.list`) — and
+  appended them with no dedupe, so a folder (or file) in both trees produced two identical rows. The
+  merged listing is now deduped by `(kind, normalized path)`; the file-space source is enumerated
+  first and wins a collision, so its movability (#479) stays authoritative rather than an object
+  duplicate wrongly forcing `movable=True`. Browse and search both dedupe; sort order is unchanged.
+  `core-app` 0.66.0→0.66.1.
 
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
@@ -993,6 +1002,16 @@ images to GHCR.
   (`core-app` → 0.5.1.)
 
 ### Dependencies
+
+- **Pin the lint/type gates exact — `mypy==2.1.0`, `ruff==0.15.20`** (#514) — the root dev
+  group pinned `mypy>=1.13` / `ruff>=0.15.20` with no ceiling, so any `uv lock` re-resolve
+  floated the tool upward and the bump rode invisibly inside an unrelated PR's lockfile — a
+  green-local/red-CI split (mypy 1.13→2.1.0 flags `session.scalar(select(...))` returned
+  directly as `no-any-return`; 1.13 accepts it). Both gates are now pinned to the exact
+  version CI already resolves, and the `.pre-commit-config.yaml` ruff hook is bumped to the
+  matching `v0.15.20` (from `v0.8.4`, id modernized to `ruff-check`) so `pre-commit` and
+  `uv run ruff` are the same binary. Bump them deliberately in their own chore PR. No
+  runtime change — dev tooling only.
 
 - **fastapi 0.137.1, mcp 1.28.0, litellm 1.89.1** (supersedes #203) — FastAPI 0.137 makes
   `include_router` attach a lazy `_IncludedRouter` to `app.routes` instead of eagerly

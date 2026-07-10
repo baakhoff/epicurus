@@ -862,19 +862,19 @@ dev = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "cookiecutter", specifier = ">=2.5" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mypy", specifier = ">=1.13" },
+    { name = "mypy", specifier = "==2.1.0" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-timeout", specifier = ">=2.3" },
-    { name = "ruff", specifier = ">=0.15.20" },
+    { name = "ruff", specifier = "==0.15.20" },
     { name = "testcontainers", extras = ["minio"], specifier = ">=4.14.2" },
     { name = "types-python-dateutil", specifier = ">=2.9.0.20260518" },
 ]
 
 [[package]]
 name = "epicurus-calendar"
-version = "0.15.0"
+version = "0.16.0"
 source = { editable = "services/calendar" }
 dependencies = [
     { name = "asyncpg" },
@@ -947,7 +947,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.66.1"
+version = "0.66.2"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },
@@ -1026,7 +1026,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-mail"
-version = "0.9.0"
+version = "0.9.1"
 source = { editable = "services/mail" }
 dependencies = [
     { name = "epicurus-core" },
@@ -1116,7 +1116,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-tasks"
-version = "0.15.1"
+version = "0.15.2"
 source = { editable = "services/tasks" }
 dependencies = [
     { name = "asyncpg" },

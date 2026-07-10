@@ -225,6 +225,61 @@ async def test_move_file_space_updates_index(tmp_path: Path, fake: FakeObjects) 
     assert await index.get(tenant=TENANT, path="knowledge/readme2.md") is not None
 
 
+async def test_move_operator_file_into_module_dir_is_refused(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # An operator file dropped onto a module folder is refused: writing behind the module's back
+    # would desync its index — the same rule the upload 400 already enforces (#479/#554).
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.post(MOVE, json={"src": "top.txt", "dst": "knowledge/top.txt"})
+    assert resp.status_code == 400
+    assert "knowledge" in resp.json()["detail"]
+    # The guard runs before the seam: the source is untouched and nothing landed in the module.
+    assert await store.stat(tenant=TENANT, path="top.txt") is not None
+    assert await store.stat(tenant=TENANT, path="knowledge/top.txt") is None
+
+
+async def test_move_module_self_move_same_top_still_allowed(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # The src-top == dst-top carve-out: a module moving its own file within its subtree is a
+    # legitimate operation the module-facing files_move relies on — it must not be blocked.
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.post(
+            MOVE, json={"src": "knowledge/readme.md", "dst": "knowledge/moved.md"}
+        )
+    assert resp.status_code == 200
+    assert await store.stat(tenant=TENANT, path="knowledge/moved.md") is not None
+
+
+async def test_rename_smuggling_a_path_into_a_module_is_refused(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # Rename is a same-parent move; a "new name" carrying a leading path relocates the file. If
+    # the smuggled top is a module, the move guard is the server backstop to the web field (#554).
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.post(MOVE, json={"src": "top.txt", "dst": "notes/top.txt"})
+    assert resp.status_code == 400
+    assert "notes" in resp.json()["detail"]
+    assert await store.stat(tenant=TENANT, path="top.txt") is not None
+
+
+async def test_move_pathological_name_is_a_clean_400(tmp_path: Path, fake: FakeObjects) -> None:
+    # A control char / NUL or an over-long segment would surface as an OSError 500 from the store;
+    # the shared sanitizer turns each into a clean 400 at the door (#554).
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        control = await client.post(MOVE, json={"src": "top.txt", "dst": "bad\tname.txt"})
+        nul = await client.post(MOVE, json={"src": "top.txt", "dst": "bad\x00name.txt"})
+        too_long = await client.post(MOVE, json={"src": "top.txt", "dst": "z" * 300 + ".txt"})
+    assert control.status_code == 400
+    assert nul.status_code == 400
+    assert too_long.status_code == 400
+
+
 async def test_upload_is_indexed_and_listed_immediately(tmp_path: Path, fake: FakeObjects) -> None:
     client, index, _ = await _make_client(tmp_path, objects=fake)
     async with client:
@@ -249,6 +304,52 @@ async def test_search_marks_module_files_read_only(tmp_path: Path, fake: FakeObj
     items = {it["id"]: it for it in page["items"]}
     # A module-owned file surfaces in search but stays read-only (#479).
     assert items["knowledge/readme.md"]["movable"] is False
+
+
+# ── Dedupe of the two-source merge (#560) ────────────────────────────────────────
+
+
+async def test_page_dedupes_colliding_folder(tmp_path: Path, fake: FakeObjects) -> None:
+    # The object store also reports the file space's ``knowledge`` folder at root.
+    fake._tree["knowledge"] = ("dir", b"")
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        root = (await client.get(PAGE)).json()
+        into = (await client.get(PAGE, params={"path": "knowledge"})).json()
+    ids = [it["id"] for it in root["items"]]
+    # The colliding folder renders once; the merged root is otherwise intact and stably sorted.
+    assert ids.count("knowledge") == 1
+    assert [it["title"] for it in root["items"]] == ["knowledge", "notes", "uploads", "top.txt"]
+    # Navigating into the collapsed folder still shows the file-space children (unchanged).
+    assert {it["id"] for it in into["items"]} == {"knowledge/readme.md"}
+
+
+async def test_page_dedupes_colliding_file_file_space_wins(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # Both stores report the same locked file. Un-deduped it renders twice, and the object copy
+    # (hard-coded ``movable=True``) would override the file space's authoritative read-only (#479).
+    fake._tree["knowledge/readme.md"] = ("file", b"obj-copy")
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        into = (await client.get(PAGE, params={"path": "knowledge"})).json()
+        search = (await client.get(PAGE, params={"q": "readme"})).json()
+    into_rows = [it for it in into["items"] if it["id"] == "knowledge/readme.md"]
+    search_rows = [it for it in search["items"] if it["id"] == "knowledge/readme.md"]
+    # Browse and search both collapse to one row; file-space precedence keeps it read-only.
+    assert len(into_rows) == 1 and into_rows[0]["movable"] is False
+    assert len(search_rows) == 1 and search_rows[0]["movable"] is False
+
+
+async def test_page_dedupes_unlocked_file_stays_movable(tmp_path: Path, fake: FakeObjects) -> None:
+    # A collision outside any locked prefix: both sources say movable, so precedence does not
+    # change the flag — but the row must still collapse to one (the general dedupe case).
+    fake._tree["top.txt"] = ("file", b"obj-copy")
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        root = (await client.get(PAGE)).json()
+    rows = [it for it in root["items"] if it["id"] == "top.txt"]
+    assert len(rows) == 1 and rows[0]["movable"] is True
 
 
 async def test_degrades_without_object_backend(tmp_path: Path) -> None:

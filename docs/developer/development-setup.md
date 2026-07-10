@@ -58,4 +58,8 @@ epicurus/
 
 It is a single **uv workspace**: one `uv.lock` pins dependencies for every
 package. Shared tool configuration (ruff, mypy, pytest) lives in the root
-`pyproject.toml`.
+`pyproject.toml`. The lint and type gates (`ruff`, `mypy`) are pinned to an
+**exact** version there so a local `uv run` matches CI byte-for-byte — bump them
+deliberately in a dedicated chore PR rather than letting a `uv lock` re-resolve
+float a new tool version in silently (a floor like `mypy>=1.13` lets a newer
+mypy ride into an unrelated PR's lockfile and turn its gate red only in CI).

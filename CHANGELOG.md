@@ -982,6 +982,16 @@ images to GHCR.
 
 ### Dependencies
 
+- **Pin the lint/type gates exact — `mypy==2.1.0`, `ruff==0.15.20`** (#514) — the root dev
+  group pinned `mypy>=1.13` / `ruff>=0.15.20` with no ceiling, so any `uv lock` re-resolve
+  floated the tool upward and the bump rode invisibly inside an unrelated PR's lockfile — a
+  green-local/red-CI split (mypy 1.13→2.1.0 flags `session.scalar(select(...))` returned
+  directly as `no-any-return`; 1.13 accepts it). Both gates are now pinned to the exact
+  version CI already resolves, and the `.pre-commit-config.yaml` ruff hook is bumped to the
+  matching `v0.15.20` (from `v0.8.4`, id modernized to `ruff-check`) so `pre-commit` and
+  `uv run ruff` are the same binary. Bump them deliberately in their own chore PR. No
+  runtime change — dev tooling only.
+
 - **fastapi 0.137.1, mcp 1.28.0, litellm 1.89.1** (supersedes #203) — FastAPI 0.137 makes
   `include_router` attach a lazy `_IncludedRouter` to `app.routes` instead of eagerly
   flattening the included sub-routes, so the long-standing `[r.path for r in app.routes]`

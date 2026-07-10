@@ -24,7 +24,7 @@ from epicurus_mail.provider import ComposedMessage
 from epicurus_mail.service import (
     _SCOPE_HINT_SEND,
     MODULE_NAME,
-    _describe_403,
+    _describe_gmail_error,
     build_module,
 )
 from epicurus_mail.settings import MailSettings
@@ -168,16 +168,18 @@ def create_app() -> FastAPI:
         exact :class:`ComposedMessage` that was shown, so the bytes sent are byte-identical to the
         reviewed draft. Publishes ``mail.sent`` (best-effort) and returns the provider message id.
 
-        A 403 from the provider maps to the same reconnect / rate-limit hint the tools surface
-        (#513/#538), raised as an HTTP 403 so the core can relay it to the turn.
+        A 403 (missing scope or ``usageLimits`` rate limit) or a 429 (throttle) from the provider
+        maps to the same reconnect / wait-and-retry hint the tools surface (#513/#538/#557),
+        re-raised under Gmail's own status code so the core can relay it to the turn.
         """
         try:
             sent_id = await provider.transmit(message)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 403:
-                raise HTTPException(
-                    status_code=403, detail=_describe_403(exc, _SCOPE_HINT_SEND)
-                ) from exc
+            hint = _describe_gmail_error(exc, _SCOPE_HINT_SEND)
+            if hint is not None:
+                # Preserve Gmail's status (403 scope/usageLimits, or 429 throttle) so the core
+                # relays the right code and the hint, not a raw 500 traceback.
+                raise HTTPException(status_code=exc.response.status_code, detail=hint) from exc
             raise
         # Fulfil the declared ``mail.sent`` contract at the one point a message is actually sent.
         # Tenant-scoped (constraint #1); best-effort — the mail already went out, so a bus hiccup

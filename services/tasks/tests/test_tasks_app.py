@@ -36,14 +36,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(the_app, raise_server_exceptions=False)
 
 
-@pytest.fixture()
-def booted_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """A TestClient whose lifespan actually runs, so the local store is created.
+def _build_booted_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Construct (but don't enter) a lifespan-running TestClient over the tasks app.
 
-    The page endpoint queries the DB, which the lifespan's ``store.init()`` builds —
-    so unlike ``client`` we enter the app's lifespan. NATS isn't available in unit
-    tests, so the EventBus connect/close are stubbed to no-ops (the existing tests
-    skip lifespan for exactly this reason).
+    Split out from the ``booted_client`` fixture so a test that must patch *before*
+    ``create_app`` runs — e.g. stubbing ``PlatformClient.get_timezone`` (captured by the
+    operator clock at build time, #555) or ``operator_clock`` itself — can apply its
+    patches, then boot. NATS isn't available in unit tests, so the EventBus connect/close
+    are stubbed to no-ops.
     """
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("NATS_URL", "nats://localhost:4222")
@@ -56,7 +56,17 @@ def booted_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 
     from epicurus_tasks.app import create_app
 
-    with TestClient(create_app(), raise_server_exceptions=False) as the_client:
+    return TestClient(create_app(), raise_server_exceptions=False)
+
+
+@pytest.fixture()
+def booted_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """A TestClient whose lifespan actually runs, so the local store is created.
+
+    The page endpoint queries the DB, which the lifespan's ``store.init()`` builds —
+    so unlike ``client`` we enter the app's lifespan.
+    """
+    with _build_booted_client(monkeypatch) as the_client:
         yield the_client
 
 
@@ -83,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.15.1"
+    assert data["version"] == "0.15.2"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",
@@ -184,3 +194,118 @@ def test_page_board_forwards_and_clamps_query_params(
     junk = booted_client.get("/pages/board?group=nonsense&show=bogus").json()
     junk_controls = {c["id"]: c["value"] for c in junk["controls"]}
     assert junk_controls == {"group": "due", "show": "open"}  # clamped to defaults
+
+
+# ── board Today/Overdue grouping uses the operator's day, not UTC's (#555) ──────────
+#
+# The board's `today` must come from the same operator-timezone clock the router's overdue
+# sweep runs on, so the display grouping and the sweep never disagree across the UTC/operator
+# midnight (a task the sweep counts as due today must not land in the board's Overdue column).
+# `build_tasks_board` itself is already unit-tested deterministically given `today`
+# (test_board.py); these assert only that `page()` derives `today` from the operator clock.
+
+
+def _capture_board_today(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Spy on ``build_tasks_board`` so a page render exposes the ``today`` it grouped by.
+
+    Patched in the app's namespace (where ``page()`` looks it up) before the client boots;
+    returns a dict the caller reads ``["today"]`` from after the request. The real board
+    payload is still built and returned, so the endpoint behaves normally.
+    """
+    import epicurus_tasks.app as app_module
+    from epicurus_tasks.service import build_tasks_board
+
+    captured: dict[str, str] = {}
+
+    def _spy(tasks: object, **kwargs: object) -> object:
+        captured["today"] = str(kwargs["today"])
+        return build_tasks_board(tasks, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(app_module, "build_tasks_board", _spy)
+    return captured
+
+
+def test_board_page_groups_by_operator_timezone_not_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The board groups by the operator's day: `today` resolves in their zone (#555).
+
+    Straddle proof: a far-ahead zone (Kiritimati, UTC+14) is a day ahead of UTC for much of
+    the UTC day. Comparing against ``datetime.now(zone)`` computed here — not a hardcoded UTC
+    date — keeps this deterministic without freezing the wall clock, the same technique the
+    operator-clock unit test uses. Under the pre-#555 ``datetime.now(UTC)`` the board grouped
+    by the UTC day instead.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    zone = "Pacific/Kiritimati"
+    # get_timezone is captured by operator_clock at create_app time, so it must be patched
+    # before the client boots (a post-boot patch wouldn't reach the already-built clock).
+    monkeypatch.setattr(PlatformClient, "get_timezone", AsyncMock(return_value=zone))
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    captured = _capture_board_today(monkeypatch)
+
+    with _build_booted_client(monkeypatch) as client:
+        resp = client.get("/pages/board")
+
+    assert resp.status_code == 200
+    assert captured["today"] == datetime.now(ZoneInfo(zone)).date().isoformat()
+
+
+def test_board_page_uses_the_operator_clock_output_over_wall_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic regression guard: `page()` groups by the operator clock's output, not
+    ``datetime.now(UTC)``. Pinning the clock to a fixed sentinel day (far from today) makes
+    the two unmistakably different — the pre-#555 code grouped by the real UTC day."""
+    import epicurus_tasks.app as app_module
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    sentinel = "2020-06-15"
+
+    def _fixed_clock(_source: object) -> object:
+        async def _today() -> str:
+            return sentinel
+
+        return _today
+
+    monkeypatch.setattr(app_module, "operator_clock", _fixed_clock)
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    captured = _capture_board_today(monkeypatch)
+
+    with _build_booted_client(monkeypatch) as client:
+        resp = client.get("/pages/board")
+
+    assert resp.status_code == 200
+    assert captured["today"] == sentinel
+
+
+def test_board_page_falls_back_to_utc_when_timezone_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Core unreachable → the board's `today` degrades to UTC, matching the sweep's own
+    fallback (both go through ``operator_clock`` → ``_resolve_timezone``), so the display and
+    the sweep still agree on the day (#555)."""
+    from datetime import UTC, datetime
+
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    async def _boom(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("core down")
+
+    monkeypatch.setattr(PlatformClient, "get_timezone", _boom)
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    captured = _capture_board_today(monkeypatch)
+
+    with _build_booted_client(monkeypatch) as client:
+        resp = client.get("/pages/board")
+
+    assert resp.status_code == 200
+    assert captured["today"] == datetime.now(UTC).date().isoformat()

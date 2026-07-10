@@ -120,8 +120,14 @@ class CalendarProvider(ABC):
         series carrying the edit; ``"all"`` (#432) edits the whole series in place.
         *recurrence* changes the series' rule and is only meaningful with
         ``edit_scope="all"`` or ``"following"`` (omitted, it continues the original pattern
-        for the new tail series); *recurrence_timezone* (#446) re-anchors its wall-clock
-        expansion zone alongside it (see :meth:`create_event`).
+        for the new tail series); an empty string ``""`` **clears** the rule (#532) — with
+        ``"all"`` the master's rule is dropped so the series collapses to a one-off event, with
+        ``"following"`` the series ends at this occurrence (earlier occurrences keep the rule,
+        this one becomes a standalone event). ``None`` leaves the rule unchanged; the three
+        states (unchanged / clear / set) are why the parameter is a sentinel string rather than
+        a plain optional. Clearing with ``"this"`` is rejected upstream (a lone occurrence has
+        no series rule of its own). *recurrence_timezone* (#446) re-anchors its wall-clock
+        expansion zone alongside a set rule (see :meth:`create_event`).
         """
 
     @abstractmethod

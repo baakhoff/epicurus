@@ -58,3 +58,13 @@ def test_is_hosted_rejects_local_ids() -> None:
     assert not registry.is_hosted("local/llama3.2")
     assert not registry.is_hosted("hf.co/org/model:tag")
     assert not registry.is_hosted("qwen2.5:0.5b")
+
+
+def test_is_hosted_rejects_provider_only_id() -> None:
+    # A provider prefix with no model part names a hosted *provider* but not a hosted *model*; it
+    # used to be True and let a junk "claude/" row into the saved-models table (#537).
+    assert not registry.is_hosted("claude/")
+    assert not registry.is_hosted("gpt/")
+    assert not registry.is_hosted("claude/   ")  # a whitespace-only model part is empty too
+    # A real model part after the prefix is still hosted.
+    assert registry.is_hosted("claude/opus-4")

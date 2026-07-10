@@ -92,6 +92,17 @@ Modules-page actions are reframed from one-tap danger sends to **compose-for-rev
 is really sent. Where the pending draft lives (core-held, not a Gmail draft), why edit-before-send
 is deferred (#542), and the Decline-reason are all recorded in ADR-0085.
 
+**v0.9.1** (#557) widens the rate-limit handling from v0.8.2. The 403 inspection now recognizes
+**both** error shapes: the legacy Gmail `error.errors[].reason` array *and* the modern AIP-193
+shape (`error.status == "RESOURCE_EXHAUSTED"` / `error.details[].reason == "RATE_LIMIT_EXCEEDED"`),
+so a throttled 403 keeps its "wait and try again" hint even if Gmail migrates shapes. An HTTP
+**429** (Too Many Requests) — which none of the hint paths caught before — now returns the same
+wait-and-retry hint on **every** Gmail-touching path (`mail_search`, `mail_read`, `mail_reply`,
+`mail_mark_read`/`unread`, and the `/send` transmit), honoring `Retry-After` when present, instead
+of a raw traceback (`mail_search`/`mail_read` previously had no HTTP-error handling at all). The
+reason-membership test is also guarded so a non-string `reason` (a nested object in an otherwise
+well-formed body) falls back to the scope hint rather than raising.
+
 ---
 
 ## Contract
@@ -116,7 +127,11 @@ hint on a 403 (it never sends, so it can never be a send-scope error). The **sen
 (`gmail.send`) is exercised only by `POST /send` (below), which returns the equivalent hint on a
 403. A 403 caused by Gmail rate limiting (`usageLimits`, not a scope problem) returns a distinct
 "wait and try again" hint instead (#538) — the error body's reason decides which hint applies, so
-throttling is never misreported as a missing scope.
+throttling is never misreported as a missing scope. The rate-limit reason is read in **both** the
+legacy (`error.errors[].reason`) and modern AIP-193 (`error.status`/`error.details[].reason`)
+shapes, and an HTTP **429** on any of these paths — including `mail_search`/`mail_read`, which
+otherwise had no HTTP-error handling — returns the same wait-and-retry hint (honoring `Retry-After`)
+rather than a raw exception (#557).
 
 `mail_reply` composes the reply body **clean** — it is never auto-quoted with the original
 message's text — and addresses the original's `Reply-To` header when present, falling back to its

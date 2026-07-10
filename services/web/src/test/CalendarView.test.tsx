@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -88,6 +88,35 @@ describe("CalendarView", () => {
     fireEvent.click(await screen.findByText("Standup"));
     expect(await screen.findByText("Daily sync")).toBeInTheDocument();
     expect(screen.getByText("Room 4")).toBeInTheDocument();
+  });
+
+  it("renders a failed event action's error below the full actions row, not between the buttons (#472)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          ...sample.events[0],
+          actions: [
+            { tool: "calendar_rsvp_event", label: "Accept", args: { event_id: "e1" } },
+            { tool: "calendar_decline_event", label: "Decline", args: { event_id: "e1" } },
+          ],
+        },
+      ],
+    });
+    mockInvoke.mockRejectedValue(new Error("NetworkError when attempting to fetch resource"));
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const row = acceptBtn.closest("div")!;
+    fireEvent.click(acceptBtn);
+
+    const error = await screen.findByText("NetworkError when attempting to fetch resource");
+    // The row still holds only its buttons — the error is not interposed between them.
+    expect(within(row).getByRole("button", { name: "Decline" })).toBeInTheDocument();
+    expect(within(row).queryByText(error.textContent!)).toBeNull();
+    // It renders as the row's next sibling, i.e. below the full row.
+    expect(row.nextElementSibling).toBe(error);
   });
 
   it("shows a recurring event's repeat rule and guest list in its detail (#432)", async () => {
@@ -270,6 +299,34 @@ describe("CalendarView", () => {
     const button = await screen.findByRole("button", { name: /new event/i });
     expect(button.className).toContain("text-xs");
     expect(button.className).not.toContain("text-sm");
+  });
+
+  // Narrow-viewport icon-only (#562): the toolbar action opts into ActionControl's
+  // responsive shrink, which keeps the accessible name on aria-label + a tooltip
+  // regardless of which of the two (CSS-driven) label spans is currently visible —
+  // jsdom doesn't evaluate the `sm:` breakpoint, so this asserts the DOM contract
+  // rather than the visual state (checked live in a real browser separately).
+  it("keeps the New event action's accessible name and label available at every width (#562)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      actions: [{ tool: "calendar_create_event", label: "New event", icon: "plus" }],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    const button = await screen.findByRole("button", { name: "New event" });
+    expect(button).toHaveAttribute("aria-label", "New event");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("New event");
+    // The label text itself still renders (hidden below `sm` by CSS, not removed from the DOM).
+    expect(button).toHaveTextContent("New event");
+  });
+
+  it("renders the month label in both its full and narrow-viewport short form (#562)", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    await screen.findByText("Standup");
+    expect(screen.getByText("June 2026")).toBeInTheDocument(); // full — shown at/above `sm`
+    expect(screen.getByText("Jun 2026")).toBeInTheDocument(); // short — shown below `sm`
   });
 
   it("lists every enabled calendar in the menu, not only those with in-window events (#431)", async () => {

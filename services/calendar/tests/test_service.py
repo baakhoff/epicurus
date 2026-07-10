@@ -722,7 +722,7 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.15.0"
+    assert manifest.version == "0.16.0"
 
 
 async def test_manifest_declares_calendar_oauth_scope(
@@ -1246,12 +1246,12 @@ async def test_calendar_update_event_tool_unknown_raises(
         await module.mcp.call_tool("calendar_update_event", {"event_id": "nope", "title": "x"})
 
 
-async def test_calendar_update_event_tool_blank_recurrence_leaves_rule_unchanged(
+async def test_calendar_update_event_tool_blank_recurrence_with_all_clears_the_rule(
     local_provider: LocalCalendarProvider,
 ) -> None:
-    # The shared board form sends recurrence="" when its repeat picker is blanked
-    # (web 0.76.1 clear-fields). Calendar has no ""-means-clear contract yet — Google
-    # would receive a bare "RRULE:" (API 400) — so a blank must mean "leave unchanged".
+    # Blanking the shared repeat picker sends recurrence="" (#532, ADR-0086). With
+    # edit_scope='all' that CLEARS the master's rule, collapsing the series to a one-off event —
+    # the real contract that replaced the #528 "leave unchanged" containment.
     module = build_module(local_provider, tenant_id="t1")
     _content, created_structured = await module.mcp.call_tool(
         "calendar_create_event",
@@ -1268,10 +1268,78 @@ async def test_calendar_update_event_tool_blank_recurrence_leaves_rule_unchanged
         {"event_id": series_id, "title": "Standup (moved)", "recurrence": "", "edit_scope": "all"},
     )
     result = _extract(structured)
-    assert result["title"] == "Standup (moved)"
+    assert result["title"] == "Standup (moved)"  # the other edit still applied
     stored = await local_provider.get_event(tenant_id="t1", event_id=series_id)
     assert stored is not None
-    assert stored.recurrence == "FREQ=WEEKLY;COUNT=4"  # blank did not clear the rule
+    assert stored.recurrence is None  # the rule is cleared — a one-off event now
+
+
+async def test_calendar_update_event_tool_blank_recurrence_on_this_is_rejected(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # Clearing is a series-level change: on a single occurrence (edit_scope='this') it has no
+    # meaning, so the tool rejects it and points at 'all' / 'following' (#532). The rule is
+    # untouched.
+    module = build_module(local_provider, tenant_id="t1")
+    start = _future_weekly_series_start()
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=30)).isoformat(),
+            "recurrence": "FREQ=WEEKLY;COUNT=4",
+        },
+    )
+    from epicurus_calendar.db import instance_id
+
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, start + timedelta(days=7))  # the 2nd occurrence
+    with pytest.raises(ToolError, match="whole series"):
+        await module.mcp.call_tool(
+            "calendar_update_event",
+            {"event_id": iid, "recurrence": "", "edit_scope": "this"},
+        )
+    stored = await local_provider.get_event(tenant_id="t1", event_id=series_id)
+    assert stored is not None
+    assert stored.recurrence == "FREQ=WEEKLY;COUNT=4"  # rule untouched by the rejected clear
+
+
+async def test_calendar_update_event_tool_blank_recurrence_following_ends_the_series(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # edit_scope='following' + clear ends the series at this occurrence (#532): earlier
+    # occurrences keep the rule, this one becomes a standalone one-off, and there is no tail
+    # series. A 4-occurrence weekly series cleared at the 3rd yields 2 recurring + 1 one-off = 3.
+    module = build_module(local_provider, tenant_id="t1")
+    start = _future_weekly_series_start()
+    _content, created_structured = await module.mcp.call_tool(
+        "calendar_create_event",
+        {
+            "title": "Standup",
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=30)).isoformat(),
+            "recurrence": "FREQ=WEEKLY;COUNT=4",  # +0, +7, +14, +21 days
+        },
+    )
+    from epicurus_calendar.db import instance_id
+
+    series_id = _extract(created_structured)["id"]
+    iid = instance_id(series_id, start + timedelta(days=14))  # the 3rd occurrence
+    _content, structured = await module.mcp.call_tool(
+        "calendar_update_event",
+        {"event_id": iid, "recurrence": "", "edit_scope": "following"},
+    )
+    tail = _extract(structured)
+    assert tail["id"] != series_id  # a genuinely new (one-off) event was split off
+    assert tail["recurrence"] is None  # …and it does not recur
+    assert tail["recurring_event_id"] is None
+
+    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    envelope = _parse_envelope(listed)
+    # 2 surviving recurring occurrences (weeks 1 & 2) + the split-off one-off (week 3) = 3;
+    # week 4 is gone because the recurrence ended at week 3.
+    assert len(envelope.entity_refs) == 3
 
 
 async def test_calendar_delete_event_tool_removes(local_provider: LocalCalendarProvider) -> None:

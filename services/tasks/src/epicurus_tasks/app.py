@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -79,12 +78,17 @@ def create_app() -> FastAPI:
         "google": GoogleTasksProvider(platform=platform, repeats=repeats)
     }
     # The recurrence clock reads the operator's timezone (ADR-0039), not UTC, so the overdue
-    # sweep and materialization treat "today" the way the operator does (#433, #535).
+    # sweep and materialization treat "today" the way the operator does (#433, #535). Held as a
+    # local so the board's Today/Overdue grouping (`page()` below) reads the *same* clock as the
+    # sweep — otherwise the display groups by the UTC day while the sweep uses the operator's, and
+    # the two disagree within one render across the UTC/operator midnight (a task the sweep counts
+    # as due today lands in the board's Overdue column, #555).
+    operator_today = operator_clock(platform.get_timezone)
     provider: TasksProvider = TasksRouter(
         local=local_provider,
         external=external,
         prefs=platform,
-        now=operator_clock(platform.get_timezone),
+        now=operator_today,
     )
 
     async def _list_categories() -> list[tuple[str, str]]:
@@ -176,7 +180,10 @@ def create_app() -> FastAPI:
             lists, default_list_id = await enabled_write_lists(external, prefs, tenant_id=tenant)
         except Exception as exc:
             log.warning("tasks board: list picker unavailable", error=str(exc))
-        today = datetime.now(UTC).date().isoformat()
+        # Group by the operator's day, not UTC's, using the *same* clock the sweep ran on this
+        # request (#555). Core unreachable → this degrades to UTC exactly like the sweep's own
+        # fallback (`operator_clock` → `_resolve_timezone`), so the two never disagree.
+        today = await operator_today()
         return build_tasks_board(
             tasks,
             today=today,

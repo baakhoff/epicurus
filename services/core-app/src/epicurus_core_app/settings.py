@@ -7,8 +7,10 @@ from urllib.parse import urlparse
 
 from pydantic import field_validator
 
-from epicurus_core import CoreSettings
+from epicurus_core import CoreSettings, get_logger
 from epicurus_core.files import FileStoreBackend
+
+log = get_logger(__name__)
 
 
 class CoreAppSettings(CoreSettings):
@@ -236,6 +238,23 @@ class CoreAppSettings(CoreSettings):
         hosts: list[str] = []
         for base in self.module_base_urls:
             host = urlparse(base).hostname
+            if host is None:
+                # A scheme-less entry ("knowledge:8080") parses its host *as* the URL scheme,
+                # leaving hostname None — which would silently unlock that module's folder
+                # (#554). Recover the host by re-parsing with a "//" authority prefix; warn
+                # either way so a malformed config is visible instead of silently degrading.
+                host = urlparse(f"//{base}").hostname
+                if host:
+                    log.warning(
+                        "module_urls entry has no scheme; assuming host to keep its folder locked",
+                        entry=base,
+                        host=host,
+                    )
+                else:
+                    log.warning(
+                        "module_urls entry has no resolvable host; its folder will not be locked",
+                        entry=base,
+                    )
             if host:
                 hosts.append(host)
         return hosts

@@ -21,6 +21,8 @@ from __future__ import annotations
 import time
 
 from sqlalchemy import BigInteger, String, delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -89,14 +91,23 @@ class SavedHostedModelStore:
             return list(rows.scalars())
 
     async def add(self, tenant: str, model: str) -> None:
-        """Save ``model`` for ``tenant`` (idempotent; a re-save bumps it to the front)."""
+        """Save ``model`` for ``tenant`` (idempotent; a re-save bumps it to the front).
+
+        A single atomic ``INSERT … ON CONFLICT DO UPDATE`` rather than get-then-insert, so two
+        concurrent first-saves of the same id can't race in the gap between the read and the
+        write to a composite-PK ``IntegrityError`` (a 500). Effectively unreachable for a single
+        operator, but the upsert keeps it correct under concurrency (#537). Dialect-specific
+        because ``ON CONFLICT`` is not in core SQLAlchemy — Postgres in production, SQLite in tests.
+        """
+        now_ms = _now_ms()
+        insert = pg_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
+        stmt = (
+            insert(_SavedModelRow)
+            .values(tenant=tenant, model=model, added_at=now_ms)
+            .on_conflict_do_update(index_elements=["tenant", "model"], set_={"added_at": now_ms})
+        )
         async with self._session() as session:
-            row = await session.get(_SavedModelRow, (tenant, model))
-            now_ms = _now_ms()
-            if row is None:
-                session.add(_SavedModelRow(tenant=tenant, model=model, added_at=now_ms))
-            else:
-                row.added_at = now_ms
+            await session.execute(stmt)
             await session.commit()
 
     async def remove(self, tenant: str, model: str) -> None:

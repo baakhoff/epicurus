@@ -106,6 +106,9 @@ function BoardCardView({
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
+  // One combined slot for whichever action last failed, rendered below the full
+  // actions row rather than per-action inline (#472) — cleared on the next success.
+  const [actionError, setActionError] = useState<string | null>(null);
   return (
     <div
       draggable={draggable}
@@ -144,10 +147,13 @@ function BoardCardView({
               pageId={pageId}
               action={action}
               compact
+              onSuccess={() => setActionError(null)}
+              onError={setActionError}
             />
           ))}
         </div>
       )}
+      {actionError && <p className="mt-1.5 text-[11px] text-danger">{actionError}</p>}
     </div>
   );
 }

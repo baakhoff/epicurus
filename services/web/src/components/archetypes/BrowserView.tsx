@@ -159,6 +159,9 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   // Inline rename (detail pane) and native drag-to-move (#391).
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  // A "/" or "\\" in a rename would relocate the file (server rejects a locked move, #554);
+  // catch it inline before it ever leaves the field.
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   // The entry awaiting a delete confirmation (#564); null when the Confirm is closed.
@@ -295,6 +298,12 @@ export function BrowserView({ source }: { source: BrowserSource }) {
     const name = renameValue.trim();
     if (!name || name === selected.title) {
       setRenaming(false);
+      return;
+    }
+    // A path separator would relocate the file rather than rename it — reject it here so a
+    // typo can't smuggle the file into another (possibly module-owned) folder (#554).
+    if (/[/\\]/.test(name)) {
+      setRenameError('A name can’t contain "/" or "\\".');
       return;
     }
     move.mutate({ from: selected.id, to: joinPath(parentPath(selected.id), name) });
@@ -661,22 +670,33 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                 <ChevronLeft size={15} /> back
               </button>
               {renaming ? (
-                <form onSubmit={submitRename} className="flex items-center gap-2">
-                  <TextInput
-                    autoFocus
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
-                    className="min-w-0 flex-1 rounded-(--radius-field) border border-edge bg-surface-1 px-2 py-1 font-serif text-xl text-ink focus:outline-none focus:ring-1 focus:ring-accent"
-                    aria-label="New name"
-                  />
-                  <Button type="submit" variant="primary" busy={move.isPending}>
-                    <Check size={14} /> Save
-                  </Button>
-                  <Button type="button" variant="ghost" onClick={() => setRenaming(false)}>
-                    Cancel
-                  </Button>
-                </form>
+                <>
+                  <form onSubmit={submitRename} className="flex items-center gap-2">
+                    <TextInput
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => {
+                        setRenameValue(e.target.value);
+                        setRenameError(null);
+                      }}
+                      onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
+                      aria-invalid={renameError ? true : undefined}
+                      className="min-w-0 flex-1 rounded-(--radius-field) border border-edge bg-surface-1 px-2 py-1 font-serif text-xl text-ink focus:outline-none focus:ring-1 focus:ring-accent"
+                      aria-label="New name"
+                    />
+                    <Button type="submit" variant="primary" busy={move.isPending}>
+                      <Check size={14} /> Save
+                    </Button>
+                    <Button type="button" variant="ghost" onClick={() => setRenaming(false)}>
+                      Cancel
+                    </Button>
+                  </form>
+                  {renameError && (
+                    <p role="alert" className="mt-1.5 text-sm text-danger">
+                      {renameError}
+                    </p>
+                  )}
+                </>
               ) : (
                 <div className="flex items-start gap-2">
                   <h2 className="min-w-0 flex-1 font-serif text-xl text-ink">{selected.title}</h2>
@@ -685,6 +705,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       <button
                         onClick={() => {
                           setRenameValue(selected.title);
+                          setRenameError(null);
                           setRenaming(true);
                         }}
                         className="shrink-0 rounded-(--radius-field) p-1.5 text-ink-faint hover:bg-surface-2 hover:text-ink"

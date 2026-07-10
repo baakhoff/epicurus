@@ -137,6 +137,36 @@ describe("BrowserView", () => {
     );
   });
 
+  it("rejects a rename containing a path separator with a field error (#554)", async () => {
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        items: [
+          { id: "report.pdf", title: "report.pdf", href: "/dl?path=report.pdf", movable: true },
+        ],
+      }),
+    });
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByText("report.pdf"));
+    fireEvent.click(await screen.findByRole("button", { name: /rename/i }));
+    // A "/" would relocate the file (into a possibly module-owned folder) instead of renaming it.
+    fireEvent.change(screen.getByLabelText("New name"), {
+      target: { value: "knowledge/report.pdf" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    // The relocating move never leaves the client; the field surfaces the refusal.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/can.t contain/i);
+    expect(source.move).not.toHaveBeenCalled();
+
+    // Editing the name clears the error (it isn't sticky).
+    fireEvent.change(screen.getByLabelText("New name"), {
+      target: { value: "report-final.pdf" },
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("offers no rename on a read-only (non-movable) entry", async () => {
     const source = fakeSource({
       fetchPage: vi.fn().mockResolvedValue({

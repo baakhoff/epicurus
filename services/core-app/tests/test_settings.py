@@ -38,3 +38,20 @@ def test_env_values_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.llm_temperature == 0.7
     assert settings.llm_top_p == 0.9
     assert settings.llm_num_ctx == 8192
+
+
+def test_module_hostnames_recovers_schemeless_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A scheme-less entry ("knowledge:8080") parses its host *as* the URL scheme, leaving
+    # urlparse().hostname None — which would silently unlock that module's folder. The host is
+    # recovered so the folder-lock (#479) survives a scheme-less config (#554).
+    monkeypatch.delenv("MODULE_URLS", raising=False)
+    settings = CoreAppSettings(service_name="test", module_urls="knowledge:8080, http://notes:8081")
+    assert settings.module_hostnames == ["knowledge", "notes"]
+
+
+def test_module_hostnames_skips_hostless_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A truly host-less entry can lock nothing and is skipped (with a logged warning), while the
+    # well-formed entries still lock their folders (#554).
+    monkeypatch.delenv("MODULE_URLS", raising=False)
+    settings = CoreAppSettings(service_name="test", module_urls="http://knowledge:8080, /")
+    assert settings.module_hostnames == ["knowledge"]

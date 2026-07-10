@@ -252,7 +252,13 @@ class GoogleCalendarProvider(CalendarProvider):
             body["description"] = description
         if location is not None:
             body["location"] = location
-        if recurrence is not None:
+        if recurrence == "":
+            # Clear the series' rule (#532, ADR-0086): Google represents "no recurrence" as an
+            # empty list, not a bare "RRULE:" (which 400s). Reached only via edit_scope='all'
+            # (target resolved to the master) or 'following' (handled above) — the tool rejects
+            # clearing a single occurrence, so a `recurrence: []` never lands on an instance id.
+            body["recurrence"] = []
+        elif recurrence:
             body["recurrence"] = [f"RRULE:{recurrence}"]
         if attendees is not None:
             body["attendees"] = [{"email": a.email} for a in attendees]

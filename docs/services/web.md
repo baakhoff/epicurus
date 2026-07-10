@@ -23,7 +23,7 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | **Suggestions** | **One inbox** for every module's agent-proposed changes (`GET /platform/v1/suggestions`), grouped by module — each group carries that module's review on/off toggle and its pending changes, each opening the shared review window. Replaces the per-module `review`-archetype nav entries (see **Reviewing suggested changes** below). |
 | **Models** | **Catalog browser** — search and filter the model catalog by **multi-select** tags (General, Code, Multilingual, **Vision**, **Tools**, **Thinking**, Embedding, Small, **Cloud-only** — combined with **AND**, so a model must carry every checked tag; "All" clears them; #389/#571), plus, once the system is known, a **fit-rating filter** (Fits / Tight / Too big — each model's size judged against your hardware; #388); pull with live progress (a freshly pulled model is given a **recommended per-model context window** sized to itself, not the global default; #386). Rows show a **real download size in GB** once the core's tags-page size fill has reached the family (#571) — the fit icon then judges the real size, with the params estimate as fallback. **Cloud-only rows** (no local weights; the family's only upstream tag is a cloud alias) get a `cloud-only` badge in place of Pull and no fit verdict, **by design** — the reason is on the badge's hover/touch title (#571). The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list: each row is a **tap-to-expand disclosure** ([per-model rows](#models--per-model-rows-328)) — collapsed it shows name + `loaded`/`default`/`hidden` badges + a **suitability status icon** (✓ fits / ⚠ tight / ✕ too big, full reason on hover; #327) + **icon-only capability badges** (tools/vision/…, label on hover; #384) + size; expanded it reveals the model's settings inline. **Global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence — with a **Re-embed everything** action (#332) that rebuilds every embedding-backed module's vectors after a model change (changing the model alone doesn't re-embed existing data); a server-wide **KV-cache type** with a **hardware-aware suggested** pick (q8_0 / q4_0 on tight VRAM, f16 when ample; #329); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
 | **Modules** | Every module's manifest-rendered config form, status, and actions. |
-| **Files** | The core-owned file space (ADR-0063) rendered through the `browser` archetype's `BrowserView` with a core-backed source (`/platform/v1/files/{page,search,read,download,move,upload}` + the `entry` delete): directory navigation with breadcrumbs + up-nav, name/path search, split-screen text reader, download, drag-to-move/rename for movable entries. **Upload (#479):** an **Upload** toolbar button puts files **into the directory being viewed** — on phones it opens a bottom-sheet **source menu** (Photo or video → gallery picker, `image/*,video/*` multiple; Camera → `capture="environment"`; Document → bare file input), on wide screens it goes straight to the file dialog, and the listing also accepts **external file drops** — dropped on empty listing space they upload into the current directory, and dropped onto a **folder row** or breadcrumb they upload **into that directory** (#556; the target highlights, and an in-flight internal move-drag is never mistaken for an upload). Multi-file picks upload **sequentially** with a per-file **pill strip** (spinner → done, auto-clearing; a failure pins the server's own 413/415 detail and raises a toast) and the listing refreshes per success, so new entries appear without a reload. Uploads are refused into module-owned folders (`knowledge/…`, `notes/…`) — those subtrees stay read-only. **Delete (#564):** a **trash** affordance on each deletable row (and in the file preview) removes a file, folder, or object behind the shared **Confirm** — a folder's prompt spells out that everything inside goes (the delete is recursive), and it is a hard delete (no trash/undo). It appears only where the #479 ownership rule allows (`deletable` on the item — broader than `movable`, since directories are deletable too); module-owned subtrees show no button and are refused server-side. |
+| **Files** | The core-owned file space (ADR-0063) rendered through the `browser` archetype's `BrowserView` with a core-backed source (`/platform/v1/files/{page,search,read,download,move,upload}` + the `entry` delete): directory navigation with breadcrumbs + up-nav, name/path search, split-screen text reader, download, drag-to-move/rename for movable entries. **Upload (#479):** an **Upload** toolbar button puts files **into the directory being viewed** — on phones it opens a bottom-sheet **source menu** (Photo or video → gallery picker, `image/*,video/*` multiple; Camera → `capture="environment"`; Document → bare file input), on wide screens it goes straight to the file dialog, and the listing also accepts **external file drops** — dropped on empty listing space they upload into the current directory, and dropped onto a **folder row** or breadcrumb they upload **into that directory** (#556; the target highlights, and an in-flight internal move-drag is never mistaken for an upload). Multi-file picks upload **sequentially** with a per-file **pill strip** (spinner → done, auto-clearing; a failure pins the server's own 413/415 detail and raises a toast) and the listing refreshes per success, so new entries appear without a reload. Uploads — and moves/renames (#554) — are refused into module-owned folders (`knowledge/…`, `notes/…`): those subtrees stay read-only, the server 400s a move whose destination is a module folder (surfaced as a toast), and a rename typed with a `/` or `\` is rejected inline in the field before it can relocate the file. **Delete (#564):** a **trash** affordance on each deletable row (and in the file preview) removes a file, folder, or object behind the shared **Confirm** — a folder's prompt spells out that everything inside goes (the delete is recursive), and it is a hard delete (no trash/undo). It appears only where the #479 ownership rule allows (`deletable` on the item — broader than `movable`, since directories are deletable too); module-owned subtrees show no button and are refused server-side. |
 | **Settings** | Theme (dark/light/system), **connected accounts** (OAuth client credentials + connect/disconnect), **chat bridges** (connect/disconnect external messaging channels like Discord — a write-only bot token, an on/off switch, and live per-bridge status; #369, ADR-0062 — the card itself only renders once the **messaging module is installed and enabled**, #430), **timezone**, **agent cycles**, platform info, and memory. The connected-account and bridge rows keep their credential/disconnect actions **icon-only** (label via the shared `Tooltip` + `aria-label`) so they never overflow a phone (#393); every field uses the one themed field style (#394). |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
 | **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`, `doc-reader`) programmatically (ADR-0018). |
@@ -137,17 +137,27 @@ from state the shell already holds —
 - **Pages** — `SURFACES` plus `modulePageNavs(modules)` minus `review` archetypes: exactly
   the rail's data, so new module pages appear with zero palette changes.
 - **Actions** — *New chat*, *Wake up / Pause — unload models* (mirrors the PowerOrb's
-  mutation on the `["power"]` cache), and *New note* when a notes editor page exists —
-  a `?new=1` deep-link the editor archetype applies once, exactly like pressing its
-  New-note button (the `?doc=` applied-guard pattern).
+  mutation on the `["power"]` cache — held back until the `["power"]` query itself has
+  resolved, so a very-fast open-and-click can't fire the wrong toggle), and *New note*
+  when a notes editor page exists — a `?new=1` deep-link the editor archetype applies
+  once, exactly like pressing its New-note button. Unlike the `?doc=` deep-link (a
+  bookmarkable permalink, left in the URL), `?new=1` is a one-shot trigger: the editor
+  strips it from the URL once applied (`setSearchParams(…, { replace: true })`, in an
+  effect — a router navigation is a side effect on an external system, not local state)
+  so a reload can't re-open the create flow, and resets its applied-latch when the param
+  disappears so a *later* `?new=1` on the same route (no remount — same-route palette
+  triggers don't remount the page) reopens it rather than silently no-op-ing (#558).
 
 Typing filters every section through a dependency-free greedy subsequence scorer
 (`src/lib/fuzzy.ts`: +2/char, +4 word-boundary start, +3 consecutive run, small
 leading-gap penalty; ties keep recency/nav order). The input is a `role="combobox"` with
 `aria-activedescendant` — focus never leaves it; arrows/Home/End move the active
-`role="option"`, Enter runs it, Escape closes (capture-phase, the Confirm stacking
-pattern) and `useModalFocus` restores focus. The dialog body mounts per open, so state
-resets structurally rather than via effects.
+`role="option"`, Enter runs it (guarded on `e.nativeEvent.isComposing`, so committing a
+CJK/IME composition doesn't also activate the highlighted entry, #558), Escape closes
+(capture-phase, the Confirm stacking pattern) and `useModalFocus` restores focus. The
+dialog body mounts per open, so state resets structurally rather than via effects. The
+`Ctrl/Cmd+K` hotkey itself excludes `Shift` and repeat keydowns, toggling on either
+modifier regardless of platform.
 
 ### Toasts & confirmations (#488)
 
@@ -282,7 +292,10 @@ each naming one of the module's MCP tools. The shell invokes the tool through th
 (`invokeModuleTool`, validated against the manifest) — a one-tap call, a `confirm` dialog,
 or a [SchemaForm](#) built from the tool's `input_schema` — then refetches the page. The
 tasks module's **Tasks** page is the first board; complete/edit/add all flow through this
-one path, so no module ever ships its own buttons or forms. A board may also declare **view
+one path, so no module ever ships its own buttons or forms. When one action in a row of
+several fails (a board card's Complete/Edit/Delete, or an event's Edit/Delete in its detail
+view), its message renders **once, below the full row** rather than splicing itself between
+the buttons (#472). A board may also declare **view
 controls** (ADR-0049) — labeled selectors (e.g. group-by, filters) the shell renders in the
 toolbar; changing one re-fetches the page with a `?<id>=<value>` query param, so grouping and
 filtering stay module-side while the shell stays a bounded renderer. Cards can also be
@@ -517,7 +530,18 @@ matching the text-field height) for forms; `Select`'s width is opt-in (`classNam
 keeps its `aria-label` and the wordy label moves into the tip; used by the turn-activity
 summary, the board's compact "+" Add, the Files up-nav, the connected-account row's
 credential / disconnect actions (#393), and the chat header's Conversations / New-chat
-buttons (#480). `Switch` is the single on/off control used
+buttons (#480). A page-level `ActionControl` (the non-compact toolbar Button, e.g. the
+calendar's "New event") can additionally opt into `iconOnlyNarrow` — the same
+icon+`aria-label`+`Tooltip` treatment, but CSS-driven (`hidden sm:inline` on the label) rather
+than module-declared, so it applies only below the `sm` breakpoint and desktop is unaffected
+(#562). Any archetype toolbar packing several full-size actions into one row can opt in; the
+calendar toolbar and the board's toolbar-level action both do, and both toolbars keep a
+`flex-wrap` fallback on the action row itself in case a still-wider set of controls (e.g. the
+Calendars menu with several accounts) doesn't fit even after shrinking — wrapping to a second
+line rather than clipping. The calendar toolbar's month/range label follows the same "carry
+both forms, let CSS choose" idea: it renders both a full form ("July 2026") and a short one
+("Jul 2026") as CSS-swapped spans, the short form showing below `sm`. `Switch` is the single
+on/off control used
 everywhere (per-tool toggles, module enable/disable, boolean schema fields). Its **track
 colour carries the state** — accent when on, muted when off — while the thumb stays a
 constant, bright, evenly-inset circle that simply slides between ends. Keep that convention

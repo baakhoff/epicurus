@@ -302,10 +302,12 @@ export function BrowserView({ source }: { source: BrowserSource }) {
 
   // Send picked/dropped files one at a time into the directory the user is looking at —
   // sequential, so each pill settles on its own and a failure names its own file (#479).
-  async function sendFiles(files: File[]) {
+  async function sendFiles(files: File[], dirOverride?: string) {
     const upload = source.upload;
     if (!upload || files.length === 0) return;
-    const dir = currentPath; // capture: navigation during the batch must not redirect it
+    // Default target is the directory being viewed; a drop onto a folder row overrides it to
+    // that folder (#556). Captured so navigation during the batch can't redirect the upload.
+    const dir = dirOverride ?? currentPath;
     const batch = files.map((file) => ({
       file,
       key: String(++uploadSeq.current),
@@ -371,22 +373,51 @@ export function BrowserView({ source }: { source: BrowserSource }) {
       }
     : {};
 
-  // Drop-target props shared by folder rows and breadcrumb segments.
-  function dropProps(targetDir: string) {
-    return {
-      onDragOver: (e: React.DragEvent) => {
-        if (!dragId || !canDropInto(dragId, targetDir)) return;
+  // Drop-target props shared by folder rows and breadcrumb segments. Handles BOTH an internal
+  // move-drag (dragId set → move the item here) and an external file drop (no dragId, the OS drag
+  // carries "Files" → upload into this directory, #556). The target directory rides on the
+  // element's `data-dir`, so this is one stable handler set — not a fresh closure built per row
+  // during render — which keeps the upload path (it bumps an upload-seq ref) off the render path.
+  // Without the external branch the target's unconditional preventDefault swallowed the drop and
+  // the pane-level upload handler then bailed on `defaultPrevented`: a dropped file just vanished.
+  const dropProps = {
+    onDragOver: (e: React.DragEvent) => {
+      const dir = e.currentTarget.getAttribute("data-dir") ?? "";
+      if (dragId) {
+        if (!canDropInto(dragId, dir)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move" as const;
-        setDragOverPath(targetDir);
-      },
-      onDragLeave: () => setDragOverPath((p) => (p === targetDir ? null : p)),
-      onDrop: (e: React.DragEvent) => {
+        setDragOverPath(dir);
+        return;
+      }
+      if (source.upload && e.dataTransfer.types.includes("Files")) {
         e.preventDefault();
-        dropInto(targetDir);
-      },
-    };
-  }
+        e.stopPropagation(); // claim it: the pane highlights the *current* dir, this target wins
+        e.dataTransfer.dropEffect = "copy" as const;
+        setFileDragOver(false);
+        setDragOverPath(dir);
+      }
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      const dir = e.currentTarget.getAttribute("data-dir") ?? "";
+      setDragOverPath((p) => (p === dir ? null : p));
+    },
+    onDrop: (e: React.DragEvent) => {
+      const dir = e.currentTarget.getAttribute("data-dir") ?? "";
+      if (dragId) {
+        e.preventDefault();
+        dropInto(dir);
+        return;
+      }
+      if (source.upload && e.dataTransfer.types.includes("Files")) {
+        e.preventDefault();
+        e.stopPropagation(); // took it — don't let the pane also upload into the current dir
+        setDragOverPath(null);
+        void sendFiles(Array.from(e.dataTransfer.files), dir);
+      }
+      // No dragId and no files: do nothing, and don't preventDefault — nothing is swallowed.
+    },
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -413,7 +444,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                   dragOverPath === "" && "bg-accent-dim text-accent-strong",
                 )}
                 aria-label="root"
-                {...dropProps("")}
+                data-dir=""
+                {...dropProps}
               >
                 /
               </button>
@@ -426,7 +458,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                       "max-w-[10rem] truncate rounded-(--radius-field) px-1 hover:text-ink",
                       dragOverPath === crumb.path && "bg-accent-dim text-accent-strong",
                     )}
-                    {...dropProps(crumb.path)}
+                    data-dir={crumb.path}
+                    {...dropProps}
                   >
                     {crumb.label}
                   </button>
@@ -550,7 +583,6 @@ export function BrowserView({ source }: { source: BrowserSource }) {
             <ul key={currentPath} className="flex flex-col p-2">
               {data.items.map((item) => {
                 const isFolder = !!item.nav_path;
-                const dropTarget = isFolder && !!dragId && dragId !== item.id;
                 return (
                   <li key={item.id} className="group flex items-center gap-1">
                     <button
@@ -564,7 +596,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                         setDragId(null);
                         setDragOverPath(null);
                       }}
-                      {...(isFolder ? dropProps(item.nav_path as string) : {})}
+                      {...(isFolder ? { "data-dir": item.nav_path as string, ...dropProps } : {})}
                       onClick={() => {
                         if (item.nav_path) {
                           const now = Date.now();
@@ -580,7 +612,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                         item.id === selectedId
                           ? "bg-accent-dim text-accent-strong"
                           : "text-ink hover:bg-surface-2",
-                        dropTarget &&
+                        isFolder &&
                           dragOverPath === item.nav_path &&
                           "bg-accent-dim ring-1 ring-accent ring-inset",
                         item.movable && "cursor-grab active:cursor-grabbing",

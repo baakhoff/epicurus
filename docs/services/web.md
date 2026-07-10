@@ -221,6 +221,53 @@ While disconnected, the **composer keeps the draft** (it already persists) and d
 Send — button and Enter alike — behind a hint, instead of letting the message fail into
 an error card for a reason the banner already explains.
 
+### PWA install surface: share target & app shortcuts (#493)
+
+The service worker is a **custom source file** (`src/sw.ts`), not vite-plugin-pwa's
+auto-generated one — `generateSW`'s declarative config can't express a custom `fetch`
+handler, and the share target below needs one (a service worker is the only way to read a
+POST body before the browser discards it navigating away). `vite.config.ts` sets
+`strategies: "injectManifest"` + `srcDir`/`filename` pointing at it; `src/sw.ts` reproduces
+the two behaviors the old declarative config gave for free — its own top comment explains
+both:
+
+- **SPA navigation fallback**: an unknown top-level path serves the cached shell instead of
+  a raw 404, so a reload/deep-link still routes client-side. `/platform/*` needs no explicit
+  denylist the old config had (`navigateFallbackDenylist`) — it's never a `navigate`-mode
+  request (the app's own fetch/SSE calls use `cors`/`same-origin` mode), so the `mode ===
+  "navigate"` check excludes it structurally.
+- **The `registerType: "prompt"` update flow**: `UpdateToast` (`App.tsx`) posts `{ type:
+  "SKIP_WAITING" }` to the waiting worker when the operator clicks Refresh; `src/sw.ts`
+  listens for exactly that message before calling `skipWaiting()` — never unconditionally,
+  or every update would activate itself without asking.
+
+`src/sw.ts` is excluded from `tsconfig.json` (a service worker's `WebWorker` lib can't
+coexist with this project's `DOM` lib in one project) and from the `no-restricted-globals`
+bare-`fetch` guard (#529) — it has no `epFetch`, no `useConnection` store, no React tree to
+feed; it is its own global scope entirely, wired into the build independently via
+`vite.config.ts`, not through `tsconfig.json`'s `include`. **A production build is the only
+way to exercise any of this** — `npm run dev` never runs the real generated service worker —
+so `npm run build && npm run preview` (the latter needs its own `preview.proxy` block,
+since `vite preview` doesn't inherit `server.proxy`) is how this whole surface gets checked.
+
+**Share target.** `manifest.share_target` (`action: "/share-target"`, `POST`,
+`multipart/form-data`) makes epicurus a share destination from any other app — a link, some
+text, or a file/photo. `src/sw.ts`'s fetch handler intercepts that POST (there is no server
+route behind it — the handler *is* the entire implementation), stashes `title`/`text`/`url`
+plus any file in the Cache API (`src/lib/shareTarget.ts` holds the cache name/keys both
+sides agree on), and 303-redirects to `/?share=1` — a Post-Redirect-Get, so reloading the
+destination can't resubmit the share. `ChatScreen` picks the deep-link up on mount: prefills
+the composer with the text/url (appended to a draft already in progress, never clobbering
+it) and uploads any file through the same `uploadFiles` path a paste or drop uses (above) —
+it never sends on the operator's behalf, the same principle the #480 starter chips follow.
+The cache entries are deleted and `?share=1` is stripped from the URL once consumed, so a
+reload of the destination is inert.
+
+**App shortcuts.** `manifest.shortcuts` — long-press the icon → "New chat" (`/`),
+"Calendar" (`/m/calendar/calendar`), "Tasks" (`/m/tasks/board`). The latter two are module
+pages; if that module is off, `ModulePageScreen`'s existing "no such module page" empty
+state is the degrade, not a crash — no new code needed for that half.
+
 ### Models — per-model rows (#328)
 
 Each local model is an **inline disclosure**, not a row of hover-only icons behind a
@@ -388,19 +435,23 @@ turn lands. An
 uploaded file is also kept durably in the storage module and shown in the Files page (the
 upload sink, ADR-0025) — entirely server-side, so the composer is unchanged.
 
-**Paste & drag-drop (#489).** Two more routes into the same upload endpoint: pasting a
-clipboard that carries files (a screenshot, a copied file) into the composer textarea
-uploads each one — plain-text pastes flow through untouched — and dragging files anywhere
-over the chat column shows a themed **"Drop to attach"** hint (a depth counter keeps it
-from flickering across child boundaries; non-file drags never trigger it) and uploads on
-drop. In-flight uploads render as spinner pills (`PendingAttachmentPill`) beside the real
-ones; failures surface as an error toast carrying the server's 413/415 size/type message,
-so the limit messaging stays single-sourced with the picker's. While a **modal overlay** is
-open (a Sheet, a Confirm, the review window — anything `aria-modal`), the drop surface is
-**inert** (#511): a backdrop blocks clicks but not native drag events, so a drag used to pop
-the hint and upload *underneath* the layer the user was looking at. Suppression is the
-least-surprise call; the drop is still swallowed (never handed back to the browser, which
-would navigate away to the file) and the drag cursor reads *not-allowed* while suppressed.
+**Paste & drag-drop (#489), share target (#493).** Three more routes into the same upload
+endpoint. Pasting a clipboard that carries files (a screenshot, a copied file) into the
+composer textarea uploads each one — plain-text pastes flow through untouched — and
+dragging files anywhere over the chat column shows a themed **"Drop to attach"** hint (a
+depth counter keeps it from flickering across child boundaries; non-file drags never
+trigger it) and uploads on drop. In-flight uploads render as spinner pills
+(`PendingAttachmentPill`) beside the real ones; failures surface as an error toast carrying
+the server's 413/415 size/type message, so the limit messaging stays single-sourced with
+the picker's. While a **modal overlay** is open (a Sheet, a Confirm, the review window —
+anything `aria-modal`), the drop surface is **inert** (#511): a backdrop blocks clicks but
+not native drag events, so a drag used to pop the hint and upload *underneath* the layer
+the user was looking at. Suppression is the least-surprise call; the drop is still
+swallowed (never handed back to the browser, which would navigate away to the file) and
+the drag cursor reads *not-allowed* while suppressed. Sharing a file from the OS share
+sheet (see the PWA install surface section below for the manifest/service-worker half of
+this) lands here too: the share-target handler calls this same `uploadFiles`, so a shared
+photo gets the identical spinner-pill-then-real-pill treatment as a paste or a drop.
 
 ### Reviewing suggested changes (#KB-refactor, ADR-0033)
 
@@ -509,8 +560,10 @@ cd services/web && npm ci && npm run dev   # dev server proxies /platform to loc
 Vite + React + TypeScript (strict), Tailwind v4, vendored shadcn-style components, Zustand
 stores, TanStack Query, zod-validated API contracts (`src/lib/contracts.ts` mirrors the
 core's models). The surface registry (`src/app/registry.ts`) is **data, not markup** — new
-screens add an entry, not a restructure. Installable PWA; `/platform` is excluded from the
-service worker so streams always hit the network.
+screens add an entry, not a restructure. Installable PWA with a custom service worker
+(`src/sw.ts`, injectManifest strategy) — `/platform` is never intercepted, so streams always
+hit the network; see "PWA install surface" above for the share-target/shortcuts mechanism
+and why a production build (`npm run build && npm run preview`) is the only way to check it.
 
 The shared primitive kit is one file — `src/components/ui.tsx` (`Button`, `Badge`, `Card`,
 the text fields `TextInput` / `NumberInput` / `TextArea`, the styled `Select`, `Switch`,

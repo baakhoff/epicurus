@@ -33,7 +33,7 @@ import {
   type DragEvent,
   type ReactNode,
 } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { AttachButton, AttachmentPill, PendingAttachmentPill } from "@/components/AttachMenu";
 import {
@@ -78,6 +78,7 @@ import {
   PROVIDER_MODEL_HINTS,
   formatBytes,
 } from "@/lib/format";
+import { SHARE_CACHE, SHARE_FILE_KEY, SHARE_FILE_NAME_HEADER, SHARE_META_KEY, type ShareMeta } from "@/lib/shareTarget";
 import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
 import { useChat, type ActivityItem } from "@/stores/chat";
 import { useConnection } from "@/stores/connection";
@@ -813,6 +814,8 @@ export function ChatScreen() {
   const queryClient = useQueryClient();
   const chat = useChat();
   const model = usePrefs((s) => s.model);
+  // Share target deep-link (#493): ?share=1 after the SW's POST-redirect (src/sw.ts).
+  const [searchParams, setSearchParams] = useSearchParams();
   // Offline / core-unreachable (#494): the shell banner explains which; here the composer
   // keeps the draft (it already persists) and disables Send instead of letting the message
   // fail into an error card.
@@ -1063,6 +1066,55 @@ export function ChatScreen() {
         .finally(() => setUploading((prev) => prev.filter((u) => u.id !== id)));
     }
   }, []);
+
+  // Share target (#493): the OS share sheet's payload, stashed by the service worker
+  // (src/sw.ts) and handed off via the ?share=1 redirect. Prefills the composer with the
+  // text/url (appended to any draft already in progress rather than clobbering it) and
+  // uploads any shared file through the same path a paste/drop does (#489) — never sends on
+  // the operator's behalf, same as a starter chip. Runs once: a share deep-link is always a
+  // fresh external trigger, never re-issued from within an already-mounted chat screen.
+  const shareHandledRef = useRef(false);
+  useEffect(() => {
+    if (searchParams.get("share") !== "1" || shareHandledRef.current) return;
+    shareHandledRef.current = true;
+    void (async () => {
+      try {
+        const cache = await caches.open(SHARE_CACHE);
+        const metaResp = await cache.match(SHARE_META_KEY);
+        if (metaResp) {
+          const meta = (await metaResp.json()) as ShareMeta;
+          const shared = [meta.text, meta.url].filter(Boolean).join("\n");
+          if (shared) chat.setDraft(chat.draft ? `${chat.draft}\n${shared}` : shared);
+          if (meta.hasFile) {
+            const fileResp = await cache.match(SHARE_FILE_KEY);
+            if (fileResp) {
+              const blob = await fileResp.blob();
+              const name = decodeURIComponent(
+                fileResp.headers.get(SHARE_FILE_NAME_HEADER) ?? "shared-file",
+              );
+              uploadFiles([new File([blob], name, { type: blob.type })]);
+            }
+          }
+        }
+        await cache.delete(SHARE_META_KEY);
+        await cache.delete(SHARE_FILE_KEY);
+      } catch {
+        toast.error("Could not load the shared content.");
+      } finally {
+        setSearchParams(
+          (prev) => {
+            const next = new URLSearchParams(prev);
+            next.delete("share");
+            return next;
+          },
+          { replace: true },
+        );
+      }
+    })();
+    // chat.draft/setDraft and uploadFiles are read fresh inside the callback, not tracked as
+    // reactive deps — this effect's trigger is the presence of the param, nothing else.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Only real file drags count — a text selection or an in-app drag must neither show
   // the overlay nor swallow the drop.

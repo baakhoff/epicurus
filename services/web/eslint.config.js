@@ -79,4 +79,11 @@ export default tseslint.config(
     files: ["src/lib/http.ts"],
     rules: { "no-restricted-globals": "off" },
   },
+  {
+    // The service worker (#493) is its own global scope entirely — no epFetch, no
+    // useConnection store, no React tree to feed — so the browser-tab-oriented #529 guard
+    // doesn't apply; its SPA-fallback route legitimately needs a bare fetch() passthrough.
+    files: ["src/sw.ts"],
+    rules: { "no-restricted-globals": "off" },
+  },
 );

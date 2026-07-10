@@ -25,5 +25,10 @@
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] }
   },
-  "include": ["src", "vite.config.ts", "eslint.config.js", "scripts"]
+  "include": ["src", "vite.config.ts", "eslint.config.js", "scripts"],
+  // A service worker's global scope (ServiceWorkerGlobalScope) can't coexist with this
+  // project's "DOM" lib in one tsconfig — see src/sw.ts's own top comment (#493). Vite still
+  // bundles it via the injectManifest strategy regardless; that's wired independently in
+  // vite.config.ts, not through this file's `include`.
+  "exclude": ["src/sw.ts"]
 }

@@ -251,6 +251,52 @@ async def test_search_marks_module_files_read_only(tmp_path: Path, fake: FakeObj
     assert items["knowledge/readme.md"]["movable"] is False
 
 
+# ── Dedupe of the two-source merge (#560) ────────────────────────────────────────
+
+
+async def test_page_dedupes_colliding_folder(tmp_path: Path, fake: FakeObjects) -> None:
+    # The object store also reports the file space's ``knowledge`` folder at root.
+    fake._tree["knowledge"] = ("dir", b"")
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        root = (await client.get(PAGE)).json()
+        into = (await client.get(PAGE, params={"path": "knowledge"})).json()
+    ids = [it["id"] for it in root["items"]]
+    # The colliding folder renders once; the merged root is otherwise intact and stably sorted.
+    assert ids.count("knowledge") == 1
+    assert [it["title"] for it in root["items"]] == ["knowledge", "notes", "uploads", "top.txt"]
+    # Navigating into the collapsed folder still shows the file-space children (unchanged).
+    assert {it["id"] for it in into["items"]} == {"knowledge/readme.md"}
+
+
+async def test_page_dedupes_colliding_file_file_space_wins(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # Both stores report the same locked file. Un-deduped it renders twice, and the object copy
+    # (hard-coded ``movable=True``) would override the file space's authoritative read-only (#479).
+    fake._tree["knowledge/readme.md"] = ("file", b"obj-copy")
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        into = (await client.get(PAGE, params={"path": "knowledge"})).json()
+        search = (await client.get(PAGE, params={"q": "readme"})).json()
+    into_rows = [it for it in into["items"] if it["id"] == "knowledge/readme.md"]
+    search_rows = [it for it in search["items"] if it["id"] == "knowledge/readme.md"]
+    # Browse and search both collapse to one row; file-space precedence keeps it read-only.
+    assert len(into_rows) == 1 and into_rows[0]["movable"] is False
+    assert len(search_rows) == 1 and search_rows[0]["movable"] is False
+
+
+async def test_page_dedupes_unlocked_file_stays_movable(tmp_path: Path, fake: FakeObjects) -> None:
+    # A collision outside any locked prefix: both sources say movable, so precedence does not
+    # change the flag — but the row must still collapse to one (the general dedupe case).
+    fake._tree["top.txt"] = ("file", b"obj-copy")
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        root = (await client.get(PAGE)).json()
+    rows = [it for it in root["items"] if it["id"] == "top.txt"]
+    assert len(rows) == 1 and rows[0]["movable"] is True
+
+
 async def test_degrades_without_object_backend(tmp_path: Path) -> None:
     client, _, _ = await _make_client(tmp_path, objects=None)
     async with client:

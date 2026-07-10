@@ -14,6 +14,26 @@ images to GHCR.
 
 ### Added
 
+- **Chat: a "finished while you were away" indicator for background turns** (#492) — a turn
+  outlives its connection (#376) and other sessions can generate concurrently (#396's pulsing
+  dot shows that *while* it runs), but nothing told the operator once a background turn
+  *finished* — the answer just sat there until they happened to reopen that conversation. A
+  shell-level watcher (`useAwayFinishedWatch`, mounted once in `Shell()` alongside the existing
+  `useConnectionWatch`) polls the same `["active-runs"]` query `SessionsSheet` already used
+  (gated on being open) — now always live, a steady 15 s, regardless of which screen is
+  showing — and diffs each poll against the previous one: a session that *was* active and no
+  longer is, and isn't the one currently open, just finished unseen. One boolean marker per
+  session (no counts, no push notifications — those are Phase-4/bridges territory): the
+  session's row in the Conversations sheet gets a static accent dot + a bolder title, the chat
+  header's History button picks up the same dot plus an `aria-label` update, and the document
+  title gets a `•` prefix so a backgrounded tab/PWA shows it too. All three clear the instant
+  that session opens — funneled through the one `openSession` store action every entry point
+  (sheet row, palette, hover-card) already calls, so nothing needed wiring per call site. No
+  extra polling while the tab is hidden — inherited for free from React Query's default
+  `refetchInterval` behavior, verified live (the watcher's poll visibly stalls while
+  `document.visibilityState` is `"hidden"` and resumes the moment it flips back). `web`
+  0.88.0→0.89.0.
+
 - **Maintenance: live progress + refresh-proof batches** (#561) — running maintenance showed no
   progress beyond a spinner, and refreshing the page during a batch lost it entirely (the card's
   running state was pure client mutation state). The batch itself was never at risk — verified

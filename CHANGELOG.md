@@ -755,6 +755,19 @@ images to GHCR.
 
 ### Fixed
 
+- **Board/calendar actions: a failed action's error no longer splits the row** (#472) — each
+  `ActionControl` rendered its own inline error span as a sibling of its button inside the
+  shared `flex flex-wrap` actions row, so a failing action (e.g. Complete on a task card)
+  spliced its message between the other buttons (Complete / *error* / Edit / Delete) instead of
+  reading as one message under the full row. `ActionControl` now takes an optional `onError`
+  callback; a caller laying out several actions in one row (a board card, an event's Edit/Delete
+  detail row) lifts the failing action's message into local state and renders it once, below the
+  full row, instead of each action rendering its own inline span. A lone toolbar action that
+  doesn't pass the callback keeps the original self-contained inline rendering. The raw
+  **"NetworkError when attempting to fetch resource"** some task-card actions surfaced is only
+  partly closed by this PR — see the issue for the full diagnosis; the remaining piece needs a
+  change outside `services/web`. `web` 0.88.0→0.88.1.
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's

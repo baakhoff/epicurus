@@ -755,6 +755,15 @@ images to GHCR.
 
 ### Fixed
 
+- **Files: a folder present in both the file space and the object store renders once** (#560) — the
+  Files page (`GET /platform/v1/files/page`) merges two listing sources — the core file-space tree
+  (`store.list_dir` / `index.search`) and the storage module's objects (`objects.list`) — and
+  appended them with no dedupe, so a folder (or file) in both trees produced two identical rows. The
+  merged listing is now deduped by `(kind, normalized path)`; the file-space source is enumerated
+  first and wins a collision, so its movability (#479) stays authoritative rather than an object
+  duplicate wrongly forcing `movable=True`. Browse and search both dedupe; sort order is unchanged.
+  `core-app` 0.66.0→0.66.1.
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's

@@ -538,7 +538,7 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   // Deep-link: open the document named by `?doc=` (e.g. a knowledge hover-card's "Open in
   // Knowledge" link, #143). The link carries a root-relative `<project>/<path>`; split the
   // leading scope so we select the right knowledge base. Adjust state during render.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const docParam = searchParams.get("doc");
   const [appliedDoc, setAppliedDoc] = useState<string | null>(null);
   if (docParam && docParam !== appliedDoc) {
@@ -555,13 +555,34 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
 
   // Deep-link (#491): `?new=1` — the command palette's "New note" — opens the create
   // flow once, exactly like pressing the New-note button. Harmless when the page can't
-  // create: the naming form only renders inside the `can_create` toolbar.
+  // create: the naming form only renders inside the `can_create` toolbar. Unlike `?doc`
+  // above, the param is stripped once applied (#558, below) — it's a one-shot trigger,
+  // not a permalink — so a reload or bookmark of the resulting URL doesn't re-open the
+  // create flow. The latch resets when the param disappears (adjusted during render,
+  // like `appliedDoc` — local state only) so a *later* `?new=1` on the same route (no
+  // remount) reopens it instead of silently no-op-ing.
   const newParam = searchParams.get("new");
   const [appliedNew, setAppliedNew] = useState(false);
   if (newParam && !appliedNew) {
     setAppliedNew(true);
     setCreating(true);
+  } else if (!newParam && appliedNew) {
+    setAppliedNew(false);
   }
+  // The URL strip itself is a router-navigation side effect, not local state — it belongs
+  // in an effect rather than the render-time adjustment above (which must touch only this
+  // component's own state, not an ancestor Router's).
+  useEffect(() => {
+    if (!newParam) return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("new");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [newParam, setSearchParams]);
 
   const doc = useQuery({
     queryKey: ["module-doc", module, pageId, scope, selectedPath],

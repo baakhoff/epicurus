@@ -137,17 +137,27 @@ from state the shell already holds —
 - **Pages** — `SURFACES` plus `modulePageNavs(modules)` minus `review` archetypes: exactly
   the rail's data, so new module pages appear with zero palette changes.
 - **Actions** — *New chat*, *Wake up / Pause — unload models* (mirrors the PowerOrb's
-  mutation on the `["power"]` cache), and *New note* when a notes editor page exists —
-  a `?new=1` deep-link the editor archetype applies once, exactly like pressing its
-  New-note button (the `?doc=` applied-guard pattern).
+  mutation on the `["power"]` cache — held back until the `["power"]` query itself has
+  resolved, so a very-fast open-and-click can't fire the wrong toggle), and *New note*
+  when a notes editor page exists — a `?new=1` deep-link the editor archetype applies
+  once, exactly like pressing its New-note button. Unlike the `?doc=` deep-link (a
+  bookmarkable permalink, left in the URL), `?new=1` is a one-shot trigger: the editor
+  strips it from the URL once applied (`setSearchParams(…, { replace: true })`, in an
+  effect — a router navigation is a side effect on an external system, not local state)
+  so a reload can't re-open the create flow, and resets its applied-latch when the param
+  disappears so a *later* `?new=1` on the same route (no remount — same-route palette
+  triggers don't remount the page) reopens it rather than silently no-op-ing (#558).
 
 Typing filters every section through a dependency-free greedy subsequence scorer
 (`src/lib/fuzzy.ts`: +2/char, +4 word-boundary start, +3 consecutive run, small
 leading-gap penalty; ties keep recency/nav order). The input is a `role="combobox"` with
 `aria-activedescendant` — focus never leaves it; arrows/Home/End move the active
-`role="option"`, Enter runs it, Escape closes (capture-phase, the Confirm stacking
-pattern) and `useModalFocus` restores focus. The dialog body mounts per open, so state
-resets structurally rather than via effects.
+`role="option"`, Enter runs it (guarded on `e.nativeEvent.isComposing`, so committing a
+CJK/IME composition doesn't also activate the highlighted entry, #558), Escape closes
+(capture-phase, the Confirm stacking pattern) and `useModalFocus` restores focus. The
+dialog body mounts per open, so state resets structurally rather than via effects. The
+`Ctrl/Cmd+K` hotkey itself excludes `Shift` and repeat keydowns, toggling on either
+modifier regardless of platform.
 
 ### Toasts & confirmations (#488)
 

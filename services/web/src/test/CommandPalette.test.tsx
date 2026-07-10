@@ -127,6 +127,19 @@ describe("Command palette (#491)", () => {
     expect(screen.queryByRole("dialog")).toBeNull(); // closed after running
   });
 
+  it("does not activate the highlighted entry when Enter commits an IME composition (#558)", async () => {
+    render(<Harness />, { wrapper });
+    await screen.findByText("Fresh plans");
+    const input = screen.getByRole("combobox");
+
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    // Nothing ran — no session opened, no navigation, the palette is still open.
+    expect(useChat.getState().sessionId).toBe("current");
+    expect(screen.getByTestId("location").textContent).toBe("/settings");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("navigates to a page picked by search", async () => {
     render(<Harness />, { wrapper });
     await screen.findByText("Fresh plans");
@@ -169,6 +182,17 @@ describe("Command palette (#491)", () => {
     await waitFor(() => expect(mockSetPower).toHaveBeenCalledWith("idle"));
   });
 
+  it("hides the power action until the power query resolves (#558)", async () => {
+    // A never-resolving power query — the fast open-and-click window where `paused` would
+    // otherwise read `false` and offer the wrong toggle.
+    mockPower.mockReturnValue(new Promise(() => {}));
+    render(<Harness />, { wrapper });
+    await screen.findByText("Fresh plans"); // sessions resolve independently of power
+
+    expect(screen.queryByText("Wake up")).toBeNull();
+    expect(screen.queryByText("Pause — unload models")).toBeNull();
+  });
+
   it("toggles with Ctrl/Cmd+K from anywhere — the listener is alive while closed", async () => {
     render(<Harness initialOpen={false} />, { wrapper });
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -177,6 +201,12 @@ describe("Command palette (#491)", () => {
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "K", metaKey: true }); // either modifier, either case
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("does not toggle on Ctrl/Cmd+Shift+K (#558)", async () => {
+    render(<Harness initialOpen={false} />, { wrapper });
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true, shiftKey: true });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

@@ -755,6 +755,20 @@ images to GHCR.
 
 ### Fixed
 
+- **Command palette: `?new=1` no longer silently no-ops on a second trigger, and Enter no
+  longer hijacks an IME composition's commit** (#558) — two small gaps found at the palette's
+  #544 merge review. `EditorView`'s `?new=1` deep-link (the palette's "New note") used a
+  one-way, never-reset latch and never stripped its own param: triggering "New note" a second
+  time while already on the notes page (same route, no remount) silently did nothing, and
+  `?new=1` survived into the address bar so a reload or bookmark re-opened the create flow. The
+  latch now resets when the param disappears (mirroring the `?doc` deep-link's change-detection)
+  and the param is stripped once applied via `setSearchParams(…, { replace: true })` in an
+  effect. Separately, `CommandPalette`'s Enter handler ran the highlighted entry even when the
+  keydown was committing a CJK/IME composition; it now bails on `e.nativeEvent.isComposing`.
+  Also, while there: the power action is held back until the `["power"]` query resolves (a very
+  fast open-and-click could otherwise send the wrong toggle), the hotkey now excludes `Shift`,
+  and the entries `useMemo` depends on the mutation's stable `.mutate` rather than the whole
+  `useMutation` result (a fresh object every render). `web` 0.88.3→0.88.4.
 - **Calendar (PWA): the toolbar no longer overflows on a phone** (#562) — the calendar page's
   top toolbar packed prev/next chevrons + the month/range label on the left and "New event" +
   the Calendars menu + Today + the view switcher on the right into a row with no shrink or wrap

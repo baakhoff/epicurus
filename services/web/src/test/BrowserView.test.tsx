@@ -137,6 +137,36 @@ describe("BrowserView", () => {
     );
   });
 
+  it("rejects a rename containing a path separator with a field error (#554)", async () => {
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        items: [
+          { id: "report.pdf", title: "report.pdf", href: "/dl?path=report.pdf", movable: true },
+        ],
+      }),
+    });
+    render(<BrowserView source={source} />, { wrapper });
+
+    fireEvent.click(await screen.findByText("report.pdf"));
+    fireEvent.click(await screen.findByRole("button", { name: /rename/i }));
+    // A "/" would relocate the file (into a possibly module-owned folder) instead of renaming it.
+    fireEvent.change(screen.getByLabelText("New name"), {
+      target: { value: "knowledge/report.pdf" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    // The relocating move never leaves the client; the field surfaces the refusal.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/can.t contain/i);
+    expect(source.move).not.toHaveBeenCalled();
+
+    // Editing the name clears the error (it isn't sticky).
+    fireEvent.change(screen.getByLabelText("New name"), {
+      target: { value: "report-final.pdf" },
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("offers no rename on a read-only (non-movable) entry", async () => {
     const source = fakeSource({
       fetchPage: vi.fn().mockResolvedValue({
@@ -340,6 +370,54 @@ describe("BrowserView upload (#479)", () => {
       dataTransfer: { types: ["Files"], files: [dropped], dropEffect: "" },
     });
     await waitFor(() => expect(send).toHaveBeenCalledWith(dropped, ""));
+  });
+
+  it("uploads into a folder when an external file is dropped on its row (#556)", async () => {
+    const { source, send } = uploadSource(); // listing carries a "docs" folder row
+    render(<BrowserView source={source} />, { wrapper });
+    const folder = (await screen.findByText("docs")).closest("button")!;
+
+    const dropped = txt("into-docs.txt");
+    fireEvent.drop(folder, {
+      dataTransfer: { types: ["Files"], files: [dropped], dropEffect: "" },
+    });
+    // No longer swallowed: it uploads into THAT folder's path (not the current dir), exactly
+    // once — the row claims the event so the pane doesn't also upload into the current dir.
+    await waitFor(() => expect(send).toHaveBeenCalledWith(dropped, "docs"));
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats an internal drag over a folder row as a move, never an upload (#556)", async () => {
+    const send = vi.fn().mockResolvedValue({ path: "x", name: "x" });
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        items: [
+          { id: "a.md", title: "a.md", href: "/dl?path=a.md", movable: true },
+          { id: "docs", title: "docs", nav_path: "docs" },
+        ],
+      }),
+      upload: { send },
+      move: vi.fn().mockResolvedValue({ path: "docs/a.md" }),
+    });
+    render(<BrowserView source={source} />, { wrapper });
+
+    const file = (await screen.findByText("a.md")).closest("button")!;
+    const folder = screen.getByText("docs").closest("button")!;
+    // The drag event carries a "Files" type, but an in-flight internal drag is a MOVE — the
+    // dragId guard must win so a reorder is never mistaken for an external upload.
+    const dataTransfer = {
+      setData: vi.fn(),
+      effectAllowed: "",
+      dropEffect: "",
+      types: ["Files"],
+      files: [txt("x.txt")],
+    };
+    fireEvent.dragStart(file, { dataTransfer });
+    fireEvent.drop(folder, { dataTransfer });
+
+    await waitFor(() => expect(source.move).toHaveBeenCalledWith("a.md", "docs/a.md"));
+    expect(send).not.toHaveBeenCalled();
   });
 });
 

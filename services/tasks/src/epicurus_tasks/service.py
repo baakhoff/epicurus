@@ -150,7 +150,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.15.1",
+        version="0.15.3",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -215,8 +215,10 @@ def build_module(
         lines = [f"- {t.title}" + (f" (due {t.due[:10]})" if t.due else "") for t in tasks]
         # Capped the same way as the entity-ref id block the core appends (both default to
         # LIST_CAP, #468) — a long backlog can otherwise inflate the text with hundreds of
-        # lines (#539, matching calendar's #522 adoption).
-        text = capped_listing(lines, noun="task")
+        # lines (#539, matching calendar's #522 adoption). ``noun="open task"`` keeps the
+        # pre-cap "Found N open task(s):" header — tasks_list only ever returns open tasks, so
+        # the plain "task(s)" the cap defaulted to read as if completed ones were included (#553).
+        text = capped_listing(lines, noun="open task")
         return tool_envelope(text, refs)
 
     @module.tool()

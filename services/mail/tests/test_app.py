@@ -256,6 +256,24 @@ class TestSend:
         assert resp.status_code == 403
         assert "Reconnect Google" in resp.json()["detail"]
 
+    def test_429_returns_rate_limit_hint_under_429(self) -> None:
+        # A Gmail 429 on transmit surfaces the wait-and-retry hint under a 429, not a raw 500,
+        # honoring Retry-After when Gmail sends it (#557).
+        provider = AsyncMock(spec=MailProvider)
+        provider.transmit = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "429 Too Many Requests",
+                request=httpx.Request("POST", "http://gmail/send"),
+                response=httpx.Response(429, headers={"Retry-After": "12"}),
+            )
+        )
+        client = self._send_client(provider, AsyncMock())
+        resp = client.post("/send", json={"to": "bob@x.com", "subject": "Hi", "body": "Hello"})
+        assert resp.status_code == 429
+        detail = resp.json()["detail"]
+        assert "rate-limiting" in detail
+        assert "12 seconds" in detail  # Retry-After surfaced
+
     def test_a_bus_failure_does_not_fail_a_completed_send(self) -> None:
         # The mail already went out; a bus hiccup must not turn a success into a 500.
         provider = AsyncMock(spec=MailProvider)

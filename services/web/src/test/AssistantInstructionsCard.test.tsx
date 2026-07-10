@@ -59,4 +59,32 @@ describe("AssistantInstructionsCard", () => {
     fireEvent.change(box, { target: { value: "x".repeat(4100) } });
     expect(screen.getByText(/never trimmed/i)).toBeInTheDocument();
   });
+
+  it("arms a beforeunload guard while a draft is unsaved and drops it on save (#536)", async () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+    try {
+      render(<AssistantInstructionsCard />, { wrapper });
+      const box = await screen.findByLabelText("Assistant instructions");
+
+      // No guard while the draft still matches the saved value.
+      expect(addSpy).not.toHaveBeenCalledWith("beforeunload", expect.any(Function));
+
+      // Editing arms the guard — an accidental reload/close now prompts instead of silently
+      // dropping the draft.
+      fireEvent.change(box, { target: { value: "Be terse." } });
+      await waitFor(() =>
+        expect(addSpy).toHaveBeenCalledWith("beforeunload", expect.any(Function)),
+      );
+
+      // Saving makes the draft clean again, so the guard is removed.
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() =>
+        expect(removeSpy).toHaveBeenCalledWith("beforeunload", expect.any(Function)),
+      );
+    } finally {
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+  });
 });

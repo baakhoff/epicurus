@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.15.1"
+    assert manifest.version == "0.15.3"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -121,7 +121,7 @@ async def test_tasks_list_text_truncates_past_the_cap_but_chips_stay_full(
     content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == total  # chips: every task, uncapped
-    assert envelope.text.startswith(f"Found {total} task(s):")
+    assert envelope.text.startswith(f"Found {total} open task(s):")
     assert envelope.text.count("- Task ") == LIST_CAP  # only the first LIST_CAP lines shown
     assert "more" in envelope.text
 

@@ -837,3 +837,31 @@ async def test_custom_prompt_overrides_default_and_leads() -> None:
     first = gw.calls[0][0]
     assert first.role == "system"
     assert first.content == "CUSTOM PROMPT"
+
+
+async def test_base_prompt_leads_the_memory_path_too() -> None:
+    """Injection-first on the *memory* path — not just the headless early return (#536).
+
+    With a session, ``_assemble`` builds recall + history, so the assembled order is
+    ``[system(instructions), system(recalled), ...history..., new user]``: the base prompt is
+    still message[0], ahead of the recalled-memory system block.
+    """
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    store = await _fresh_instructions(default="You are epsilon.")
+    memory = _FakeMemory(
+        recalled=["the user's name is Sam"],
+        history=[
+            ChatMessage(role="user", content="earlier question"),
+            ChatMessage(role="assistant", content="earlier answer"),
+        ],
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory, instructions=store)
+    await agent.run([ChatMessage(role="user", content="what's my name?")], session_id="s1")
+
+    sent = gw.calls[0]
+    # The base prompt leads; the recalled-memory system block comes *after* it, not before.
+    assert sent[0].role == "system" and sent[0].content == "You are epsilon."
+    assert sent[1].role == "system" and "Sam" in (sent[1].content or "")
+    # Then the prior history, then the new user turn — order preserved.
+    assert [m.content for m in sent if m.role == "user"] == ["earlier question", "what's my name?"]
+    assert any(m.role == "assistant" and m.content == "earlier answer" for m in sent)

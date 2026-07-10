@@ -72,6 +72,12 @@ configured timezone** instead of the UTC instant every event normalizes to inter
 **names the zone** in the text; `calendar_find_free`'s returned slots carry the same offset.
 See *Timezones*, below.
 
+Since **v0.16** (#532, ADR-0086) `calendar_update_event` can **clear** a recurrence rule:
+`recurrence=""` drops the series' rule, scope-aware (`"all"` → the series becomes a one-off,
+`"following"` → the series ends at this occurrence, `"this"` → rejected). Blanking the shared
+repeat picker on a recurring event now actually stops it repeating, where before it was a no-op
+(#528 containment). See *Clearing recurrence* under *Recurring events*, below.
+
 ## Contract
 
 ### MCP tools
@@ -80,7 +86,7 @@ See *Timezones*, below.
 |------|-------------|
 | `calendar_list_events(range_days=7)` | List events in the next *range_days* days (1–90). Returns the matching events as **entity-reference chips** (ADR-0019), ordered by start time; its listing text truncates past `LIST_CAP` (50, ADR-0084/#468) with a "…and N more" note — the chips still carry every matching event. Times are shown in the **operator's configured timezone**, named in the text (e.g. `(Europe/Belgrade)`) — #559. |
 | `calendar_create_event(title, start, end, all_day=false, location?, description?, calendar_id?, recurrence?, attendees?, add_meet=false)` | Create a new event. `start`/`end` are ISO-8601 strings — a value **without a UTC offset is read in the operator's configured timezone** (ADR-0039, #433) — or **dates** (`YYYY-MM-DD`) when `all_day` is set (`end` = inclusive last date). Lands on the **write-default** calendar (active → first enabled external → connected provider's primary → local), or on `calendar_id` when given — an `account:collection` token (e.g. `google:primary`). `recurrence` (#432) is an RFC 5545 RRULE (e.g. `"FREQ=WEEKLY;COUNT=10"`, no `"RRULE:"` prefix) making this a recurring series; `attendees` is a comma-separated guest email list; `add_meet` (#444) attaches a Google Meet link — Google-only, a no-op on the local store. Returns the created event (`meet_url` set when a Meet link was attached). |
-| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` is `"this"` (#432, default — just the named occurrence), `"following"` (#445 — this occurrence and every later one, splitting the series in two), or `"all"` (#432 — the whole series); `recurrence` is only honoured with `edit_scope="all"` or `"following"` (raises with `"this"` — an instance can't carry its own rule; omitted with `"following"`, the new tail series just continues the existing pattern). Returns the updated event; raises if absent. |
+| `calendar_update_event(event_id, title?, start?, end?, all_day?, location?, description?, calendar_id?, recurrence?, attendees?, edit_scope="this")` | Edit an event. Only the fields passed change; the rest are left as-is (naive `start`/`end` follow the same operator-timezone rule as create). Pass `all_day` (with matching `start`/`end`) to switch between timed and all-day. Found and edited **wherever it lives** across the enabled calendars (#208); pass `calendar_id` — the event's own `account:collection` tag from a listing/page — to edit its home calendar directly instead of probing each one (#435). For a recurring event, `edit_scope` is `"this"` (#432, default — just the named occurrence), `"following"` (#445 — this occurrence and every later one, splitting the series in two), or `"all"` (#432 — the whole series); `recurrence` is only honoured with `edit_scope="all"` or `"following"` (raises with `"this"` — an instance can't carry its own rule; omitted with `"following"`, the new tail series just continues the existing pattern). Pass `recurrence=""` to **clear** the rule (#532, ADR-0086): `"all"` makes the whole series a one-off event, `"following"` ends the series at this occurrence (earlier occurrences keep recurring, this one becomes a standalone event); clearing with `"this"` is rejected. Returns the updated event; raises if absent. |
 | `calendar_delete_event(event_id, calendar_id?, edit_scope="this")` | Delete an event wherever it lives (`calendar_id` targets its home calendar directly, as in update). `edit_scope` mirrors update: `"this"` (#432) removes just the named occurrence, `"following"` (#445) removes it and every later occurrence (truncating the series), `"all"` (#432) removes the whole series. Returns `{deleted: true, id}`; raises if absent. |
 | `calendar_find_free(duration_minutes=60, range_days=7)` | Find open time slots of at least *duration_minutes* in the next *range_days* days. Returns a list of `{start, end}` windows, in the operator's configured timezone offset (#559). |
 
@@ -179,6 +185,15 @@ instance id; for local, an exception row is created/updated (or a tombstone, for
 was given (a lookup on Google; parsed from the id locally), then edited/deleted directly.
 Setting `recurrence` requires `edit_scope="all"` or `"following"` — a single occurrence
 can't carry its own rule (`edit_scope="this"` with `recurrence` set raises).
+
+**Clearing recurrence** (#532, ADR-0086). Passing `recurrence=""` drops the series' rule — the
+three-state sentinel `None` (leave unchanged) / `""` (clear) / RRULE (set), since a plain
+optional can't tell "unset" from "clear". It is a series-level change, so it is scope-aware:
+`"all"` clears the master and the series collapses to a one-off event (Google `recurrence: []`,
+local a NULL master rule); `"following"` ends the series at this occurrence — earlier occurrences
+keep recurring, this one becomes a standalone event, and there is no tail series; `"this"` is
+**rejected** (a lone occurrence has no rule of its own — the tool points at `"all"`/`"following"`).
+The web repeat picker sends `""` only when an existing rule is blanked, never for a one-off event.
 
 **"This and following"** (`edit_scope="following"`, #445) splits the series in two at the
 named occurrence: the original series is truncated (an `UNTIL` set to the prior occurrence,

@@ -168,6 +168,40 @@ on miss).
   adoption (#522/#468) for consistency — a long backlog no longer inflates the tool's text
   with an unbounded number of lines; the entity-reference chips stay uncapped regardless.
 
+**v0.15.2** finishes the v0.15.1 timezone work at the board's **display** call site (#555).
+The overdue sweep already computed "today" in the operator's zone (v0.15.1 above), but the
+board page still grouped its **Today / Overdue** columns by the UTC day — so within a single
+render the two clocks could disagree across the UTC/operator midnight: a task the sweep counted
+as due today could sit in the board's Overdue column. The page now reads the same
+operator-timezone clock the sweep runs on (one shared clock, `operator_clock`), so the grouping
+and the sweep always agree. Core unreachable → both degrade to UTC together. (The extra
+per-render timezone lookup this introduces is deduplicated by a short-TTL memo added alongside
+the sweep's cancellation hardening, #553.)
+
+**v0.15.3** hardens the sweep's materialize machinery further and caches the timezone read (#553):
+
+- **The materialize claim no longer leaks on cancellation.** `_materialize` claims a
+  `(tenant_id, task_id)` key before spawning a successor and releases it at each normal outcome —
+  but every handler was `except Exception`, which does **not** catch `asyncio.CancelledError` (a
+  `BaseException` since 3.8). A cancel between claim and release (client disconnect, core timeout)
+  left the key claimed forever, so that task's recurrence silently never materialized again until a
+  process restart. The claimed region now runs under an `except BaseException` that releases the
+  claim **synchronously** (never awaiting on a cancellation path) and re-raises — *unless* a
+  successor was already created but its rule not yet retired, which is the intentional
+  keep-claimed terminal state (#533b) that stops duplicate amplification.
+- **"Today" is resolved once per read, before claiming.** The operator timezone was fetched
+  uncached on the hot path — once per enabled collection in the sweep and again per materialized
+  anchor, each a fresh `get_timezone` HTTP round trip inside the claimed window. It is now
+  resolved once at the top of `list_tasks` (and once per completion) and threaded into the sweep
+  and `_materialize`: one core call per read regardless of collection count, a claimed window of
+  pure DB work, and one "today" the sweep and materialize can't disagree on across a midnight tick.
+- **The operator-timezone clock memoizes for 60 s.** `operator_clock` caches the resolved zone
+  for a short TTL so reads seconds apart (the board render + a chat turn) share one `get_timezone`
+  call, and a core-down spell logs one warning per window instead of one per call.
+- **`tasks_list` header wording restored.** The `capped_listing` adoption (v0.15.1) changed the
+  pre-cap header from "Found N open task(s):" to "Found N task(s):"; `noun="open task"` restores
+  it — `tasks_list` only ever returns open tasks.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -252,7 +286,10 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   single flat list). Empty columns are dropped, and each card carries a **category tag** naming
   the list it came from (ADR-0036). Layout is a pure function,
   `build_tasks_board(tasks, today=…, group_by=…, scope=…, lists=…, default_list_id=…)`, so it
-  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing.
+  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing. The
+  `today` the columns key off is the **operator's** day, resolved from the same operator-timezone
+  clock the overdue sweep runs on, so the Today/Overdue split and the sweep never disagree within
+  a render (#555); it degrades to UTC when the core is unreachable.
 - **View controls** (`controls` in the board data) are a **Group by** selector and a **Show**
   filter (Open / Completed / All), rendered by the shell as a toolbar; changing one re-fetches
   the page with a forwarded query param (`group` / `show`, each clamped to a known value). The

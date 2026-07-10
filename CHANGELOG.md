@@ -32,7 +32,7 @@ images to GHCR.
   extra polling while the tab is hidden — inherited for free from React Query's default
   `refetchInterval` behavior, verified live (the watcher's poll visibly stalls while
   `document.visibilityState` is `"hidden"` and resumes the moment it flips back). `web`
-  0.88.0→0.89.0.
+  0.88.6→0.89.0.
 
 - **Maintenance: live progress + refresh-proof batches** (#561) — running maintenance showed no
   progress beyond a spinner, and refreshing the page during a batch lost it entirely (the card's
@@ -775,6 +775,95 @@ images to GHCR.
 
 ### Fixed
 
+- **Assistant instructions: guard an unsaved draft; cover injection-first on the memory path** (#536) —
+  the Settings instructions editor is the first long-form editor there (the other cards instant-save),
+  so an unsaved draft silently vanished on an accidental reload/close. It now arms a `beforeunload`
+  guard while the draft is dirty and drops it on save (an in-app route change is a declarative-router
+  navigation `beforeunload` can't observe — a future data-router `useBlocker` would cover that, noted
+  on the issue). Test-side, injection-first (#497) was only asserted on the headless/no-memory path; a
+  test now pins the **memory path** order — `[system(instructions), system(recalled), …history…, new
+  user]` — and the resume path was confirmed by reading not to re-inject the base prompt
+  (`run_stream(resume_convo=…)` uses the rehydrated convo and skips assembly). An explicit
+  **empty-prompt escape hatch** (a deliberately blank prompt, distinct from "use the default") is left
+  as an owner call — blank still resets to the shipped default; the one-character-prompt workaround
+  stands. `web` 0.88.5→0.88.6 (the core-app change is test-only — no version bump).
+- **Files: dropping an external file onto a folder row uploads into it instead of vanishing** (#556) —
+  a file dropped precisely on a folder row was silently swallowed: the row's drop handler
+  unconditionally `preventDefault`ed and ran the internal-move path (a no-op for an OS file drag),
+  and the pane-level upload handler then bailed on `defaultPrevented` — no upload, no move, no
+  error. The shared directory drop-target now handles an external file drag too: no internal
+  drag + the drag carries `Files` → **upload into that directory** (the same "upload lands where
+  you dropped" rule as the pane, one level deeper), with the row/breadcrumb highlighting as the
+  target and claiming the event so the pane doesn't also upload into the current dir. An in-flight
+  internal move-drag still takes precedence, so a reorder is never mistaken for an upload. `web`
+  0.88.4→0.88.5.
+- **Command palette: `?new=1` no longer silently no-ops on a second trigger, and Enter no
+  longer hijacks an IME composition's commit** (#558) — two small gaps found at the palette's
+  #544 merge review. `EditorView`'s `?new=1` deep-link (the palette's "New note") used a
+  one-way, never-reset latch and never stripped its own param: triggering "New note" a second
+  time while already on the notes page (same route, no remount) silently did nothing, and
+  `?new=1` survived into the address bar so a reload or bookmark re-opened the create flow. The
+  latch now resets when the param disappears (mirroring the `?doc` deep-link's change-detection)
+  and the param is stripped once applied via `setSearchParams(…, { replace: true })` in an
+  effect. Separately, `CommandPalette`'s Enter handler ran the highlighted entry even when the
+  keydown was committing a CJK/IME composition; it now bails on `e.nativeEvent.isComposing`.
+  Also, while there: the power action is held back until the `["power"]` query resolves (a very
+  fast open-and-click could otherwise send the wrong toggle), the hotkey now excludes `Shift`,
+  and the entries `useMemo` depends on the mutation's stable `.mutate` rather than the whole
+  `useMutation` result (a fresh object every render). `web` 0.88.3→0.88.4.
+- **Calendar (PWA): the toolbar no longer overflows on a phone** (#562) — the calendar page's
+  top toolbar packed prev/next chevrons + the month/range label on the left and "New event" +
+  the Calendars menu + Today + the view switcher on the right into a row with no shrink or wrap
+  escape valve, so at ~380px width the right group clipped past the viewport edge. `ActionControl`
+  gains an opt-in `iconOnlyNarrow` capability — the same icon+`aria-label`+`Tooltip` treatment an
+  `icon_only` action already gets, but CSS-driven (`hidden sm:inline`) rather than
+  module-declared, so it only shrinks the label below the `sm` breakpoint and desktop is
+  unaffected; both the calendar toolbar's "New event" and the board toolbar's action opt in. The
+  month/range label now carries a short form ("Jul 2026") alongside the full one ("July 2026"),
+  CSS-swapped the same way, and the action row keeps a `flex-wrap` fallback for a still-wider
+  case (several connected calendars) rather than clipping. `web` 0.88.2→0.88.3.
+- **Board/calendar actions: a failed action's error no longer splits the row** (#472) — each
+  `ActionControl` rendered its own inline error span as a sibling of its button inside the
+  shared `flex flex-wrap` actions row, so a failing action (e.g. Complete on a task card)
+  spliced its message between the other buttons (Complete / *error* / Edit / Delete) instead of
+  reading as one message under the full row. `ActionControl` now takes an optional `onError`
+  callback; a caller laying out several actions in one row (a board card, an event's Edit/Delete
+  detail row) lifts the failing action's message into local state and renders it once, below the
+  full row, instead of each action rendering its own inline span. A lone toolbar action that
+  doesn't pass the callback keeps the original self-contained inline rendering. The raw
+  **"NetworkError when attempting to fetch resource"** some task-card actions surfaced is only
+  partly closed by this PR — see the issue for the full diagnosis; the remaining piece needs a
+  change outside `services/web`. `web` 0.88.1→0.88.2.
+- **Saved hosted models: atomic upsert + no junk provider-only rows** (#537) — `POST
+  /llm/saved-models`'s `add()` was get-then-insert, so two concurrent first-saves of the same id
+  could race in the gap to a composite-PK `IntegrityError` (a 500); it is now a single atomic
+  `INSERT … ON CONFLICT DO UPDATE`. And `is_hosted("claude/")` was True — a `/` was present but the
+  model part was empty — so a provider-only id persisted a junk `claude/` row; `is_hosted` now
+  requires a non-empty model part, so that `POST` is a clean **400**. (Removing a saved id that is
+  the current `llm_prefs.global_default` still deliberately leaves the default pointing at it —
+  valid for inference, just unlisted.) `core-app` 0.66.2→0.66.3.
+
+- **Files: move/rename can't smuggle a file into a module's subtree** (#554) — `POST /files/move`
+  checked neither `src` nor `dst` against the module-owned `locked_prefixes`, though `upload`
+  does — and #479 is what made operator files draggable, so the hole was newly reachable: dragging
+  a file onto a module folder row (or typing a `/`-bearing rename) landed a foreign file behind the
+  module's back, desyncing its index. The move handler now mirrors the upload guard — **400** when
+  `dst`'s top-level segment is a module folder and `src`'s differs, so a module's *own* same-top
+  move still works — the web rename field rejects a `/` or `\` inline before it can relocate, and a
+  pathological name (control char / NUL, or a segment over 255 bytes) is clamped to a clean **400**
+  instead of a store-level 500. A scheme-less `module_urls` entry (its host parsed as the URL
+  scheme, leaving `hostname` None) now recovers its host so the folder stays locked, warning rather
+  than silently unlocking. `core-app` 0.66.1→0.66.2, `web` 0.88.0→0.88.1.
+
+- **Files: a folder present in both the file space and the object store renders once** (#560) — the
+  Files page (`GET /platform/v1/files/page`) merges two listing sources — the core file-space tree
+  (`store.list_dir` / `index.search`) and the storage module's objects (`objects.list`) — and
+  appended them with no dedupe, so a folder (or file) in both trees produced two identical rows. The
+  merged listing is now deduped by `(kind, normalized path)`; the file-space source is enumerated
+  first and wins a collision, so its movability (#479) stays authoritative rather than an object
+  duplicate wrongly forcing `movable=True`. Browse and search both dedupe; sort order is unchanged.
+  `core-app` 0.66.0→0.66.1.
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's
@@ -1001,6 +1090,16 @@ images to GHCR.
   (`core-app` → 0.5.1.)
 
 ### Dependencies
+
+- **Pin the lint/type gates exact — `mypy==2.1.0`, `ruff==0.15.20`** (#514) — the root dev
+  group pinned `mypy>=1.13` / `ruff>=0.15.20` with no ceiling, so any `uv lock` re-resolve
+  floated the tool upward and the bump rode invisibly inside an unrelated PR's lockfile — a
+  green-local/red-CI split (mypy 1.13→2.1.0 flags `session.scalar(select(...))` returned
+  directly as `no-any-return`; 1.13 accepts it). Both gates are now pinned to the exact
+  version CI already resolves, and the `.pre-commit-config.yaml` ruff hook is bumped to the
+  matching `v0.15.20` (from `v0.8.4`, id modernized to `ruff-check`) so `pre-commit` and
+  `uv run ruff` are the same binary. Bump them deliberately in their own chore PR. No
+  runtime change — dev tooling only.
 
 - **fastapi 0.137.1, mcp 1.28.0, litellm 1.89.1** (supersedes #203) — FastAPI 0.137 makes
   `include_router` attach a lazy `_IncludedRouter` to `app.routes` instead of eagerly

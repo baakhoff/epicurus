@@ -270,7 +270,16 @@ class LocalCalendarProvider(CalendarProvider):
                 attendees=attendees,
                 recurrence_timezone=recurrence_timezone,
             )
-        # edit_scope == "this" on an instance id: override just that occurrence.
+        # edit_scope == "this" on an instance id: override just that occurrence. A recurrence
+        # value here is nonsensical — a lone occurrence has no series rule of its own — so it is
+        # rejected. The tool already rejects the clear case (#532); this stays a defensive guard
+        # for direct provider calls, with the message matched to set ("FREQ=…") vs clear ("").
+        if recurrence == "":
+            raise ValueError(
+                "cannot clear a recurrence rule on a single occurrence (edit_scope='this'); "
+                "use edit_scope='all' to make the whole series one-off, or 'following' to end "
+                "the series at this occurrence"
+            )
         if recurrence is not None:
             raise ValueError(
                 "cannot set a recurrence rule on a single occurrence (edit_scope='this'); "

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EditorView } from "@/components/archetypes/EditorView";
@@ -472,6 +472,76 @@ describe("EditorView — knowledge bases (scopes)", () => {
       </QueryClientProvider>,
     );
     // The naming form is already open — exactly as if "New note" had been pressed.
+    expect(await screen.findByLabelText("New note title")).toBeInTheDocument();
+  });
+
+  it("strips ?new=1 from the URL once applied, so a reload can't re-trigger it (#558)", async () => {
+    mockModulePage.mockResolvedValue({
+      can_create: true,
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    function LocationProbe() {
+      const location = useLocation();
+      return <div data-testid="location">{location.pathname + location.search}</div>;
+    }
+
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/notes/notes?new=1"]}>
+          <LocationProbe />
+          <EditorView module="notes" pageId="notes" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await screen.findByLabelText("New note title");
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/m/notes/notes"));
+  });
+
+  it("reopens the New-note flow on a later ?new=1 trigger, same route, no remount (#558)", async () => {
+    mockModulePage.mockResolvedValue({
+      can_create: true,
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    // Stands in for the command palette's `navigate(path + "?new=1")` (#491) — a
+    // same-route search-param change, not a remount.
+    function Harness() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <button onClick={() => navigate("/m/notes/notes?new=1")}>trigger new-note</button>
+          <EditorView module="notes" pageId="notes" />
+        </>
+      );
+    }
+
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/notes/notes"]}>
+          <Harness />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // Not open yet — no deep-link on the initial URL.
+    await screen.findByRole("button", { name: /New note/ });
+    expect(screen.queryByLabelText("New note title")).toBeNull();
+
+    // First trigger opens it, same as the deep-link case.
+    fireEvent.click(screen.getByText("trigger new-note"));
+    const nameInput = await screen.findByLabelText("New note title");
+
+    // The operator changes their mind (Escape closes it, same as the button's own form).
+    fireEvent.keyDown(nameInput, { key: "Escape" });
+    expect(screen.queryByLabelText("New note title")).toBeNull();
+
+    // A second trigger, still on the same page (no remount), must reopen it rather than
+    // silently no-op — the old one-way latch never reset after the first application.
+    fireEvent.click(screen.getByText("trigger new-note"));
     expect(await screen.findByLabelText("New note title")).toBeInTheDocument();
   });
 

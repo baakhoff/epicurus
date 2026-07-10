@@ -149,6 +149,11 @@ class GmailProvider(MailProvider):
         """
         token = await self._get_token()
         async with self._make_client(token) as client:
+            # Single Gmail call on this path — so a 403/429 raised here is unambiguously the
+            # header lookup, which is why mail_reply maps it to _SCOPE_HINT_REPLY_LOOKUP ("…look
+            # up the original message"). If a future revision adds a *second* Gmail call to this
+            # method, that one-size hint no longer fits every failure: split it by which call
+            # raised rather than letting a new call silently inherit the lookup wording (#557).
             headers, thread_id = await self._fetch_reply_headers(client, message_id)
         return _compose_reply(headers, thread_id, body)
 

@@ -755,6 +755,19 @@ images to GHCR.
 
 ### Fixed
 
+- **Assistant instructions: guard an unsaved draft; cover injection-first on the memory path** (#536) —
+  the Settings instructions editor is the first long-form editor there (the other cards instant-save),
+  so an unsaved draft silently vanished on an accidental reload/close. It now arms a `beforeunload`
+  guard while the draft is dirty and drops it on save (an in-app route change is a declarative-router
+  navigation `beforeunload` can't observe — a future data-router `useBlocker` would cover that, noted
+  on the issue). Test-side, injection-first (#497) was only asserted on the headless/no-memory path; a
+  test now pins the **memory path** order — `[system(instructions), system(recalled), …history…, new
+  user]` — and the resume path was confirmed by reading not to re-inject the base prompt
+  (`run_stream(resume_convo=…)` uses the rehydrated convo and skips assembly). An explicit
+  **empty-prompt escape hatch** (a deliberately blank prompt, distinct from "use the default") is left
+  as an owner call — blank still resets to the shipped default; the one-character-prompt workaround
+  stands. `web` 0.88.0→0.88.1 (the core-app change is test-only — no version bump).
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's

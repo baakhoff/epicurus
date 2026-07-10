@@ -80,12 +80,19 @@ function step(view: ViewMode, cursor: Date, dir: 1 | -1): Date {
 const fmtDay = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const fmtTime = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
-function periodLabel(view: ViewMode, cursor: Date): string {
+/** The toolbar's period label, in both forms the narrow/wide toolbar switches between
+ *  via CSS (#562) — `short` drops the parts a ~380px viewport has no room for (the long
+ *  month name, the year on a date range), `full` is the unabridged desktop form. */
+function periodLabel(view: ViewMode, cursor: Date): { full: string; short: string } {
   if (view === "month") {
-    return cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    return {
+      full: cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
+      short: cursor.toLocaleDateString(undefined, { month: "short", year: "numeric" }),
+    };
   }
   const { start, end } = visibleRange(view, cursor);
-  return `${fmtDay(start)} – ${fmtDay(addDays(end, -1))}, ${start.getFullYear()}`;
+  const range = `${fmtDay(start)} – ${fmtDay(addDays(end, -1))}`;
+  return { full: `${range}, ${start.getFullYear()}`, short: range };
 }
 
 /** Bucket events into local-day lists, each ordered by start time.
@@ -380,7 +387,8 @@ function Toolbar({
   onToday,
 }: {
   view: ViewMode;
-  label: string;
+  /** Both forms of the period label (#562) — `short` renders below `sm`, `full` at/above it. */
+  label: { full: string; short: string };
   fetching: boolean;
   actions: BoardAction[];
   module: string;
@@ -412,13 +420,21 @@ function Toolbar({
             <ChevronRight size={18} />
           </button>
         </div>
-        <h2 className="font-serif text-base text-ink">{label}</h2>
+        <h2 className="font-serif text-base text-ink">
+          <span className="hidden sm:inline">{label.full}</span>
+          <span className="sm:hidden">{label.short}</span>
+        </h2>
         {fetching && <Spinner className="size-3.5 text-ink-faint" />}
       </div>
 
-      <div className="flex items-center gap-2">
+      {/* flex-wrap is the last-resort fallback (#562) — icon-only "New event" plus the
+          tighter narrow gap should fit this group on one line at ~380px, but a phone
+          with several writable calendars (the Calendars menu adds real width) may still
+          need the second line rather than clip. */}
+      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
         {/* Page-level actions (e.g. "New event") — core-rendered from the page data (#208).
-            size="sm" matches the Today/view-switcher controls in this toolbar (#427). */}
+            size="sm" matches the Today/view-switcher controls in this toolbar (#427);
+            iconOnlyNarrow drops the label below `sm`, keeping just the icon (#562). */}
         {actions.map((action) => (
           <ActionControl
             key={action.tool + action.label}
@@ -426,6 +442,7 @@ function Toolbar({
             pageId={pageId}
             action={action}
             size="sm"
+            iconOnlyNarrow
           />
         ))}
         {/* Pick which calendars are visible (#378) — only when more than one is in view. */}

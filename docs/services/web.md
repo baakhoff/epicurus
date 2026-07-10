@@ -517,7 +517,18 @@ matching the text-field height) for forms; `Select`'s width is opt-in (`classNam
 keeps its `aria-label` and the wordy label moves into the tip; used by the turn-activity
 summary, the board's compact "+" Add, the Files up-nav, the connected-account row's
 credential / disconnect actions (#393), and the chat header's Conversations / New-chat
-buttons (#480). `Switch` is the single on/off control used
+buttons (#480). A page-level `ActionControl` (the non-compact toolbar Button, e.g. the
+calendar's "New event") can additionally opt into `iconOnlyNarrow` — the same
+icon+`aria-label`+`Tooltip` treatment, but CSS-driven (`hidden sm:inline` on the label) rather
+than module-declared, so it applies only below the `sm` breakpoint and desktop is unaffected
+(#562). Any archetype toolbar packing several full-size actions into one row can opt in; the
+calendar toolbar and the board's toolbar-level action both do, and both toolbars keep a
+`flex-wrap` fallback on the action row itself in case a still-wider set of controls (e.g. the
+Calendars menu with several accounts) doesn't fit even after shrinking — wrapping to a second
+line rather than clipping. The calendar toolbar's month/range label follows the same "carry
+both forms, let CSS choose" idea: it renders both a full form ("July 2026") and a short one
+("Jul 2026") as CSS-swapped spans, the short form showing below `sm`. `Switch` is the single
+on/off control used
 everywhere (per-tool toggles, module enable/disable, boolean schema fields). Its **track
 colour carries the state** — accent when on, muted when off — while the thumb stays a
 constant, bright, evenly-inset circle that simply slides between ends. Keep that convention

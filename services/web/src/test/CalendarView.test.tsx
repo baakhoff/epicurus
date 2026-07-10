@@ -272,6 +272,34 @@ describe("CalendarView", () => {
     expect(button.className).not.toContain("text-sm");
   });
 
+  // Narrow-viewport icon-only (#562): the toolbar action opts into ActionControl's
+  // responsive shrink, which keeps the accessible name on aria-label + a tooltip
+  // regardless of which of the two (CSS-driven) label spans is currently visible —
+  // jsdom doesn't evaluate the `sm:` breakpoint, so this asserts the DOM contract
+  // rather than the visual state (checked live in a real browser separately).
+  it("keeps the New event action's accessible name and label available at every width (#562)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      actions: [{ tool: "calendar_create_event", label: "New event", icon: "plus" }],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    const button = await screen.findByRole("button", { name: "New event" });
+    expect(button).toHaveAttribute("aria-label", "New event");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("New event");
+    // The label text itself still renders (hidden below `sm` by CSS, not removed from the DOM).
+    expect(button).toHaveTextContent("New event");
+  });
+
+  it("renders the month label in both its full and narrow-viewport short form (#562)", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    await screen.findByText("Standup");
+    expect(screen.getByText("June 2026")).toBeInTheDocument(); // full — shown at/above `sm`
+    expect(screen.getByText("Jun 2026")).toBeInTheDocument(); // short — shown below `sm`
+  });
+
   it("lists every enabled calendar in the menu, not only those with in-window events (#431)", async () => {
     mockCollections.mockResolvedValue({
       noun: "calendar",

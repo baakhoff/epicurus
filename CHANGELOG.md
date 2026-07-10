@@ -755,6 +755,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Calendar (PWA): the toolbar no longer overflows on a phone** (#562) — the calendar page's
+  top toolbar packed prev/next chevrons + the month/range label on the left and "New event" +
+  the Calendars menu + Today + the view switcher on the right into a row with no shrink or wrap
+  escape valve, so at ~380px width the right group clipped past the viewport edge. `ActionControl`
+  gains an opt-in `iconOnlyNarrow` capability — the same icon+`aria-label`+`Tooltip` treatment an
+  `icon_only` action already gets, but CSS-driven (`hidden sm:inline`) rather than
+  module-declared, so it only shrinks the label below the `sm` breakpoint and desktop is
+  unaffected; both the calendar toolbar's "New event" and the board toolbar's action opt in. The
+  month/range label now carries a short form ("Jul 2026") alongside the full one ("July 2026"),
+  CSS-swapped the same way, and the action row keeps a `flex-wrap` fallback for a still-wider
+  case (several connected calendars) rather than clipping. `web` 0.88.0→0.88.1.
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's

@@ -84,7 +84,7 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 | `PUT /platform/v1/files/write?path=&tenant_id=` (body `{content}`) | Write UTF-8 text → `FileEntry`. **400** writing the root. |
 | `DELETE /platform/v1/files?path=&tenant_id=` | `{deleted}` — a file or a whole tree. **400** deleting the root. |
 | `POST /platform/v1/files/dir?path=&tenant_id=` | Create a directory → `FileEntry`. |
-| `POST /platform/v1/files/move?tenant_id=` (body `{src, dst}`) | Move/rename → `FileEntry`. **File-space first**, else falls back to the storage object store (`POST /objects/move`) for object entries. **404** missing src, **409** dst exists, **400** root/traversal/into-itself. |
+| `POST /platform/v1/files/move?tenant_id=` (body `{src, dst}`) | Move/rename → `FileEntry`. **File-space first**, else falls back to the storage object store (`POST /objects/move`) for object entries. **404** missing src, **409** dst exists, **400** root/traversal/into-itself, a **module-owned `dst`** (its top-level segment is a `module_urls` hostname and differs from `src`'s top — mirrors the upload lock so a foreign file can't land behind a module's back, #479/#554; a module's *own* same-top move is still allowed), or a **pathological name** (a control char / NUL, or a path segment over 255 bytes — clamped to a clean 400 instead of a store-level 500). |
 
 > **`read`, `move`, `download`, and `delete` fall back to the storage object store** for object
 > entries (chat uploads, agent-written files): the core tries the file space first, then proxies

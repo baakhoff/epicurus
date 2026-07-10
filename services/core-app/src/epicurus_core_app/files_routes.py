@@ -112,6 +112,24 @@ def _browser_item(
     }
 
 
+_MAX_SEGMENT_BYTES = 255
+
+
+def _reject_pathological(path: str) -> None:
+    """400 on a name the store would otherwise only reject deep down with a 500 (#554).
+
+    ``normalize_rel`` blocks traversal but not a control char / NUL or an over-long segment
+    (>255 bytes is the common filesystem limit); those surface as an ``OSError`` inside the
+    FileStore. Turn them into a clean 400 at the door — for both upload and move/rename — so a
+    bad name is a client error, not a server error.
+    """
+    for seg in path.split("/"):
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in seg):
+            raise HTTPException(status_code=400, detail="name contains control characters")
+        if len(seg.encode("utf-8")) > _MAX_SEGMENT_BYTES:
+            raise HTTPException(status_code=400, detail="name segment exceeds 255 bytes")
+
+
 def _dedupe_key(kind: str, path: str) -> tuple[str, str]:
     """The identity of one browser row across the two listing sources (#560).
 
@@ -279,14 +297,28 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
-        _safe(body.src)
-        _safe(body.dst)
+        src = _safe(body.src)
+        dst = _safe(body.dst)
+        _reject_pathological(dst)
+        # Mirror the upload guard (#479) on the move/rename path (#554): refuse landing a file
+        # *into* a module-owned top-level subtree from outside it. The src-top ≠ dst-top
+        # condition preserves a module's self-moves (it manages its own subtree, and the
+        # module-facing files_move relies on that) — a foreign file landing behind a module's
+        # back would desync its index, exactly what the upload 400 prevents. A rename whose typed
+        # name smuggled in a leading path (making dst_top a locked module) is caught here too.
+        src_top = src.split("/", 1)[0]
+        dst_top = dst.split("/", 1)[0]
+        if dst_top in locked_prefixes and src_top != dst_top:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{dst_top}' belongs to the {dst_top} module — move into your own folders",
+            )
         try:
-            moved = await store.move(tenant=tenant, src=body.src, dst=body.dst)
+            moved = await store.move(tenant=tenant, src=src, dst=dst)
         except FileNotFoundError:
             # Not a file-space entry — try the object store (a movable upload/agent object).
             if objects is not None:
-                entry = await objects.move(tenant=tenant, src=body.src, dst=body.dst)
+                entry = await objects.move(tenant=tenant, src=src, dst=dst)
                 return FileEntry(path=entry.path, name=entry.name, kind=entry.kind, size=entry.size)
             raise HTTPException(status_code=404, detail="source not found") from None
         except FileExistsError as exc:
@@ -368,6 +400,7 @@ def create_files_router(
         name = (file.filename or "file").replace("\\", "/").rsplit("/", 1)[-1].strip()
         if name in ("", ".", ".."):
             name = "file"
+        _reject_pathological(name)
         target = await _unused_path(tenant=tenant, rel_dir=rel_dir, name=name)
         entry = await store.write_bytes(tenant=tenant, path=target, data=data, content_type=kind)
         # Keep the index in step immediately so the upload is searchable at once (the

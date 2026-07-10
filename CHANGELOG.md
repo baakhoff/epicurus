@@ -755,6 +755,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Files: move/rename can't smuggle a file into a module's subtree** (#554) — `POST /files/move`
+  checked neither `src` nor `dst` against the module-owned `locked_prefixes`, though `upload`
+  does — and #479 is what made operator files draggable, so the hole was newly reachable: dragging
+  a file onto a module folder row (or typing a `/`-bearing rename) landed a foreign file behind the
+  module's back, desyncing its index. The move handler now mirrors the upload guard — **400** when
+  `dst`'s top-level segment is a module folder and `src`'s differs, so a module's *own* same-top
+  move still works — the web rename field rejects a `/` or `\` inline before it can relocate, and a
+  pathological name (control char / NUL, or a segment over 255 bytes) is clamped to a clean **400**
+  instead of a store-level 500. A scheme-less `module_urls` entry (its host parsed as the URL
+  scheme, leaving `hostname` None) now recovers its host so the folder stays locked, warning rather
+  than silently unlocking. `core-app` 0.66.1→0.66.2, `web` 0.88.0→0.88.1.
+
 - **Files: a folder present in both the file space and the object store renders once** (#560) — the
   Files page (`GET /platform/v1/files/page`) merges two listing sources — the core file-space tree
   (`store.list_dir` / `index.search`) and the storage module's objects (`objects.list`) — and

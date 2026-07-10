@@ -178,6 +178,30 @@ and the sweep always agree. Core unreachable → both degrade to UTC together. (
 per-render timezone lookup this introduces is deduplicated by a short-TTL memo added alongside
 the sweep's cancellation hardening, #553.)
 
+**v0.15.3** hardens the sweep's materialize machinery further and caches the timezone read (#553):
+
+- **The materialize claim no longer leaks on cancellation.** `_materialize` claims a
+  `(tenant_id, task_id)` key before spawning a successor and releases it at each normal outcome —
+  but every handler was `except Exception`, which does **not** catch `asyncio.CancelledError` (a
+  `BaseException` since 3.8). A cancel between claim and release (client disconnect, core timeout)
+  left the key claimed forever, so that task's recurrence silently never materialized again until a
+  process restart. The claimed region now runs under an `except BaseException` that releases the
+  claim **synchronously** (never awaiting on a cancellation path) and re-raises — *unless* a
+  successor was already created but its rule not yet retired, which is the intentional
+  keep-claimed terminal state (#533b) that stops duplicate amplification.
+- **"Today" is resolved once per read, before claiming.** The operator timezone was fetched
+  uncached on the hot path — once per enabled collection in the sweep and again per materialized
+  anchor, each a fresh `get_timezone` HTTP round trip inside the claimed window. It is now
+  resolved once at the top of `list_tasks` (and once per completion) and threaded into the sweep
+  and `_materialize`: one core call per read regardless of collection count, a claimed window of
+  pure DB work, and one "today" the sweep and materialize can't disagree on across a midnight tick.
+- **The operator-timezone clock memoizes for 60 s.** `operator_clock` caches the resolved zone
+  for a short TTL so reads seconds apart (the board render + a chat turn) share one `get_timezone`
+  call, and a core-down spell logs one warning per window instead of one per call.
+- **`tasks_list` header wording restored.** The `capped_listing` adoption (v0.15.1) changed the
+  pre-cap header from "Found N open task(s):" to "Found N task(s):"; `noun="open task"` restores
+  it — `tasks_list` only ever returns open tasks.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)

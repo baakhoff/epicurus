@@ -10,7 +10,7 @@ creates exactly one successor with the right due date, retires the rule on the c
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -88,11 +88,14 @@ def _router(store: TaskStore, *, today: str) -> TasksRouter:
 
 
 @pytest.fixture()
-async def store() -> TaskStore:
+async def store() -> AsyncIterator[TaskStore]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     ts = TaskStore(engine)
     await ts.init()
-    return ts
+    yield ts
+    # Dispose while the loop is still running so aiosqlite's connections close here rather than
+    # in a `Connection.__del__` after the loop shuts down (a benign but noisy teardown warning).
+    await engine.dispose()
 
 
 def _partition(tasks: list[Task]) -> tuple[list[Task], list[Task]]:
@@ -328,3 +331,142 @@ async def test_operator_clock_reads_today_in_the_resolved_zone() -> None:
     tz = ZoneInfo("Pacific/Kiritimati")  # UTC+14 — the furthest-ahead named zone
     clock = operator_clock(_tz("Pacific/Kiritimati"))
     assert await clock() == datetime.now(tz).date().isoformat()
+
+
+# ── resolve-today-once + timezone memo (#553) ──────────────────────────────────
+
+
+async def test_list_tasks_resolves_today_once_per_read(store: TaskStore) -> None:
+    """Pre-#553 the sweep called `_now` once *and* `_materialize` called it once per anchor:
+    a read with two overdue recurring tasks made three timezone fetches. Now `today` is resolved
+    once at the top of `list_tasks` and threaded into the sweep and every `_materialize`, so the
+    count is one regardless of how many collections or anchors the read touches."""
+    inner = LocalTasksProvider(store)
+    await inner.add_task(TENANT, "A", due=MON, repeat="FREQ=WEEKLY")
+    await inner.add_task(TENANT, "B", due=MON, repeat="FREQ=DAILY")
+    calls = 0
+
+    async def counting_now() -> str:
+        nonlocal calls
+        calls += 1
+        return THU
+
+    router = TasksRouter(local=inner, external={}, prefs=_LocalPrefs(), now=counting_now)
+    await router.list_tasks(TENANT, scope="all")
+    assert calls == 1
+
+
+async def test_operator_clock_memoizes_the_timezone_within_ttl() -> None:
+    """The zone is fetched once per TTL window, not once per clock read (#553) — an injected
+    monotonic makes the expiry deterministic without sleeping."""
+    calls = 0
+
+    async def counting_source() -> str:
+        nonlocal calls
+        calls += 1
+        return "America/New_York"
+
+    fake_time = [1000.0]
+    clock = operator_clock(counting_source, ttl_seconds=60.0, monotonic=lambda: fake_time[0])
+
+    await clock()
+    await clock()
+    await clock()
+    assert calls == 1  # memoized within the window
+
+    fake_time[0] += 61.0  # advance past the TTL
+    await clock()
+    assert calls == 2  # re-fetched after expiry
+
+
+# ── materialize claim is cancellation-safe (#553) ──────────────────────────────
+
+
+class _BlockOnceAddProvider:
+    """Delegates to *inner*; the first ``add_task`` blocks until cancelled, then works (#553).
+
+    Suspends a materialize *inside* the claimed region so a test can cancel it exactly between
+    the claim and its release. ``entered`` fires once the block is reached (the claim is held).
+    """
+
+    def __init__(self, inner: LocalTasksProvider) -> None:
+        self._inner = inner
+        self.entered = asyncio.Event()
+        self._block = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def add_task(self, *args: Any, **kwargs: Any) -> Task:
+        if self._block:
+            self._block = False
+            self.entered.set()
+            await asyncio.Event().wait()  # blocks until the task is cancelled
+        return await self._inner.add_task(*args, **kwargs)
+
+
+class _BlockOnceRetireProvider:
+    """Delegates to *inner*; ``add_task`` works, but the first ``update_task`` (the rule retire)
+    blocks until cancelled, then works — so a cancel lands *after* a successor already exists,
+    the created-but-not-retired terminal state (#533b/#553)."""
+
+    def __init__(self, inner: LocalTasksProvider) -> None:
+        self._inner = inner
+        self.entered = asyncio.Event()
+        self._block = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def update_task(self, *args: Any, **kwargs: Any) -> Task:
+        if self._block:
+            self._block = False
+            self.entered.set()
+            await asyncio.Event().wait()  # blocks until the task is cancelled
+        return await self._inner.update_task(*args, **kwargs)
+
+
+@pytest.mark.timeout(15)
+async def test_cancelled_materialize_before_add_releases_the_claim(store: TaskStore) -> None:
+    """A cancellation between the claim and its release must not leak the claim (#553a): with the
+    old `except Exception` the CancelledError sailed past every handler and the anchor's key
+    stayed claimed forever — its recurrence silently never materialized again until restart. The
+    fix releases synchronously and re-raises, so the *next* read materializes normally."""
+    inner = LocalTasksProvider(store)
+    await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+    blocking = _BlockOnceAddProvider(inner)
+    router = TasksRouter(local=blocking, external={}, prefs=_LocalPrefs(), now=_fixed(THU))
+
+    read = asyncio.create_task(router.list_tasks(TENANT, scope="all"))
+    await asyncio.wait_for(blocking.entered.wait(), timeout=5)  # now suspended inside the claim
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    assert router._materializing == set()  # the claim was released, not leaked
+    # And behaviourally: a fresh read materializes the successor (add_task now works).
+    open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len([t for t in open_tasks if t.due == NEXT_MON]) == 1
+
+
+@pytest.mark.timeout(15)
+async def test_cancelled_retire_after_add_keeps_the_claim(store: TaskStore) -> None:
+    """A cancellation *after* the successor exists but before the retire lands is the #533b
+    keep-claimed terminal state: the anchor's rule is still live, so releasing the claim would
+    re-materialize a duplicate on the next read. The cancellation path marks that state
+    synchronously (created_ok), so the claim is kept and no duplicate appears."""
+    inner = LocalTasksProvider(store)
+    anchor = await inner.add_task(TENANT, "Water plants", due=MON, repeat="FREQ=WEEKLY")
+    blocking = _BlockOnceRetireProvider(inner)
+    router = TasksRouter(local=blocking, external={}, prefs=_LocalPrefs(), now=_fixed(THU))
+
+    read = asyncio.create_task(router.list_tasks(TENANT, scope="all"))
+    await asyncio.wait_for(blocking.entered.wait(), timeout=5)  # suspended in the retire write
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    assert router._materializing == {(TENANT, anchor.id)}  # claim kept (created but not retired)
+    # A follow-up read must not spawn a second successor (the claim blocks re-materialization).
+    open_tasks, _ = _partition(await router.list_tasks(TENANT, scope="all"))
+    assert len([t for t in open_tasks if t.due == NEXT_MON]) == 1  # exactly one, no duplicate

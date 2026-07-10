@@ -829,6 +829,9 @@ function EventDetail({
   // focus when the overlay unmounts. `open` is literally true: the component only
   // mounts while an event is selected, so mount/unmount are the open/close edges.
   useModalFocus(dialogRef, true);
+  // One combined slot for whichever action last failed, rendered below the full
+  // actions row rather than per-action inline (#472) — cleared on the next success.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -906,10 +909,12 @@ function EventDetail({
                 action={action}
                 compact
                 onSuccess={onClose}
+                onError={setActionError}
               />
             ))}
           </div>
         )}
+        {actionError && <p className="mt-2 text-[11px] text-danger">{actionError}</p>}
       </div>
     </div>
   );

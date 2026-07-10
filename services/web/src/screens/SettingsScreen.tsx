@@ -396,6 +396,21 @@ export function AssistantInstructionsCard() {
   const SOFT_LIMIT = 4000;
   const overSoft = value.length > SOFT_LIMIT;
 
+  // Warn before a browser-level navigation (reload, tab/app close) drops an unsaved draft. This is
+  // the first long-form editor in Settings — unlike the instant-save cards around it, a half-written
+  // system prompt is real work that shouldn't vanish on an accidental refresh (#536). (An in-app
+  // route change goes through the declarative router, which `beforeunload` can't observe; blocking
+  // those needs the data-router `useBlocker` — see the issue note.)
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ""; // some browsers only show the native prompt when returnValue is set
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   return (
     <Card>
       <h3 className="mb-2 font-serif text-base text-ink">Assistant instructions</h3>

@@ -755,6 +755,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Assistant instructions: guard an unsaved draft; cover injection-first on the memory path** (#536) —
+  the Settings instructions editor is the first long-form editor there (the other cards instant-save),
+  so an unsaved draft silently vanished on an accidental reload/close. It now arms a `beforeunload`
+  guard while the draft is dirty and drops it on save (an in-app route change is a declarative-router
+  navigation `beforeunload` can't observe — a future data-router `useBlocker` would cover that, noted
+  on the issue). Test-side, injection-first (#497) was only asserted on the headless/no-memory path; a
+  test now pins the **memory path** order — `[system(instructions), system(recalled), …history…, new
+  user]` — and the resume path was confirmed by reading not to re-inject the base prompt
+  (`run_stream(resume_convo=…)` uses the rehydrated convo and skips assembly). An explicit
+  **empty-prompt escape hatch** (a deliberately blank prompt, distinct from "use the default") is left
+  as an owner call — blank still resets to the shipped default; the one-character-prompt workaround
+  stands. `web` 0.88.5→0.88.6 (the core-app change is test-only — no version bump).
 - **Files: dropping an external file onto a folder row uploads into it instead of vanishing** (#556) —
   a file dropped precisely on a folder row was silently swallowed: the row's drop handler
   unconditionally `preventDefault`ed and ran the internal-move path (a no-op for an OS file drag),

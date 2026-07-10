@@ -225,6 +225,61 @@ async def test_move_file_space_updates_index(tmp_path: Path, fake: FakeObjects) 
     assert await index.get(tenant=TENANT, path="knowledge/readme2.md") is not None
 
 
+async def test_move_operator_file_into_module_dir_is_refused(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # An operator file dropped onto a module folder is refused: writing behind the module's back
+    # would desync its index — the same rule the upload 400 already enforces (#479/#554).
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.post(MOVE, json={"src": "top.txt", "dst": "knowledge/top.txt"})
+    assert resp.status_code == 400
+    assert "knowledge" in resp.json()["detail"]
+    # The guard runs before the seam: the source is untouched and nothing landed in the module.
+    assert await store.stat(tenant=TENANT, path="top.txt") is not None
+    assert await store.stat(tenant=TENANT, path="knowledge/top.txt") is None
+
+
+async def test_move_module_self_move_same_top_still_allowed(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # The src-top == dst-top carve-out: a module moving its own file within its subtree is a
+    # legitimate operation the module-facing files_move relies on — it must not be blocked.
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.post(
+            MOVE, json={"src": "knowledge/readme.md", "dst": "knowledge/moved.md"}
+        )
+    assert resp.status_code == 200
+    assert await store.stat(tenant=TENANT, path="knowledge/moved.md") is not None
+
+
+async def test_rename_smuggling_a_path_into_a_module_is_refused(
+    tmp_path: Path, fake: FakeObjects
+) -> None:
+    # Rename is a same-parent move; a "new name" carrying a leading path relocates the file. If
+    # the smuggled top is a module, the move guard is the server backstop to the web field (#554).
+    client, _, store = await _make_client(tmp_path, objects=fake)
+    async with client:
+        resp = await client.post(MOVE, json={"src": "top.txt", "dst": "notes/top.txt"})
+    assert resp.status_code == 400
+    assert "notes" in resp.json()["detail"]
+    assert await store.stat(tenant=TENANT, path="top.txt") is not None
+
+
+async def test_move_pathological_name_is_a_clean_400(tmp_path: Path, fake: FakeObjects) -> None:
+    # A control char / NUL or an over-long segment would surface as an OSError 500 from the store;
+    # the shared sanitizer turns each into a clean 400 at the door (#554).
+    client, _, _ = await _make_client(tmp_path, objects=fake)
+    async with client:
+        control = await client.post(MOVE, json={"src": "top.txt", "dst": "bad\tname.txt"})
+        nul = await client.post(MOVE, json={"src": "top.txt", "dst": "bad\x00name.txt"})
+        too_long = await client.post(MOVE, json={"src": "top.txt", "dst": "z" * 300 + ".txt"})
+    assert control.status_code == 400
+    assert nul.status_code == 400
+    assert too_long.status_code == 400
+
+
 async def test_upload_is_indexed_and_listed_immediately(tmp_path: Path, fake: FakeObjects) -> None:
     client, index, _ = await _make_client(tmp_path, objects=fake)
     async with client:

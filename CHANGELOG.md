@@ -755,6 +755,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Files: move/rename can't smuggle a file into a module's subtree** (#554) — `POST /files/move`
+  checked neither `src` nor `dst` against the module-owned `locked_prefixes`, though `upload`
+  does — and #479 is what made operator files draggable, so the hole was newly reachable: dragging
+  a file onto a module folder row (or typing a `/`-bearing rename) landed a foreign file behind the
+  module's back, desyncing its index. The move handler now mirrors the upload guard — **400** when
+  `dst`'s top-level segment is a module folder and `src`'s differs, so a module's *own* same-top
+  move still works — the web rename field rejects a `/` or `\` inline before it can relocate, and a
+  pathological name (control char / NUL, or a segment over 255 bytes) is clamped to a clean **400**
+  instead of a store-level 500. A scheme-less `module_urls` entry (its host parsed as the URL
+  scheme, leaving `hostname` None) now recovers its host so the folder stays locked, warning rather
+  than silently unlocking. `core-app` 0.66.0→0.66.1, `web` 0.88.0→0.88.1.
+
 - **Chat: expanding a message's Sources pill no longer reveals every hover-card at once** (#572) —
   unnamed Tailwind `group`/`group-hover` pairs compile to a descendant selector that matches **any**
   ancestor carrying `.group`, so a source chip nested inside a message row also reacted to the row's

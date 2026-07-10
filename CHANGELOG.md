@@ -755,6 +755,16 @@ images to GHCR.
 
 ### Fixed
 
+- **Files: dropping an external file onto a folder row uploads into it instead of vanishing** (#556) —
+  a file dropped precisely on a folder row was silently swallowed: the row's drop handler
+  unconditionally `preventDefault`ed and ran the internal-move path (a no-op for an OS file drag),
+  and the pane-level upload handler then bailed on `defaultPrevented` — no upload, no move, no
+  error. The shared directory drop-target now handles an external file drag too: no internal
+  drag + the drag carries `Files` → **upload into that directory** (the same "upload lands where
+  you dropped" rule as the pane, one level deeper), with the row/breadcrumb highlighting as the
+  target and claiming the event so the pane doesn't also upload into the current dir. An in-flight
+  internal move-drag still takes precedence, so a reorder is never mistaken for an upload. `web`
+  0.88.4→0.88.5.
 - **Command palette: `?new=1` no longer silently no-ops on a second trigger, and Enter no
   longer hijacks an IME composition's commit** (#558) — two small gaps found at the palette's
   #544 merge review. `EditorView`'s `?new=1` deep-link (the palette's "New note") used a

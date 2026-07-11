@@ -37,6 +37,7 @@ import {
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
+  PageOrderPrefs,
   PendingSuggestion,
   PlatformInfo,
   PowerStatus,
@@ -204,6 +205,14 @@ export const api = {
     request(z.object({ status: z.string(), timezone: z.string() }), "/platform/v1/timezone", {
       method: "PUT",
       body: JSON.stringify({ timezone }),
+    }),
+
+  // The operator's drag-and-drop left-nav page order (#543), reordered on the Modules page.
+  pageOrder: () => request(PageOrderPrefs, "/platform/v1/page-order"),
+  setPageOrder: (order: string[]) =>
+    request(PageOrderPrefs, "/platform/v1/page-order", {
+      method: "PUT",
+      body: JSON.stringify({ order }),
     }),
 
   // The agent's editable base system prompt (#497). GET returns the effective prompt + whether

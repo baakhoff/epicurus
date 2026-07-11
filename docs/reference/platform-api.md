@@ -139,6 +139,20 @@ Both take an optional `tenant_id` query param, falling back to the default tenan
 
 ---
 
+## `GET /platform/v1/page-order` · `PUT /platform/v1/page-order`
+
+The operator's drag-and-drop order for left-nav module pages (#543) — purely a shell/nav
+concern (ADR-0018), no module ever reads or writes it. `GET` returns `{order: string[]}`, each
+entry a page's `path` (e.g. `/m/calendar/main`), most-preferred-first; `[]` means no
+preference is set and the nav falls back to its manifest-declared (`nav_order`-then-label)
+default. `PUT {order}` replaces the stored list wholesale — no validation against the current
+module set, since merge semantics (unknown ids append, stale ids are ignored) are resolved
+client-side, not here (`sortByPageOrder` in `src/app/registry.ts`). Both take an optional
+`tenant_id` query param, falling back to the default tenant when omitted. Edited from the web
+**Modules** screen's **Page order** card, never the sidebar itself.
+
+---
+
 ## `GET` · `POST` · `DELETE /platform/v1/llm/saved-models`
 
 The operator's saved hosted-model ids (#496) — a tenant-scoped, durable home for the hosted

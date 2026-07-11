@@ -599,6 +599,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   movability stays authoritative (#560; see [file space](../reference/files.md)).
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
+- **Postgres `page_order_prefs`** — per-tenant left-nav page order (#543): `tenant`,
+  `order_json` (a JSON list of page paths, most-preferred-first). A missing row (or null)
+  falls back to the manifest-declared default order; opaque storage only — merge semantics
+  live client-side (ADR-0018), not in this table.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):
   `tenant`, `instructions` (nullable). A NULL/blank row falls back to the shipped
   `DEFAULT_AGENT_INSTRUCTIONS`; resolved per turn and injected first in `Agent._assemble`.

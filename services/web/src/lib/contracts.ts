@@ -77,6 +77,10 @@ export type LlmPrefs = z.infer<typeof LlmPrefs>;
 export const TimezonePrefs = z.object({ timezone: z.string() });
 export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 
+/** The operator's stored left-nav page order (#543) — `order` is `[]` when unset. */
+export const PageOrderPrefs = z.object({ order: z.array(z.string()) });
+export type PageOrderPrefs = z.infer<typeof PageOrderPrefs>;
+
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;

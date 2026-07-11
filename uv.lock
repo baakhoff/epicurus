@@ -1141,7 +1141,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-websearch"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "services/websearch" }
 dependencies = [
     { name = "epicurus-core" },

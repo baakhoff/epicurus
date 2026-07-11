@@ -87,6 +87,80 @@ describe("EntityRefChip", () => {
   });
 });
 
+describe("EntityRefChip — websearch (#551)", () => {
+  const WEB_REF: EntityRef = {
+    ref_id: "abc123",
+    module: "websearch",
+    kind: "result",
+    title: "Example Site",
+    summary: "A snippet.",
+  };
+
+  it("renders an external-link glyph instead of the entity @ glyph", () => {
+    render(<EntityRefChip entref={WEB_REF} />, { wrapper });
+    const button = screen.getByRole("button", { name: /Example Site/ });
+    expect(button.querySelector(".lucide-external-link")).toBeInTheDocument();
+    expect(button.querySelector(".lucide-at-sign")).not.toBeInTheDocument();
+  });
+
+  it("resolves and opens the source page in a new tab on click, not the right panel", async () => {
+    mockResolve.mockResolvedValue({
+      title: "Example Site",
+      description: "A snippet.",
+      details: [],
+      href: { label: "Open page", url: "https://example.com/page" },
+    });
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    render(<EntityRefChip entref={WEB_REF} />, { wrapper });
+    fireEvent.click(screen.getByRole("button", { name: /Example Site/ }));
+    await waitFor(() =>
+      expect(openSpy).toHaveBeenCalledWith(
+        "https://example.com/page",
+        "_blank",
+        "noopener,noreferrer",
+      ),
+    );
+    expect(usePanel.getState().stack).toHaveLength(0);
+    openSpy.mockRestore();
+  });
+
+  it("reuses an already-resolved hover-card instead of refetching on click", async () => {
+    mockResolve.mockResolvedValue({
+      title: "Example Site",
+      description: "A snippet.",
+      details: [],
+      href: { label: "Open page", url: "https://example.com/page" },
+    });
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    render(<EntityRefChip entref={WEB_REF} />, { wrapper });
+    fireEvent.mouseEnter(screen.getByRole("button", { name: /Example Site/ }).parentElement!);
+    // The hover-card's own "Open page" link only renders once `card.data` (with `href`) has
+    // actually landed in a re-render — waiting for the mock to have been *called* isn't enough,
+    // since that's true before its promise resolves and React re-renders with the result.
+    await screen.findByRole("link", { name: /Open page/ });
+    expect(mockResolve).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: /Example Site/ }));
+    await waitFor(() => expect(openSpy).toHaveBeenCalled());
+    expect(mockResolve).toHaveBeenCalledTimes(1); // no second fetch on click
+    openSpy.mockRestore();
+  });
+
+  it("never opens a tab for a non-external href (defensive scheme guard)", async () => {
+    mockResolve.mockResolvedValue({
+      title: "Example Site",
+      description: "",
+      details: [],
+      href: { label: "x", url: "javascript:alert(1)" },
+    });
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    render(<EntityRefChip entref={WEB_REF} />, { wrapper });
+    fireEvent.click(screen.getByRole("button", { name: /Example Site/ }));
+    await waitFor(() => expect(mockResolve).toHaveBeenCalled());
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+  });
+});
+
 describe("SourcesPill (#333)", () => {
   const REFS: EntityRef[] = [
     REF,

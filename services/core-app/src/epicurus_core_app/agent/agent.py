@@ -30,7 +30,7 @@ from epicurus_core_app.agent.activity import (
 )
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
-from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
+from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.gateway import LlmGateway
@@ -1024,11 +1024,12 @@ class Agent:
         """Run a tool call, returning ``(text_for_model, is_error)``.
 
         ``is_error`` is the structural failure signal the activity timeline classifies on:
-        True when the call could not be made (unknown tool) or the tool reported failure — an
-        MCP ``isError`` response the host raises as :class:`ToolCallError` (#435), or an
-        unexpected exception. It is tracked from the catch state, *not* sniffed from the
-        returned text: the ToolCallError path hands the model the tool's own message verbatim,
-        which need not begin with ``error:`` (#440), so a text prefix is not a reliable signal.
+        True when the call could not be made (unknown tool), the tool reported failure — an
+        MCP ``isError`` response the host raises as :class:`ToolCallError` (#435) — the module
+        was unreachable (:class:`ModuleUnreachableError`, #472), or an unexpected exception. It
+        is tracked from the catch state, *not* sniffed from the returned text: the ToolCallError
+        path hands the model the tool's own message verbatim, which need not begin with
+        ``error:`` (#440), so a text prefix is not a reliable signal.
         """
         url = route.get(name)
         if url is None:
@@ -1040,6 +1041,11 @@ class Agent:
             # text — exactly what it received before the host raised on isError (#435).
             log.warning("tool reported failure", tool=name, error=str(exc))
             return str(exc), True
+        except ModuleUnreachableError as exc:
+            # The module never answered (down/restarting/timed out). Tell the model plainly
+            # so it can retry later or route around it, rather than crash the turn (#472).
+            log.warning("tool module unreachable", tool=name, error=str(exc))
+            return f"error: tool {name!r} is unavailable: {exc}", True
         except Exception as exc:  # surface the failure to the model, don't crash the turn
             log.warning("tool call failed", tool=name, error=str(exc))
             return f"error: tool {name!r} failed: {exc}", True

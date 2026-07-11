@@ -5,10 +5,10 @@
  * right panel. The hover-card / panel shapes are core-owned; modules supply only data.
  */
 import { useQuery } from "@tanstack/react-query";
-import { AtSign, ChevronDown, Library } from "lucide-react";
+import { AtSign, ChevronDown, ExternalLink, Library } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
-import { CardLink } from "@/components/CardLink";
+import { CardLink, isExternalHref } from "@/components/CardLink";
 import { cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { EntityRef, HoverCard } from "@/lib/contracts";
@@ -78,6 +78,10 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
   const data = card.data ?? cardFromRef(entref);
 
   const isMailMessage = entref.module === "mail" && entref.kind === "message";
+  // websearch has no right-panel view of its own (#551) — its only destination is the
+  // source page, so a click resolves (reusing the hover fetch when it already landed)
+  // and opens it directly, the same way the hover-card's own CardLink already would.
+  const isWebSearchResult = entref.module === "websearch" && entref.kind === "result";
 
   const handleClick = () => {
     if (isMailMessage) {
@@ -86,6 +90,14 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
         .readMailMessage(entref.module, entref.ref_id)
         .then((email) => open("email-reader", email, entref.title))
         .catch(() => open("entity-detail", data, entref.title))
+        .finally(() => setOpening(false));
+    } else if (isWebSearchResult) {
+      setOpening(true);
+      (card.data ? Promise.resolve(card.data) : api.resolveEntity(entref.module, entref.kind, entref.ref_id))
+        .then((resolved) => {
+          const url = resolved.href?.url;
+          if (url && isExternalHref(url)) window.open(url, "_blank", "noopener,noreferrer");
+        })
         .finally(() => setOpening(false));
     } else {
       open("entity-detail", data, entref.title);
@@ -107,7 +119,11 @@ export function EntityRefChip({ entref }: { entref: EntityRef }) {
           (opening ? " opacity-60" : "")
         }
       >
-        <AtSign size={11} className="shrink-0" />
+        {isWebSearchResult ? (
+          <ExternalLink size={11} className="shrink-0" />
+        ) : (
+          <AtSign size={11} className="shrink-0" />
+        )}
         {entref.title}
       </button>
       <span className="invisible absolute top-full left-0 z-40 mt-1 block w-64 opacity-0 transition-opacity group-focus-within/chip:visible group-focus-within/chip:opacity-100 group-hover/chip:visible group-hover/chip:opacity-100">

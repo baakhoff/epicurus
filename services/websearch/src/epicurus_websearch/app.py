@@ -7,16 +7,21 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 
 from epicurus_core import (
     EventBus,
+    HoverCard,
+    HoverCardDetail,
+    HoverCardLink,
     add_manifest_route,
     add_ops_routes,
     configure_logging,
     get_logger,
 )
+from epicurus_websearch.refs import decode_ref
 from epicurus_websearch.searxng import SearXNGClient
 from epicurus_websearch.service import MODULE_NAME, build_module
 from epicurus_websearch.settings import WebSearchSettings
@@ -68,6 +73,29 @@ def create_app() -> FastAPI:
         """SearXNG reachability status for the manifest-driven UI status panel."""
         healthy = await client.health_check()
         return {"searxng_healthy": healthy, "searxng_url": settings.searxng_url}
+
+    @app.get("/resolve/result/{ref_id}", response_model=HoverCard)
+    async def resolve_result(ref_id: str) -> HoverCard:
+        """Hover-card resolver for a web-search result entity (#551, ADR-0019).
+
+        Stateless: the module holds no store, so every field is reconstructed
+        from the self-describing ``ref_id`` (``epicurus_websearch.refs``)
+        rather than a lookup — a session reopened days after the search still
+        resolves. Unlike mail's in-app precedent, this always carries an
+        ``href``: a web-search result's only destination is the page itself,
+        opened in a new tab (the module has no right-panel view of its own).
+        """
+        result = decode_ref(ref_id)
+        domain = urlsplit(result["url"]).netloc
+        return HoverCard(
+            title=result["title"],
+            description=result["snippet"],
+            details=[
+                HoverCardDetail(label="Engine", value=result["engine"]),
+                HoverCardDetail(label="Domain", value=domain),
+            ],
+            href=HoverCardLink(label="Open page", url=result["url"]),
+        )
 
     app.mount("/mcp", mcp_app)
 

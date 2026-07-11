@@ -71,6 +71,12 @@ another machine until you opt in. To expose the stack more widely, set
 `BIND_ADDRESS` (e.g. `0.0.0.0`) in your `.env` and put your own perimeter (VPN,
 reverse proxy, auth proxy) in front — see [Configuration](configuration.md).
 
+> **Before you expose anything:** the stack ships with **no authentication** (ADR-0008),
+> so reaching the web UI off-box also reaches `/platform/v1/*` (agent, files, OAuth) with
+> no login in front. Follow [Remote access & hardening](../infrastructure/remote-access.md)
+> — copy-pasteable Tailscale / reverse-proxy / OIDC recipes and a security checklist —
+> before setting `BIND_ADDRESS` to anything but loopback.
+
 | Service | Port(s) |
 | --- | --- |
 | Postgres | 5432 |

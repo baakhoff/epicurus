@@ -21,7 +21,8 @@ however you expose your own server).
 - **[API Reference](reference/index.md)** — the `epicurus-core` library and the
   module↔core contracts (platform API, MCP, NATS, manifest).
 - **[Infrastructure](../infra/README.md)** — the data plane (Postgres, Valkey, NATS,
-  Qdrant, OpenBao, MinIO), the edge gateway, observability, and Ollama.
+  Qdrant, OpenBao, MinIO), the edge gateway, observability, and Ollama. Reaching it from
+  outside the box: [Remote access & hardening](infrastructure/remote-access.md).
 - **[Developer Guide](developer/index.md)** — architecture, building a module, testing,
   contributing, releases.
 
@@ -36,7 +37,7 @@ epicurus
 │  ├─ storage     MinIO object store + chat-upload sink; agent file tools over the core file space
 │  ├─ knowledge   Obsidian-vault RAG (incremental index + search)
 │  ├─ calendar    provider-neutral calendar (local + Google)
-│  ├─ mail        Gmail-backed mail (search · read · send)
+│  ├─ mail        Gmail-backed mail — full client page (browse · read · reply · compose)
 │  ├─ tasks       task management (Google Tasks + local store)
 │  ├─ messaging   chat bridges (external channels drive a turn; reply routes back)
 │  └─ echo        the contract-proof reference module

@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **Mail: a full mail client in the shell** (#550, ADR-0087) — mail becomes a first-class
+  left-nav page like Files / Calendar / Tasks / Notes, through a new **`mailbox` page
+  archetype**: a labels rail with unread counts → a cursor-paginated thread list → the full
+  conversation, with **compose and reply**. Browsing is folder-scoped; a search (`q`, Gmail
+  syntax) spans the whole mailbox, and the page size is capped so one fetch can't scan an
+  unbounded mailbox (#539). The mail module ships **zero markup** (ADR-0018): it declares the
+  archetype and supplies data, and the core shell renders — reusing the *same* `MailMessageView`
+  the panel `email-reader` already uses, not a fork. **Plain-text-first**: an HTML-only message
+  is decoded to readable text server-side (`_html_to_text`, adversarially tested), so no HTML is
+  ever rendered in the shell — zero mail-XSS surface. `mail` 0.9.1→0.10.0, `core-app`
+  0.66.3→0.67.0, `epicurus-core` 0.24.0→0.25.0, `web` 0.90.0→0.91.0.
 - **Calendar: show task due-dates on the calendar page** (#469, ADR-0088) — "what's on my
   plate today" meant checking the tasks board and the calendar separately; open tasks with a
   due date now show as read-only, checkbox-glyphed chips on their due day, distinct from real

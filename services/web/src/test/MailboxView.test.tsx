@@ -176,3 +176,20 @@ it("invokes a message action (archive) through the tool proxy", async () => {
     expect(mockInvoke).toHaveBeenCalledWith("mail", "mail_archive", { message_id: "m1" }),
   );
 });
+
+it("surfaces a thread-open error (not the silent list) with a Back control", async () => {
+  // The list loads, but the thread fetch fails with a relayed Gmail hint (#538/#557).
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.thread_id) {
+      return Promise.reject(new Error("Gmail is rate-limiting this account"));
+    }
+    return Promise.resolve(LIST);
+  });
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  fireEvent.click(await screen.findByText("Project kickoff"));
+  // The hint is shown rather than silently falling back to the list.
+  expect(await screen.findByText(/rate-limiting/)).toBeInTheDocument();
+  // Back clears the failed thread id and returns to the list (a re-open would refetch).
+  fireEvent.click(screen.getByRole("button", { name: /Back to list/ }));
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+});

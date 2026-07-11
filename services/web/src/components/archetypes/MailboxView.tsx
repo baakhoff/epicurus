@@ -142,7 +142,7 @@ function ComposeForm({
 
   const canSend = body.trim().length > 0 && (reply != null || to.trim().length > 0);
   const submit = () => {
-    if (!canSend || connectionLost) return;
+    if (!canSend || connectionLost || send.isPending) return;
     setConfirming(true);
   };
 
@@ -202,7 +202,7 @@ function ComposeForm({
         <Button
           variant="primary"
           busy={send.isPending}
-          disabled={!canSend || connectionLost}
+          disabled={!canSend || connectionLost || send.isPending}
           onClick={submit}
         >
           Send
@@ -313,12 +313,12 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
     resetPaging();
     setOpenThreadId(null);
   };
+  // Refresh both the open thread AND the list after an in-thread action (archive / trash /
+  // mark), so a triaged message's list row isn't stale when the user goes Back — the broad
+  // page prefix covers both queries (the same key `afterSent` invalidates).
   const refetchThread = useCallback(
-    () =>
-      queryClient.invalidateQueries({
-        queryKey: ["module-page", module, pageId, "thread", openThreadId],
-      }),
-    [queryClient, module, pageId, openThreadId],
+    () => queryClient.invalidateQueries({ queryKey: ["module-page", module, pageId] }),
+    [queryClient, module, pageId],
   );
   const afterSent = useCallback(() => {
     setComposing(false);
@@ -386,6 +386,18 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
           ) : openThreadId && threadQuery.isLoading ? (
             <div className="flex h-full items-center justify-center">
               <Spinner />
+            </div>
+          ) : openThreadId && threadQuery.isError ? (
+            // A thread read can fail with a Gmail scope/rate-limit hint (#538/#557) the module
+            // relays — surface it (not the silent list) and give a Back that clears the failed
+            // id so a re-open refetches instead of being a no-op on unchanged state.
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
+              <EmptyState quote="Couldn't open that conversation.">
+                <p className="text-sm text-ink-dim">{(threadQuery.error as Error).message}</p>
+              </EmptyState>
+              <Button variant="outline" onClick={() => setOpenThreadId(null)}>
+                <ArrowLeft size={15} /> Back to list
+              </Button>
             </div>
           ) : listQuery.isLoading ? (
             <div className="flex h-full items-center justify-center">

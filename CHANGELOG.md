@@ -14,6 +14,24 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: click a day to create an event, pre-filled** (#473) — creating an event meant
+  reaching for the toolbar's "New event" button and re-typing a date the calendar was already
+  showing. Clicking empty space in a month-grid day cell now opens the page's own existing
+  create-event form (ADR-0034 — no new module contract) pre-filled with that date, `all_day`
+  on by default so the date pickers collapse correctly (`date_toggle`, #252); the operator can
+  still adjust or switch to a timed event before submitting. Event chips and the "+N more"
+  overflow button keep opening event/detail as before — each stops the click from also
+  bubbling into the new cell handler, so only genuinely empty space triggers create. The
+  existing calendar-picker default (`form_values.calendar_id`) survives untouched, since the
+  seed only ever adds `start`/`end`/`all_day` on top of it, never replacing the whole set.
+  Two small, generic extensions carry this rather than a calendar-specific one-off:
+  `ActionControl` gains optional `initialValues` (merged over a module's `form_values`) and
+  `open`/`onOpenChange`/`hideTrigger` (drives its form sheet from outside, with no visible
+  button of its own) — any future archetype wanting the same "click something else to open
+  an existing form, pre-filled" pattern reuses it as-is. The day/time-grid slot-click and
+  click-drag range-select the issue also describes has no substrate yet — `WeekView` is a
+  per-day list, not an hour grid — and is left for whenever that view exists; the acceptance
+  criteria's own "(where those views exist)" qualifier anticipated the gap. `web` 0.90.0→0.91.0.
 - **PWA: share target + app shortcuts** (#493) — the installed app was inert to the OS around
   it. Two manifest-level features, especially useful on Android: **share a link, text, or
   file/photo from any app straight into a chat turn** (`manifest.share_target`, `POST`

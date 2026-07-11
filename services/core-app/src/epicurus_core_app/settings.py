@@ -160,6 +160,12 @@ class CoreAppSettings(CoreSettings):
     # hour after the extraction drain's default so the two never overlap when both are on.
     maintenance_hour: int = 4
 
+    # ── Scheduled turns (ADR-0092) ────────────────────────────────────────────────
+    # How often the scheduler checks for a due row (a plain poll, not one sleep-until-hour task
+    # per row — rows are created/paused/deleted at runtime with independently configured hours).
+    # 60s keeps the worst-case delivery lag under a minute without meaningfully polling Postgres.
+    scheduled_turns_poll_interval_s: int = 60
+
     # ── File space (ADR-0052) ───────────────────────────────────────────────────
     # The core owns the per-tenant user file space behind a swappable backend (constraint #3).
     # "local" serves the shared volume at FILES_ROOT/<tenant>; "s3" serves a per-tenant

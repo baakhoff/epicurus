@@ -43,6 +43,7 @@ import {
   ProviderInfo,
   Readiness,
   SavedModelsResponse,
+  ScheduledTurn,
   SessionSummary,
   SystemInfo,
   TimezonePrefs,
@@ -205,6 +206,39 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ timezone }),
     }),
+  // Recurring prompts that run unattended and deliver into their own session (ADR-0092).
+  scheduledTurns: () => request(z.array(ScheduledTurn), "/platform/v1/scheduled-turns"),
+  createScheduledTurn: (body: {
+    prompt: string;
+    cadence: "daily" | "weekly";
+    hour: number;
+    weekday?: number | null;
+  }) =>
+    request(ScheduledTurn, "/platform/v1/scheduled-turns", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  setScheduledTurnEnabled: (id: string, enabled: boolean) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/scheduled-turns/${encodeURIComponent(id)}/enabled`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+  deleteScheduledTurn: async (id: string): Promise<void> => {
+    const response = await epFetch(
+      `/platform/v1/scheduled-turns/${encodeURIComponent(id)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(response.status, detail);
+    }
+  },
 
   // The agent's editable base system prompt (#497). GET returns the effective prompt + whether
   // it's the shipped default; PUT sets it, or resets to the default when `instructions` is null.

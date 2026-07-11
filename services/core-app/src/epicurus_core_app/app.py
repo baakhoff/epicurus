@@ -97,6 +97,8 @@ from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.object_backend import StorageObjectBackend
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
+from epicurus_core_app.scheduled_turns import ScheduledTurnScheduler, ScheduledTurnStore
+from epicurus_core_app.scheduled_turns_routes import create_scheduled_turns_router
 from epicurus_core_app.settings import CoreAppSettings
 from epicurus_core_app.system_info import create_system_router
 from epicurus_core_app.timezone_prefs import TimezonePrefsStore
@@ -189,6 +191,9 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # Recurring prompts that run unattended and deliver into a session (ADR-0092): the
+    # tenant-scoped row store; the scheduler poll loop is built below, once `agent` exists.
+    scheduled_turns = ScheduledTurnStore(engine)
     # The agent's editable base system prompt (#497, ADR-0083): one row per tenant, NULL = the
     # shipped default. Resolved per turn in ``Agent._assemble``, edited in web Settings.
     agent_instructions = AgentInstructionsStore(engine)
@@ -296,6 +301,16 @@ def create_app() -> FastAPI:
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         hour=settings.memory_extraction_hour,
         batch_limit=settings.memory_extraction_batch_limit,
+    )
+    # Scheduled-turns poll loop (ADR-0092): the same headless-turn shape InboundConsumer uses
+    # for a bridge message (no HTTP caller, an explicit tenant_id + session_id) — reused here
+    # for a due recurring prompt instead of an inbound message.
+    scheduled_turn_scheduler = ScheduledTurnScheduler(
+        scheduled_turns,
+        agent,
+        power,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        poll_interval_s=settings.scheduled_turns_poll_interval_s,
     )
     oauth = OAuthService(
         secrets,
@@ -405,6 +420,10 @@ def create_app() -> FastAPI:
             await extraction_queue.init()
         except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
             log.error("extraction queue init failed; nightly extraction off", error=str(exc))
+        try:
+            await scheduled_turns.init()
+        except Exception as exc:  # store down → scheduled turns degrade; chat is unaffected
+            log.error("scheduled-turns init failed; scheduled turns disabled", error=str(exc))
         # Provision the tenant's file-space root and index it (core-owned, ADR-0052/0061). The
         # core now mounts the shared volume (Phase 2), so the local root exists at boot: init the
         # file index, ensure the tenant root, then walk it in. Best-effort throughout — a DB or
@@ -428,6 +447,9 @@ def create_app() -> FastAPI:
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
+        # Scheduled turns (ADR-0092): a plain poll loop finding due rows and delivering each as
+        # a headless agent turn. Fire-and-forget, same shape as the tasks around it.
+        scheduled_turns_task = asyncio.create_task(scheduled_turn_scheduler.run_periodic())
         # Evict finished in-flight runs past their grace window (#376), even with no new traffic.
         live_run_reaper = asyncio.create_task(live_runs.reap_periodically())
         # Keep the file index live: re-walk on a debounced change (local backend only, ADR-0063).
@@ -453,6 +475,7 @@ def create_app() -> FastAPI:
             catalog_task.cancel()
             catalog_size_task.cancel()
             extraction_task.cancel()
+            scheduled_turns_task.cancel()
             live_run_reaper.cancel()
             maintenance_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -461,6 +484,8 @@ def create_app() -> FastAPI:
                 await catalog_size_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
+            with suppress(asyncio.CancelledError):
+                await scheduled_turns_task
             with suppress(asyncio.CancelledError):
                 await live_run_reaper
             with suppress(asyncio.CancelledError):
@@ -526,6 +551,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         create_instructions_router(agent_instructions, default_tenant=settings.default_tenant_id)
+    )
+    app.include_router(
+        create_scheduled_turns_router(scheduled_turns, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(

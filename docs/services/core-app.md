@@ -501,6 +501,49 @@ case, so this avoids redundant nightly work; consolidating those schedules onto 
 the named follow-up. Every *completed* run publishes a tenant-scoped `maintenance.completed`; a run
 interrupted by shutdown is discarded, not published.
 
+### Scheduled turns (ADR-0092)
+
+Recurring prompts that run **unattended** and deliver into their own chat session — the
+time-driven half of proactivity (the event-driven half, listeners/alerts, is a later
+milestone). An operator authors a prompt, a cadence (daily/weekly at a local hour), and it
+fires on its own with no HTTP caller — the same headless-turn shape the inbound messaging
+consumer above already uses for a bridge message (`Agent.run(tenant_id=..., session_id=...)`,
+no SSE).
+
+`ScheduledTurnScheduler` is a **single poll loop** (`SCHEDULED_TURNS_POLL_INTERVAL_S`, default
+60s), not one task per row: each row carries its own independently configured hour (and, for a
+weekly cadence, weekday) and rows are created/paused/deleted at runtime, which the existing
+single-hour `sleep_until_hour` primitive (shared by the extraction drain and the maintenance
+orchestrator above) can't express. Each tick reads every enabled row, resolves the operator's
+timezone the same way those two do, and runs every due row **sequentially** (gentle on one
+local GPU). A row fires once per matching window — `last_run_at` (set on a real run *and* a
+paused-skip) is compared by local calendar date so a tick landing anywhere inside the target
+hour doesn't re-fire on the next poll.
+
+**Delivery is an ordinary session, not a new persistence path.** A fresh session id
+(`scheduled-<uuid>`) is minted when the turn is created; the session comes into being — with a
+title derived from its first message (the prompt itself) — the moment it first fires, exactly
+like any other session. Metering is automatic: threading the row's real tenant through
+`Agent.run` means the usage event attributes to it with no extra wiring (constraint #1/#8).
+
+**Power state**: the poll loop itself is pause-agnostic; the per-row runner checks
+`power.paused` right before invoking the agent and, if paused, records the skip
+(`last_status = "skipped (paused)"`, advancing `last_run_at`) rather than running — skip and
+record once per window, never a burst of catch-up runs when the operator resumes.
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/scheduled-turns` | The tenant's scheduled turns, oldest first. |
+| `POST /platform/v1/scheduled-turns` | Create one: `{prompt, cadence: "daily"\|"weekly", hour, weekday?}` (`weekday`, 0=Monday..6=Sunday, required for `"weekly"`). **400** on a blank prompt, an out-of-range hour/weekday, or a missing weekday for a weekly cadence. Mints a fresh `delivery_target` session id. |
+| `POST /platform/v1/scheduled-turns/{id}/enabled` | Pause/resume: `{enabled}`. **404** unknown id. |
+| `DELETE /platform/v1/scheduled-turns/{id}` | Remove it. **204**; **404** unknown id. |
+
+Settings-surface only (ADR-0018): shell-rendered (the web **Settings → Scheduled turns**
+card), not a module page — the feature lives entirely in the core, so there is no module UI
+to gate it behind. Single-runner v1: one core instance evaluates the poll loop; a multi-instance
+SaaS deployment needs leader election or a distributed queue so two instances can't double-fire
+the same row — a named follow-up, not attempted here.
+
 ### Events (NATS)
 
 Emits **`<tenant>.llm.usage`** after every inference call — model, token counts, latency.
@@ -551,6 +594,7 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
+| `SCHEDULED_TURNS_POLL_INTERVAL_S` | `60` | How often the scheduled-turns poll loop checks for a due row (ADR-0092). |
 | `OTEL_TRACES_ENABLED` | `false` | Emit OpenTelemetry traces — the agent loop, platform API, and event bus — to Tempo (#57). See the [tracing reference](../reference/observability.md#tracing-57-adr-0068). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://tempo:4318` | OTLP/HTTP base URL for traces (the exporter appends `/v1/traces`). |
 
@@ -611,6 +655,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `agent_suspended_runs` (a separate table, so `create_all` builds it with no migration and the two
   consume-on-resume paths can't cross). Written on suspend, **consumed** on Confirm/Decline, reaped
   after `DRAFT_REVIEW_TTL_HOURS`.
+- **Postgres `scheduled_turns`** — recurring prompts that run unattended (ADR-0092): `id`,
+  `tenant`, `prompt`, `cadence` (`daily`/`weekly`), `hour`, `weekday` (nullable, weekly-only,
+  0=Monday..6=Sunday), `delivery_target` (the session id the turn delivers into), `enabled`,
+  `created_at`, `last_run_at`, `last_status`. `last_run_at` is set on both a real run and a
+  paused-skip, so the scheduler's poll tick evaluates a row's due-ness at most once per
+  matching window.
 - **In-memory live runs** (`LiveRunRegistry`, ADR-0055) — *not* persisted: each in-flight turn's
   detached task + its seq-tagged event buffer, keyed by `run_id` and indexed by `(tenant,
   session_id)`. Disposable cache for re-attach; the authoritative answer lands in `agent_messages`.

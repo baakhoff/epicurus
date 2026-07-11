@@ -14,6 +14,28 @@ images to GHCR.
 
 ### Added
 
+- **Websearch: results as Sources-pill chips, at parity with local sources** (#551,
+  ADR-0019) — a `web_search` answer previously left the operator unfolding raw tool-call
+  JSON to see which pages informed it; local sources (knowledge/mail/calendar/tasks) had
+  this solved since #333. `web_search` now returns a `ToolEnvelope` (text unchanged —
+  still a ranked title/URL/snippet listing the model can cite — plus one `EntityRef` per
+  result), so results render as the same **Sources (N)** pill and chips. The module stays
+  **stateless**: a new `epicurus_websearch.refs` codec (mirroring
+  `epicurus_knowledge.refs`'s self-describing-id pattern) base64url-encodes each result's
+  url/title/snippet/engine directly into its `ref_id`, so the new `GET
+  /resolve/result/{ref_id}` hover-card resolver reconstructs everything with no store —
+  hover-cards keep resolving in a session reopened long after the search ran. Because
+  websearch has no right-panel view of its own, its chip is the first to diverge from the
+  generic click-opens-the-panel behavior: it always carries an `href` and a chip click
+  resolves then opens the source page directly in a new tab
+  (`rel="noopener noreferrer"`), with an external-link glyph on the chip itself so a web
+  source is never mistaken for an in-app entity — both already-generic frontend pieces
+  (`CardLink`'s scheme-gated external-link branch, the core's cross-call `_RefCollector`
+  ref-id dedup) needed zero core-app changes to support this end-to-end. Same-page
+  duplicates within one search (SearXNG returning a URL from multiple engines) are
+  collapsed before refs are built; a malformed or tampered `ref_id` (bad base64, non-JSON,
+  or a non-`http(s)` scheme) 400s cleanly, never a 500 and never an unsafe `href`.
+  `websearch` 0.1.0→0.2.0, `web` 0.91.0→0.92.0.
 - **PWA: share target + app shortcuts** (#493) — the installed app was inert to the OS around
   it. Two manifest-level features, especially useful on Android: **share a link, text, or
   file/photo from any app straight into a chat turn** (`manifest.share_target`, `POST`

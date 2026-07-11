@@ -1,4 +1,4 @@
-"""Tests for the mail HTTP endpoints: resolver and messages."""
+"""Tests for the mail HTTP endpoints: resolver, messages, and the mailbox page (ADR-0087)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,30 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from epicurus_mail.provider import MailMessage, MailProvider
+from epicurus_mail.provider import (
+    AttachmentContent,
+    ComposedMessage,
+    MailLabel,
+    MailMessage,
+    MailProvider,
+    MailThread,
+    MailThreadSummary,
+    ThreadPage,
+)
+
+
+def _client_with_provider(provider: MailProvider) -> TestClient:
+    """A TestClient over *provider* with a mocked event bus (ADR-0087 route tests)."""
+    if not hasattr(provider.health_check, "assert_awaited"):  # ensure health_check is mocked
+        provider.health_check = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    with (
+        patch("epicurus_mail.app.GmailProvider", return_value=provider),
+        patch("epicurus_mail.app.EventBus.from_settings", return_value=AsyncMock()),
+    ):
+        from epicurus_mail.app import create_app
+
+        app = create_app()
+    return TestClient(app, raise_server_exceptions=True)
 
 
 def _sample() -> MailMessage:
@@ -284,3 +307,170 @@ class TestSend:
         resp = client.post("/send", json={"to": "b@x.com", "subject": "s", "body": "b"})
         assert resp.status_code == 200
         assert resp.json() == {"id": "sent-123"}
+
+
+# ── mailbox page routes (ADR-0087) ───────────────────────────────────────────
+
+
+def _mailbox_message(msg_id: str = "m1", *, body: str = "Hello") -> MailMessage:
+    return MailMessage(
+        id=msg_id,
+        thread_id="t1",
+        subject="Hi",
+        sender="a@x.com",
+        to=["me@x.com"],
+        date="",
+        snippet="",
+        body=body,
+    )
+
+
+class TestMailboxListRoute:
+    def test_returns_rail_and_threads(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.list_labels = AsyncMock(
+            return_value=[MailLabel(id="INBOX", title="Inbox", unread=2)]
+        )
+        provider.list_threads = AsyncMock(
+            return_value=ThreadPage(
+                threads=[
+                    MailThreadSummary(id="t1", subject="Hi", sender="a@x.com", snippet="…", date="")
+                ],
+                next_cursor="N2",
+            )
+        )
+        resp = _client_with_provider(provider).get("/pages/mailbox")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["active_label"] == "INBOX"
+        assert body["labels"][0]["unread"] == 2
+        assert body["threads"][0]["id"] == "t1"
+        assert body["next_cursor"] == "N2"
+
+    def test_forwards_label_query_cursor(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.list_labels = AsyncMock(return_value=[])
+        provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+        _client_with_provider(provider).get("/pages/mailbox?label=SENT&cursor=C1")
+        provider.list_threads.assert_awaited_once_with(
+            label="SENT", query=None, cursor="C1", limit=25
+        )
+
+    def test_thread_id_returns_conversation(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.get_thread = AsyncMock(
+            return_value=MailThread(id="t1", subject="Hi", messages=[_mailbox_message("m1")])
+        )
+        provider.compose_reply = AsyncMock(
+            return_value=ComposedMessage(to="a@x.com", subject="Re: Hi", body="")
+        )
+        resp = _client_with_provider(provider).get("/pages/mailbox?thread_id=t1")
+        assert resp.status_code == 200
+        thread = resp.json()["thread"]
+        assert thread["id"] == "t1"
+        assert thread["messages"][0]["message_id"] == "m1"
+        assert thread["reply"]["reply_to_message_id"] == "m1"
+
+    def test_unknown_page_is_404(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        resp = _client_with_provider(provider).get("/pages/nope")
+        assert resp.status_code == 404
+
+    def test_gmail_scope_error_relayed_with_status(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        request = httpx.Request("GET", "https://gmail.googleapis.com")
+        response = httpx.Response(403, request=request, json={"error": {"message": "no scope"}})
+        provider.list_labels = AsyncMock(
+            side_effect=httpx.HTTPStatusError("403", request=request, response=response)
+        )
+        resp = _client_with_provider(provider).get("/pages/mailbox")
+        assert resp.status_code == 403
+        assert "Reconnect Google" in resp.json()["detail"]
+
+
+class TestMailboxSendRoute:
+    def test_compose_transmits_a_fresh_message(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.transmit = AsyncMock(return_value="sent-1")
+        resp = _client_with_provider(provider).post(
+            "/pages/mailbox/send", json={"to": "b@x.com", "subject": "Hi", "body": "Body"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"id": "sent-1"}
+        sent = provider.transmit.await_args.args[0]
+        assert isinstance(sent, ComposedMessage)
+        assert sent.to == "b@x.com" and sent.subject == "Hi" and sent.body == "Body"
+        provider.compose_reply.assert_not_awaited()
+
+    def test_reply_rederives_threading_server_side(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.compose_reply = AsyncMock(
+            return_value=ComposedMessage(
+                to="a@x.com", subject="Re: Hi", body="My reply", thread_id="t1"
+            )
+        )
+        provider.transmit = AsyncMock(return_value="sent-2")
+        resp = _client_with_provider(provider).post(
+            "/pages/mailbox/send", json={"reply_to_message_id": "m9", "body": "My reply"}
+        )
+        assert resp.status_code == 200
+        # The module (not the web) derives threading from the original message id (#461).
+        provider.compose_reply.assert_awaited_once_with("m9", "My reply")
+        assert provider.transmit.await_args.args[0].thread_id == "t1"
+
+    def test_compose_without_recipient_is_400(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        resp = _client_with_provider(provider).post("/pages/mailbox/send", json={"body": "Body"})
+        assert resp.status_code == 400
+        provider.transmit.assert_not_awaited()
+
+    def test_send_to_unknown_page_is_404(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        resp = _client_with_provider(provider).post(
+            "/pages/nope/send", json={"body": "x", "to": "a@x.com"}
+        )
+        assert resp.status_code == 404
+
+
+class TestMailboxAttachmentRoute:
+    def test_streams_bytes_with_disposition(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.get_attachment = AsyncMock(
+            return_value=AttachmentContent(
+                filename="report.pdf", mime_type="application/pdf", content=b"PDFDATA"
+            )
+        )
+        resp = _client_with_provider(provider).get(
+            "/pages/mailbox/attachment?message_id=m1&attachment_id=att1"
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"PDFDATA"
+        assert resp.headers["content-type"] == "application/pdf"
+        assert 'filename="report.pdf"' in resp.headers["content-disposition"]
+        provider.get_attachment.assert_awaited_once_with("m1", "att1")
+
+    def test_missing_attachment_is_404(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        request = httpx.Request("GET", "https://gmail.googleapis.com")
+        response = httpx.Response(404, request=request)
+        provider.get_attachment = AsyncMock(
+            side_effect=httpx.HTTPStatusError("404", request=request, response=response)
+        )
+        resp = _client_with_provider(provider).get(
+            "/pages/mailbox/attachment?message_id=m1&attachment_id=missing"
+        )
+        assert resp.status_code == 404
+
+    def test_disposition_strips_unsafe_filename_chars(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.get_attachment = AsyncMock(
+            return_value=AttachmentContent(
+                filename='ev"il\r\n.pdf', mime_type="application/octet-stream", content=b"x"
+            )
+        )
+        resp = _client_with_provider(provider).get(
+            "/pages/mailbox/attachment?message_id=m1&attachment_id=a1"
+        )
+        disposition = resp.headers["content-disposition"]
+        assert "\r" not in disposition and "\n" not in disposition
+        assert 'filename="evil.pdf"' in disposition

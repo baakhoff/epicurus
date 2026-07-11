@@ -14,6 +14,28 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: show task due-dates on the calendar page** (#469, ADR-0088) — "what's on my
+  plate today" meant checking the tasks board and the calendar separately; open tasks with a
+  due date now show as read-only, checkbox-glyphed chips on their due day, distinct from real
+  events. The core gains a new cross-module **calendar-feed** aggregate
+  (`GET /platform/v1/calendar-feed?start=&end=`, `ModuleRegistry.calendar_feed_items`) —
+  deliberately **not** a manifest-declared capability like `resolver`/`attachable`: a module
+  opts in purely by serving `GET /calendar-feed?start=&end=` itself, and the aggregator
+  probes every enabled, healthy module for that path, skipping a 404/unreachable one exactly
+  the way the existing `/suggestions` feed already tolerates a down module — reusing that
+  pattern kept every line of this change inside `services/tasks` and `services/core-app`,
+  with zero touches to the shared `libs/epicurus-core` (which was under concurrent edit for
+  an unrelated in-flight archetype at the time). `tasks` is the first module to implement it:
+  `calendar_feed_items` filters the already-fetched open-task list to a due date in range,
+  carrying each item's own status (open vs. in-progress) and a `kind` field (beyond the
+  issue's own sketch) so the shell's click handler can call the *generic* hover-card resolver
+  without hardcoding "task". Every task hover-card also gained a link back to the Tasks board,
+  not only ones reached from the calendar. Verified live: a task chip renders on its due day
+  alongside real events, resolves through `GET /resolve/task/{ref_id}` and opens in the right
+  panel on click, and a failed feed fetch never blanks the events that did load. Month-grid
+  view only for this pass — week/agenda are a follow-up, mirroring #473's own scoping of the
+  time-grid slot-click to "no hour-grid view exists yet." `tasks` 0.15.3→0.16.0, `core-app`
+  0.66.3→0.67.0, `web` 0.90.0→0.91.0.
 - **PWA: share target + app shortcuts** (#493) — the installed app was inert to the OS around
   it. Two manifest-level features, especially useful on Android: **share a link, text, or
   file/photo from any app straight into a chat turn** (`manifest.share_target`, `POST`

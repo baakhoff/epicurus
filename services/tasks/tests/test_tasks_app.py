@@ -93,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.15.3"
+    assert data["version"] == "0.16.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",
@@ -194,6 +194,30 @@ def test_page_board_forwards_and_clamps_query_params(
     junk = booted_client.get("/pages/board?group=nonsense&show=bogus").json()
     junk_controls = {c["id"]: c["value"] for c in junk["controls"]}
     assert junk_controls == {"group": "due", "show": "open"}  # clamped to defaults
+
+
+# ── calendar-feed endpoint wiring (#469) — filtering logic itself is unit-tested
+# exhaustively in test_board.py against `calendar_feed_items` directly; these confirm
+# only that the route exists, threads the range through, and degrades cleanly.
+
+
+def test_calendar_feed_empty_store_returns_empty_list(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    resp = booted_client.get("/calendar-feed?start=2026-07-01&end=2026-08-01")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_calendar_feed_requires_start_and_end(client: TestClient) -> None:
+    """No 500 on a missing range — FastAPI's own required-query-param 422."""
+    resp = client.get("/calendar-feed")
+    assert resp.status_code == 422
 
 
 # ── board Today/Overdue grouping uses the operator's day, not UTC's (#555) ──────────

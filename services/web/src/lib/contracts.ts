@@ -732,6 +732,26 @@ export const CalendarData = z.object({
 });
 export type CalendarData = z.infer<typeof CalendarData>;
 
+/**
+ * One date-anchored item from another module's calendar feed (#469) — e.g. an open task
+ * with a due date. `date` is a floating `YYYY-MM-DD`, never timezone-shifted (same
+ * convention as an all-day `CalendarEvent`). `module` is stamped by the core's aggregate
+ * endpoint (`GET /platform/v1/calendar-feed`), not the owning module itself; `module` +
+ * `kind` + `ref_id` route a click to that module's existing hover-card resolver
+ * (`GET /resolve/{kind}/{ref_id}`, ADR-0019) generically — no new UI contract, distinct
+ * from a real `CalendarEvent` (read-only, no `actions`).
+ */
+export const CalendarFeedItem = z.object({
+  id: z.string(),
+  title: z.string(),
+  date: z.string(),
+  status: z.string(),
+  ref_id: z.string(),
+  kind: z.string(),
+  module: z.string(),
+});
+export type CalendarFeedItem = z.infer<typeof CalendarFeedItem>;
+
 /** One document or folder in an `editor` page's tree (content fetched lazily on open). */
 export const EditorDoc = z.object({
   id: z.string(),

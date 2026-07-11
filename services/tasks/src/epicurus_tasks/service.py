@@ -27,6 +27,7 @@ from epicurus_core import (
     EpicurusModule,
     HoverCard,
     HoverCardDetail,
+    HoverCardLink,
     PageSpec,
     UiSection,
     capped_listing,
@@ -150,7 +151,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.15.3",
+        version="0.16.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -626,6 +627,40 @@ def _slug(title: str) -> str:
     return title.lower().replace(" ", "-")
 
 
+def calendar_feed_items(tasks: list[Task], start: str, end: str) -> list[dict[str, Any]]:
+    """Open tasks due within ``[start, end)`` as calendar-feed items (#469).
+
+    Feeds the core's generic cross-module calendar overlay — the endpoint this backs
+    (``GET /calendar-feed``) has no manifest declaration; a module that doesn't serve it
+    simply 404s on the core's probe and is skipped. *tasks* should already be scope
+    ``"open"`` (excludes completed, ADR-0049's ``TaskScope``); a task without a due date
+    is dropped here too, since an undated task has nowhere to anchor on the calendar.
+    ISO date strings compare lexicographically, matching :func:`_bucket_for`'s convention.
+
+    ``kind`` rides alongside ``module``/``ref_id`` (a small, deliberate addition beyond the
+    issue's own sketch) so the shell's click handler can call the *generic*
+    ``GET /resolve/{kind}/{ref_id}`` resolver (ADR-0019) without hardcoding "task" — a
+    future second calendar-feed module keeps working with zero web changes.
+    """
+    items: list[dict[str, Any]] = []
+    for task in tasks:
+        if not task.due:
+            continue
+        due = task.due[:10]
+        if start <= due < end:
+            items.append(
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "date": due,
+                    "status": task.status,
+                    "ref_id": task.id,
+                    "kind": TASK_KIND,
+                }
+            )
+    return items
+
+
 def _bucket_for(task: Task, today: str) -> str:
     """The due-date column a task belongs in, relative to *today* (ISO date).
 
@@ -969,6 +1004,10 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         title=task.title,
         description=task.notes or "",
         details=details,
+        # A calendar-feed chip's hover-card needs a way back to the task (#469's own
+        # acceptance criteria); every task hover-card gains it, not just those reached
+        # from the calendar — consistent regardless of where the chip was clicked.
+        href=HoverCardLink(label="Open in Tasks", url=f"/m/{MODULE_NAME}/{TASKS_PAGE_ID}"),
     ).model_dump()
 
 

@@ -1140,6 +1140,35 @@ class ModuleRegistry:
                     out.append({**item, "module": snap.manifest.name, "page_id": page.id})
         return out
 
+    async def calendar_feed_items(self, start: str, end: str) -> list[dict[str, Any]]:
+        """Date-anchored items from every enabled module, for the calendar page's overlay (#469).
+
+        Generic across any module that serves ``GET /calendar-feed?start=&end=`` ->
+        ``[{id, title, date, status, ref_id}]`` (``end`` exclusive, matching the calendar
+        archetype's own range contract, ADR-0023) — **not** a manifest-declared capability
+        like ``resolver``/``attachable``: a module that doesn't implement the path simply
+        404s on the probe and is skipped, the same best-effort tolerance
+        :meth:`all_suggestions` already relies on. Each item is stamped with its owning
+        ``module`` so the shell can route a click to that module's existing hover-card
+        resolver — no new UI contract, reusing ADR-0019 end to end.
+        """
+        out: list[dict[str, Any]] = []
+        for snap, base in zip(await self.snapshot(), self._bases, strict=True):
+            if snap.removed or not snap.enabled or not snap.status.healthy:
+                continue
+            try:
+                items = await self._get_json(
+                    base,
+                    "/calendar-feed",
+                    params={"start": start, "end": end},
+                    op=f"{snap.manifest.name} calendar feed",
+                )
+            except HTTPException:
+                continue
+            for item in items:
+                out.append({**item, "module": snap.manifest.name})
+        return out
+
 
 def create_suggestions_router(registry: ModuleRegistry) -> APIRouter:
     """The cross-module pending-suggestions feed the shell polls (#KB-refactor).
@@ -1152,6 +1181,21 @@ def create_suggestions_router(registry: ModuleRegistry) -> APIRouter:
     @router.get("/suggestions")
     async def list_suggestions() -> list[dict[str, Any]]:
         return await registry.all_suggestions()
+
+    return router
+
+
+def create_calendar_feed_router(registry: ModuleRegistry) -> APIRouter:
+    """The cross-module calendar-feed aggregate the calendar page overlays (#469).
+
+    Separate from the modules router so it lives at ``/platform/v1/calendar-feed``
+    rather than under ``/platform/v1/modules`` (mirrors ``create_suggestions_router``).
+    """
+    router = APIRouter(prefix="/platform/v1", tags=["calendar-feed"])
+
+    @router.get("/calendar-feed")
+    async def list_calendar_feed(start: str, end: str) -> list[dict[str, Any]]:
+        return await registry.calendar_feed_items(start, end)
 
     return router
 

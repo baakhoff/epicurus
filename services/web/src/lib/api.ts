@@ -11,6 +11,7 @@ import {
   AgentInstructions,
   AttachmentUploaded,
   BridgeStatus,
+  CalendarFeedItem,
   CatalogResponse,
   type CollectionPrefs,
   EditorDocContent,
@@ -365,6 +366,14 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}${query}`,
     );
   },
+  // The cross-module calendar-feed aggregate (#469) — date-anchored items (e.g. tasks
+  // with a due date) from every module that serves `GET /calendar-feed`, merged and
+  // module-stamped by the core. `end` is exclusive, matching `modulePage`'s own range.
+  calendarFeed: (start: string, end: string) =>
+    request(
+      z.array(CalendarFeedItem),
+      `/platform/v1/calendar-feed?${new URLSearchParams({ start, end })}`,
+    ),
   // One `editor` document's content, proxied through the core (ADR-0018).
   modulePageDoc: (name: string, pageId: string, path: string) =>
     request(

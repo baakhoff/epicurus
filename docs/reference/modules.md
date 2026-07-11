@@ -480,6 +480,22 @@ the storage module's object store (the upload sink, ADR-0025) so it is kept dura
 becomes browsable in the Files page — best-effort, so a down storage never fails the
 upload. See [storage](../services/storage.md#the-chat-upload-sink-adr-0025).
 
+### Calendar feed (#469, ADR-0088)
+
+A module can contribute date-anchored items (e.g. tasks with a due date) to the calendar page's
+overlay. **Unlike `resolver`/`attachable`, this is not a manifest-declared capability** — opt in
+purely by serving `GET /calendar-feed?start=&end=` → `[{id, title, date, status, ref_id, kind}]`
+(`date` a floating `YYYY-MM-DD`; `end` exclusive, matching the `calendar` archetype's own range
+convention, ADR-0023). The core's registry probes every enabled, healthy module for that path on
+each `GET /platform/v1/calendar-feed?start=&end=` (not nested under `/modules`, mirroring
+`/suggestions` above) and merges the results, stamping each item with its owning `module`; a
+module that doesn't implement the path simply 404s and is skipped, the same tolerance
+`/suggestions` already relies on for a down module. Set `kind` to whatever your existing
+`resolver` already serves (e.g. `tasks` uses `kind="task"`) so a feed-item chip's click can call
+the generic `GET /resolve/{kind}/{ref_id}` resolver — no calendar-feed-specific UI contract to
+build. The shell renders feed items as compact, muted chips distinct from real events, in the
+month-grid view only today.
+
 ### `CONTRACT_VERSION`
 `"0.1"` — the module↔core contract version this release targets.
 

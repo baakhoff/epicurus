@@ -202,6 +202,14 @@ the sweep's cancellation hardening, #553.)
   pre-cap header from "Found N open task(s):" to "Found N task(s):"; `noun="open task"` restores
   it — `tasks_list` only ever returns open tasks.
 
+**v0.16.0** shows task due-dates on the **calendar page** (#469, ADR-0088) — "what's on my
+plate today" without splitting attention between the tasks board and the calendar. Serves a new
+`GET /calendar-feed?start=&end=` (open tasks due in range, `end` exclusive); this is **not** a
+manifest-declared capability — the core's aggregator probes every enabled module for the path and
+skips a 404, so opting in is just serving it, no flag to set (see *Calendar-feed*, below, and
+[core-app](core-app.md)). Every task hover-card (not only calendar-originated ones) also gains an
+`href` back to the Tasks board, previously absent.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -264,6 +272,7 @@ side table keyed by task id (ADR-0082).
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
+| `GET /calendar-feed?start=&end=` | Open tasks with a due date in `[start, end)` (`end` exclusive), as calendar-feed items (#469, ADR-0088): `{id, title, date, status, ref_id, kind}`. No manifest declaration — probed generically by the core's cross-module aggregate, `GET /platform/v1/calendar-feed` (see [core-app](core-app.md)). |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
 
 ### Web UI (manifest, ADR-0007 Tier 1)
@@ -341,8 +350,24 @@ module-card action button — tasks are surfaced through chat.)
 envelope (`title` · `description` · `details: [{label, value}]`): the task's notes as the
 description, plus **Due** (when set) and **Status** (Open / Completed) detail rows. An unknown
 `kind` or a missing task is a `404`. The core proxies it at
-`GET /platform/v1/modules/tasks/resolve/{kind}/{ref_id}`. The hover-card carries no `href` —
-clicking opens the in-app entity-detail panel, not an outbound URL.
+`GET /platform/v1/modules/tasks/resolve/{kind}/{ref_id}`. Every task hover-card also carries an
+`href` back to the Tasks board (`{label: "Open in Tasks", url: "/m/tasks/board"}`, #469) — added
+so a task reached from the calendar-feed overlay (below) has a way back to it; the same link
+shows regardless of where the chip was clicked (chat, the calendar, or elsewhere).
+
+### Calendar-feed: task due-dates on the calendar page (#469, ADR-0088)
+
+Open tasks with a due date show as read-only chips on the calendar page's due day, distinct from
+real events — "what's on my plate today" without leaving the calendar. `tasks` is the first module
+to implement the core's generic, **non-manifest-declared** `calendar_feed` convention (ADR-0088):
+serving `GET /calendar-feed?start=&end=` is the only opt-in, no capability flag to set.
+`calendar_feed_items(tasks, start, end)` (`epicurus_tasks.service`) filters the already-fetched
+`scope="open"` list (open **and** in-progress, ADR-0049) to a `due` date inside `[start, end)`
+(`end` exclusive), dropping undated tasks; each item's `status` reflects the task's own status,
+not a flattened literal. `kind="task"` rides on every item so the shell's click handler can call
+the generic resolver (above) without hardcoding "task" — a future second calendar-feed module
+needs no web change. Completing or deleting a task removes its chip on the next range fetch (the
+feed is computed fresh, not cached). See [core-app](core-app.md) for the aggregation side.
 
 ### Chat-attachment source (ADR-0019)
 

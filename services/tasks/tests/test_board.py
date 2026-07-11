@@ -10,6 +10,7 @@ from epicurus_tasks.models import Task
 from epicurus_tasks.service import (
     TASKS_PAGE_ID,
     build_tasks_board,
+    calendar_feed_items,
     coerce_group,
     coerce_scope,
 )
@@ -406,3 +407,52 @@ def test_coerce_scope_clamps_unknown_to_open() -> None:
     assert coerce_scope("done") == "done"
     assert coerce_scope("bogus") == "open"
     assert coerce_scope(None) == "open"
+
+
+# ── calendar-feed items (#469) ────────────────────────────────────────────────
+
+
+def test_calendar_feed_items_includes_a_due_date_in_range() -> None:
+    tasks = [_task("1", "In range", due="2026-07-15")]
+    items = calendar_feed_items(tasks, "2026-07-01", "2026-08-01")
+    assert items == [
+        {
+            "id": "1",
+            "title": "In range",
+            "date": "2026-07-15",
+            "status": "open",
+            "ref_id": "1",
+            "kind": "task",
+        }
+    ]
+
+
+def test_calendar_feed_items_excludes_dates_outside_the_range() -> None:
+    tasks = [
+        _task("before", "Too early", due="2026-06-30"),
+        _task("after", "Too late (end exclusive)", due="2026-08-01"),
+        _task("in", "Just right", due="2026-07-31"),
+    ]
+    items = calendar_feed_items(tasks, "2026-07-01", "2026-08-01")
+    assert [i["id"] for i in items] == ["in"]
+
+
+def test_calendar_feed_items_excludes_tasks_without_a_due_date() -> None:
+    tasks = [_task("1", "Someday", due=None)]
+    assert calendar_feed_items(tasks, "2026-07-01", "2026-08-01") == []
+
+
+def test_calendar_feed_items_reflects_the_tasks_own_status() -> None:
+    # "open" scope includes both open and in_progress (ADR-0049's TaskScope) — the feed
+    # item's status must say which, not flatten both to a literal "open".
+    tasks = [_task("1", "Working on it", due="2026-07-15", status="in_progress")]
+    items = calendar_feed_items(tasks, "2026-07-01", "2026-08-01")
+    assert items[0]["status"] == "in_progress"
+
+
+def test_calendar_feed_items_accepts_a_full_datetime_due_string() -> None:
+    # `due` may be a full RFC-3339 timestamp on some providers (Task.due's documented
+    # shape) — only the date portion anchors the calendar day and the range comparison.
+    tasks = [_task("1", "Timestamped", due="2026-07-15T09:00:00.000Z")]
+    items = calendar_feed_items(tasks, "2026-07-01", "2026-08-01")
+    assert items[0]["date"] == "2026-07-15"

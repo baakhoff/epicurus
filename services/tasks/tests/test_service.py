@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.15.3"
+    assert manifest.version == "0.16.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -416,7 +416,13 @@ def test_task_hover_card_full() -> None:
     labels = {d["label"]: d["value"] for d in card["details"]}
     assert labels["Due"] == "2026-06-20"
     assert labels["Status"] == "Open"
-    assert card.get("href") is None
+
+
+def test_task_hover_card_links_back_to_the_board() -> None:
+    # A calendar-feed chip's hover-card needs a way back to the task (#469); every task
+    # hover-card carries it now, not just those reached from the calendar.
+    card = task_hover_card(_task())
+    assert card["href"] == {"label": "Open in Tasks", "url": "/m/tasks/board"}
 
 
 def test_task_hover_card_omits_due_when_absent_and_marks_completed() -> None:

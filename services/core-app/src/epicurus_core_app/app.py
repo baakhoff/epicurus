@@ -88,6 +88,7 @@ from epicurus_core_app.messaging import (
 from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import (
     ModuleRegistry,
+    create_calendar_feed_router,
     create_modules_router,
     create_suggestions_router,
 )
@@ -549,6 +550,7 @@ def create_app() -> FastAPI:
     app.include_router(create_system_router(gateway))
     app.include_router(create_modules_router(registry))
     app.include_router(create_suggestions_router(registry))
+    app.include_router(create_calendar_feed_router(registry))
     # Chat-bridge admin (#369, ADR-0062): connect/manage the messaging module's bridges. The core
     # writes per-tenant bot tokens to OpenBao and reloads the module so a bridge connects at
     # runtime; the browser never holds a token (constraint #6).

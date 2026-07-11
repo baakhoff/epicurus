@@ -29,13 +29,14 @@ __all__ = [
     "UiSection",
 ]
 
-PageArchetype = Literal["browser", "calendar", "editor", "board", "review"]
+PageArchetype = Literal["browser", "calendar", "editor", "board", "review", "mailbox"]
 """The bounded set of left-nav view shapes the shell can render (ADR-0018).
 
 Core-owned and core-rendered: ``browser`` (tree/list + detail), ``calendar``,
-``editor`` (Obsidian-like doc), ``board`` (lists/cards). A module names one of these
-and supplies data; it never ships markup, and it cannot invent a new shape — the
-vocabulary extends only in core.
+``editor`` (Obsidian-like doc), ``board`` (lists/cards), ``review`` (suggestion queue),
+and ``mailbox`` (labels rail -> paginated thread list -> conversation + compose/reply,
+ADR-0087). A module names one of these and supplies data; it never ships markup, and it
+cannot invent a new shape — the vocabulary extends only in core.
 """
 
 

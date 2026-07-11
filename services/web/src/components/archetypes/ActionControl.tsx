@@ -12,7 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { createElement, useMemo, useState } from "react";
 
-import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
+import { SchemaForm, type FormValues, type ObjectSchema } from "@/components/SchemaForm";
 import { Button, Confirm, Sheet, Tooltip, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { BoardAction } from "@/lib/contracts";
@@ -81,6 +81,10 @@ export function ActionControl({
   iconOnlyNarrow = false,
   onSuccess,
   onError,
+  initialValues,
+  open: openProp,
+  onOpenChange,
+  hideTrigger = false,
 }: {
   module: string;
   pageId: string;
@@ -107,9 +111,28 @@ export function ActionControl({
    * action that doesn't pass it keeps the self-contained inline rendering below.
    */
   onError?: (message: string) => void;
+  /** Extra seed values merged over `action.form_values` (caller wins) — e.g. a clicked
+   *  calendar slot's date/time (#473). Only meaningful when `action.form` is set. */
+  initialValues?: FormValues;
+  /**
+   * Controls the form sheet from outside instead of only the button's own click (#473) —
+   * e.g. a calendar day-cell click opening the page's existing "New event" action.
+   * Omit both to keep the sheet as purely internal state, as before.
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /**
+   * Render only the form sheet, no trigger button — for a caller that opens this action
+   * from its own UI (a day-cell click) rather than a rendered button (#473). Pair with
+   * `open`/`onOpenChange`; the action's own `confirm` overlay is skipped too, since there
+   * is no button to trigger it.
+   */
+  hideTrigger?: boolean;
 }) {
   const queryClient = useQueryClient();
-  const [sheetOpen, setSheetOpen] = useState(false);
+  const [internalSheetOpen, setInternalSheetOpen] = useState(false);
+  const sheetOpen = openProp ?? internalSheetOpen;
+  const setSheetOpen = onOpenChange ?? setInternalSheetOpen;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const invoke = useMutation({
     mutationFn: (args: Record<string, unknown>) => api.invokeModuleTool(module, action.tool, args),
@@ -155,75 +178,79 @@ export function ActionControl({
 
   return (
     <>
-      {iconOnly ? (
-        <Tooltip label={action.label} side="bottom">
-          <button
-            type="button"
-            onClick={onClick}
-            disabled={invoke.isPending}
-            aria-label={action.label}
-            className={cn(
-              "inline-flex items-center justify-center rounded-(--radius-field) p-2 transition-colors disabled:opacity-50",
-              action.intent === "danger"
-                ? "border border-danger/40 text-danger hover:bg-danger/10"
-                : action.intent === "primary"
-                  ? "bg-accent text-on-accent hover:bg-accent-hover"
-                  : "border border-edge-strong text-ink hover:border-accent hover:text-accent-strong",
-            )}
-          >
-            {invoke.isPending ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              createElement(moduleIcon(action.icon ?? undefined), { size: 16 })
-            )}
-          </button>
-        </Tooltip>
-      ) : compact ? (
-        <button
-          type="button"
-          onClick={onClick}
-          disabled={invoke.isPending}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-(--radius-field) px-2 py-1 text-xs transition-colors disabled:opacity-50",
-            compactTone,
-          )}
-        >
-          {invoke.isPending ? (
-            <Loader2 size={12} className="animate-spin" />
+      {!hideTrigger && (
+        <>
+          {iconOnly ? (
+            <Tooltip label={action.label} side="bottom">
+              <button
+                type="button"
+                onClick={onClick}
+                disabled={invoke.isPending}
+                aria-label={action.label}
+                className={cn(
+                  "inline-flex items-center justify-center rounded-(--radius-field) p-2 transition-colors disabled:opacity-50",
+                  action.intent === "danger"
+                    ? "border border-danger/40 text-danger hover:bg-danger/10"
+                    : action.intent === "primary"
+                      ? "bg-accent text-on-accent hover:bg-accent-hover"
+                      : "border border-edge-strong text-ink hover:border-accent hover:text-accent-strong",
+                )}
+              >
+                {invoke.isPending ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  createElement(moduleIcon(action.icon ?? undefined), { size: 16 })
+                )}
+              </button>
+            </Tooltip>
+          ) : compact ? (
+            <button
+              type="button"
+              onClick={onClick}
+              disabled={invoke.isPending}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-(--radius-field) px-2 py-1 text-xs transition-colors disabled:opacity-50",
+                compactTone,
+              )}
+            >
+              {invoke.isPending ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                action.icon && createElement(moduleIcon(action.icon), { size: 13 })
+              )}
+              {action.label}
+            </button>
+          ) : shrinkNarrow ? (
+            <Tooltip label={action.label} side="bottom">
+              <Button
+                variant={fullVariant}
+                size={size}
+                busy={invoke.isPending}
+                onClick={onClick}
+                aria-label={action.label}
+              >
+                {createElement(moduleIcon(action.icon ?? undefined), { size: 15 })}
+                <span className="hidden sm:inline">{action.label}</span>
+              </Button>
+            </Tooltip>
           ) : (
-            action.icon && createElement(moduleIcon(action.icon), { size: 13 })
+            <Button variant={fullVariant} size={size} busy={invoke.isPending} onClick={onClick}>
+              {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
+              {action.label}
+            </Button>
           )}
-          {action.label}
-        </button>
-      ) : shrinkNarrow ? (
-        <Tooltip label={action.label} side="bottom">
-          <Button
-            variant={fullVariant}
-            size={size}
-            busy={invoke.isPending}
-            onClick={onClick}
-            aria-label={action.label}
-          >
-            {createElement(moduleIcon(action.icon ?? undefined), { size: 15 })}
-            <span className="hidden sm:inline">{action.label}</span>
-          </Button>
-        </Tooltip>
-      ) : (
-        <Button variant={fullVariant} size={size} busy={invoke.isPending} onClick={onClick}>
-          {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
-          {action.label}
-        </Button>
-      )}
 
-      {!action.form && !onError && invoke.isError && (
-        <span className="text-[11px] text-danger">{(invoke.error as Error).message}</span>
+          {!action.form && !onError && invoke.isError && (
+            <span className="text-[11px] text-danger">{(invoke.error as Error).message}</span>
+          )}
+        </>
       )}
 
       {action.form && (
         <Sheet open={sheetOpen} onClose={() => setSheetOpen(false)} title={action.label}>
           <SchemaForm
             schema={formSchema}
-            initial={action.form_values}
+            initial={{ ...action.form_values, ...initialValues }}
             submitLabel={action.label}
             busy={invoke.isPending}
             onSubmit={(values) => invoke.mutate({ ...action.args, ...values })}
@@ -234,7 +261,7 @@ export function ActionControl({
         </Sheet>
       )}
 
-      {action.confirm && (
+      {action.confirm && !hideTrigger && (
         <Confirm
           open={confirmOpen}
           danger={action.intent === "danger"}

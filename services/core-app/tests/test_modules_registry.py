@@ -25,7 +25,7 @@ from epicurus_core import (
     UiAction,
     UiSection,
 )
-from epicurus_core_app.agent.mcp_host import ToolCallError
+from epicurus_core_app.agent.mcp_host import ModuleUnreachableError, ToolCallError
 from epicurus_core_app.docker_control import DockerError
 from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
 
@@ -279,6 +279,26 @@ async def test_invoke_tool_error_is_400_with_the_tools_message() -> None:
         await registry.invoke("echo", "echo", {"message": "hi"})
     assert err.value.status_code == 400
     assert "event 'e1' not found" in err.value.detail
+
+
+async def test_invoke_unreachable_module_is_502_not_raw_network_error() -> None:
+    # A module that is down / does not answer must surface as a controlled 502, not an
+    # unhandled transport exception that nginx turns into an opaque "NetworkError" — the
+    # failure every board/calendar action shared through this dispatch (#472). Distinct
+    # from the 404 above: there the module is known-unhealthy at resolve time; here it
+    # resolves healthy but the tool call itself fails mid-flight.
+    registry, mcp, _ = _registry()
+
+    async def unreachable_call(
+        name: str, arguments: dict[str, Any], url: str, *, tenant: str
+    ) -> str:
+        raise ModuleUnreachableError(f"module for tool {name!r} is unreachable")
+
+    mcp.call = unreachable_call  # type: ignore[method-assign]
+    with pytest.raises(HTTPException) as err:
+        await registry.invoke("echo", "echo", {"message": "hi"})
+    assert err.value.status_code == 502
+    assert "unreachable" in err.value.detail
 
 
 async def test_config_round_trip_and_empty_default() -> None:

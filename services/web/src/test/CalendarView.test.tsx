@@ -48,6 +48,64 @@ const sample = {
   ],
 };
 
+// A minimal `calendar_create_event` tool schema (#473) — the default empty `mockModules`
+// fixture (below) makes `ActionControl`'s form schema empty, which is fine for tests that
+// never open the sheet; slot-create tests need real `start`/`end`/`all_day` properties to
+// assert the pre-fill actually reaches the rendered fields.
+const CALENDAR_MODULE_WITH_CREATE_SCHEMA = [
+  {
+    manifest: {
+      name: "calendar",
+      version: "1.0.0",
+      description: "",
+      contract_version: "0.1",
+      tags: [],
+      tools: [
+        {
+          name: "calendar_create_event",
+          description: "",
+          input_schema: {
+            type: "object",
+            properties: {
+              title: { type: "string", title: "Title" },
+              start: { type: "string", format: "date-time", date_toggle: "all_day", title: "Start" },
+              end: { type: "string", format: "date-time", date_toggle: "all_day", title: "End" },
+              all_day: { type: "boolean", title: "All day" },
+              // Present so `form_values.calendar_id` (the existing default, #473 must not
+              // clobber it) actually round-trips into the submitted payload — SchemaForm only
+              // carries values for keys the schema itself declares.
+              calendar_id: { type: "string", title: "Calendar" },
+            },
+            required: [],
+          },
+        },
+      ],
+      events_emitted: [],
+      events_consumed: [],
+      config: [],
+      secrets: [],
+      pages: [],
+      resolver: false,
+      attachable: false,
+      required_models: [],
+    },
+    status: { healthy: true, version: "1.0.0" },
+    enabled: true,
+    disabled_tools: [],
+  },
+];
+
+/** The first day cell in the month grid that doesn't hold the "Standup" fixture event. */
+function findEmptyDayCell(container: HTMLElement): HTMLElement {
+  const grid = container.querySelector(".grid-rows-6");
+  if (!grid) throw new Error("month grid not rendered");
+  const cell = [...grid.children].find(
+    (c) => !c.textContent?.includes("Standup"),
+  ) as HTMLElement | undefined;
+  if (!cell) throw new Error("no empty day cell found");
+  return cell;
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-06-15T12:00:00Z"));
@@ -475,6 +533,120 @@ describe("CalendarView", () => {
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
     expect(screen.getByText("Standup")).toBeInTheDocument(); // straight from the persisted cache
     expect(mockModulePage).toHaveBeenCalled(); // …and it still revalidates in the background
+  });
+});
+
+describe("Slot-click create (#473)", () => {
+  it("opens the existing create form pre-filled with the clicked day, all-day on", async () => {
+    mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      actions: [
+        { tool: "calendar_create_event", label: "New event", form: true, form_values: {} },
+      ],
+    });
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup");
+
+    const cell = findEmptyDayCell(container);
+    const dayNum = cell.querySelector("span.rounded-full")!.textContent!.padStart(2, "0");
+    fireEvent.click(cell);
+
+    const startInput = (await screen.findByLabelText("Start")) as HTMLInputElement;
+    const endInput = screen.getByLabelText("End") as HTMLInputElement;
+    expect(startInput).toHaveAttribute("type", "date"); // date_toggle collapsed it (#252/#473)
+    expect(startInput.value.endsWith(`-${dayNum}`)).toBe(true);
+    expect(endInput.value.endsWith(`-${dayNum}`)).toBe(false); // exclusive end = start + 1 day
+
+    const allDay = screen.getByRole("switch", { name: "All day" });
+    expect(allDay).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("submits the seeded date without the operator re-typing it", async () => {
+    mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      actions: [
+        {
+          tool: "calendar_create_event",
+          label: "New event",
+          form: true,
+          form_values: { calendar_id: "local" },
+        },
+      ],
+    });
+    mockInvoke.mockResolvedValue({});
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup");
+
+    const cell = findEmptyDayCell(container);
+    const dayNum = cell.querySelector("span.rounded-full")!.textContent!.padStart(2, "0");
+    fireEvent.click(cell);
+    const startInput = (await screen.findByLabelText("Start")) as HTMLInputElement;
+    const seededStart = startInput.value;
+    expect(seededStart.endsWith(`-${dayNum}`)).toBe(true);
+
+    // Scoped to the open sheet: its submit button shares "New event" with the toolbar's
+    // own (separate, still-closed) trigger button, so an unscoped query would be ambiguous.
+    const sheet = screen.getByRole("dialog", { name: "New event" });
+    fireEvent.click(within(sheet).getByRole("button", { name: "New event" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "calendar",
+        "calendar_create_event",
+        expect.objectContaining({
+          calendar_id: "local", // the existing default (#473 must not clobber it)
+          start: seededStart,
+          all_day: true,
+        }),
+      ),
+    );
+  });
+
+  it("does not open the create form when an event chip is clicked", async () => {
+    mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      actions: [
+        { tool: "calendar_create_event", label: "New event", form: true, form_values: {} },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Standup"));
+    expect(await screen.findByRole("dialog", { name: "Standup" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Start")).not.toBeInTheDocument();
+  });
+
+  it('does not open the create form when the "+N more" button is clicked', async () => {
+    mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
+    const busyDay = Array.from({ length: 5 }, (_, i) => ({
+      id: `e${i}`,
+      title: `Event ${i}`,
+      start: "2026-06-15T09:00:00",
+      end: "2026-06-15T09:30:00",
+    }));
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: busyDay,
+      actions: [
+        { tool: "calendar_create_event", label: "New event", form: true, form_values: {} },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("+2 more"));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument(); // opened event detail…
+    expect(screen.queryByLabelText("Start")).not.toBeInTheDocument(); // …not the create form
+  });
+
+  it("leaves day cells inert when the page declares no create action", async () => {
+    mockModulePage.mockResolvedValue(sample); // no `actions` at all
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup");
+
+    fireEvent.click(findEmptyDayCell(container));
+    expect(screen.queryByLabelText("Start")).not.toBeInTheDocument();
   });
 });
 

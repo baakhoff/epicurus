@@ -341,6 +341,23 @@ the server composes the body — `append` concatenates onto the current note). O
 (paired with `…/reject`, which discards). **409** for knowledge when the target vault is
 externally owned (watch mode, #232); notes have no external-owner mode.
 
+### `POST /platform/v1/modules/{name}/pages/{page_id}/send`
+
+**Mailbox-only (ADR-0087, #550).** A **human-initiated** compose/reply from the mail page. Body
+`{body, to?, subject?, cc?, reply_to_message_id?}` → `{"id": <sent message id>}`. With
+`reply_to_message_id` the module re-derives the recipient/subject/threading server-side (the web
+never handles RFC-2822 headers); otherwise it composes from `to`/`subject`/`body`/`cc`. Gated on the
+`mailbox` archetype (a non-mailbox page **404**s), and **operator-only** — it is not an MCP tool, so
+the agent can never reach it (the draft-first guarantee of ADR-0085 still holds). Relays the
+module's own hint on a Gmail scope/rate-limit error (**403**/**429**). It shares the module's
+transmit endpoint (`POST /send`) but never the agent draft pane.
+
+### `GET /platform/v1/modules/{name}/pages/{page_id}/attachment?message_id=…&attachment_id=…`
+
+**Mailbox-only (ADR-0087).** Streams one message attachment's bytes (with its content type and a
+download `Content-Disposition`) from the module through the core to the browser — nothing is stored.
+Gated on the `mailbox` archetype; **404** for an unknown message/attachment.
+
 ---
 
 ## `PlatformClient`

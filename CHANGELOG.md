@@ -35,7 +35,47 @@ images to GHCR.
   panel on click, and a failed feed fetch never blanks the events that did load. Month-grid
   view only for this pass — week/agenda are a follow-up, mirroring #473's own scoping of the
   time-grid slot-click to "no hour-grid view exists yet." `tasks` 0.15.3→0.16.0, `core-app`
-  0.66.3→0.67.0, `web` 0.90.0→0.91.0.
+  0.67.1→0.68.0, `web` 0.93.0→0.94.0.
+- **Calendar: click a day to create an event, pre-filled** (#473) — creating an event meant
+  reaching for the toolbar's "New event" button and re-typing a date the calendar was already
+  showing. Clicking empty space in a month-grid day cell now opens the page's own existing
+  create-event form (ADR-0034 — no new module contract) pre-filled with that date, `all_day`
+  on by default so the date pickers collapse correctly (`date_toggle`, #252); the operator can
+  still adjust or switch to a timed event before submitting. Event chips and the "+N more"
+  overflow button keep opening event/detail as before — each stops the click from also
+  bubbling into the new cell handler, so only genuinely empty space triggers create. The
+  existing calendar-picker default (`form_values.calendar_id`) survives untouched, since the
+  seed only ever adds `start`/`end`/`all_day` on top of it, never replacing the whole set.
+  Two small, generic extensions carry this rather than a calendar-specific one-off:
+  `ActionControl` gains optional `initialValues` (merged over a module's `form_values`) and
+  `open`/`onOpenChange`/`hideTrigger` (drives its form sheet from outside, with no visible
+  button of its own) — any future archetype wanting the same "click something else to open
+  an existing form, pre-filled" pattern reuses it as-is. The day/time-grid slot-click and
+  click-drag range-select the issue also describes has no substrate yet — `WeekView` is a
+  per-day list, not an hour grid — and is left for whenever that view exists; the acceptance
+  criteria's own "(where those views exist)" qualifier anticipated the gap. `web` 0.92.0→0.93.0.
+- **Websearch: results as Sources-pill chips, at parity with local sources** (#551,
+  ADR-0019) — a `web_search` answer previously left the operator unfolding raw tool-call
+  JSON to see which pages informed it; local sources (knowledge/mail/calendar/tasks) had
+  this solved since #333. `web_search` now returns a `ToolEnvelope` (text unchanged —
+  still a ranked title/URL/snippet listing the model can cite — plus one `EntityRef` per
+  result), so results render as the same **Sources (N)** pill and chips. The module stays
+  **stateless**: a new `epicurus_websearch.refs` codec (mirroring
+  `epicurus_knowledge.refs`'s self-describing-id pattern) base64url-encodes each result's
+  url/title/snippet/engine directly into its `ref_id`, so the new `GET
+  /resolve/result/{ref_id}` hover-card resolver reconstructs everything with no store —
+  hover-cards keep resolving in a session reopened long after the search ran. Because
+  websearch has no right-panel view of its own, its chip is the first to diverge from the
+  generic click-opens-the-panel behavior: it always carries an `href` and a chip click
+  resolves then opens the source page directly in a new tab
+  (`rel="noopener noreferrer"`), with an external-link glyph on the chip itself so a web
+  source is never mistaken for an in-app entity — both already-generic frontend pieces
+  (`CardLink`'s scheme-gated external-link branch, the core's cross-call `_RefCollector`
+  ref-id dedup) needed zero core-app changes to support this end-to-end. Same-page
+  duplicates within one search (SearXNG returning a URL from multiple engines) are
+  collapsed before refs are built; a malformed or tampered `ref_id` (bad base64, non-JSON,
+  or a non-`http(s)` scheme) 400s cleanly, never a 500 and never an unsafe `href`.
+  `websearch` 0.1.0→0.2.0, `web` 0.91.0→0.92.0.
 - **PWA: share target + app shortcuts** (#493) — the installed app was inert to the OS around
   it. Two manifest-level features, especially useful on Android: **share a link, text, or
   file/photo from any app straight into a chat turn** (`manifest.share_target`, `POST`
@@ -821,6 +861,23 @@ images to GHCR.
 
 ### Fixed
 
+- **Board/calendar actions no longer fail with a raw `NetworkError` when a module is down** (#472) —
+  every manifest-declared UI action runs through one dispatch, `McpHost.call`, and it alone among the
+  core's outbound module calls had **no timeout and no transport-failure mapping** — unlike the sibling
+  `_get_json`/`_post_json` helpers that already turn a slow/dead module into a controlled `502`. So a
+  refused or hung module let a raw transport exception escape to nginx as an opaque **502
+  NetworkError**, closing the action form with no reason. The dispatch now bounds every hop (connect,
+  `initialize`, and the tool RPC) with a 30s timeout and normalizes a transport failure into a new
+  `ModuleUnreachableError`, which `ModuleRegistry.invoke` maps to a **502** `… action failed: module
+  unreachable` (the agent's tool loop reports it to the model instead of crashing the turn). Finding
+  this exposed a latent second bug the mocked `#435` tests hid: the streamable-HTTP client runs its
+  transport in an anyio task group, so a `ToolCallError` raised **inside** the `async with` block was
+  silently **wrapped in an `ExceptionGroup`** — every `except ToolCallError` missed it. The `isError`
+  → `ToolCallError` raise now lives *outside* the transport block, so a tool-reported failure still
+  surfaces as a clean **400** with the tool's own message. Verified end-to-end against a **live**
+  FastMCP server (the mocks can't reproduce the anyio wrapping): success, `isError`→`ToolCallError`,
+  refused→`ModuleUnreachableError`, and a hung socket tripping the read timeout are all now covered.
+  `core-app` 0.67.0→0.67.1.
 - **Assistant instructions: guard an unsaved draft; cover injection-first on the memory path** (#536) —
   the Settings instructions editor is the first long-form editor there (the other cards instant-save),
   so an unsaved draft silently vanished on an accidental reload/close. It now arms a `beforeunload`

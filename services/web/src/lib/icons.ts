@@ -5,6 +5,7 @@
  * this set, so module visuals stay coherent with the rest of the app.
  */
 import {
+  Archive,
   Bell,
   Blocks,
   Bot,
@@ -39,6 +40,7 @@ import {
 } from "lucide-react";
 
 export const MODULE_ICONS: Record<string, LucideIcon> = {
+  archive: Archive,
   bell: Bell,
   blocks: Blocks,
   bot: Bot,

@@ -8,8 +8,22 @@ agnostic; only the concrete provider knows about the underlying API.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class MailAttachment(BaseModel):
+    """One attachment on a message — metadata only; bytes are streamed separately (ADR-0087).
+
+    The mailbox page lists these under a message and downloads one on demand via the core
+    attachment proxy (:meth:`MailProvider.get_attachment`). The module never stores the bytes.
+    """
+
+    id: str
+    filename: str
+    mime_type: str = ""
+    size: int = 0
 
 
 class MailMessage(BaseModel):
@@ -26,6 +40,67 @@ class MailMessage(BaseModel):
     # Whether the message is unread. Provider-agnostic; the Gmail provider derives it
     # from the ``UNREAD`` label. Surfaced in the hover-card resolver (ADR-0019).
     unread: bool = False
+    # Attachments carried by the message (ADR-0087). Populated only on a full read
+    # (``read`` / ``get_thread``); a metadata-only search/list leaves it empty.
+    attachments: list[MailAttachment] = Field(default_factory=list)
+
+
+class MailLabel(BaseModel):
+    """A folder/label in the mailbox rail (ADR-0087) — provider-agnostic.
+
+    ``kind`` is ``"system"`` for provider-defined labels (Inbox, Sent, ...) and ``"user"``
+    for the operator's own. ``unread`` is the label's unread count when the provider
+    supplies it cheaply, else ``None`` (the rail renders a count only when present, so a
+    provider that can't count per-label capability-gates rather than forcing a number).
+    """
+
+    id: str
+    title: str
+    kind: str = "system"
+    unread: int | None = None
+
+
+class MailThreadSummary(BaseModel):
+    """One row in the paginated thread list (ADR-0087) — a conversation at a glance."""
+
+    id: str
+    subject: str
+    sender: str
+    snippet: str
+    date: str
+    unread: bool = False
+    message_count: int = 1
+
+
+class ThreadPage(BaseModel):
+    """A cursor-paginated page of thread summaries (ADR-0087).
+
+    ``next_cursor`` is the opaque provider token for the following page, or ``None`` at the
+    end — cursor pagination only (never offset), since a mailbox is unbounded (#539).
+    """
+
+    threads: list[MailThreadSummary] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+class MailThread(BaseModel):
+    """A full conversation — every message in the thread, oldest first (ADR-0087)."""
+
+    id: str
+    subject: str
+    messages: list[MailMessage] = Field(default_factory=list)
+
+
+class AttachmentContent(BaseModel):
+    """The bytes + metadata for one downloaded attachment (ADR-0087).
+
+    Returned by :meth:`MailProvider.get_attachment`; the core streams ``content`` to the
+    browser with ``mime_type`` / ``filename``. Never persisted by the module.
+    """
+
+    filename: str
+    mime_type: str
+    content: bytes
 
 
 class ComposedMessage(BaseModel):
@@ -94,6 +169,63 @@ class MailProvider(ABC):
 
         Provider-agnostic counterpart to the ``unread`` flag on :class:`MailMessage`.
         Idempotent — setting the state a message is already in is a no-op.
+        """
+
+    # ── mailbox page (ADR-0087) ──────────────────────────────────────────────
+
+    @abstractmethod
+    async def list_labels(self, *, count_ids: Sequence[str] = ()) -> list[MailLabel]:
+        """Return the mailbox's folders/labels for the page's rail (ADR-0087).
+
+        System labels (Inbox, Sent, ...) first, then the operator's own. *count_ids* names
+        the labels whose unread count the caller wants filled — kept small (the active label
+        + Inbox) so the rail's per-label counts don't fan out to one call per label. A label
+        outside *count_ids*, or a provider that can't count cheaply, leaves
+        :attr:`MailLabel.unread` ``None`` (capability-gate, not a forced zero — ADR-0030).
+        """
+
+    @abstractmethod
+    async def list_threads(
+        self, *, label: str | None, query: str | None, cursor: str | None, limit: int
+    ) -> ThreadPage:
+        """Return one cursor-paginated page of thread summaries (ADR-0087).
+
+        Scoped to *label* (the rail selection) and/or a provider-native *query* (Gmail
+        syntax, as ``search`` uses). *cursor* is the opaque token from a previous page's
+        ``next_cursor`` (``None`` for the first page); *limit* bounds the page — the caller
+        caps it so one fetch can't scan an unbounded mailbox (#539).
+        """
+
+    @abstractmethod
+    async def get_thread(self, thread_id: str) -> MailThread:
+        """Return the full conversation *thread_id* — every message, oldest first (ADR-0087).
+
+        Each message carries its decoded body and attachment metadata, so the page's thread
+        pane renders the whole conversation from one call.
+        """
+
+    @abstractmethod
+    async def archive(self, message_id: str) -> None:
+        """Archive a message — remove it from the Inbox without deleting it (ADR-0087).
+
+        Idempotent. For Gmail this drops the ``INBOX`` label (``messages.modify``), inside
+        the already-granted ``gmail.modify`` scope — no reconnect.
+        """
+
+    @abstractmethod
+    async def trash(self, message_id: str) -> None:
+        """Move a message to Trash (ADR-0087) — recoverable, not a permanent delete.
+
+        Idempotent. Permanent deletion is deliberately out of scope (it needs the full
+        Gmail scope); trash is inside ``gmail.modify``.
+        """
+
+    @abstractmethod
+    async def get_attachment(self, message_id: str, attachment_id: str) -> AttachmentContent:
+        """Fetch one attachment's bytes + metadata for the core to stream (ADR-0087).
+
+        The bytes are never persisted by the module — they flow provider -> module ->
+        core proxy -> browser. Raises if the message or attachment does not exist.
         """
 
     @abstractmethod

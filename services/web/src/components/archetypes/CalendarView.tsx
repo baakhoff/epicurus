@@ -24,6 +24,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { isExternalHref } from "@/components/CardLink";
+import type { FormValues } from "@/components/SchemaForm";
 import { EmptyState, Spinner, cn, useModalFocus } from "@/components/ui";
 import { api } from "@/lib/api";
 import { onColor } from "@/lib/color";
@@ -55,8 +56,9 @@ const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
 const startOfWeek = (d: Date) => addDays(startOfDay(d), -((d.getDay() + 6) % 7));
 const isSameDay = (a: Date, b: Date) => startOfDay(a).getTime() === startOfDay(b).getTime();
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-/** Local floating `YYYY-MM-DD` (#469) — never `toISOString()` here, which would UTC-shift
- *  a date near local midnight; the calendar-feed endpoint compares this lexicographically. */
+/** Local floating `YYYY-MM-DD` — never `toISOString()` here, which would UTC-shift a date
+ *  near local midnight. Feeds the calendar-feed lexicographic compare (#469) and is the
+ *  exact shape SchemaForm's `date_toggle` fields expect (#473). */
 const ymd = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
@@ -270,6 +272,9 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
   const [selected, setSelected] = useState<CalendarEvent | null>(null);
   // Which calendars are hidden (#378), persisted per page so the choice survives a reload.
   const [hidden, setHidden] = useState<Set<string>>(() => readHidden(module, pageId));
+  // Clicking an empty day/time slot opens the page's own create-event form, pre-filled
+  // (#473) — no new module contract, just seed values fed into the existing action below.
+  const [slotSeed, setSlotSeed] = useState<FormValues | null>(null);
 
   const range = useMemo(() => visibleRange(view, cursor), [view, cursor]);
   const startISO = range.start.toISOString();
@@ -330,6 +335,11 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
   };
 
   const data = query.data ? CalendarData.parse(query.data) : null;
+
+  // The page's own "New event" action (ADR-0034) — reused as-is for slot-click seeding
+  // (#473) rather than inventing a second create surface. Assumes at most one form action;
+  // true for calendar today, and a second would just seed whichever is found first.
+  const createAction = useMemo(() => (data?.actions ?? []).find((a) => a.form), [data]);
 
   // The visibility menu lists every *enabled* calendar — not only those with events in
   // the current window (#431) — plus any token an in-window event carries that the
@@ -408,6 +418,11 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
             colorFor={colorFor}
             onSelect={setSelected}
             onOpenFeedItem={openFeedItem}
+            onCreateDay={
+              createAction
+                ? (day) => setSlotSeed({ all_day: true, start: ymd(day), end: ymd(addDays(day, 1)) })
+                : undefined
+            }
           />
         ) : view === "week" ? (
           <WeekView cursor={cursor} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
@@ -422,6 +437,20 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
           module={module}
           pageId={pageId}
           onClose={() => setSelected(null)}
+        />
+      )}
+
+      {/* No visible button — a slot click seeds this and opens it directly (#473). Reuses
+          the page's own create action/form so there is exactly one create surface. */}
+      {createAction && (
+        <ActionControl
+          module={module}
+          pageId={pageId}
+          action={createAction}
+          initialValues={slotSeed ?? undefined}
+          open={slotSeed !== null}
+          onOpenChange={(open) => !open && setSlotSeed(null)}
+          hideTrigger
         />
       )}
     </div>
@@ -619,6 +648,7 @@ function MonthView({
   colorFor,
   onSelect,
   onOpenFeedItem,
+  onCreateDay,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
@@ -627,6 +657,9 @@ function MonthView({
   colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
   onOpenFeedItem: (item: CalendarFeedItem) => void;
+  /** Clicking empty space in a day cell seeds + opens the create form (#473); omitted
+   *  when the page has no create action (no-op cells, same as before). */
+  onCreateDay?: (day: Date) => void;
 }) {
   const gridStart = startOfWeek(startOfMonth(cursor));
   const days = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
@@ -652,9 +685,13 @@ function MonthView({
           return (
             <div
               key={day.toISOString()}
+              // Event chips / "+more" stop propagation on their own click (they open
+              // detail, not create) — only genuinely empty space reaches this (#473).
+              onClick={onCreateDay && (() => onCreateDay(day))}
               className={cn(
                 "flex min-h-0 flex-col gap-0.5 overflow-hidden border-b border-r border-edge p-1",
                 !inMonth && "bg-surface-2/40",
+                onCreateDay && "cursor-pointer hover:bg-surface-2/60",
               )}
             >
               <div className="flex justify-end">
@@ -677,7 +714,10 @@ function MonthView({
                 ))}
                 {evs.length > MAX_CHIPS && (
                   <button
-                    onClick={() => onSelect(evs[MAX_CHIPS])}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelect(evs[MAX_CHIPS]);
+                    }}
                     className="px-1 text-left text-[11px] text-ink-faint hover:text-ink"
                   >
                     +{evs.length - MAX_CHIPS} more
@@ -688,7 +728,10 @@ function MonthView({
                 ))}
                 {feedItems.length > MAX_FEED_CHIPS && (
                   <button
-                    onClick={() => onOpenFeedItem(feedItems[MAX_FEED_CHIPS])}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenFeedItem(feedItems[MAX_FEED_CHIPS]);
+                    }}
                     className="px-1 text-left text-[11px] text-ink-faint hover:text-ink"
                   >
                     +{feedItems.length - MAX_FEED_CHIPS} more
@@ -718,7 +761,10 @@ function EventChip({
 }) {
   return (
     <button
-      onClick={() => onSelect(ev)}
+      onClick={(e) => {
+        e.stopPropagation(); // the day cell behind it opens a *create* form on click (#473)
+        onSelect(ev);
+      }}
       title={ev.title}
       style={{ "--cal": color, "--cal-ink": onColor(color) } as CSSProperties}
       className="flex items-baseline gap-1 truncate rounded-sm bg-[color-mix(in_srgb,var(--cal)_24%,transparent)] px-1 py-0.5 text-left text-[11px] leading-tight text-ink hover:bg-(--cal) hover:text-(--cal-ink)"
@@ -744,7 +790,10 @@ function FeedItemChip({
 }) {
   return (
     <button
-      onClick={() => onOpen(item)}
+      onClick={(e) => {
+        e.stopPropagation(); // the day cell behind it opens a *create* form on click (#473)
+        onOpen(item);
+      }}
       title={item.title}
       className="flex items-center gap-1 truncate rounded-sm px-1 py-0.5 text-left text-[11px] leading-tight text-ink-faint hover:bg-surface-2 hover:text-ink-dim"
     >

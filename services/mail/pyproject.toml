@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-mail"
-version = "0.9.1"
+version = "0.10.0"
 description = "Mail module — provider-agnostic mail (Gmail v0.1): search, read, draft-first send/reply, mark read/unread."
 requires-python = ">=3.11"
 dependencies = [

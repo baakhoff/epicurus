@@ -4,15 +4,27 @@ The MCP connection itself is stubbed: ``streamablehttp_client`` is patched to re
 the URL it is asked to open and then raise (URL-filter tests), or replaced with a mock
 session that returns a canned tool listing (tool-filter tests), so ``discover``
 exercises filtering logic without a live server.
+
+The transport-hardening tests at the bottom (#472) are the exception — they run a *real*
+FastMCP streamable-HTTP server, because the behavior they pin (a tool's isError, a refused
+connection, and an RPC read timeout) only manifests through the live anyio task group the
+mocks bypass.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import socket
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import uvicorn
+from mcp.server.fastmcp import FastMCP
 
-from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
+import epicurus_core_app.agent.mcp_host as mcp_host
+from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 
 
 def _recording_client() -> tuple[list[str], object]:
@@ -277,3 +289,124 @@ async def test_builtin_respects_disabled_filter() -> None:
     specs, route = await host.discover()
     assert specs == []
     assert "now" not in route
+
+
+# ── Transport hardening: real server, real failure modes (#472) ────────────────
+# ``call`` dispatches every board/calendar UI action. The mocked tests above cannot
+# reproduce what a live streamable-HTTP connection does: it runs its transport in an anyio
+# task group, so a failure raised *inside* the ``async with`` — a refused/dropped socket, an
+# RPC read timeout, *or* a tool's isError — escapes wrapped in a (possibly nested)
+# ``ExceptionGroup``, never a bare exception. These tests run a real FastMCP server so the
+# host's contract is verified against production behavior: a tool error surfaces as a bare
+# ``ToolCallError`` (raised after the block, so it is never wrapped), while a genuinely
+# unreachable module normalizes to ``ModuleUnreachableError`` — the structured signal
+# ``ModuleRegistry.invoke`` maps to a controlled 502 instead of a raw ``NetworkError``.
+
+
+def _free_port() -> int:
+    """An ephemeral localhost port — bind :0, read it back, release it."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    try:
+        return int(sock.getsockname()[1])
+    finally:
+        sock.close()
+
+
+def _live_module_app() -> object:
+    """A FastMCP streamable-HTTP app with a ``echo`` tool and a raising ``boom`` tool."""
+    mcp = FastMCP("test-module")
+
+    @mcp.tool()
+    def echo(message: str) -> str:
+        return f"echo: {message}"
+
+    @mcp.tool()
+    def boom() -> str:
+        raise ValueError("event 'e1' not found")
+
+    return mcp.streamable_http_app()
+
+
+@contextlib.asynccontextmanager
+async def _live_module() -> AsyncIterator[str]:
+    """Serve the module in-process on an ephemeral port; yield its ``/mcp`` URL.
+
+    A plain ``async with`` helper rather than a fixture — the repo has no async-fixture
+    convention and this keeps the lifecycle explicit and portable (it boots on Windows and
+    Linux alike, no Docker).
+    """
+    port = _free_port()
+    config = uvicorn.Config(_live_module_app(), host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(250):  # up to ~5s for startup
+            if server.started:
+                break
+            await asyncio.sleep(0.02)
+        else:  # pragma: no cover - only trips if uvicorn never comes up
+            raise RuntimeError("uvicorn did not start in time")
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        server.should_exit = True
+        await serve_task
+
+
+async def test_call_success_against_live_server() -> None:
+    host = McpHost([])
+    async with _live_module() as url:
+        out = await host.call("echo", {"message": "hi"}, url, tenant="t1")
+    assert out == "echo: hi"
+
+
+async def test_call_iserror_surfaces_bare_toolcallerror() -> None:
+    # The crux of #472: a tool's isError is detected inside the streamable client's anyio
+    # task group. Were ToolCallError raised there, anyio would wrap it in an ExceptionGroup
+    # and every ``except ToolCallError`` (agent loop + ModuleRegistry.invoke) would silently
+    # miss it. The host raises it *after* the block, so it must arrive bare here — this fails
+    # if someone moves the isError check back inside the ``async with``.
+    host = McpHost([])
+    async with _live_module() as url:
+        with pytest.raises(ToolCallError, match="event 'e1' not found"):
+            await host.call("boom", {}, url, tenant="t1")
+
+
+async def test_call_refused_module_raises_module_unreachable() -> None:
+    # Nothing listening on the port → the transport throws a nested
+    # ExceptionGroup(ConnectError); the host must normalize it to ModuleUnreachableError,
+    # not let the raw group escape toward nginx as an opaque NetworkError (#472).
+    host = McpHost([])
+    dead_url = f"http://127.0.0.1:{_free_port()}/mcp"
+    with pytest.raises(ModuleUnreachableError):
+        await host.call("echo", {"message": "hi"}, dead_url, tenant="t1")
+
+
+async def test_call_hung_module_times_out_to_module_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A module that accepts the TCP connection but never replies must not hang ``call``
+    # forever — the original #472 defect (no read-timeout override). The bounded RPC read
+    # trips and normalizes to ModuleUnreachableError. Shorten the bound so the test is fast;
+    # wrap in wait_for so a regression fails loudly at 15s rather than at the 60s gate.
+    monkeypatch.setattr(mcp_host, "_CALL_TIMEOUT_S", 1.0)
+
+    async def _hold(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await asyncio.sleep(30)  # accept the socket, send nothing back
+        finally:
+            writer.close()
+
+    port = _free_port()
+    server = await asyncio.start_server(_hold, "127.0.0.1", port)
+    host = McpHost([])
+    url = f"http://127.0.0.1:{port}/mcp"
+    try:
+        async with server:
+            with pytest.raises(ModuleUnreachableError):
+                await asyncio.wait_for(
+                    host.call("echo", {"message": "hi"}, url, tenant="t1"),
+                    timeout=15,
+                )
+    finally:
+        server.close()

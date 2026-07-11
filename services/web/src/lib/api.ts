@@ -510,6 +510,34 @@ export const api = {
       EmailMessage,
       `/platform/v1/modules/${encodeURIComponent(module)}/messages/${encodeURIComponent(refId)}`,
     ),
+  // Send a human-composed mailbox message (ADR-0087) — compose (to/subject) or reply
+  // (reply_to_message_id; the module re-derives threading). Operator-only; never the agent.
+  sendMailboxMessage: (
+    module: string,
+    pageId: string,
+    payload: {
+      body: string;
+      to?: string;
+      subject?: string;
+      cc?: string;
+      reply_to_message_id?: string;
+    },
+  ) =>
+    request(
+      z.object({ id: z.string() }),
+      `/platform/v1/modules/${encodeURIComponent(module)}/pages/${encodeURIComponent(pageId)}/send`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  // The same-origin URL for one attachment's download (ADR-0087). Used as an `<a href download>`;
+  // the core streams the bytes provider → module → browser (nothing stored).
+  mailboxAttachmentUrl: (
+    module: string,
+    pageId: string,
+    messageId: string,
+    attachmentId: string,
+  ) =>
+    `/platform/v1/modules/${encodeURIComponent(module)}/pages/${encodeURIComponent(pageId)}` +
+    `/attachment?message_id=${encodeURIComponent(messageId)}&attachment_id=${encodeURIComponent(attachmentId)}`,
   // A text file's contents for the Files split-screen reader (#KB-refactor, req 6).
   readModuleText: (module: string, path: string) =>
     request(

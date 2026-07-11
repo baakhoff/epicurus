@@ -144,8 +144,9 @@ the model that supersedes ADR-0007's Tier-2 (iframe) idea for first-party module
 
 **`PageArchetype`** — the bounded vocabulary (core-owned, extends only in core):
 `browser` (tree/list + detail), `calendar` (month / week / agenda), `editor`
-(Obsidian-like doc), `board` (lists/cards), `review` (diff approve/reject queue). The
-shell ships one first-party screen per archetype; all five are implemented today.
+(Obsidian-like doc), `board` (lists/cards), `review` (diff approve/reject queue), and
+`mailbox` (labels rail → paginated thread list → conversation + compose/reply, ADR-0087).
+The shell ships one first-party screen per archetype; all six are implemented today.
 
 **Serving page data.** The module serves each page's data at **`GET /pages/{id}`** in
 the archetype's data shape; the core proxies it at
@@ -429,6 +430,19 @@ field and the calendar `recurrence` field get a human-friendly control while the
 still accepts a raw RRULE. The module declares the format once on its tool parameter (via
 `Field(json_schema_extra={"format": "rrule"})`); no markup leaves the module. The same
 `actions` vocabulary works for any archetype that wants core-rendered mutations.
+
+**The `mailbox` archetype (a mail client, ADR-0087).** One `GET /pages/{id}` read serves both
+panes (query params forwarded, no new read endpoint): the **list** (`?label=`, `?q=`, `?cursor=`)
+returns the folders rail + one cursor-paginated page of thread summaries; the **thread**
+(`?thread_id=`) returns `{thread: {id, subject, messages, reply}}`, where each message reuses the
+`EmailMessage` shape (extended with `attachments`) so the page and the panel `email-reader` share
+one renderer. Pagination is **cursor-only** (`next_cursor`, never offset — mailboxes are unbounded);
+triage is message-level `BoardAction`s (`mail_mark_read`/`unread`, `mail_archive`, `mail_trash`)
+through the normal tool proxy. Two `mailbox`-gated core proxies back the rest: **`POST
+…/pages/{id}/send`** (a *human-initiated* compose/reply — shares the module transmit but never the
+agent draft pane, ADR-0085) and **`GET …/pages/{id}/attachment`** (streams a message's attachment
+bytes). Rendering is **plain-text-first**: HTML-only mail is decoded to text server-side, so the
+shell never renders mail HTML.
 
 ### Entity references & the resolver (ADR-0019)
 

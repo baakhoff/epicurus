@@ -398,7 +398,14 @@ export type UiSection = z.infer<typeof UiSection>;
 /* ── module-contributed pages (ADR-0018) ─────────────────────────────────── */
 
 /** The bounded vocabulary of core-rendered left-nav view shapes. */
-export const PageArchetype = z.enum(["browser", "calendar", "editor", "board", "review"]);
+export const PageArchetype = z.enum([
+  "browser",
+  "calendar",
+  "editor",
+  "board",
+  "review",
+  "mailbox",
+]);
 export type PageArchetype = z.infer<typeof PageArchetype>;
 
 export const PageSpec = z.object({
@@ -925,7 +932,16 @@ export const HoverCard = z.object({
 });
 export type HoverCard = z.infer<typeof HoverCard>;
 
-/** An email shown in the panel's `email-reader` view (used by 3.8 mail). */
+/** One attachment on a message (ADR-0087) — metadata only; bytes stream via the core proxy. */
+export const MailAttachment = z.object({
+  id: z.string(),
+  filename: z.string(),
+  mime_type: z.string().default(""),
+  size: z.number().default(0),
+});
+export type MailAttachment = z.infer<typeof MailAttachment>;
+
+/** An email shown in the panel's `email-reader` view + the mailbox thread pane (ADR-0019/0087). */
 export const EmailMessage = z.object({
   subject: z.string().default("(no subject)"),
   from: z.string().nullish(),
@@ -938,8 +954,69 @@ export const EmailMessage = z.object({
   unread: z.boolean().default(false),
   /** Tool-backed actions on this message (ADR-0024) — e.g. Mark as read / Mark as unread. */
   actions: z.array(BoardAction).default([]),
+  /** Attachments listed under the message; downloaded on demand via the core proxy (ADR-0087).
+   *  Absent for the panel reader (which doesn't fetch them), present in the mailbox thread. */
+  attachments: z.array(MailAttachment).default([]),
 });
 export type EmailMessage = z.infer<typeof EmailMessage>;
+
+/* ── mailbox archetype (ADR-0087) ────────────────────────────────────────── */
+
+/** One folder/label in the mailbox rail; `unread` is shown only when the provider supplied it. */
+export const MailLabel = z.object({
+  id: z.string(),
+  title: z.string(),
+  kind: z.string().default("system"),
+  unread: z.number().nullish(),
+});
+export type MailLabel = z.infer<typeof MailLabel>;
+
+/** One row in the paginated thread list — a conversation at a glance. */
+export const MailThreadSummary = z.object({
+  id: z.string(),
+  subject: z.string().default("(no subject)"),
+  sender: z.string().default(""),
+  snippet: z.string().default(""),
+  date: z.string().default(""),
+  unread: z.boolean().default(false),
+  message_count: z.number().default(1),
+});
+export type MailThreadSummary = z.infer<typeof MailThreadSummary>;
+
+/** The `mailbox` list read: the rail + one cursor page of threads (ADR-0087). */
+export const MailboxListData = z.object({
+  title: z.string().default("Mail"),
+  labels: z.array(MailLabel).default([]),
+  active_label: z.string().default("INBOX"),
+  query: z.string().default(""),
+  threads: z.array(MailThreadSummary).default([]),
+  /** Opaque next-page token; absent at the end of the mailbox. */
+  next_cursor: z.string().nullish(),
+});
+export type MailboxListData = z.infer<typeof MailboxListData>;
+
+/** The server-derived reply prefill for a thread (ADR-0087). The actual send re-derives
+ *  threading from `reply_to_message_id`, so the web never handles raw RFC-2822 headers. */
+export const MailboxReply = z.object({
+  reply_to_message_id: z.string(),
+  to: z.string().default(""),
+  subject: z.string().default(""),
+  reply_to_original: z.string().nullish(),
+});
+export type MailboxReply = z.infer<typeof MailboxReply>;
+
+/** The `mailbox` thread read: a full conversation + the reply prefill (ADR-0087). */
+export const MailThreadData = z.object({
+  id: z.string(),
+  subject: z.string().default("(no subject)"),
+  messages: z.array(EmailMessage).default([]),
+  reply: MailboxReply.nullish(),
+});
+export type MailThreadData = z.infer<typeof MailThreadData>;
+
+/** The `?thread_id=` envelope — the module returns `{thread}` for a single conversation. */
+export const MailboxThreadData = z.object({ thread: MailThreadData });
+export type MailboxThreadData = z.infer<typeof MailboxThreadData>;
 
 /** A composed outbound email shown in the split-pane for Confirm/Decline (ADR-0085, #563).
  *  The same payload the module's transmit endpoint sends, so what is reviewed is what goes out. */

@@ -4,6 +4,19 @@ Self-hosted web search for the agent.  The websearch module runs a
 [SearXNG](https://docs.searxng.org/) instance inside the stack and exposes a
 single `web_search` MCP tool.  No external API keys are required.
 
+**v0.2.0** (#551, ADR-0019): `web_search` results now surface as entity-reference
+chips in the chat UI, at parity with local sources (#333). Hover shows the title,
+snippet, engine, and domain; clicking a chip opens the source page in a new tab —
+websearch has no right-panel view of its own, so unlike every other resolver-backed
+module it always carries an `href`. The module is (and stays) **stateless**: the
+resolver reconstructs a result's hover-card entirely from a self-describing
+`ref_id` (`epicurus_websearch.refs`, mirroring `epicurus_knowledge.refs`'s pattern),
+not a lookup, so hover-cards keep resolving in sessions reopened long after the
+search ran. Same-page duplicates within one `web_search` call (SearXNG returning
+one URL from multiple engines) are collapsed before refs are built; two separate
+calls surfacing the same result encode to the same `ref_id`, so the core's
+cross-call entity-ref dedup (`_RefCollector`) merges them into one chip.
+
 ## What it is
 
 The module adds two containers to the stack:
@@ -20,23 +33,17 @@ The module adds two containers to the stack:
 
 | Tool | Description |
 | ---- | ----------- |
-| `web_search(query, num_results?)` | Search the web for `query`; returns up to `num_results` results (default: configured max, capped at 20). |
+| `web_search(query, num_results?)` | Search the web for `query`; returns up to `num_results` results (default: configured max, capped at 20) as a `ToolEnvelope`. |
 
-#### `web_search` return type
+#### `web_search` return shape
 
-Each element in the returned list is:
-
-```json
-{
-  "title":   "Page title",
-  "url":     "https://example.com",
-  "snippet": "Brief description from the search result",
-  "engine":  "google"
-}
-```
-
-Results are ordered by SearXNG's relevance ranking.  An empty list is returned
-when SearXNG finds nothing or is temporarily unreachable.
+`web_search` returns a `ToolEnvelope` (ADR-0019, `epicurus_core.tool_envelope`):
+`text` is a ranked listing — title, URL, engine, and snippet per result, capped
+the same way as the entity-ref id block (`epicurus_core.capped_listing`) — fed
+back to the model so it can still cite URLs directly; `entity_refs` carries one
+`EntityRef` per (deduplicated) result (`module="websearch"`, `kind="result"`,
+`summary` = snippet) so the UI renders chips. An empty/unreachable search
+returns `tool_envelope("No web results found.", [])` rather than failing the turn.
 
 ### HTTP endpoints
 
@@ -46,7 +53,31 @@ when SearXNG finds nothing or is temporarily unreachable.
 | `GET` | `/metrics` | Prometheus metrics. |
 | `GET` | `/manifest` | Module manifest (tools, UI, config schema). |
 | `GET` | `/status` | SearXNG reachability: `{"searxng_healthy": true, "searxng_url": "..."}`. |
+| `GET` | `/resolve/result/{ref_id}` | Hover-card resolver (ADR-0019) — see below. |
 | `*` | `/mcp/*` | Streamable-HTTP MCP transport (agent connects here). |
+
+#### `HoverCard` shape (from resolver)
+
+Stateless: every field is decoded straight out of `ref_id`, never looked up.
+Always carries an `href` — the chip's only destination is the source page itself,
+opened in a new tab (`rel="noopener noreferrer"`, core-rendered via `CardLink`).
+A malformed or tampered `ref_id` (bad base64, non-JSON, or a non-`http(s)` URL —
+e.g. a `javascript:` scheme) is rejected with **400**, never a 500 and never
+echoed back as an `href`.
+
+```json
+{
+  "title": "Page title",
+  "description": "Brief description from the search result",
+  "details": [
+    { "label": "Engine", "value": "google" },
+    { "label": "Domain", "value": "example.com" }
+  ],
+  "href": { "label": "Open page", "url": "https://example.com/page" }
+}
+```
+
+The core exposes this via `GET /platform/v1/modules/websearch/resolve/result/{ref_id}`.
 
 ### Events
 

@@ -28,7 +28,7 @@ from epicurus_core import (
     SecretStore,
     get_logger,
 )
-from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
+from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.docker_control import PROTECTED, DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
@@ -122,6 +122,22 @@ class ApproveRequest(BaseModel):
     edit. Absent ⇒ apply the agent's full proposal."""
 
     content: str | None = None
+
+
+class MailboxSend(BaseModel):
+    """The body of a mailbox page's human-initiated compose/reply (ADR-0087).
+
+    Forwarded verbatim to the module's ``POST /pages/{id}/send``: a reply carries
+    ``reply_to_message_id`` (the module re-derives threading), a fresh compose carries
+    ``to``/``subject``. Operator-only (shell -> core -> module) — never an MCP tool, so the
+    agent can't send (ADR-0085 holds).
+    """
+
+    body: str
+    to: str | None = None
+    subject: str | None = None
+    cc: str | None = None
+    reply_to_message_id: str | None = None
 
 
 class ModuleRegistry:
@@ -624,7 +640,10 @@ class ModuleRegistry:
 
         A tool that runs but reports failure surfaces as a **400** carrying the tool's
         own message — previously the error text returned as a 200 "result" and the
-        shell closed the form as if the action had worked (#435).
+        shell closed the form as if the action had worked (#435). A module that is
+        unreachable or does not answer in time is a controlled **502** (cf.
+        :meth:`_get_json`), never a raw ``NetworkError`` bubbling up through nginx — the
+        failure every board/calendar action shared through this dispatch (#472).
         """
         base, manifest = await self._resolve(name)
         if not await self._prefs.is_enabled(self._tenant, name):
@@ -635,6 +654,10 @@ class ModuleRegistry:
             return await self._mcp.call(tool, arguments, f"{base}/mcp", tenant=self._tenant)
         except ToolCallError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ModuleUnreachableError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"{name} action failed: module unreachable"
+            ) from exc
 
     async def get_config(self, name: str) -> dict[str, Any]:
         """The module's stored config values (empty if never saved)."""
@@ -1115,6 +1138,71 @@ class ModuleRegistry:
         data: dict[str, Any] = await self._post_json(base, "/send", json=draft, op=f"{name} send")
         return str(data.get("id", ""))
 
+    async def _resolve_mailbox_page(self, name: str, page_id: str) -> str:
+        """The base URL of *name*, asserting it declares a ``mailbox`` page ``page_id`` (ADR-0087).
+
+        The mailbox send + attachment proxies are ``mailbox``-only — a non-mailbox page has
+        neither, so they 404 for it (mirrors the editor-doc gate). Raises 404 if the module
+        is unreachable, has no such page, or the page isn't a mailbox.
+        """
+        base, manifest = await self._resolve(name)
+        page = next((p for p in manifest.pages if p.id == page_id), None)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
+        if page.archetype != "mailbox":
+            raise HTTPException(status_code=404, detail=f"page {page_id!r} is not a mailbox")
+        return base
+
+    async def send_page_message(
+        self, name: str, page_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Proxy a mailbox page's human-initiated compose/reply to the module (ADR-0087).
+
+        The operator-only counterpart to :meth:`send_draft`: it POSTs the page's send request
+        to the module's ``POST /pages/{page_id}/send`` (which composes/derives + transmits).
+        Gated on the ``mailbox`` archetype, and reachable only from the shell — never an MCP
+        tool, so the agent still cannot send (ADR-0085 holds). A module 4xx (e.g. a Gmail
+        reconnect / rate-limit hint) is relayed with its own ``detail`` via ``_post_json``.
+        """
+        _safe_segment(page_id, label="page_id")
+        base = await self._resolve_mailbox_page(name, page_id)
+        data: dict[str, Any] = await self._post_json(
+            base, f"/pages/{page_id}/send", json=payload, op=f"{name} mailbox send"
+        )
+        return data
+
+    async def download_page_attachment(
+        self, name: str, page_id: str, message_id: str, attachment_id: str
+    ) -> httpx.Response:
+        """Proxy a mailbox attachment download from the module (ADR-0087).
+
+        Streams the bytes provider -> module -> here -> browser; nothing is stored. Gated on
+        the ``mailbox`` archetype. The caller streams the returned response body. A module 404
+        (unknown message/attachment) is relayed as 404; other 4xx as themselves, 5xx as 502.
+        """
+        _safe_segment(page_id, label="page_id")
+        base = await self._resolve_mailbox_page(name, page_id)
+        client = httpx.AsyncClient(base_url=base, timeout=60)
+        try:
+            resp = await client.get(
+                f"/pages/{page_id}/attachment",
+                params={"message_id": message_id, "attachment_id": attachment_id},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            await client.aclose()
+            code = exc.response.status_code
+            raise HTTPException(
+                status_code=code if 400 <= code < 500 else 502,
+                detail=f"{name} attachment failed: module returned {code}",
+            ) from exc
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise HTTPException(
+                status_code=502, detail=f"{name} attachment failed: module unreachable"
+            ) from exc
+        return resp
+
     async def all_suggestions(self) -> list[dict[str, Any]]:
         """Pending suggestions across every enabled module that declares a ``review`` page.
 
@@ -1392,6 +1480,37 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def reject_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
         """Reject a staged suggestion: the module discards it, vault untouched (#220)."""
         return await registry.review_action(name, page_id, suggestion_id, "reject")
+
+    @router.post("/{name}/pages/{page_id}/send")
+    async def send_mailbox_message(name: str, page_id: str, body: MailboxSend) -> dict[str, Any]:
+        """Send an operator-composed mailbox message (ADR-0087) — compose or reply.
+
+        The human-initiated counterpart to the agent draft confirm: the shell posts here when
+        the operator presses Send on the mail page. Gated on the ``mailbox`` archetype and
+        reachable only from the shell (never an MCP tool -> never the agent). Relays the
+        module's own hint on a Gmail scope/rate-limit error.
+        """
+        return await registry.send_page_message(name, page_id, body.model_dump())
+
+    @router.get("/{name}/pages/{page_id}/attachment")
+    async def download_mailbox_attachment(
+        name: str,
+        page_id: str,
+        message_id: str = Query(...),
+        attachment_id: str = Query(...),
+    ) -> StreamingResponse:
+        """Stream a mailbox attachment from the module to the browser (ADR-0087).
+
+        The core is the sole gateway browser <-> module; the bytes flow provider -> module ->
+        here -> browser and are never stored. Gated on the ``mailbox`` archetype.
+        """
+        resp = await registry.download_page_attachment(name, page_id, message_id, attachment_id)
+        content_type = resp.headers.get("content-type", "application/octet-stream")
+        disposition = resp.headers.get("content-disposition", "")
+        headers: dict[str, str] = {}
+        if disposition:
+            headers["content-disposition"] = disposition
+        return StreamingResponse(resp.aiter_bytes(), media_type=content_type, headers=headers)
 
     @router.get("/{name}/download")
     async def download_module_file(name: str, path: str = Query(...)) -> StreamingResponse:

@@ -70,3 +70,21 @@ See **[Releases](releases.md)** for the mechanics (tag → workflow → GHCR). N
 changes are recorded in
 [`CHANGELOG.md`](https://github.com/baakhoff/epicurus/blob/main/CHANGELOG.md),
 following [Keep a Changelog](https://keepachangelog.com/).
+
+## Module graduation at v1.0.0
+
+Reaching the `v1.0.0` stack tag is a one-time exception to "modules freeze at their
+own 1.0" above: instead of each component earning a MAJOR independently, a fixed set
+**graduates together** at the stack tag (ADR-0017 amendment, 2026-07-11).
+
+**Graduates to `1.0.0`:** `epicurus-core`, `core-app`, `web`, `storage`, `knowledge`,
+`websearch`, `mail`, `notes`, `calendar`, `tasks` — every component that carried the
+"foundation complete & stable" milestone.
+
+**Stays `0.x`:** `messaging` (early Phase-4 work, still finding its shape) and `echo`
+(a reference/example module, never meant to signal production-readiness).
+
+After the tag, ordinary per-component SemVer resumes — a module's next MAJOR is its
+own again. The graduation bump is its **own commit** (version fields only, no code
+change bundled in), timed after every in-flight pre-1.0.0 PR has landed — an early
+bump collides with their own version-line edits.

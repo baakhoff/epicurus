@@ -29,6 +29,7 @@ import httpx
 from epicurus_core import (
     EntityRef,
     EpicurusModule,
+    PageSpec,
     UiAction,
     UiSection,
     capped_listing,
@@ -36,9 +37,18 @@ from epicurus_core import (
     tool_envelope,
 )
 from epicurus_mail.gmail import GMAIL_API_SCOPES
-from epicurus_mail.provider import ComposedMessage, MailProvider
+from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
 
 MODULE_NAME = "mail"
+MAILBOX_PAGE_ID = "mailbox"
+# The default folder the page opens on, and the Gmail label the nav-badge unread reflects.
+DEFAULT_LABEL = "INBOX"
+# The kind every mail entity-reference / attachment carries (ADR-0019).
+MESSAGE_KIND = "message"
+# Cap on threads per list page (ADR-0087). Each thread costs a metadata fetch, so a bounded
+# page keeps one request from fanning out across an unbounded mailbox (#539); the shell pages
+# further with the returned cursor.
+MAILBOX_PAGE_SIZE = 25
 
 # Shown when ``messages.modify`` is rejected for lack of scope — the operator connected
 # Google before mail required ``gmail.modify`` and must reconnect to grant it.
@@ -52,6 +62,14 @@ _SCOPE_HINT = (
 _SCOPE_HINT_SEND = (
     "Couldn't send: the connected Google account is missing the Gmail send permission."
     " Reconnect Google (Settings → Connect) to grant it."
+)
+
+# Shown when archive/trash (``messages.modify`` / ``messages.trash``) is rejected for lack of
+# scope (ADR-0087). Both need ``gmail.modify`` (already granted for mark read/unread), so a
+# bare 403 there means the operator connected before mail required it and must reconnect.
+_SCOPE_HINT_TRIAGE = (
+    "Couldn't move the message: the connected Google account is missing the Gmail modify"
+    " permission. Reconnect Google (Settings → Connect) to grant it."
 )
 
 # Shown when mail_reply's own metadata lookup (the original message's Reply-To/From/
@@ -172,7 +190,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.9.1",
+        version="0.10.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -207,6 +225,19 @@ def build_module(provider: MailProvider) -> EpicurusModule:
                 ),
             ],
         ),
+        # A left-nav Mail page (ADR-0087): the module supplies labels/threads/messages and
+        # the core shell renders the `mailbox` client (rail -> thread list -> conversation +
+        # compose/reply). No module markup. Reads flow through the generic page proxy; the
+        # send + attachment endpoints are gated, mailbox-only core proxies.
+        pages=[
+            PageSpec(
+                id=MAILBOX_PAGE_ID,
+                title="Mail",
+                archetype="mailbox",
+                icon="mail",
+                nav_order=50,
+            )
+        ],
         resolver=True,
         # The Gmail API scopes the shell requests when connecting Google (#241); the core
         # adds the default identity scopes. Without these, Gmail API calls return 403.
@@ -386,4 +417,193 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             raise
         return f"marked-unread:{message_id}"
 
+    @module.tool()
+    async def mail_archive(message_id: str) -> str:
+        """Archive a mail message — remove it from the Inbox without deleting it.
+
+        The message stays in All Mail and is fully recoverable; this only takes it out of
+        the Inbox (discover ids with ``mail_search``). Idempotent — archiving an
+        already-archived message is a no-op.
+
+        Args:
+            message_id: The message ID returned by ``mail_search``.
+        """
+        try:
+            await provider.archive(message_id)
+        except httpx.HTTPStatusError as exc:
+            hint = _describe_gmail_error(exc, _SCOPE_HINT_TRIAGE)
+            if hint is not None:
+                return hint
+            raise
+        return f"archived:{message_id}"
+
+    @module.tool()
+    async def mail_trash(message_id: str) -> str:
+        """Move a mail message to Trash — recoverable, not a permanent delete.
+
+        The message goes to Trash (auto-purged by the provider after its retention window)
+        and can be restored until then; this is **not** a permanent delete. Discover ids
+        with ``mail_search``. Idempotent.
+
+        Args:
+            message_id: The message ID returned by ``mail_search``.
+        """
+        try:
+            await provider.trash(message_id)
+        except httpx.HTTPStatusError as exc:
+            hint = _describe_gmail_error(exc, _SCOPE_HINT_TRIAGE)
+            if hint is not None:
+                return hint
+            raise
+        return f"trashed:{message_id}"
+
     return module
+
+
+# ── mailbox page data (ADR-0087) ──────────────────────────────────────────────
+# Pure builders the app's page routes call; unit-testable against a mocked provider.
+# Every mutation is a `BoardAction` (ADR-0024) naming an existing MCP tool, so the page
+# mutates through the same validated tool proxy the agent uses — no module markup.
+
+
+def _mark_read_action(message_id: str) -> dict[str, Any]:
+    """A `BoardAction` (ADR-0024) that marks an unread message read."""
+    return {
+        "tool": "mail_mark_read",
+        "label": "Mark as read",
+        "intent": "default",
+        "icon": "check",
+        "args": {"message_id": message_id},
+    }
+
+
+def _mark_unread_action(message_id: str) -> dict[str, Any]:
+    """A `BoardAction` (ADR-0024) that marks a read message unread."""
+    return {
+        "tool": "mail_mark_unread",
+        "label": "Mark as unread",
+        "intent": "default",
+        "icon": "mail",
+        "args": {"message_id": message_id},
+    }
+
+
+def _archive_action(message_id: str) -> dict[str, Any]:
+    """A `BoardAction` that archives a message out of the Inbox (ADR-0087)."""
+    return {
+        "tool": "mail_archive",
+        "label": "Archive",
+        "intent": "default",
+        "icon": "archive",
+        "args": {"message_id": message_id},
+    }
+
+
+def _trash_action(message_id: str) -> dict[str, Any]:
+    """A danger `BoardAction` that moves a message to Trash (ADR-0087).
+
+    A danger action must carry a confirm prompt (the shared BoardAction contract), so the
+    shell gates it behind a dialog — trash is recoverable but still a triage step the
+    operator should mean.
+    """
+    return {
+        "tool": "mail_trash",
+        "label": "Trash",
+        "intent": "danger",
+        "icon": "trash",
+        "args": {"message_id": message_id},
+        "confirm": "Move this message to Trash?",
+    }
+
+
+def message_payload(message: MailMessage) -> dict[str, Any]:
+    """One thread-pane message as the shared `email-reader` shape + attachments (ADR-0087).
+
+    The same envelope the panel's `GET /messages/{id}` returns (ADR-0024), so the page's
+    thread pane and the panel reader render through one component — plus this message's
+    attachments and its full triage action set (mark toggle, Archive, Trash). The toggle
+    flips to whichever state the message is *not* in.
+    """
+    toggle = _mark_read_action(message.id) if message.unread else _mark_unread_action(message.id)
+    return {
+        "subject": message.subject or "(no subject)",
+        "from": message.sender,
+        "date": message.date,
+        "body": message.body or "",
+        "module": MODULE_NAME,
+        "message_id": message.id,
+        "unread": message.unread,
+        "attachments": [att.model_dump() for att in message.attachments],
+        "actions": [toggle, _archive_action(message.id), _trash_action(message.id)],
+    }
+
+
+async def build_mailbox_list(
+    provider: MailProvider,
+    *,
+    label: str | None = None,
+    query: str | None = None,
+    cursor: str | None = None,
+    limit: int = MAILBOX_PAGE_SIZE,
+) -> dict[str, Any]:
+    """The `mailbox` list read (ADR-0087): the rail + one cursor page of threads.
+
+    Browsing is folder-scoped (the active *label*); a *query* searches the whole mailbox
+    (Gmail syntax, like ``mail_search``) while the rail keeps highlighting the current
+    folder. Unread counts are filled only for Inbox (the nav-badge source) and the active
+    label to bound the rail's provider calls. ``limit`` is clamped to the page cap so one
+    fetch can't scan an unbounded mailbox (#539); the shell pages on with ``next_cursor``.
+
+    Args:
+        provider: The active mail backend.
+        label: The rail selection; defaults to the Inbox.
+        query: Optional provider-native search; searches all mail when present.
+        cursor: Opaque next-page token from a previous read (``None`` for the first page).
+        limit: Requested page size, clamped to :data:`MAILBOX_PAGE_SIZE`.
+    """
+    active = label or DEFAULT_LABEL
+    capped = max(1, min(limit, MAILBOX_PAGE_SIZE))
+    q = (query or "").strip() or None
+    labels = await provider.list_labels(count_ids=(DEFAULT_LABEL, active))
+    page = await provider.list_threads(
+        label=None if q else active, query=q, cursor=cursor, limit=capped
+    )
+    return {
+        "title": "Mail",
+        "labels": [lbl.model_dump() for lbl in labels],
+        "active_label": active,
+        "query": q or "",
+        "threads": [thread.model_dump() for thread in page.threads],
+        "next_cursor": page.next_cursor,
+    }
+
+
+async def build_mailbox_thread(provider: MailProvider, thread_id: str) -> dict[str, Any]:
+    """The `mailbox` thread read (ADR-0087): a full conversation + the reply prefill.
+
+    Every message is rendered through the shared reader shape (:func:`message_payload`); the
+    ``reply`` prefill derives the recipient/subject/threading from the **last** message via
+    the tested :meth:`MailProvider.compose_reply` (#461) so a page reply threads correctly.
+    The prefill carries only the last message's id — the actual send re-derives threading
+    server-side, so the web never handles raw RFC-2822 headers.
+    """
+    thread = await provider.get_thread(thread_id)
+    reply: dict[str, Any] | None = None
+    if thread.messages:
+        last = thread.messages[-1]
+        composed = await provider.compose_reply(last.id, "")
+        reply = {
+            "reply_to_message_id": last.id,
+            "to": composed.to,
+            "subject": composed.subject,
+            "reply_to_original": composed.reply_to_original
+            or (f"{last.sender} — {thread.subject}" if last.sender else thread.subject),
+        }
+    return {
+        "thread": {
+            "id": thread.id,
+            "subject": thread.subject,
+            "messages": [message_payload(m) for m in thread.messages],
+            "reply": reply,
+        }
+    }

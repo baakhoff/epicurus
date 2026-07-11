@@ -36,7 +36,7 @@ epicurus
 │  ├─ storage     MinIO object store + chat-upload sink; agent file tools over the core file space
 │  ├─ knowledge   Obsidian-vault RAG (incremental index + search)
 │  ├─ calendar    provider-neutral calendar (local + Google)
-│  ├─ mail        Gmail-backed mail (search · read · send)
+│  ├─ mail        Gmail-backed mail — full client page (browse · read · reply · compose)
 │  ├─ tasks       task management (Google Tasks + local store)
 │  ├─ messaging   chat bridges (external channels drive a turn; reply routes back)
 │  └─ echo        the contract-proof reference module

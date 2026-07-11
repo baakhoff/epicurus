@@ -8,12 +8,24 @@ import httpx
 import pytest
 
 from epicurus_core.contracts import DraftReview, ToolEnvelope
-from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
+from epicurus_mail.provider import (
+    ComposedMessage,
+    MailAttachment,
+    MailLabel,
+    MailMessage,
+    MailProvider,
+    MailThread,
+    MailThreadSummary,
+    ThreadPage,
+)
 from epicurus_mail.service import (
     _SCOPE_HINT,
     _describe_403,
     _describe_gmail_error,
+    build_mailbox_list,
+    build_mailbox_thread,
     build_module,
+    message_payload,
 )
 
 
@@ -415,6 +427,8 @@ async def test_manifest_declares_all_tools() -> None:
         "mail_reply",
         "mail_mark_read",
         "mail_mark_unread",
+        "mail_archive",
+        "mail_trash",
     }
 
 
@@ -455,11 +469,11 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_9_1() -> None:
+async def test_manifest_version_is_0_10_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.9.1"
+    assert manifest.version == "0.10.0"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:
@@ -473,3 +487,192 @@ async def test_manifest_declares_gmail_oauth_scopes() -> None:
             "https://www.googleapis.com/auth/gmail.send",
         ]
     }
+
+
+async def test_manifest_declares_mailbox_page() -> None:
+    # The Mail page is a `mailbox` archetype (ADR-0087); the smoke gate's page-discovery
+    # check sees it via the manifest, and the shell renders it — the module ships no markup.
+    provider = _make_provider()
+    manifest = await build_module(provider).manifest()
+    assert [(p.id, p.archetype) for p in manifest.pages] == [("mailbox", "mailbox")]
+
+
+# ── mail_archive / mail_trash tools (ADR-0087) ───────────────────────────────
+
+
+async def test_mail_archive_calls_provider_and_confirms() -> None:
+    provider = _make_provider()
+    provider.archive = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_archive", {"message_id": "m1"})
+    provider.archive.assert_awaited_once_with("m1")  # type: ignore[attr-defined]
+    assert content[0].text == "archived:m1"  # type: ignore[attr-defined]
+
+
+async def test_mail_trash_calls_provider_and_confirms() -> None:
+    provider = _make_provider()
+    provider.trash = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_trash", {"message_id": "m2"})
+    provider.trash.assert_awaited_once_with("m2")  # type: ignore[attr-defined]
+    assert content[0].text == "trashed:m2"  # type: ignore[attr-defined]
+
+
+async def test_mail_archive_softens_gmail_scope_error() -> None:
+    # A Gmail 403 (missing gmail.modify) surfaces the reconnect hint, not a raw traceback.
+    provider = _make_provider()
+    request = httpx.Request("POST", "https://gmail.googleapis.com")
+    response = httpx.Response(403, request=request, json={"error": {"message": "insufficient"}})
+    provider.archive = AsyncMock(  # type: ignore[attr-defined]
+        side_effect=httpx.HTTPStatusError("403", request=request, response=response)
+    )
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool("mail_archive", {"message_id": "m1"})
+    assert "Reconnect Google" in content[0].text  # type: ignore[attr-defined]
+
+
+# ── mailbox page builders (ADR-0087) ─────────────────────────────────────────
+
+
+def _summary(tid: str = "t1", *, unread: bool = False) -> MailThreadSummary:
+    return MailThreadSummary(
+        id=tid, subject="Hi", sender="a@x.com", snippet="…", date="", unread=unread
+    )
+
+
+async def test_build_mailbox_list_shape_and_defaults() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox", unread=3)])
+    provider.list_threads = AsyncMock(
+        return_value=ThreadPage(threads=[_summary("t1", unread=True)], next_cursor="NEXT")
+    )
+    data = await build_mailbox_list(provider)  # type: ignore[arg-type]
+    assert data["title"] == "Mail"
+    assert data["active_label"] == "INBOX"  # defaults to Inbox
+    assert data["labels"][0]["unread"] == 3
+    assert data["threads"][0]["id"] == "t1"
+    assert data["next_cursor"] == "NEXT"
+    # Inbox + the active label are the only labels counted (bounded rail fan-out).
+    provider.list_labels.assert_awaited_once_with(count_ids=("INBOX", "INBOX"))
+
+
+async def test_build_mailbox_list_browses_active_label() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.list_labels = AsyncMock(return_value=[])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+    await build_mailbox_list(provider, label="SENT", cursor="CUR")  # type: ignore[arg-type]
+    # Browsing (no query) scopes to the active label and forwards the cursor.
+    provider.list_threads.assert_awaited_once_with(label="SENT", query=None, cursor="CUR", limit=25)
+
+
+async def test_build_mailbox_list_search_spans_all_mail() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.list_labels = AsyncMock(return_value=[])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+    data = await build_mailbox_list(provider, label="INBOX", query="is:unread")  # type: ignore[arg-type]
+    # A query searches the whole mailbox (label=None) while the rail keeps the active folder.
+    provider.list_threads.assert_awaited_once_with(
+        label=None, query="is:unread", cursor=None, limit=25
+    )
+    assert data["active_label"] == "INBOX"
+    assert data["query"] == "is:unread"
+
+
+async def test_build_mailbox_list_clamps_limit_to_cap() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.list_labels = AsyncMock(return_value=[])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+    await build_mailbox_list(provider, limit=9999)  # type: ignore[arg-type]
+    assert provider.list_threads.await_args.kwargs["limit"] == 25  # clamped (#539)
+
+
+async def test_build_mailbox_thread_renders_messages_and_reply() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    messages = [
+        MailMessage(
+            id="m1",
+            thread_id="t1",
+            subject="Hi",
+            sender="a@x.com",
+            to=["me@x.com"],
+            date="",
+            snippet="",
+            body="First",
+            unread=True,
+        ),
+        MailMessage(
+            id="m2",
+            thread_id="t1",
+            subject="Re: Hi",
+            sender="b@x.com",
+            to=["me@x.com"],
+            date="",
+            snippet="",
+            body="Second",
+        ),
+    ]
+    provider.get_thread = AsyncMock(
+        return_value=MailThread(id="t1", subject="Hi", messages=messages)
+    )
+    provider.compose_reply = AsyncMock(
+        return_value=ComposedMessage(
+            to="b@x.com", subject="Re: Hi", body="", reply_to_original="b@x.com — Hi"
+        )
+    )
+    data = await build_mailbox_thread(provider, "t1")  # type: ignore[arg-type]
+    thread = data["thread"]
+    assert thread["id"] == "t1"
+    assert [m["message_id"] for m in thread["messages"]] == ["m1", "m2"]
+    # The reply prefill derives from the LAST message via compose_reply (#461).
+    provider.compose_reply.assert_awaited_once_with("m2", "")
+    assert thread["reply"]["reply_to_message_id"] == "m2"
+    assert thread["reply"]["to"] == "b@x.com"
+
+
+async def test_build_mailbox_thread_empty_has_no_reply() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.get_thread = AsyncMock(return_value=MailThread(id="t0", subject="", messages=[]))
+    data = await build_mailbox_thread(provider, "t0")  # type: ignore[arg-type]
+    assert data["thread"]["reply"] is None
+    provider.compose_reply.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+def test_message_payload_actions_and_attachments() -> None:
+    message = MailMessage(
+        id="m1",
+        thread_id="t1",
+        subject="Hi",
+        sender="a@x.com",
+        to=["me@x.com"],
+        date="",
+        snippet="",
+        body="Body",
+        unread=True,
+        attachments=[
+            MailAttachment(id="att1", filename="doc.pdf", mime_type="application/pdf", size=9)
+        ],
+    )
+    payload = message_payload(message)
+    assert payload["message_id"] == "m1"
+    assert payload["attachments"][0]["filename"] == "doc.pdf"
+    tools = [a["tool"] for a in payload["actions"]]
+    # An unread message offers Mark-as-read first, then Archive + (danger) Trash.
+    assert tools == ["mail_mark_read", "mail_archive", "mail_trash"]
+    trash = next(a for a in payload["actions"] if a["tool"] == "mail_trash")
+    assert trash["intent"] == "danger" and trash["confirm"]
+
+
+def test_message_payload_read_message_offers_mark_unread() -> None:
+    message = MailMessage(
+        id="m1",
+        thread_id="t1",
+        subject="Hi",
+        sender="a@x.com",
+        to=[],
+        date="",
+        snippet="",
+        body="Body",
+        unread=False,
+    )
+    payload = message_payload(message)
+    assert payload["actions"][0]["tool"] == "mail_mark_unread"

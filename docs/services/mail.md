@@ -103,6 +103,38 @@ of a raw traceback (`mail_search`/`mail_read` previously had no HTTP-error handl
 reason-membership test is also guarded so a non-string `reason` (a nested object in an otherwise
 well-formed body) falls back to the scope hint rather than raising.
 
+**v0.10.0** (#550, ADR-0087): **a full mail client in the shell — the `mailbox` page.** Mail is now
+a first-class left-nav page like Files / Calendar / Tasks / Notes: a **labels rail → paginated
+thread list → conversation** with compose and reply, rendered entirely by the core shell (the
+module still ships **zero markup**, ADR-0018). It declares a new `mailbox` archetype and serves its
+data over the page proxy:
+
+- **Browse.** `GET /pages/mailbox?label=&q=&cursor=` returns the rail (folders with unread counts
+  for the active label + Inbox) and one **cursor-paginated** page of thread summaries. Browsing is
+  folder-scoped; a search (`q`, Gmail syntax) spans the whole mailbox. Page size is capped so one
+  fetch can't scan an unbounded mailbox (#539).
+- **Read.** `GET /pages/mailbox?thread_id=` returns the full conversation — every message through
+  the **same renderer** as the panel `email-reader` (not forked) — plus each message's attachments
+  and a server-derived reply prefill. **Plain-text-first:** an HTML-only message is decoded to
+  readable **text** server-side (`_html_to_text`, adversarial-tested) — no HTML is ever rendered in
+  the shell, so there is no HTML-mail XSS surface. Rich sanitized-HTML rendering is a deferred
+  follow-up.
+- **Triage.** Two new message-level tools, `mail_archive` (drop the `INBOX` label) and `mail_trash`
+  (move to Trash — recoverable, not a permanent delete), both inside the already-granted
+  `gmail.modify` scope (no reconnect). They join `mail_mark_read`/`mail_mark_unread` as per-message
+  `BoardAction`s in the thread pane.
+- **Compose / reply.** A **human-initiated** page send: `POST /pages/mailbox/send` composes (or, for
+  a reply, re-derives threading via `compose_reply`) and transmits. It **shares the transmit path
+  but never the agent draft pane** (ADR-0085): the operator is the send button, gated by a Send
+  confirm, and the endpoint is operator-only (never an MCP tool → the agent still cannot send).
+- **Attachments** stream through the core proxy (`GET /pages/mailbox/attachment`), provider → module
+  → browser — nothing is stored.
+
+The `MailProvider` seam gains `list_labels` / `list_threads` / `get_thread` / `archive` / `trash` /
+`get_attachment` (typed in mail-domain terms; a future IMAP/Microsoft provider capability-gates
+rather than forcing symmetry). Deferred: thread-level bulk triage, the unread-count nav badge, and
+rich HTML rendering.
+
 ---
 
 ## Contract
@@ -119,6 +151,8 @@ All tools operate on the active `MailProvider` for the tenant.
 | `mail_reply` | `message_id: str`, `body: str` | `DraftReview` | **Compose-only (draft-first)** — does **not** send. Composes a reply in *message_id*'s thread (RFC-2822 `In-Reply-To`/`References` + provider thread association; recipient/subject derived from the original) and returns a `DraftReview`. The compose-time metadata read needs `gmail.modify`. |
 | `mail_mark_read` | `message_id: str` | `str` | Clears the unread flag (`messages.modify`). Returns `"marked-read:<id>"`. Distinct from `mail_read` (which fetches the body). Idempotent. |
 | `mail_mark_unread` | `message_id: str` | `str` | Restores the unread flag. Returns `"marked-unread:<id>"`. Idempotent. |
+| `mail_archive` | `message_id: str` | `str` | Removes the `INBOX` label — archives out of the Inbox without deleting (`messages.modify`). Returns `"archived:<id>"`. Idempotent (ADR-0087). |
+| `mail_trash` | `message_id: str` | `str` | Moves the message to Trash — recoverable, **not** a permanent delete (`messages.trash`). Returns `"trashed:<id>"`. Idempotent (ADR-0087). |
 
 `mail_mark_read` / `mail_mark_unread` require the `gmail.modify` scope; on a 403 (a Google
 account connected before v0.7.0, lacking the scope) they return a reconnect hint instead of failing.
@@ -162,18 +196,75 @@ proxies them to the web shell (the shell never calls the module directly).
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body, `module`/`message_id`, the `unread` state, and a one-element `actions` toggle (mark read/unread, ADR-0024). |
 | `POST` | `/send` | body: `ComposedMessage` → `{"id": str}` | **The module's only send path (ADR-0085, #563).** Transmits an operator-confirmed draft verbatim and publishes `mail.sent`. Not an MCP tool, so the agent cannot reach it — the core calls it after the operator Confirms a draft in the split-pane. A 403 maps to the same reconnect / rate-limit hint the tools use (#513/#538), as an HTTP 403. |
 | `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
+| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?cursor=`). Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. |
+| `POST` | `/pages/mailbox/send` | body: `MailboxSend` → `{"id": str}` | **Human-initiated compose/reply from the page (ADR-0087).** With `reply_to_message_id` re-derives threading via `compose_reply`, else composes from `to`/`subject`/`body`/`cc`; then transmits and publishes `mail.sent`. Operator-only via the gated core proxy — never an MCP tool, so the agent still cannot send (ADR-0085). |
+| `GET` | `/pages/mailbox/attachment` | `?message_id=&attachment_id=` → bytes | Streams one attachment's bytes (with content-type + download disposition) for the core proxy to relay; nothing is stored (ADR-0087). |
 
 The core exposes these via:
 
 ```
-GET  /platform/v1/modules/mail/resolve/message/{ref_id}   → HoverCard
-GET  /platform/v1/modules/mail/messages/{ref_id}          → EmailMessage
-GET  /platform/v1/modules/mail/status                     → status JSON
+GET  /platform/v1/modules/mail/resolve/message/{ref_id}        → HoverCard
+GET  /platform/v1/modules/mail/messages/{ref_id}               → EmailMessage
+GET  /platform/v1/modules/mail/status                          → status JSON
+GET  /platform/v1/modules/mail/pages/mailbox[?thread_id|label|q|cursor]  → MailboxList | {thread}
+POST /platform/v1/modules/mail/pages/mailbox/send              → {"id": str}   (mailbox-gated)
+GET  /platform/v1/modules/mail/pages/mailbox/attachment        → streamed bytes (mailbox-gated)
 ```
 
 `POST /send` is **not** proxied to the shell — it is the core-internal transmit hop invoked by the
-draft-review Confirm (`ModuleRegistry.send_draft`, ADR-0085). The future mail page (#550) reuses it
-for a human-initiated compose, with its own form-level confirm — but never the agent pane.
+draft-review Confirm (`ModuleRegistry.send_draft`, ADR-0085). The mail page's own compose (#550,
+ADR-0087) instead posts to `…/pages/mailbox/send` above: a **human-initiated** send that shares the
+module's transmit but never the agent draft pane. The `send` and `attachment` proxies are gated on
+the `mailbox` archetype (a non-mailbox page 404s), mirroring the editor doc gate.
+
+#### `mailbox` archetype shapes (ADR-0087)
+
+The list read (no `thread_id`): the rail carries `unread` only where cheaply known (the active
+label + Inbox); pagination is by opaque `next_cursor` (never offset).
+
+```json
+{
+  "title": "Mail",
+  "labels": [{ "id": "INBOX", "title": "Inbox", "kind": "system", "unread": 2 }],
+  "active_label": "INBOX",
+  "query": "",
+  "threads": [
+    { "id": "t1", "subject": "Project kickoff", "sender": "alice@example.com",
+      "snippet": "Let's get started", "date": "Mon, 1 Jan 2024 10:00:00 +0000",
+      "unread": true, "message_count": 2 }
+  ],
+  "next_cursor": "PAGE2"
+}
+```
+
+The thread read (`?thread_id=t1`): every message uses the `EmailMessage` shape (now extended with
+`attachments`) so the page and panel share one renderer; `reply` is the server-derived prefill (the
+send re-derives threading from `reply_to_message_id`, so the web never handles RFC-2822 headers).
+
+```json
+{
+  "thread": {
+    "id": "t1",
+    "subject": "Project kickoff",
+    "messages": [
+      { "subject": "Project kickoff", "from": "alice@example.com", "date": "…",
+        "body": "…", "module": "mail", "message_id": "m1", "unread": false,
+        "attachments": [{ "id": "att1", "filename": "agenda.pdf",
+                          "mime_type": "application/pdf", "size": 2048 }],
+        "actions": [ { "tool": "mail_mark_unread", "…": "…" },
+                     { "tool": "mail_archive", "…": "…" },
+                     { "tool": "mail_trash", "intent": "danger", "…": "…" } ] }
+    ],
+    "reply": { "reply_to_message_id": "m1", "to": "alice@example.com",
+               "subject": "Re: Project kickoff",
+               "reply_to_original": "alice@example.com — Project kickoff" }
+  }
+}
+```
+
+`MailboxSend` (the `POST /pages/mailbox/send` body): `{ body, to?, subject?, cc?,
+reply_to_message_id? }` — a reply sets `reply_to_message_id` (the module derives the rest); a fresh
+compose sets `to`/`subject`.
 
 #### `HoverCard` shape (from resolver)
 
@@ -318,4 +409,13 @@ uv run uvicorn epicurus_mail.app:app --reload --port 8087
 
 The service will fail health-checks for Gmail tools until a Google account is
 connected, but the HTTP surface (`/health`, `/manifest`, `/status`, `/resolve/…`,
-`/messages/…`) works immediately.
+`/messages/…`, `/pages/mailbox`) works immediately (the Gmail-backed reads return an
+error hint until an account is connected).
+
+### Adding a provider (updated for the `mailbox` page, ADR-0087)
+
+Implementing `MailProvider` now also means the `mailbox`-page seam: `list_labels`,
+`list_threads` (cursor-paginated), `get_thread`, `archive`, `trash`, and `get_attachment`
+— typed in mail-domain terms. A backend that can't do one should **capability-gate** it
+(e.g. return an empty label list, or raise a clear "unsupported") rather than force a fake
+symmetry (ADR-0030): asymmetry is fine, silent wrong answers are not.

@@ -13,15 +13,42 @@ Required Google OAuth scopes (requested when the operator connects via
 from __future__ import annotations
 
 import base64
+import html
+import re
+from collections.abc import Sequence
 from email.mime.text import MIMEText
 from typing import Any
 
 import httpx
 
 from epicurus_core import PlatformClient
-from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
+from epicurus_mail.provider import (
+    AttachmentContent,
+    ComposedMessage,
+    MailAttachment,
+    MailLabel,
+    MailMessage,
+    MailProvider,
+    MailThread,
+    MailThreadSummary,
+    ThreadPage,
+)
 
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
+
+# System labels shown in the mailbox rail, in this order (ADR-0087). Gmail exposes many more
+# system labels (CATEGORY_*, CHAT, ...) that aren't useful folders; this curated set is the
+# rail, with the operator's own ``user`` labels appended after.
+_RAIL_SYSTEM_LABELS = ("INBOX", "STARRED", "SENT", "DRAFT", "IMPORTANT", "SPAM", "TRASH")
+_SYSTEM_LABEL_TITLES = {
+    "INBOX": "Inbox",
+    "STARRED": "Starred",
+    "SENT": "Sent",
+    "DRAFT": "Drafts",
+    "IMPORTANT": "Important",
+    "SPAM": "Spam",
+    "TRASH": "Trash",
+}
 
 # The Gmail API scopes this module needs (beyond the default identity scopes the core
 # always requests). Declared in the manifest (``oauth_scopes``) so the shell requests them
@@ -166,6 +193,115 @@ class GmailProvider(MailProvider):
             resp = await client.post(f"/users/me/messages/{message_id}/modify", json=body)
             resp.raise_for_status()
 
+    # ── mailbox page (ADR-0087) ──────────────────────────────────────────────
+
+    async def list_labels(self, *, count_ids: Sequence[str] = ()) -> list[MailLabel]:
+        """The mailbox rail: the curated system labels then the operator's own (ADR-0087).
+
+        Unread counts are filled only for *count_ids* (the active label + Inbox) via a
+        per-label ``labels.get`` — Gmail's ``labels.list`` carries no counts, so filling
+        every label would fan out to one call per label. Others stay ``None``.
+        """
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.get("/users/me/labels")
+            resp.raise_for_status()
+            raw = resp.json().get("labels", [])
+            labels = _order_labels(raw)
+            wanted = {lid for lid in count_ids if lid}
+            for label in labels:
+                if label.id in wanted:
+                    label.unread = await _label_unread(client, label.id)
+            return labels
+
+    async def list_threads(
+        self, *, label: str | None, query: str | None, cursor: str | None, limit: int
+    ) -> ThreadPage:
+        """One cursor page of thread summaries for *label*/*query* (ADR-0087).
+
+        ``threads.list`` gives ids + a page token; each thread then needs a metadata
+        ``threads.get`` to build its row (subject/sender/date/unread/count). The page size
+        bounds that fan-out so a single fetch can't scan an unbounded mailbox (#539).
+        """
+        params: dict[str, Any] = {"maxResults": limit}
+        if label:
+            params["labelIds"] = label
+        if query:
+            params["q"] = query
+        if cursor:
+            params["pageToken"] = cursor
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.get("/users/me/threads", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            summaries: list[MailThreadSummary] = []
+            for stub in data.get("threads", []):
+                detail = await client.get(
+                    f"/users/me/threads/{stub['id']}",
+                    params={
+                        "format": "metadata",
+                        "metadataHeaders": ["Subject", "From", "Date"],
+                    },
+                )
+                detail.raise_for_status()
+                summaries.append(_thread_summary(detail.json()))
+            return ThreadPage(threads=summaries, next_cursor=data.get("nextPageToken") or None)
+
+    async def get_thread(self, thread_id: str) -> MailThread:
+        """The full conversation — every message with body + attachment metadata (ADR-0087)."""
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.get(f"/users/me/threads/{thread_id}", params={"format": "full"})
+            resp.raise_for_status()
+            data = resp.json()
+            messages = [_parse_message(m, full=True) for m in data.get("messages", [])]
+            subject = messages[0].subject if messages else "(no subject)"
+            return MailThread(id=thread_id, subject=subject, messages=messages)
+
+    async def archive(self, message_id: str) -> None:
+        """Drop the ``INBOX`` label so the message leaves the Inbox (ADR-0087). Idempotent."""
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.post(
+                f"/users/me/messages/{message_id}/modify", json={"removeLabelIds": ["INBOX"]}
+            )
+            resp.raise_for_status()
+
+    async def trash(self, message_id: str) -> None:
+        """Move the message to Trash (recoverable, not a permanent delete) (ADR-0087)."""
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.post(f"/users/me/messages/{message_id}/trash")
+            resp.raise_for_status()
+
+    async def get_attachment(self, message_id: str, attachment_id: str) -> AttachmentContent:
+        """Fetch one attachment's bytes + metadata for the core to stream (ADR-0087).
+
+        Two calls: the message (to resolve the part's filename/mime — ``attachments.get``
+        returns neither) then the attachment bytes. Nothing is persisted by the module.
+        """
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            msg = await client.get(f"/users/me/messages/{message_id}", params={"format": "full"})
+            msg.raise_for_status()
+            part = _find_attachment_part(msg.json().get("payload", {}), attachment_id)
+            if part is None:
+                raise httpx.HTTPStatusError(
+                    "attachment not found",
+                    request=msg.request,
+                    response=httpx.Response(404, request=msg.request),
+                )
+            att = await client.get(f"/users/me/messages/{message_id}/attachments/{attachment_id}")
+            att.raise_for_status()
+            raw = att.json().get("data", "")
+            content = base64.urlsafe_b64decode(raw + "==") if raw else b""
+            return AttachmentContent(
+                filename=part.filename or "attachment",
+                mime_type=part.mime_type or "application/octet-stream",
+                content=content,
+            )
+
     async def health_check(self) -> bool:
         try:
             token = await self._get_token()
@@ -192,12 +328,15 @@ class GmailProvider(MailProvider):
 
 def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
     """Convert a Gmail API message object to a ``MailMessage``."""
-    headers = {h["name"].lower(): h["value"] for h in data.get("payload", {}).get("headers", [])}
+    payload = data.get("payload", {})
+    headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
     to_raw = headers.get("to", "")
     to_list = [t.strip() for t in to_raw.split(",") if t.strip()]
     body: str | None = None
+    attachments: list[MailAttachment] = []
     if full:
-        body = _extract_body(data.get("payload", {}))
+        body = _extract_body(payload)
+        attachments = _extract_attachments(payload)
     # Gmail flags an unread message with the system ``UNREAD`` label; ``labelIds`` is
     # returned for both the ``metadata`` and ``full`` formats, so search and read agree.
     unread = "UNREAD" in data.get("labelIds", [])
@@ -211,7 +350,105 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         snippet=data.get("snippet", ""),
         body=body,
         unread=unread,
+        attachments=attachments,
     )
+
+
+def _order_labels(raw: list[dict[str, Any]]) -> list[MailLabel]:
+    """Curated system labels (in rail order) then the operator's own, from ``labels.list``.
+
+    Gmail exposes many non-folder system labels (``CATEGORY_*``, ``CHAT``, ``UNREAD`` ...);
+    only :data:`_RAIL_SYSTEM_LABELS` are useful folders, so the rail shows those first (in a
+    fixed, familiar order) and appends every ``user`` label alphabetically.
+    """
+    by_id = {lbl.get("id"): lbl for lbl in raw}
+    labels: list[MailLabel] = []
+    for lid in _RAIL_SYSTEM_LABELS:
+        if lid in by_id:
+            labels.append(MailLabel(id=lid, title=_SYSTEM_LABEL_TITLES[lid], kind="system"))
+    user = sorted(
+        (lbl for lbl in raw if lbl.get("type") == "user"),
+        key=lambda lbl: str(lbl.get("name", "")).lower(),
+    )
+    for lbl in user:
+        labels.append(MailLabel(id=str(lbl["id"]), title=str(lbl.get("name", "")), kind="user"))
+    return labels
+
+
+async def _label_unread(client: httpx.AsyncClient, label_id: str) -> int | None:
+    """The unread count for one label via ``labels.get`` — ``None`` if it can't be read.
+
+    Best-effort: a label that 404s (renamed/removed between the list and this call) or any
+    transient error yields ``None`` (no count shown) rather than failing the whole rail.
+    """
+    try:
+        resp = await client.get(f"/users/me/labels/{label_id}")
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    value = resp.json().get("messagesUnread")
+    return int(value) if isinstance(value, int) else None
+
+
+def _headers_of(message: dict[str, Any]) -> dict[str, str]:
+    """Lowercased ``{header: value}`` for one Gmail message dict (empty if none)."""
+    return {h["name"].lower(): h["value"] for h in message.get("payload", {}).get("headers", [])}
+
+
+def _thread_summary(data: dict[str, Any]) -> MailThreadSummary:
+    """Build a thread-list row from a metadata ``threads.get`` (ADR-0087).
+
+    Subject comes from the first message (the conversation's), while the sender/snippet/date
+    reflect the **most recent** message (what a mail client shows in the row); the thread is
+    unread if any message is.
+    """
+    messages = data.get("messages", [])
+    first = messages[0] if messages else {}
+    last = messages[-1] if messages else {}
+    first_headers = _headers_of(first)
+    last_headers = _headers_of(last)
+    unread = any("UNREAD" in m.get("labelIds", []) for m in messages)
+    return MailThreadSummary(
+        id=str(data.get("id", "")),
+        subject=first_headers.get("subject", "(no subject)"),
+        sender=last_headers.get("from", ""),
+        snippet=last.get("snippet", "") or data.get("snippet", ""),
+        date=last_headers.get("date", ""),
+        unread=unread,
+        message_count=len(messages),
+    )
+
+
+def _extract_attachments(payload: dict[str, Any]) -> list[MailAttachment]:
+    """Walk a Gmail payload for attachment parts (a filename + a body ``attachmentId``)."""
+    found: list[MailAttachment] = []
+
+    def walk(part: dict[str, Any]) -> None:
+        body = part.get("body", {})
+        attachment_id = body.get("attachmentId")
+        filename = part.get("filename") or ""
+        if attachment_id and filename:
+            found.append(
+                MailAttachment(
+                    id=str(attachment_id),
+                    filename=filename,
+                    mime_type=str(part.get("mimeType", "")),
+                    size=int(body.get("size", 0) or 0),
+                )
+            )
+        for sub in part.get("parts", []):
+            walk(sub)
+
+    walk(payload)
+    return found
+
+
+def _find_attachment_part(payload: dict[str, Any], attachment_id: str) -> MailAttachment | None:
+    """The attachment part matching *attachment_id* (for filename/mime), or ``None``."""
+    for att in _extract_attachments(payload):
+        if att.id == attachment_id:
+            return att
+    return None
 
 
 def _reply_subject(original_subject: str) -> str:
@@ -285,14 +522,62 @@ def _build_mime(message: ComposedMessage) -> MIMEText:
     return msg
 
 
-def _extract_body(payload: dict[str, Any]) -> str | None:
-    """Recursively extract the first plain-text body part from a Gmail payload."""
-    if payload.get("mimeType") == "text/plain":
+def _first_part_text(payload: dict[str, Any], mime: str) -> str | None:
+    """Recursively decode the first body part whose MIME type is *mime*, or ``None``."""
+    if payload.get("mimeType") == mime:
         data = payload.get("body", {}).get("data", "")
         if data:
             return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
     for part in payload.get("parts", []):
-        result = _extract_body(part)
+        result = _first_part_text(part, mime)
         if result is not None:
             return result
     return None
+
+
+def _extract_body(payload: dict[str, Any]) -> str | None:
+    """The message body as **text**: the first ``text/plain`` part, else HTML->text (ADR-0087).
+
+    Plain-text-first — no HTML is ever rendered in the shell, so there is no HTML-mail XSS
+    surface. When a message carries only an HTML part (common for newsletters), it is
+    stripped to readable text server-side (:func:`_html_to_text`) rather than shown blank.
+    """
+    plain = _first_part_text(payload, "text/plain")
+    if plain is not None:
+        return plain
+    html_body = _first_part_text(payload, "text/html")
+    if html_body is not None:
+        return _html_to_text(html_body)
+    return None
+
+
+# HTML -> text (ADR-0087). Order is the security property: script/style *content* is removed
+# first, block tags become newlines, ALL remaining tags (with their attributes) are stripped,
+# and only THEN are entities decoded — so a decoded ``&lt;script&gt;`` becomes inert literal
+# text, never re-parsed as a tag (the output is rendered as plain text, never as HTML).
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style|head|title)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
+)
+_BREAK_RE = re.compile(r"(?i)<\s*(?:br|/p|/div|/tr|/li|/h[1-6]|/table)\s*/?>")
+_TAG_RE = re.compile(r"<[^>]+>")
+_INLINE_WS_RE = re.compile(r"[ \t\r\f\v]+")
+_BLANK_LINES_RE = re.compile(r"\n[ \t]*\n[ \t]*\n+")
+
+
+def _html_to_text(raw: str) -> str:
+    """Strip HTML to readable text — the server-side "sanitizer" for HTML-only mail (ADR-0087).
+
+    Not a renderer: it never emits HTML. It removes ``script``/``style``/``head`` blocks
+    (content and all), turns block-level tags into line breaks, strips every remaining tag
+    **including its attributes** (so ``onerror=`` / ``href=`` never survive), then decodes
+    entities last — so nothing that decodes can be re-interpreted as markup. Adversarial
+    fixtures pin these properties.
+    """
+    text = _SCRIPT_STYLE_RE.sub(" ", raw)
+    text = _BREAK_RE.sub("\n", text)
+    text = _TAG_RE.sub("", text)
+    text = html.unescape(text)
+    text = text.replace(chr(0xA0), " ")  # decoded &nbsp; -> ordinary space
+    text = _INLINE_WS_RE.sub(" ", text)
+    text = _BLANK_LINES_RE.sub("\n\n", text)
+    return text.strip()

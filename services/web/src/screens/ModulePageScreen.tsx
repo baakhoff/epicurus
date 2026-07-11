@@ -11,6 +11,7 @@ import { BoardView } from "@/components/archetypes/BoardView";
 import { BrowserView, type BrowserSource } from "@/components/archetypes/BrowserView";
 import { CalendarView } from "@/components/archetypes/CalendarView";
 import { EditorView } from "@/components/archetypes/EditorView";
+import { MailboxView } from "@/components/archetypes/MailboxView";
 import { ReviewView } from "@/components/archetypes/ReviewView";
 import { EmptyState, Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -78,6 +79,8 @@ export function ModulePageScreen() {
           <BoardView module={moduleName} pageId={pageId} />
         ) : page.archetype === "review" ? (
           <ReviewView module={moduleName} pageId={pageId} />
+        ) : page.archetype === "mailbox" ? (
+          <MailboxView module={moduleName} pageId={pageId} />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
             <ComingSoon archetype={page.archetype} />

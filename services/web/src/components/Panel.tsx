@@ -6,22 +6,14 @@
  */
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, WifiOff, X } from "lucide-react";
-import {
-  createElement,
-  Fragment,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type PointerEvent,
-} from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 
 import { CardLink } from "@/components/CardLink";
+import { MailMessageView } from "@/components/MailMessageView";
 import { Markdown } from "@/components/Markdown";
 import { Button, Sheet } from "@/components/ui";
 import { api } from "@/lib/api";
-import { EmailDraft, EmailMessage, FileText, HoverCard, type BoardAction } from "@/lib/contracts";
-import { moduleIcon } from "@/lib/icons";
+import { EmailDraft, EmailMessage, FileText, HoverCard } from "@/lib/contracts";
 import { useChat } from "@/stores/chat";
 import { useConnection } from "@/stores/connection";
 import { usePanel, usePanelCurrent, usePanelDepth, type PanelEntry } from "@/stores/panel";
@@ -62,77 +54,19 @@ function EntityDetailView({ payload }: { payload: unknown }) {
 }
 
 /**
- * One tool-backed action on the open email (ADR-0024) — the Mark as read / unread toggle.
- * Invokes the module's MCP tool through the core proxy, then re-fetches the message and
- * swaps it into the panel so the toggle flips to its opposite. Plain local state (not
- * react-query) keeps the panel decoupled from the query client.
+ * The `email-reader` view (ADR-0024): one message shown through the shared `MailMessageView`
+ * (ADR-0087) — the same renderer the mailbox page's thread pane uses, so the two never fork.
+ * After a mark read/unread action it re-fetches the message and swaps it into the panel so the
+ * toggle flips. No attachment links here — the panel reader doesn't fetch attachments (the
+ * mailbox page does).
  */
-function MailActionButton({
-  module,
-  messageId,
-  action,
-}: {
-  module: string;
-  messageId: string;
-  action: BoardAction;
-}) {
-  const replace = usePanel((s) => s.replace);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const run = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.invokeModuleTool(module, action.tool, action.args);
-      replace(await api.readMailMessage(module, messageId));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Action failed");
-      setBusy(false);
-    }
-  }, [module, messageId, action.tool, action.args, replace]);
-
-  return (
-    <>
-      <Button variant="outline" busy={busy} onClick={run}>
-        {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
-        {action.label}
-      </Button>
-      {error && <span className="text-[11px] text-danger">{error}</span>}
-    </>
-  );
-}
-
 function EmailReaderView({ payload }: { payload: unknown }) {
   const mail = EmailMessage.parse(payload);
-  return (
-    <article>
-      <h3 className="font-serif text-lg text-ink">{mail.subject}</h3>
-      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 text-xs text-ink-faint">
-        {mail.from && <span>{mail.from}</span>}
-        {mail.from && mail.date && <span>·</span>}
-        {mail.date && <span>{mail.date}</span>}
-        {mail.unread && (
-          <span className="rounded-full bg-accent-dim px-1.5 py-0.5 text-[11px] text-accent-strong">
-            Unread
-          </span>
-        )}
-      </div>
-      <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">{mail.body}</p>
-      {mail.message_id && mail.actions.length > 0 && (
-        <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-edge pt-4">
-          {mail.actions.map((action) => (
-            <MailActionButton
-              key={action.tool}
-              module={mail.module}
-              messageId={mail.message_id}
-              action={action}
-            />
-          ))}
-        </div>
-      )}
-    </article>
-  );
+  const replace = usePanel((s) => s.replace);
+  const onActed = useCallback(async () => {
+    replace(await api.readMailMessage(mail.module, mail.message_id));
+  }, [replace, mail.module, mail.message_id]);
+  return <MailMessageView message={mail} onActed={mail.message_id ? onActed : undefined} />;
 }
 
 /**

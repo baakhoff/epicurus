@@ -126,6 +126,19 @@ per-tool disable filter as module tools.
   precisely so `remember` can scope its write. A near-duplicate of an existing fact is a
   no-op. The *implicit* path is background extraction — deferred to a nightly drain by default
   (ADR-0051; see **Data model**); together they are the corpus that recall pulls into later chats.
+- **`memory_search(query, scope?, limit?)`** — deliberate recall over long-term memory
+  (ADR-0089). The complement to the ambient recall `_assemble` injects each turn: the agent
+  calls this when the user refers to something discussed or decided *before* that isn't in the
+  current conversation ("what did we settle on for the backup strategy?"). `scope` ∈
+  `facts | sessions | both` (default `both`) chooses the **fact store** (Qdrant — the same
+  ranking a turn's recall gets), past **conversations** (a portable case-insensitive content
+  match over `agent_messages`, joined to each conversation's title + date), or both. `limit` is
+  clamped 1–10 (default 5) per source. Runs for the **calling tenant** only (recall crosses
+  sessions, so scoping is a privacy boundary, constraint #1). Best-effort like all memory: the
+  facts half embeds through the gateway (constraint #8), so a cold embedder degrades to just the
+  sessions text search (no embed) rather than failing the call; results are capped and compact —
+  never a raw session dump. It runs inline like `now`/`remember` and shows as a normal
+  `memory_search` step in the activity timeline.
 - **`ask_user(question)`** — pause the turn to ask the operator a clarifying question
   (ADR-0053). Unlike other built-ins it is **not executed inline**: the agent loop intercepts
   the call, persists the in-progress run (`agent_suspended_runs`), emits an `awaiting_input`
@@ -565,7 +578,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   activity timeline on reopen (ADR-0041). `activity.timeline` is the **chronological**
   interleaving of thinking blocks and tool steps (think → call → think, #300); the flat
   `thinking`/`steps` are derived and kept for backward compatibility (older rows have only
-  those). Tenant-scoped; post-release columns are added in place at startup (no migration).
+  those). Tenant-scoped; post-release columns are added in place at startup (no migration). The
+  `memory_search` built-in's *sessions* half (ADR-0089) runs a tenant-scoped case-insensitive
+  content match here (portable `ILIKE`, no full-text index — a single operator's history is
+  small; FTS is a future optimization), joined back to each session's opening-message title.
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
   `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297),

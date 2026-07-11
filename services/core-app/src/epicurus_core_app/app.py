@@ -38,9 +38,12 @@ from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.builtins import (
     ASK_USER_SPEC,
     ASK_USER_TOOL,
+    MEMORY_SEARCH_SPEC,
+    MEMORY_SEARCH_TOOL,
     NOW_SPEC,
     REMEMBER_SPEC,
     make_ask_user_handler,
+    make_memory_search_handler,
     make_now_handler,
     make_remember_handler,
 )
@@ -249,6 +252,12 @@ def create_app() -> FastAPI:
     # Core `remember` built-in tool (ADR-0045): the agent's explicit path for saving a durable
     # fact about the user to long-term memory; background extraction covers the implicit path.
     mcp_host.register_builtin("remember", REMEMBER_SPEC, make_remember_handler(memory))
+    # Core `memory_search` built-in tool (ADR-0089): deliberate recall over the fact store and
+    # past conversations — the agent-initiated complement to the ambient recall `_assemble`
+    # injects each turn. Tenant-scoped (built-ins receive the tenant), best-effort like recall.
+    mcp_host.register_builtin(
+        MEMORY_SEARCH_TOOL, MEMORY_SEARCH_SPEC, make_memory_search_handler(memory)
+    )
     # Core `ask_user` built-in tool (ADR-0053): lets the model pause the turn to ask a
     # clarifying question. The agent loop intercepts the call to suspend; this handler is a
     # safety net (the spec reaches the model via the same discovery path as now/remember).

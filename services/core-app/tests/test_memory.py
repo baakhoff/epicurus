@@ -8,6 +8,7 @@ from typing import Any
 
 from epicurus_core_app.memory.facts import SOURCE_AUTO, SOURCE_TOOL, UserFact, UserFactHit
 from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.memory.store import MessageHit
 
 _BASE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -40,6 +41,32 @@ class _FakeStore:
 
     async def history(self, *, tenant: str, session_id: str) -> list[tuple[str, str]]:
         return [(r, c) for (t, s, r, c) in self.rows if t == tenant and s == session_id]
+
+    async def search_messages(self, *, tenant: str, query: str, limit: int = 8) -> list[MessageHit]:
+        # Faithful stand-in: tenant-scoped case-insensitive substring, newest (last-appended) first.
+        q = query.strip().lower()
+        if not q:
+            return []
+        matches = [
+            (i, row) for i, row in enumerate(self.rows) if row[0] == tenant and q in row[3].lower()
+        ]
+        matches.reverse()  # last appended = most recent
+        return [
+            MessageHit(
+                session_id=s,
+                role=r,
+                content=c,
+                created_at=_BASE_TIME + timedelta(seconds=i),
+            )
+            for i, (_t, s, r, c) in matches[:limit]
+        ]
+
+    async def session_titles(self, *, tenant: str, session_ids: list[str]) -> dict[str, str]:
+        titles: dict[str, str] = {}
+        for _t, s, _r, c in self.rows:
+            if _t == tenant and s in session_ids and s not in titles:
+                titles[s] = c.strip()  # first (earliest) message wins
+        return titles
 
     async def delete_session(self, *, tenant: str, session_id: str) -> int:
         before = len(self.rows)
@@ -194,6 +221,31 @@ async def test_search_memory_sets_score() -> None:
     assert total == 1
     assert items[0].text == "alpha"
     assert items[0].score is not None
+
+
+async def test_search_sessions_joins_each_hit_to_its_conversation_title() -> None:
+    memory, _, _ = _memory()
+    await memory.remember(tenant="t1", session_id="s1", role="user", content="Planning the trip")
+    await memory.remember(tenant="t1", session_id="s1", role="assistant", content="Booked flights")
+    await memory.remember(tenant="t1", session_id="s2", role="user", content="Unrelated chat")
+    hits = await memory.search_sessions(tenant="t1", query="flights")
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit.session_id == "s1"
+    assert hit.title == "Planning the trip"  # the session's opening message, not the matched line
+    assert hit.role == "assistant"
+    assert hit.snippet == "Booked flights"
+
+
+async def test_search_sessions_is_tenant_scoped() -> None:
+    memory, _, _ = _memory()
+    await memory.remember(tenant="t1", session_id="s", role="user", content="secret plan")
+    await memory.remember(tenant="t2", session_id="s", role="user", content="secret plan")
+    assert [h.snippet for h in await memory.search_sessions(tenant="t1", query="secret")] == [
+        "secret plan"
+    ]
+    # the query never crosses the tenant boundary (recall privacy, constraint #1)
+    assert len(await memory.search_sessions(tenant="t2", query="secret")) == 1
 
 
 async def test_forget_memory_drops_one_fact() -> None:

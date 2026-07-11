@@ -65,6 +65,20 @@ class MessageMeta(BaseModel):
     created_at: datetime
 
 
+class MessageHit(BaseModel):
+    """A message matched by a content search, with the session + timestamp it came from (#523).
+
+    Backs the agent's ``memory_search`` deliberate recall over past conversations — unlike
+    :class:`MessageMeta` (metadata only) it carries the matching text so the caller can build a
+    snippet, and the ``session_id`` so a hit can name the conversation it belongs to.
+    """
+
+    session_id: str
+    role: str
+    content: str
+    created_at: datetime
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -236,6 +250,70 @@ class ConversationStore:
             return {
                 row.id: MessageMeta(role=row.role, created_at=row.created_at) for row in rows.all()
             }
+
+    async def search_messages(self, *, tenant: str, query: str, limit: int = 8) -> list[MessageHit]:
+        """Search a tenant's message content, most-recent first, capped at ``limit`` (#523).
+
+        Backs the agent's ``memory_search`` built-in — a deliberate look back over past
+        conversations. Uses a portable case-insensitive substring match (``ILIKE`` → native on
+        Postgres, ``lower() LIKE lower()`` on the tests' SQLite) so one query runs on both; a
+        Postgres full-text index is a future optimization (a single operator's chat history is
+        small). ``tenant`` scopes the search — recall crosses sessions, so the filter is a
+        privacy boundary, never optional. A blank query matches nothing (rather than everything).
+        """
+        cleaned = query.strip()
+        if not cleaned:
+            return []
+        # Escape the LIKE metacharacters so a query containing % or _ matches literally.
+        escaped = cleaned.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(StoredMessage)
+                .where(
+                    StoredMessage.tenant == tenant,
+                    StoredMessage.content.ilike(pattern, escape="\\"),
+                )
+                .order_by(StoredMessage.created_at.desc(), StoredMessage.id.desc())
+                .limit(limit)
+            )
+            return [
+                MessageHit(
+                    session_id=m.session_id,
+                    role=m.role,
+                    content=m.content,
+                    created_at=m.created_at,
+                )
+                for m in rows
+            ]
+
+    async def session_titles(self, *, tenant: str, session_ids: list[str]) -> dict[str, str]:
+        """Map each of ``session_ids`` to its title — its opening message (tenant-scoped).
+
+        Mirrors :meth:`sessions`' title rule (the first stored message) for a known subset —
+        the sessions a memory search matched — so a hit can name its conversation without
+        loading every session. One group-by plus one fetch, never N+1.
+        """
+        if not session_ids:
+            return {}
+        async with self._session() as session:
+            firsts = await session.execute(
+                select(func.min(StoredMessage.id).label("first_id"))
+                .where(
+                    StoredMessage.tenant == tenant,
+                    StoredMessage.session_id.in_(session_ids),
+                )
+                .group_by(StoredMessage.session_id)
+            )
+            first_ids = [row.first_id for row in firsts.all()]
+            if not first_ids:
+                return {}
+            rows = await session.execute(
+                select(StoredMessage.session_id, StoredMessage.content).where(
+                    StoredMessage.id.in_(first_ids)
+                )
+            )
+            return {row.session_id: (row.content or "").strip() for row in rows.all()}
 
     async def delete_session(self, *, tenant: str, session_id: str) -> int:
         """Delete a session's messages; returns how many were removed."""

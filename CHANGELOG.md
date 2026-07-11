@@ -14,6 +14,21 @@ images to GHCR.
 
 ### Added
 
+- **Agent: `memory_search` built-in tool — deliberate recall over past sessions and facts**
+  (#523, ADR-0089) — structural recall only injects top-k facts every turn, with no way for the
+  agent to *dig*; "what did we decide last week about the backup strategy?" failed unless
+  extraction happened to distil that exact decision into a fact. A new core built-in
+  `memory_search(query, scope = facts | sessions | both, limit)` closes the gap: the agent
+  deliberately searches the durable **fact store** (Qdrant, the same ranking a turn's ambient
+  recall gets) **and** past **conversations** (a portable case-insensitive content match over
+  `agent_messages`, joined back to each conversation's title), and gets back a compact, capped
+  set of the most relevant facts + past-conversation excerpts. It registers alongside
+  `now`/`remember`/`ask_user` (ADR-0039) and shows as a normal step in the activity timeline.
+  Tenant-scoped on every query (recall crosses sessions, so scoping is a privacy boundary,
+  constraint #1); best-effort like the rest of memory — the facts half embeds through the
+  gateway (constraint #8), so a cold embedder degrades to just the sessions text search (no
+  embed) rather than failing the tool call. Results are capped (≤10/source, snippets trimmed)
+  for token discipline — never a raw session dump. `core-app` 0.68.0→0.69.0.
 - **Mail: a full mail client in the shell** (#550, ADR-0087) — mail becomes a first-class
   left-nav page like Files / Calendar / Tasks / Notes, through a new **`mailbox` page
   archetype**: a labels rail with unread counts → a cursor-paginated thread list → the full

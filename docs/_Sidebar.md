@@ -43,6 +43,7 @@
 **Infrastructure**
 
 - [Overview](infrastructure/index.md)
+- [Remote access & hardening](infrastructure/remote-access.md)
 - [Auto-deploy (CD)](infrastructure/auto-deploy.md)
 - [Secrets (OpenBao)](infrastructure/secrets.md)
 - [Startup and recovery](infrastructure/startup-and-recovery.md)

@@ -32,6 +32,7 @@ from epicurus_tasks.service import (
     TaskNotFound,
     build_module,
     build_tasks_board,
+    calendar_feed_items,
     coerce_group,
     coerce_scope,
     enabled_write_lists,
@@ -192,6 +193,25 @@ def create_app() -> FastAPI:
             lists=lists,
             default_list_id=default_list_id,
         )
+
+    @app.get("/calendar-feed")
+    async def calendar_feed(start: str, end: str) -> list[dict[str, Any]]:
+        """Open tasks due within ``[start, end)`` — the calendar page's overlay (#469).
+
+        Probed generically by the core's cross-module calendar-feed aggregator
+        (``ModuleRegistry.calendar_feed_items``); this path has no manifest
+        declaration, so a module that doesn't implement it simply 404s and is
+        skipped. ``end`` is exclusive, matching the calendar archetype's own range
+        contract (ADR-0023). Reuses the same tenant/provider path as the board
+        (``scope="open"``), so a down/erroring list degrades the same way (#209)
+        rather than failing the whole feed.
+        """
+        tenant = settings.default_tenant_id
+        try:
+            tasks = await provider.list_tasks(tenant, scope="open")
+        except (GoogleTasksError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return calendar_feed_items(tasks, start, end)
 
     async def _require_task(ref_id: str) -> Task:
         """Fetch an attached/referenced task, translating misses into proxy errors.

@@ -16,6 +16,7 @@ import {
   Layers,
   MapPin,
   Repeat,
+  SquareCheck,
   Users,
   Video,
   X,
@@ -32,7 +33,9 @@ import {
   type AccountsView,
   type BoardAction,
   type CalendarEvent,
+  type CalendarFeedItem,
 } from "@/lib/contracts";
+import { usePanel } from "@/stores/panel";
 
 import { ActionControl } from "./ActionControl";
 
@@ -53,8 +56,9 @@ const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
 const startOfWeek = (d: Date) => addDays(startOfDay(d), -((d.getDay() + 6) % 7));
 const isSameDay = (a: Date, b: Date) => startOfDay(a).getTime() === startOfDay(b).getTime();
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-/** Local floating `YYYY-MM-DD`, the exact shape SchemaForm's `date_toggle` fields expect
- *  (#473) — never `toISOString()` here, which would UTC-shift a date near local midnight. */
+/** Local floating `YYYY-MM-DD` — never `toISOString()` here, which would UTC-shift a date
+ *  near local midnight. Feeds the calendar-feed lexicographic compare (#469) and is the
+ *  exact shape SchemaForm's `date_toggle` fields expect (#473). */
 const ymd = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
@@ -123,6 +127,23 @@ function groupByDay(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
     } else {
       push(dayKey(ev.start), ev);
     }
+  }
+  return map;
+}
+
+/** Bucket calendar-feed items (#469, e.g. task due-dates) into local-day lists, keyed the
+ *  same way `groupByDay` keys events, so a day cell can look both maps up by one key.
+ *  `item.date` is a floating `YYYY-MM-DD` — parsed from its components via the local `Date`
+ *  constructor, never `new Date("YYYY-MM-DD")` (which parses as UTC midnight and can read
+ *  back as the *previous* local day west of UTC). */
+function groupFeedByDay(items: CalendarFeedItem[]): Map<string, CalendarFeedItem[]> {
+  const map = new Map<string, CalendarFeedItem[]>();
+  for (const item of items) {
+    const [y, m, d] = item.date.split("-").map(Number);
+    const key = dayKey(new Date(y, m - 1, d));
+    const bucket = map.get(key);
+    if (bucket) bucket.push(item);
+    else map.set(key, [item]);
   }
   return map;
 }
@@ -285,6 +306,34 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
   });
   const meta = useMemo(() => buildCalendarMeta(collections.data), [collections.data]);
 
+  // Task due-dates (and any future module's calendar feed, #469) — a third query merged
+  // client-side alongside events, the same precedent `collections` already set. Floating
+  // local dates (`ymd`), not `startISO`/`endISO`: the feed endpoint compares `due` (a bare
+  // `YYYY-MM-DD`) lexicographically, so a UTC-instant boundary would off-by-one it near
+  // local midnight. A down/disabled feed module degrades to "no chips", never blanks events
+  // — the core's aggregator already tolerates a 404/unreachable module per-item (ADR-0019).
+  const feedStart = ymd(range.start);
+  const feedEnd = ymd(range.end);
+  const feed = useQuery({
+    queryKey: ["calendar-feed", feedStart, feedEnd],
+    queryFn: () => api.calendarFeed(feedStart, feedEnd),
+    placeholderData: keepPreviousData,
+  });
+  const feedByDay = useMemo(() => groupFeedByDay(feed.data ?? []), [feed.data]);
+
+  const open = usePanel((s) => s.open);
+  // Read-only: clicking a feed chip resolves the owning module's existing hover-card
+  // (ADR-0019) and opens it in the right panel — no calendar-specific detail view, no
+  // mutation surface (#469 is explicitly read-only; editing a task stays on its own board).
+  const openFeedItem = (item: CalendarFeedItem) => {
+    api
+      .resolveEntity(item.module, item.kind, item.ref_id)
+      .then((card) => open("entity-detail", card, item.title))
+      .catch(() =>
+        open("entity-detail", { title: item.title, description: "", details: [] }, item.title),
+      );
+  };
+
   const data = query.data ? CalendarData.parse(query.data) : null;
 
   // The page's own "New event" action (ADR-0034) — reused as-is for slot-click seeding
@@ -365,8 +414,10 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
           <MonthView
             cursor={cursor}
             byDay={byDay}
+            feedByDay={feedByDay}
             colorFor={colorFor}
             onSelect={setSelected}
+            onOpenFeedItem={openFeedItem}
             onCreateDay={
               createAction
                 ? (day) => setSlotSeed({ all_day: true, start: ymd(day), end: ymd(addDays(day, 1)) })
@@ -593,14 +644,19 @@ function CalendarsMenu({
 function MonthView({
   cursor,
   byDay,
+  feedByDay,
   colorFor,
   onSelect,
+  onOpenFeedItem,
   onCreateDay,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
+  /** Task due-dates (and any future module's calendar feed, #469), keyed like `byDay`. */
+  feedByDay: Map<string, CalendarFeedItem[]>;
   colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
+  onOpenFeedItem: (item: CalendarFeedItem) => void;
   /** Clicking empty space in a day cell seeds + opens the create form (#473); omitted
    *  when the page has no create action (no-op cells, same as before). */
   onCreateDay?: (day: Date) => void;
@@ -609,6 +665,7 @@ function MonthView({
   const days = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
   const today = new Date();
   const MAX_CHIPS = 3;
+  const MAX_FEED_CHIPS = 3;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -622,6 +679,7 @@ function MonthView({
       <div className="grid min-h-0 flex-1 grid-cols-7 grid-rows-6">
         {days.map((day) => {
           const evs = byDay.get(dayKey(day)) ?? [];
+          const feedItems = feedByDay.get(dayKey(day)) ?? [];
           const inMonth = day.getMonth() === cursor.getMonth();
           const today_ = isSameDay(day, today);
           return (
@@ -665,6 +723,20 @@ function MonthView({
                     +{evs.length - MAX_CHIPS} more
                   </button>
                 )}
+                {feedItems.slice(0, MAX_FEED_CHIPS).map((item) => (
+                  <FeedItemChip key={`${item.module}:${item.id}`} item={item} onOpen={onOpenFeedItem} />
+                ))}
+                {feedItems.length > MAX_FEED_CHIPS && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenFeedItem(feedItems[MAX_FEED_CHIPS]);
+                    }}
+                    className="px-1 text-left text-[11px] text-ink-faint hover:text-ink"
+                  >
+                    +{feedItems.length - MAX_FEED_CHIPS} more
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -701,6 +773,32 @@ function EventChip({
         <span className="shrink-0 tabular-nums opacity-80">{fmtTime(ev.start)}</span>
       )}
       <span className="truncate">{ev.title}</span>
+    </button>
+  );
+}
+
+/** A read-only task-due-date marker inside a day cell (#469) — muted and checkbox-glyphed
+ *  so it reads as "not an event" at a glance, distinct from a colour-tinted `EventChip`.
+ *  No `actions`, no create/edit affordance here: it opens the owning module's own
+ *  hover-card in the right panel, the same generic resolve path chat's entity chips use. */
+function FeedItemChip({
+  item,
+  onOpen,
+}: {
+  item: CalendarFeedItem;
+  onOpen: (item: CalendarFeedItem) => void;
+}) {
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation(); // the day cell behind it opens a *create* form on click (#473)
+        onOpen(item);
+      }}
+      title={item.title}
+      className="flex items-center gap-1 truncate rounded-sm px-1 py-0.5 text-left text-[11px] leading-tight text-ink-faint hover:bg-surface-2 hover:text-ink-dim"
+    >
+      <SquareCheck size={11} className="shrink-0" />
+      <span className="truncate">{item.title}</span>
     </button>
   );
 }

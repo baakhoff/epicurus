@@ -1245,6 +1245,62 @@ async def test_all_suggestions_empty_without_a_review_page() -> None:
     assert await registry.all_suggestions() == []
 
 
+# ── Cross-module calendar-feed aggregate (#469) ─────────────────────────────────
+
+
+async def test_calendar_feed_items_aggregates_and_stamps_module() -> None:
+    registry, _, _ = _registry(manifest=ModuleManifest(name="tasks", version="0.15.3"))
+    resp = MagicMock()
+    resp.json.return_value = [
+        {
+            "id": "t1",
+            "title": "Buy milk",
+            "date": "2026-07-15",
+            "status": "open",
+            "ref_id": "t1",
+            "kind": "task",
+        },
+    ]
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_cls:
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        result = await registry.calendar_feed_items("2026-07-01", "2026-08-01")
+    assert len(result) == 1
+    assert result[0]["module"] == "tasks"
+    assert result[0]["id"] == "t1"
+    client.get.assert_called_once_with(
+        "/calendar-feed", params={"start": "2026-07-01", "end": "2026-08-01"}
+    )
+
+
+async def test_calendar_feed_items_skips_a_module_that_404s() -> None:
+    # Not a manifest-declared capability (unlike `resolver`/`attachable`) — a module with
+    # no `/calendar-feed` route (e.g. calendar itself, or any module that never opted in)
+    # 404s, and that 404 is the only signal; the feed degrades to "contributes nothing"
+    # for that module rather than failing the whole aggregate (#469).
+    registry, _, _ = _registry(manifest=ModuleManifest(name="calendar", version="0.16.0"))
+    request = httpx.Request("GET", "http://echo:8080/calendar-feed")
+    resp = httpx.Response(404, request=request)
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_cls:
+        client = AsyncMock()
+        client.get = AsyncMock(
+            side_effect=httpx.HTTPStatusError("404", request=request, response=resp)
+        )
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        result = await registry.calendar_feed_items("2026-07-01", "2026-08-01")
+    assert result == []
+
+
+async def test_calendar_feed_items_skips_unhealthy_module() -> None:
+    registry, _, _ = _registry(
+        healthy=False, manifest=ModuleManifest(name="tasks", version="0.15.3")
+    )
+    assert await registry.calendar_feed_items("2026-07-01", "2026-08-01") == []
+
+
 # ── Suggestions review on/off toggle (#KB-refactor) ────────────────────────────
 
 

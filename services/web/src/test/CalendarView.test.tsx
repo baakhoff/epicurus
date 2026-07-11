@@ -4,17 +4,22 @@ import { type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CalendarView } from "@/components/archetypes/CalendarView";
+import { usePanel } from "@/stores/panel";
 
 const mockModulePage = vi.fn();
 const mockCollections = vi.fn();
 const mockModules = vi.fn();
 const mockInvoke = vi.fn();
+const mockCalendarFeed = vi.fn();
+const mockResolveEntity = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
     getModuleCollections: (...args: unknown[]) => mockCollections(...args),
     modules: (...args: unknown[]) => mockModules(...args),
     invokeModuleTool: (...args: unknown[]) => mockInvoke(...args),
+    calendarFeed: (...args: unknown[]) => mockCalendarFeed(...args),
+    resolveEntity: (...args: unknown[]) => mockResolveEntity(...args),
   },
 }));
 
@@ -107,6 +112,8 @@ beforeEach(() => {
   mockModulePage.mockReset();
   mockModules.mockReset().mockResolvedValue([]);
   mockInvoke.mockReset();
+  mockCalendarFeed.mockReset().mockResolvedValue([]);
+  mockResolveEntity.mockReset();
   mockCollections.mockReset().mockResolvedValue({
     noun: "calendar",
     multi: true,
@@ -690,5 +697,86 @@ describe("EventDetail focus management (#512)", () => {
 
     fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
     expect(link).toHaveFocus(); // backward from the first wraps to the last
+  });
+});
+
+describe("Task-feed overlay (#469)", () => {
+  const FEED_ITEM = {
+    id: "t1",
+    title: "Buy milk",
+    date: "2026-06-15",
+    status: "open",
+    ref_id: "t1",
+    kind: "task",
+    module: "tasks",
+  };
+
+  beforeEach(() => usePanel.getState().close());
+
+  it("renders a task-feed chip on its due day, distinct from an event chip", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    mockCalendarFeed.mockResolvedValue([FEED_ITEM]);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    const chip = (await screen.findByText("Buy milk")).closest("button")!;
+    expect(chip.querySelector(".lucide-square-check")).toBeInTheDocument();
+    expect(mockCalendarFeed).toHaveBeenCalledWith("2026-06-01", "2026-07-13"); // month grid bounds
+    // Still shows the real event too — the feed overlays, it never replaces.
+    expect(screen.getByText("Standup")).toBeInTheDocument();
+  });
+
+  it("opens the owning module's hover-card in the panel on click, read-only", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    mockCalendarFeed.mockResolvedValue([FEED_ITEM]);
+    mockResolveEntity.mockResolvedValue({
+      title: "Buy milk",
+      description: "",
+      details: [
+        { label: "Due", value: "2026-06-15" },
+        { label: "Status", value: "Open" },
+      ],
+      href: { label: "Open in Tasks", url: "/m/tasks/board" },
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("Buy milk"));
+    await waitFor(() =>
+      expect(mockResolveEntity).toHaveBeenCalledWith("tasks", "task", "t1"),
+    );
+    await waitFor(() =>
+      expect(usePanel.getState().stack.at(-1)).toMatchObject({
+        view: "entity-detail",
+        title: "Buy milk",
+      }),
+    );
+    // Read-only: no mutating action anywhere in the resolved payload/click path.
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("collapses feed items beyond the cap into a +N more control", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    mockCalendarFeed.mockResolvedValue(
+      Array.from({ length: 5 }, (_, i) => ({ ...FEED_ITEM, id: `t${i}`, ref_id: `t${i}`, title: `Task ${i}` })),
+    );
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    expect(await screen.findByText("+2 more")).toBeInTheDocument();
+  });
+
+  it("still renders events when the calendar-feed call fails (module-down tolerance)", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    mockCalendarFeed.mockRejectedValue(new Error("tasks module unreachable"));
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    expect(await screen.findByText("Standup")).toBeInTheDocument();
+  });
+
+  it("renders no feed chips when nothing is due in the visible window", async () => {
+    mockModulePage.mockResolvedValue(sample);
+    mockCalendarFeed.mockResolvedValue([]);
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+
+    await screen.findByText("Standup");
+    expect(screen.queryByText("Buy milk")).not.toBeInTheDocument();
   });
 });

@@ -275,6 +275,34 @@ leave those empty, with `to_path` carrying a `move`'s destination. `append` is *
 (the agent supplies just the text to add; the server concatenates it on approval) and is
 content-like — its diff shows the added text.
 
+### `GET /platform/v1/calendar-feed?start=&end=`
+
+The **cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items — e.g. open
+tasks with a due date — from every enabled, healthy module, merged and stamped with the owning
+`module`. **Not a manifest-declared capability** like `resolver`/`attachable`: a module opts in
+purely by serving `GET {base}/calendar-feed?start=&end=` itself; the aggregator probes every
+module for that path and skips a `404`/unreachable one, the same tolerance `/suggestions` above
+already relies on. `start`/`end` are floating `YYYY-MM-DD` dates, `end` exclusive (the calendar
+archetype's own range convention, ADR-0023). `tasks` is the first module to implement it.
+
+```json
+[
+  {
+    "id": "t1",
+    "title": "Renew passport",
+    "date": "2026-07-15",
+    "status": "open",
+    "ref_id": "t1",
+    "kind": "task",
+    "module": "tasks"
+  }
+]
+```
+
+`kind` + `ref_id` + the stamped `module` are exactly what `GET /platform/v1/modules/{module}/resolve/{kind}/{ref_id}`
+needs, so the shell's click handler resolves and opens a chip's hover-card generically — no
+calendar-feed-specific UI contract, reusing ADR-0019 end to end.
+
 ### `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled`
 
 The per-module **review on/off** toggle (#KB-refactor) — `{ "enabled": true }`. When **on**

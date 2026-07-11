@@ -120,7 +120,10 @@ class AgentTurn(BaseModel):
 
     content: str
     tools_used: list[str] = Field(default_factory=list)
-    stopped: str  # "completed" or "max_steps"
+    # Why the turn ended: "completed" (the model answered) · "max_steps" (the loop bound) ·
+    # "repeat_call" / "tool_errors" (loop-hygiene early stops, #524) · "error" (a mid-stream
+    # failure, streaming only). The web can key stop-reason copy off it.
+    stopped: str
     # Module entities the turn referenced, lifted from tool outputs (ADR-0019).
     entity_refs: list[EntityRef] = Field(default_factory=list)
     # The turn's process — thinking + tool steps — persisted so the activity timeline
@@ -312,6 +315,92 @@ def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
     return name, arguments, call.get("id") or ""
 
 
+# Loop hygiene (#524). The thin loop (ADR-0001) continues on the blunt rule "the model made a
+# tool call", up to max_steps. Two shapes burn the whole budget and end in a silent stop: the
+# model re-issuing the *same* call, and a run of consecutive tool errors (retrying a broken call
+# to exhaustion). The guard below wraps the loop with outcome-aware *stopping* — not planning — so
+# ADR-0001's thinness holds. Both nudges are one-shot per turn, like _ANSWER_NUDGE.
+_REPEAT_NUDGE = (
+    "You just made that exact tool call with the same arguments — its result is already above. "
+    "Use that result to answer, or try something different; do not repeat the same call."
+)
+_REPEAT_TOOL_NOTICE = (
+    "This exact call was just made with the same arguments; its earlier result above still "
+    "stands. It was not run again — use that result or give your final answer."
+)
+# Stop the turn after this many consecutive tool errors rather than exhausting max_steps.
+_MAX_CONSECUTIVE_TOOL_ERRORS = 3
+
+# ``stopped`` reasons beyond "completed" | "max_steps", surfaced on AgentTurn.stopped (#524).
+_STOPPED_REPEAT_CALL = "repeat_call"
+_STOPPED_TOOL_ERRORS = "tool_errors"
+
+
+def _canonical_calls(tool_calls: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
+    """A stable signature for a step's tool calls — ``(name, canonical-args)`` per call, order-free.
+
+    Canonicalizes each call to ``(name, json(args, sort_keys))`` and sorts the set, so the same
+    calls in a different order compare equal but *different arguments* (paging, per-item work) do
+    not. This is what lets repeat detection fire on an identical re-issue yet leave a legitimate
+    distinct-args repeat untouched (#524).
+    """
+    signature: list[tuple[str, str]] = []
+    for call in tool_calls:
+        name, arguments, _ = _parse_tool_call(call)
+        try:
+            canon = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            canon = repr(arguments)
+        signature.append((name, canon))
+    return tuple(sorted(signature))
+
+
+class _LoopGuard:
+    """Outcome-aware stop detection wrapped around the thin loop (ADR-0001 stays thin, #524).
+
+    Detects two turn-fatal shapes without entangling the loop, so both ``run`` (``_loop``) and
+    ``run_stream`` apply the same rule by asking the same object:
+
+    * **identical repeat** — the model re-issues the exact same call(s). The first repeat earns a
+      one-shot nudge (``"nudge"``); a further repeat stops the turn (``"stop"``), mirroring the
+      one-shot ``_ANSWER_NUDGE`` for a blank answer.
+    * **error streak** — :data:`_MAX_CONSECUTIVE_TOOL_ERRORS` consecutive tool errors (the model
+      retrying a broken call to exhaustion) stops the turn early, so the user gets "here's what
+      failed" instead of a silent stall.
+    """
+
+    def __init__(self) -> None:
+        self._prev_signature: tuple[tuple[str, str], ...] | None = None
+        self.repeat_nudged = False
+        self.error_streak = 0
+
+    def repeat_verdict(self, tool_calls: list[dict[str, Any]]) -> str:
+        """Classify this step's calls vs. the previous step: ``"new"`` | ``"nudge"`` | ``"stop"``.
+
+        Updates the remembered signature every call, so a distinct step in between resets the
+        comparison — only an *immediately* repeated call is caught.
+        """
+        signature = _canonical_calls(tool_calls)
+        is_repeat = self._prev_signature is not None and signature == self._prev_signature
+        self._prev_signature = signature
+        if not is_repeat:
+            return "new"
+        if not self.repeat_nudged:
+            self.repeat_nudged = True
+            return "nudge"
+        return "stop"
+
+    def note_results(self, errored: list[bool]) -> bool:
+        """Fold this step's tool outcomes into the running streak; ``True`` once it hits the bound.
+
+        Any success resets the streak — the guard fires only on *consecutive* errors, so a turn
+        that errors once and then recovers is left untouched (no behavior change for healthy turns).
+        """
+        for is_error in errored:
+            self.error_streak = self.error_streak + 1 if is_error else 0
+        return self.error_streak >= _MAX_CONSECUTIVE_TOOL_ERRORS
+
+
 class Agent:
     """Drives the LLM gateway plus module tools to answer a turn."""
 
@@ -433,6 +522,8 @@ class Agent:
         stopped = "completed"
         reasoned = False  # the model emitted <think> reasoning at least once this turn
         nudged = False  # we already nudged a blank step to commit to an answer (do it once)
+        guard = _LoopGuard()  # outcome-aware stop detection (#524), same rule as run()'s _loop
+        need_final = False  # an early/exhausted stop wants one final tool-less answer streamed
         try:
             specs, route = await self._mcp.discover()
             # Offer tools only to a model that can use them; otherwise the runtime errors and
@@ -471,6 +562,29 @@ class Agent:
                         role="assistant", content=result.content, tool_calls=result.tool_calls
                     )
                 )
+                verdict = guard.repeat_verdict(result.tool_calls)
+                if verdict != "new":
+                    # The model re-issued the exact same call(s). Don't run them again (a repeated
+                    # write would double-apply) — stub each result so the conversation stays valid,
+                    # then nudge once (like _ANSWER_NUDGE) or stop the turn on a further repeat. A
+                    # repeated ask_user/draft can't reach here — the first one suspends and returns.
+                    for call in result.tool_calls:
+                        _name, _args, call_id = _parse_tool_call(call)
+                        convo.append(
+                            ChatMessage(
+                                role="tool",
+                                tool_call_id=call_id,
+                                name=_name,
+                                content=_REPEAT_TOOL_NOTICE,
+                            )
+                        )
+                    if verdict == "nudge":
+                        convo.append(ChatMessage(role="user", content=_REPEAT_NUDGE))
+                        continue
+                    stopped = _STOPPED_REPEAT_CALL
+                    need_final = True
+                    break
+                errored: list[bool] = []  # per-tool error flags this step, for the streak guard
                 pending: _Pending | None = None  # the one turn-pausing call this step, if any
                 for call in result.tool_calls:
                     name, arguments, call_id = _parse_tool_call(call)
@@ -529,6 +643,7 @@ class Agent:
                             )
                         continue
                     status = "error" if is_error else "ok"
+                    errored.append(is_error)
                     yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
                     append_tool(timeline, name, status, detail)
                     convo.append(
@@ -567,8 +682,19 @@ class Agent:
                             ),
                         )
                     )
-            else:  # steps exhausted — stream one final answer without tools
+                if guard.note_results(errored):
+                    # A streak of consecutive tool errors — stop early and answer with what failed,
+                    # rather than letting the model retry a broken call until max_steps.
+                    stopped = _STOPPED_TOOL_ERRORS
+                    need_final = True
+                    break
+            else:  # steps exhausted — one final tool-less answer streamed below
                 stopped = "max_steps"
+                need_final = True
+            if need_final:
+                # A non-answer exit (max_steps, or a hygiene early stop) streams one final tool-less
+                # answer, so the turn ends with a real reply — "here's what I found / what failed" —
+                # never a silent stop. One call, not the unbounded retrying the guard just cut off.
                 async for event in self._gateway.stream_chat(
                     convo, model=model, tenant_id=tenant_id
                 ):
@@ -947,6 +1073,7 @@ class Agent:
         def activity() -> MessageActivity:
             return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
 
+        guard = _LoopGuard()  # outcome-aware stop detection (#524), wrapping the thin loop
         reasoned = False  # the model emitted <think> reasoning at least once this turn
         nudged = False  # we already nudged a blank step to commit to an answer (do it once)
         content = ""
@@ -970,6 +1097,27 @@ class Agent:
             convo.append(
                 ChatMessage(role="assistant", content=result.content, tool_calls=result.tool_calls)
             )
+            verdict = guard.repeat_verdict(result.tool_calls)
+            if verdict != "new":
+                # The model re-issued the exact same call(s). Don't run them again — a repeated
+                # write would double-apply — but stub each result so the conversation stays valid,
+                # then nudge once (like _ANSWER_NUDGE) or stop the turn on a further repeat.
+                for call in result.tool_calls:
+                    _name, _args, call_id = _parse_tool_call(call)
+                    convo.append(
+                        ChatMessage(
+                            role="tool",
+                            tool_call_id=call_id,
+                            name=_name,
+                            content=_REPEAT_TOOL_NOTICE,
+                        )
+                    )
+                if verdict == "nudge":
+                    convo.append(ChatMessage(role="user", content=_REPEAT_NUDGE))
+                    continue
+                stopped = _STOPPED_REPEAT_CALL
+                break
+            errored: list[bool] = []
             for call in result.tool_calls:
                 name, arguments, call_id = _parse_tool_call(call)
                 tools_used.append(name)
@@ -990,17 +1138,27 @@ class Agent:
                         " Tell the user it was not sent."
                     )
                     status = "error"
+                errored.append(status == "error")
                 append_tool(timeline, name, status, _tool_detail(arguments))
                 convo.append(
                     ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
                 )
+            if guard.note_results(errored):
+                # A streak of consecutive tool errors — stop early and answer with what failed,
+                # rather than letting the model retry a broken call until max_steps.
+                stopped = _STOPPED_TOOL_ERRORS
+                break
         else:
+            stopped = "max_steps"
+        if stopped != "completed":
+            # Any non-answer exit (max_steps, or a hygiene stop) gets one final tool-less answer,
+            # so the turn ends with a real reply — "here's what I found / what failed" — never a
+            # silent stop. One call, not the unbounded retrying the guard just cut off.
             final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
             if final.reasoning:
                 reasoned = True
                 append_thinking(timeline, final.reasoning)
             content = final.content
-            stopped = "max_steps"
         if not content.strip():
             log.warning(
                 "turn produced no answer; using fallback",

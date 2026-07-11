@@ -14,6 +14,22 @@ images to GHCR.
 
 ### Added
 
+- **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
+  loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole
+  `max_steps` budget and ended in a silent stop: the model re-issuing the *exact same* call over and
+  over, and a streak of tool errors (retrying a broken call to exhaustion). A small `_LoopGuard`
+  wraps the loop (ADR-0001 stays thin — outcome-aware *stopping*, not planning), applied identically
+  to `run` and `run_stream`. A repeated identical call (canonicalized `(name, sorted-args)`, so
+  distinct-args paging/per-item repeats pass untouched) earns a one-shot nudge and is **not
+  re-executed** — a repeated write would double-apply — then ends the turn `stopped="repeat_call"` on
+  a further repeat; three consecutive tool errors end it `stopped="tool_errors"` (any success resets
+  the streak). Both take the same single tool-less final round `max_steps` already uses, so the turn
+  ends with a **real answer** — "here's what I found / what failed" — never a silent stall. The new
+  `stopped` reasons ride the streamed `done` event for the web to key copy off; the repeated/errored
+  steps stay visible in the activity timeline. (Web stop-reason badge deferred — the transcript
+  carries no per-message `stopped` yet; the live reason is already on the `done` event.)
+  `core-app` 0.68.0→0.69.0.
+
 - **Mail: a full mail client in the shell** (#550, ADR-0087) — mail becomes a first-class
   left-nav page like Files / Calendar / Tasks / Notes, through a new **`mailbox` page
   archetype**: a labels rail with unread counts → a cursor-paginated thread list → the full

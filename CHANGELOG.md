@@ -35,7 +35,7 @@ images to GHCR.
   duplicates within one search (SearXNG returning a URL from multiple engines) are
   collapsed before refs are built; a malformed or tampered `ref_id` (bad base64, non-JSON,
   or a non-`http(s)` scheme) 400s cleanly, never a 500 and never an unsafe `href`.
-  `websearch` 0.1.0→0.2.0, `web` 0.90.0→0.91.0.
+  `websearch` 0.1.0→0.2.0, `web` 0.91.0→0.92.0.
 - **PWA: share target + app shortcuts** (#493) — the installed app was inert to the OS around
   it. Two manifest-level features, especially useful on Android: **share a link, text, or
   file/photo from any app straight into a chat turn** (`manifest.share_target`, `POST`

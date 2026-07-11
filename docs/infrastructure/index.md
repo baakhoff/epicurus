@@ -67,7 +67,8 @@ init container runs.
 **Traefik** routes to services by Docker label, with **no authentication baked in** and no
 assumed ingress — the operator layers their own perimeter (Tailscale, a reverse proxy, an
 auth proxy) in front (ADR-0008). Host ports **8088** (web entrypoint) and **8089**
-(dashboard). Details: [`infra/edge/README.md`](../../infra/edge/README.md).
+(dashboard). Details: [`infra/edge/README.md`](../../infra/edge/README.md); concrete
+copy-pasteable perimeter recipes in [Remote access & hardening](remote-access.md).
 
 ## Observability (opt-in)
 
@@ -128,6 +129,10 @@ See the [Architecture](../developer/architecture.md) guide for how the pieces fi
 
 ## Operations
 
+- [Remote access & hardening](remote-access.md) — reach the PWA from outside the box
+  safely: Tailscale, a reverse proxy with basic auth, or oauth2-proxy/OIDC, plus a
+  self-hosting security checklist. The stack has no built-in auth (ADR-0008), so a
+  perimeter is mandatory for any non-loopback exposure.
 - [Auto-deploy (CD)](auto-deploy.md) — how a released tag rolls out to the box
   automatically (scheduled reconcile script or Watchtower), and how to roll back.
 - [Startup and recovery](startup-and-recovery.md) — configure Docker Desktop

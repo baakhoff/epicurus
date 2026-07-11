@@ -21,7 +21,8 @@ however you expose your own server).
 - **[API Reference](reference/index.md)** — the `epicurus-core` library and the
   module↔core contracts (platform API, MCP, NATS, manifest).
 - **[Infrastructure](../infra/README.md)** — the data plane (Postgres, Valkey, NATS,
-  Qdrant, OpenBao, MinIO), the edge gateway, observability, and Ollama.
+  Qdrant, OpenBao, MinIO), the edge gateway, observability, and Ollama. Reaching it from
+  outside the box: [Remote access & hardening](infrastructure/remote-access.md).
 - **[Developer Guide](developer/index.md)** — architecture, building a module, testing,
   contributing, releases.
 

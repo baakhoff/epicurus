@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+from epicurus_core.contracts import ToolEnvelope
 from epicurus_websearch.searxng import SearchResult, SearXNGClient
 from epicurus_websearch.service import build_module
 
@@ -14,21 +15,40 @@ def _make_client(results: list[SearchResult]) -> SearXNGClient:
     return client  # type: ignore[return-value]
 
 
+def _parse_envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
+    """Extract the ToolEnvelope from the first TextContent item in a call_tool result."""
+    text = content[0].text  # type: ignore[attr-defined]
+    return ToolEnvelope.model_validate_json(text)
+
+
 SAMPLE_RESULTS: list[SearchResult] = [
     SearchResult(title="T1", url="https://t1.com", snippet="S1", engine="google"),
     SearchResult(title="T2", url="https://t2.com", snippet="S2", engine="bing"),
 ]
 
 
-async def test_web_search_tool_returns_results() -> None:
+async def test_web_search_returns_entity_refs() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client)
-    _content, structured = await module.mcp.call_tool("web_search", {"query": "hello"})
-    assert structured is not None
-    result = structured.get("result") or structured
-    assert isinstance(result, list)
-    assert len(result) == 2
-    assert result[0]["title"] == "T1"
+    content, _ = await module.mcp.call_tool("web_search", {"query": "hello"})
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == 2
+    ref = envelope.entity_refs[0]
+    assert ref.module == "websearch"
+    assert ref.kind == "result"
+    assert ref.title == "T1"
+    assert ref.summary == "S1"
+
+
+async def test_web_search_text_mentions_titles_and_urls() -> None:
+    client = _make_client(SAMPLE_RESULTS)
+    module = build_module(client)
+    content, _ = await module.mcp.call_tool("web_search", {"query": "hello"})
+    envelope = _parse_envelope(content)
+    assert "T1" in envelope.text
+    assert "https://t1.com" in envelope.text
+    assert "T2" in envelope.text
+    assert "https://t2.com" in envelope.text
 
 
 async def test_web_search_tool_caps_at_20() -> None:
@@ -38,16 +58,54 @@ async def test_web_search_tool_caps_at_20() -> None:
     client.search.assert_called_once_with("q", 20)  # type: ignore[attr-defined]
 
 
-async def test_web_search_returns_empty_on_exception() -> None:
+async def test_web_search_returns_no_refs_on_exception() -> None:
     client = AsyncMock(spec=SearXNGClient)
     client.search = AsyncMock(side_effect=Exception("network error"))
     module = build_module(client)  # type: ignore[arg-type]
-    _content, structured = await module.mcp.call_tool("web_search", {"query": "q"})
-    result = structured.get("result") if structured else []
-    assert result == [] or structured == {"result": []}
+    content, _ = await module.mcp.call_tool("web_search", {"query": "q"})
+    envelope = _parse_envelope(content)
+    assert envelope.entity_refs == []
+    assert "No web results" in envelope.text
 
 
-async def test_manifest_declares_tool_and_ui() -> None:
+async def test_web_search_empty_results_returns_no_refs() -> None:
+    client = _make_client([])
+    module = build_module(client)
+    content, _ = await module.mcp.call_tool("web_search", {"query": "q"})
+    envelope = _parse_envelope(content)
+    assert envelope.entity_refs == []
+    assert "No web results" in envelope.text
+
+
+async def test_web_search_dedupes_same_url_within_one_call() -> None:
+    results = [
+        SearchResult(title="A", url="https://dup.com/page", snippet="S1", engine="google"),
+        # Same page, trailing slash + different engine/snippet — still one chip.
+        SearchResult(
+            title="A (bing copy)", url="https://dup.com/page/", snippet="S2", engine="bing"
+        ),
+        SearchResult(title="B", url="https://other.com", snippet="S3", engine="google"),
+    ]
+    client = _make_client(results)
+    module = build_module(client)
+    content, _ = await module.mcp.call_tool("web_search", {"query": "q"})
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == 2
+    assert envelope.entity_refs[0].title == "A"  # first occurrence kept
+
+
+async def test_web_search_two_calls_same_result_produce_same_ref_id() -> None:
+    """The core's cross-call `_RefCollector` dedupes on `ref_id` — verify determinism."""
+    client = _make_client(SAMPLE_RESULTS)
+    module = build_module(client)
+    content_a, _ = await module.mcp.call_tool("web_search", {"query": "hello"})
+    content_b, _ = await module.mcp.call_tool("web_search", {"query": "hello again"})
+    ref_ids_a = {r.ref_id for r in _parse_envelope(content_a).entity_refs}
+    ref_ids_b = {r.ref_id for r in _parse_envelope(content_b).entity_refs}
+    assert ref_ids_a == ref_ids_b
+
+
+async def test_manifest_declares_tool_ui_and_resolver() -> None:
     client = _make_client([])
     module = build_module(client)
     manifest = await module.manifest()
@@ -56,6 +114,7 @@ async def test_manifest_declares_tool_and_ui() -> None:
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     assert manifest.ui.icon == "globe"
+    assert manifest.resolver is True
 
 
 async def test_manifest_tool_describes_query_param() -> None:

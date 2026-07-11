@@ -40,6 +40,7 @@ import {
   PendingSuggestion,
   PlatformInfo,
   PowerStatus,
+  ProfileView,
   ProviderInfo,
   Readiness,
   SavedModelsResponse,
@@ -287,6 +288,20 @@ export const api = {
   // Forget one remembered fact so it stops being recalled (the conversation is kept).
   forgetMemory: (id: string) =>
     request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // The standing profile the agent injects each turn (#527) — null before first synthesis.
+  profile: () => request(ProfileView, "/platform/v1/agent/memory/profile"),
+  // Save an operator edit (pinned, survives re-synthesis); a blank body clears it (resume auto).
+  saveProfile: (content: string) =>
+    request(ProfileView, "/platform/v1/agent/memory/profile", {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+  // Clear the profile (all versions); the next nightly synthesis regenerates a fresh one.
+  clearProfile: () =>
+    request(z.object({ cleared: z.number() }), "/platform/v1/agent/memory/profile", {
       method: "DELETE",
     }),
 

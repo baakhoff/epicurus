@@ -14,6 +14,22 @@ images to GHCR.
 
 ### Added
 
+- **Memory: a standing user profile, synthesized nightly and injected statically** (#527, ADR-0094)
+  — recall was top-k vector search over the fact store at *turn time*, so the stable common case
+  (who the user is, durable preferences) paid an embedding round-trip and a single-GPU model-swap
+  risk on **every** turn, for content that barely changes. Now a nightly `profile_synthesis_job`
+  (added to the ADR-0060 maintenance registry, beside the extraction drain) distils each tenant's
+  facts into one compact **standing profile** via a single gateway call, and `Agent._assemble`
+  injects it as a static system block with **no turn-time embed** — moving the common-case cost off
+  the response path (the same trade ADR-0051 made for fact extraction); vector recall stays for the
+  long-tail specifics. Stored per tenant and versioned (`standing_profiles`, last 5 kept). Visible,
+  **editable, and clearable** in the Settings → Memory view (`GET/PUT/DELETE /memory/profile`): an
+  operator edit is **pinned** and survives re-synthesis (the synthesizer skips a tenant whose
+  profile is `edited`) until cleared. Best-effort throughout — no profile is exactly today's
+  behavior, a failed synthesis keeps the previous profile. Nightly auto-runs ride the opt-in
+  maintenance schedule (`MAINTENANCE_SCHEDULE_ENABLED`) or the manual "run everything" trigger.
+  `core-app` 0.68.0→0.69.0, `web` 0.94.0→0.95.0.
+
 - **Mail: a full mail client in the shell** (#550, ADR-0087) — mail becomes a first-class
   left-nav page like Files / Calendar / Tasks / Notes, through a new **`mailbox` page
   archetype**: a labels rail with unread counts → a cursor-paginated thread list → the full

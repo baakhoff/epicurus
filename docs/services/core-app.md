@@ -52,6 +52,9 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/runs/{run_id}/stream?after_seq=N` | **Re-attach** to an in-flight turn (ADR-0055), replaying buffered events after `N` (or `Last-Event-ID`) then tailing live — same SSE protocol as `/chat/stream`, no readiness prelude. A `gone` event if the run is unknown / finished-and-reaped (the client then falls back to the durable transcript). Note: this `run_id` is a **live-run** id (in-memory, for re-attach), distinct from the suspended-run id used by `/resume`. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
+| `GET /platform/v1/agent/memory/profile` | The **standing profile** the agent injects each turn (#527, ADR-0094). Returns `{profile, source, pinned, versions}` — `profile` is `null` before first synthesis (the agent then behaves exactly as before); `source` is `auto` (nightly synthesis) or `edited`; `pinned` flags an operator edit that survives re-synthesis; `versions` is the recent history. Backs the **Settings → Memory** standing-profile panel. Declared **before** `/memory/{id}` so a DELETE isn't captured as "forget the fact `profile`". |
+| `PUT /platform/v1/agent/memory/profile` | Save an operator edit (`{content}`) — stored as an `edited`, **pinned** version the nightly synthesizer won't clobber. A blank body **clears** the profile (resume auto-synthesis), same as DELETE. |
+| `DELETE /platform/v1/agent/memory/profile` | Clear the profile (all versions); the next nightly synthesis regenerates a fresh `auto` one. Returns `{cleared}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 | `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. |
 
@@ -469,13 +472,15 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Three
+registers by being added to the list; the run / route / schedule machinery is unchanged. Four
 ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
-deferred-extraction queue, ADR-0051), the **module re-index** fan-out (heavy, manual-only — the
-same `reembed` fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
-`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
-single GPU) and each is contained: one job's failure becomes an `error` result, never aborting
-the rest.
+deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light, nightly-eligible
+— `ProfileSynthesizer.run` distils each tenant's facts into its statically-injected profile,
+ADR-0094), the **module re-index** fan-out (heavy, manual-only — the same `reembed` fan-out as
+above), and **memory facts re-embed** (heavy, manual-only — calls `UserFactStore.reembed_all` for
+the default tenant, #436). Jobs run **sequenced** (gentle on a single GPU) and each is contained:
+one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs are opt-in
+(`MAINTENANCE_SCHEDULE_ENABLED`); the manual "run everything" trigger is always available.
 
 A batch runs as a **detached background task**, decoupled from the request that started it (#561)
 — the same shape as chat turns (`agent/live_runs.py`, #376). `POST /run` starts it and returns
@@ -548,6 +553,8 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `MEMORY_EXTRACTION_MODEL` | — | Optional small dedicated model for the extraction call (e.g. `llama3.2:3b`); blank = the default chat model. |
 | `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
 | `MEMORY_RECALL_TIMEOUT_S` | `4.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). 4s (was 2s) fits a single-GPU embed-model swap. |
+| `MEMORY_PROFILE_MODEL` | `""` | Optional dedicated model for the nightly **standing-profile** synthesis (ADR-0094); blank = the operator's default chat model. A small model keeps the pass cheap. |
+| `MEMORY_PROFILE_MAX_VERSIONS` | `5` | How many past standing-profile versions to retain per tenant (the newest is injected). |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
@@ -636,6 +643,15 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   the `ExtractionRunner` drains it once a day (at `MEMORY_EXTRACTION_HOUR` in the operator's
   timezone), serially, so extraction never competes with a live turn for the GPU. Drained rows
   are deleted; because the queue is durable, a restart never loses a pending exchange.
+- **Postgres `standing_profiles`** — the compact per-tenant **standing profile** the agent injects
+  each turn (#527, ADR-0094): `id`, `tenant`, `content`, `source` (`auto` | `edited`), `created_at`.
+  Append-only and **versioned** — each write keeps the last `MEMORY_PROFILE_MAX_VERSIONS` (5) per
+  tenant, newest injected (the ADR-0046 snapshot idiom). Synthesized on the nightly **maintenance
+  batch** (`profile_synthesis_job`, ADR-0060) from the fact store via one gateway call, and injected
+  **statically** in `_assemble` with no turn-time embed — moving the common-case recall cost off the
+  response path (the ADR-0051 trade, now for the profile). An operator edit is stored `edited` and
+  **pinned**: synthesis skips a tenant whose current profile is `edited`, so a correction survives
+  re-synthesis until the operator clears it.
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
 answers — just without memory — and never blocks core startup. Recall (the one memory step left

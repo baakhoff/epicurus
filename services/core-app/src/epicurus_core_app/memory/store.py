@@ -164,6 +164,17 @@ class ConversationStore:
             )
             return [(message.role, message.content) for message in rows]
 
+    async def distinct_tenants(self) -> list[str]:
+        """Every tenant that has conversation history — the set to synthesize profiles for (#527).
+
+        Facts (the synthesis input) are only ever written inside a turn, which persists messages,
+        so a tenant with facts always has rows here; this is the tenant-first fan-out source
+        (constraint #1) for the nightly profile job, even though v1 has a single tenant.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(select(StoredMessage.tenant).distinct())
+            return list(rows)
+
     async def sessions(self, *, tenant: str) -> list[SessionSummary]:
         """Summarize the tenant's conversations, most recently active first.
 

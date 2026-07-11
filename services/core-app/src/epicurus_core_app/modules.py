@@ -28,7 +28,7 @@ from epicurus_core import (
     SecretStore,
     get_logger,
 )
-from epicurus_core_app.agent.mcp_host import McpHost, ToolCallError
+from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.docker_control import PROTECTED, DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
@@ -624,7 +624,10 @@ class ModuleRegistry:
 
         A tool that runs but reports failure surfaces as a **400** carrying the tool's
         own message — previously the error text returned as a 200 "result" and the
-        shell closed the form as if the action had worked (#435).
+        shell closed the form as if the action had worked (#435). A module that is
+        unreachable or does not answer in time is a controlled **502** (cf.
+        :meth:`_get_json`), never a raw ``NetworkError`` bubbling up through nginx — the
+        failure every board/calendar action shared through this dispatch (#472).
         """
         base, manifest = await self._resolve(name)
         if not await self._prefs.is_enabled(self._tenant, name):
@@ -635,6 +638,10 @@ class ModuleRegistry:
             return await self._mcp.call(tool, arguments, f"{base}/mcp", tenant=self._tenant)
         except ToolCallError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ModuleUnreachableError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"{name} action failed: module unreachable"
+            ) from exc
 
     async def get_config(self, name: str) -> dict[str, Any]:
         """The module's stored config values (empty if never saved)."""

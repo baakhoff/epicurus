@@ -799,6 +799,23 @@ images to GHCR.
 
 ### Fixed
 
+- **Board/calendar actions no longer fail with a raw `NetworkError` when a module is down** (#472) —
+  every manifest-declared UI action runs through one dispatch, `McpHost.call`, and it alone among the
+  core's outbound module calls had **no timeout and no transport-failure mapping** — unlike the sibling
+  `_get_json`/`_post_json` helpers that already turn a slow/dead module into a controlled `502`. So a
+  refused or hung module let a raw transport exception escape to nginx as an opaque **502
+  NetworkError**, closing the action form with no reason. The dispatch now bounds every hop (connect,
+  `initialize`, and the tool RPC) with a 30s timeout and normalizes a transport failure into a new
+  `ModuleUnreachableError`, which `ModuleRegistry.invoke` maps to a **502** `… action failed: module
+  unreachable` (the agent's tool loop reports it to the model instead of crashing the turn). Finding
+  this exposed a latent second bug the mocked `#435` tests hid: the streamable-HTTP client runs its
+  transport in an anyio task group, so a `ToolCallError` raised **inside** the `async with` block was
+  silently **wrapped in an `ExceptionGroup`** — every `except ToolCallError` missed it. The `isError`
+  → `ToolCallError` raise now lives *outside* the transport block, so a tool-reported failure still
+  surfaces as a clean **400** with the tool's own message. Verified end-to-end against a **live**
+  FastMCP server (the mocks can't reproduce the anyio wrapping): success, `isError`→`ToolCallError`,
+  refused→`ModuleUnreachableError`, and a hung socket tripping the read timeout are all now covered.
+  `core-app` 0.66.3→0.66.4.
 - **Assistant instructions: guard an unsaved draft; cover injection-first on the memory path** (#536) —
   the Settings instructions editor is the first long-form editor there (the other cards instant-save),
   so an unsaved draft silently vanished on an accidental reload/close. It now arms a `beforeunload`

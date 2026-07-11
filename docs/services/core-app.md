@@ -410,7 +410,7 @@ down produces no repeat log.
 | `GET /platform/v1/modules/{name}/collections/prefs` | The raw stored `{enabled, active}` (Postgres only, no module round-trip) — backs `PlatformClient.get_collections` so a module resolves its own routing (ADR-0030). |
 | `POST /platform/v1/modules/{name}/tools/{tool}/enabled` | Enable or disable one tool (#213): `{enabled: bool}`. Hides the named tool from the agent while the module keeps running and other tools remain unaffected. **404** unknown module or undeclared tool. Persisted in Postgres (`module_prefs`). |
 | `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled` | The per-module **review on/off** toggle (#KB-refactor): `{enabled: bool}`. When **on** (the default — a missing/NULL pref reads as `true`) the module stages agent changes for approval on its `review` page; when **off** the module applies them directly. The module reads this through `PlatformClient.get_suggestions_enabled()`; the shell's review-page header writes it. `PUT` **404**s an unknown module. Persisted in Postgres (`module_prefs`). |
-| `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. **400** when the tool runs but reports failure — the response `detail` is the tool's own error message, so the shell can show it instead of closing the form as a success (#435). |
+| `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. **400** when the tool runs but reports failure — the response `detail` is the tool's own error message, so the shell can show it instead of closing the form as a success (#435). **502** `{name} action failed: module unreachable` when the module refuses the connection or does not answer within the call timeout (30s) — the MCP dispatch is bounded and its transport failure mapped to a controlled status, so a down/restarting module no longer surfaces as a raw `NetworkError` (#472). |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 | `GET /platform/v1/modules/{name}/read?path=…` | Proxy an **editor** module's `GET /read` text-file endpoint for its split-screen reader (knowledge, notes): `{path, name, content}`. Upstream 4xx pass through (415 binary, 413 too large, 404 missing); an unreachable module is a controlled **502**. (The unified **Files** read is core-owned at `GET /platform/v1/files/read` — ADR-0063; see [file space](../reference/files.md).) |
 | `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…` | Create a new knowledge base (project / top-level scope) in an editor page's store (#KB-refactor). 409 if it exists, 400 for an invalid name; the module enforces name-safety. |
@@ -438,6 +438,16 @@ upstream failure to a **controlled** status, not an unhandled exception (#209): 
 client error (4xx) passes through as-is (e.g. a missing entity stays a `404`), while a 5xx,
 a timeout, or a connection failure becomes a `502` carrying the operation — so a slow or
 erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
+
+The **tool-invocation POST** (the board/calendar UI actions above) is held to the same
+guarantee (#472). Its dispatch runs over MCP rather than a plain HTTP proxy, so the host
+(`McpHost.call`) bounds every hop — connect, `initialize`, and the tool RPC — with a 30s
+timeout and normalizes a refused/dropped connection or an RPC read timeout (which the
+streamable-HTTP client's anyio task group raises **wrapped in an `ExceptionGroup`**) into a
+single `ModuleUnreachableError`. `ModuleRegistry.invoke` maps that to the **502** above; a
+tool that *ran* and reported failure stays a **400** with its own message (`ToolCallError`,
+#435). The two are kept distinct on purpose — "the module never answered" vs. "the tool
+rejected the request".
 
 ### Chat bridges (ADR-0062)
 

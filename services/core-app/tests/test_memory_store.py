@@ -82,6 +82,70 @@ async def test_delete_session_is_tenant_scoped() -> None:
     assert [s.id for s in await store.sessions(tenant="t2")] == ["s"]  # other tenant untouched
 
 
+async def test_search_messages_is_tenant_scoped_and_case_insensitive() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t1", session_id="s", role="user", content="Our Backup Strategy")
+    await store.append(tenant="t2", session_id="s", role="user", content="backup strategy leaks?")
+
+    hits = await store.search_messages(tenant="t1", query="backup")
+    assert [h.content for h in hits] == ["Our Backup Strategy"]  # matched despite the case
+    assert hits[0].session_id == "s"
+    assert hits[0].role == "user"
+    # the other tenant's identical topic never surfaces
+    assert [h.content for h in await store.search_messages(tenant="t2", query="leaks")] == [
+        "backup strategy leaks?"
+    ]
+
+
+async def test_search_messages_orders_newest_first_and_caps() -> None:
+    store, engine = await _fresh_store()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add_all(
+            [
+                StoredMessage(
+                    tenant="t",
+                    session_id="s",
+                    role="user",
+                    content=f"note about topic {i}",
+                    created_at=base + timedelta(hours=i),
+                )
+                for i in range(4)
+            ]
+        )
+        await session.commit()
+    hits = await store.search_messages(tenant="t", query="topic", limit=2)
+    # newest first, capped at the limit
+    assert [h.content for h in hits] == ["note about topic 3", "note about topic 2"]
+
+
+async def test_search_messages_treats_like_metacharacters_literally() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s", role="user", content="save 50% today")
+    await store.append(tenant="t", session_id="s", role="user", content="nothing on sale")
+    # Without escaping, '50%' would match via the trailing wildcard; with escaping it's literal.
+    assert [h.content for h in await store.search_messages(tenant="t", query="50%")] == [
+        "save 50% today"
+    ]
+    assert await store.search_messages(tenant="t", query="zz%") == []
+
+
+async def test_search_messages_blank_query_matches_nothing() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s", role="user", content="anything")
+    assert await store.search_messages(tenant="t", query="   ") == []
+
+
+async def test_session_titles_maps_first_message_per_session() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s1", role="user", content="First of s1")
+    await store.append(tenant="t", session_id="s1", role="assistant", content="reply")
+    await store.append(tenant="t", session_id="s2", role="user", content="First of s2")
+    titles = await store.session_titles(tenant="t", session_ids=["s1", "s2", "missing"])
+    assert titles == {"s1": "First of s1", "s2": "First of s2"}
+    assert await store.session_titles(tenant="t", session_ids=[]) == {}
+
+
 async def test_entity_refs_persist_and_round_trip() -> None:
     store, _ = await _fresh_store()
     refs = [{"ref_id": "e1", "module": "calendar", "kind": "event", "title": "Standup"}]

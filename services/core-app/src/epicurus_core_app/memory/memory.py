@@ -39,6 +39,21 @@ class MemoryItem(BaseModel):
     score: float | None = None
 
 
+class SessionHit(BaseModel):
+    """A past-conversation match for the agent's deliberate ``memory_search`` recall (#523).
+
+    Carries the matched message (``snippet`` + ``role``) plus the conversation it came from
+    (``session_id`` + ``title`` + ``created_at``), so a hit reads with enough context for the
+    model to use it — "on {date}, in '{title}', {role} said …".
+    """
+
+    session_id: str
+    title: str
+    role: str
+    snippet: str
+    created_at: datetime | None = None
+
+
 class Memory:
     """Conversation persistence (Postgres) plus durable user-fact memory (Qdrant)."""
 
@@ -152,6 +167,30 @@ class Memory:
         hits = await self._facts.search(tenant=tenant, query=query, limit=limit)
         total = await self._facts.count(tenant=tenant)
         return [self._to_item(hit, score=hit.score) for hit in hits], total
+
+    async def search_sessions(self, *, tenant: str, query: str, limit: int = 5) -> list[SessionHit]:
+        """Search past conversations for ``query`` — the sessions half of ``memory_search`` (#523).
+
+        Matches message content (Postgres, no embedding round-trip) and joins each hit back to
+        its conversation's title in one extra query, so the agent can deliberately look up
+        something said in an earlier chat it wasn't handed. Tenant-scoped throughout.
+        """
+        hits = await self._store.search_messages(tenant=tenant, query=query, limit=limit)
+        if not hits:
+            return []
+        titles = await self._store.session_titles(
+            tenant=tenant, session_ids=list({hit.session_id for hit in hits})
+        )
+        return [
+            SessionHit(
+                session_id=hit.session_id,
+                title=titles.get(hit.session_id, "").strip()[:80],
+                role=hit.role,
+                snippet=hit.content,
+                created_at=hit.created_at,
+            )
+            for hit in hits
+        ]
 
     async def forget_memory(self, *, tenant: str, memory_id: str) -> int:
         """Forget one fact so it stops being recalled."""

@@ -5,12 +5,23 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
 from epicurus_core import LIST_CAP, Attachment, EntityRef, draft_review, tool_envelope
-from epicurus_core_app.agent.agent import _ANSWER_NUDGE, _EMPTY_ANSWER_FALLBACK, Agent
+from epicurus_core_app.agent.agent import (
+    _ANSWER_NUDGE,
+    _EMPTY_ANSWER_FALLBACK,
+    _MAX_CONSECUTIVE_TOOL_ERRORS,
+    _REPEAT_NUDGE,
+    _STOPPED_REPEAT_CALL,
+    _STOPPED_TOOL_ERRORS,
+    Agent,
+    _canonical_calls,
+    _LoopGuard,
+)
 from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
     AgentInstructionsStore,
@@ -171,9 +182,11 @@ async def test_agent_offers_tools_when_the_model_supports_them() -> None:
 
 
 async def test_agent_stops_at_max_steps() -> None:
+    # Distinct args each round, so this is a genuine budget exhaustion (real tool work every
+    # step) rather than the repeated-call path that #524's guard would otherwise intercept.
     results = [
-        ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
-        ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+        ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"a": 1}')]),
+        ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"a": 2}')]),
         ChatResult(model="m", content="final"),
     ]
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
@@ -182,6 +195,7 @@ async def test_agent_stops_at_max_steps() -> None:
     )
     assert turn.stopped == "max_steps"
     assert turn.content == "final"
+    assert mcp.called == [("echo", {"a": 1}), ("echo", {"a": 2})]  # both rounds really ran
 
 
 async def test_agent_max_steps_resolved_from_prefs_at_runtime() -> None:
@@ -866,6 +880,147 @@ async def test_base_prompt_leads_the_memory_path_too() -> None:
     # Then the prior history, then the new user turn — order preserved.
     assert [m.content for m in sent if m.role == "user"] == ["earlier question", "what's my name?"]
     assert any(m.role == "assistant" and m.content == "earlier answer" for m in sent)
+
+
+# ── Loop hygiene: repeated calls + error streaks (#524) ───────────────────────
+
+
+def test_canonical_calls_is_order_free_but_arg_sensitive() -> None:
+    a = _tool_call("echo", '{"x": 1, "y": 2}', "c1")
+    b = _tool_call("read", '{"p": 5}', "c2")
+    # The same set of calls in either order canonicalizes identically…
+    assert _canonical_calls([a, b]) == _canonical_calls([b, a])
+    # …and key order inside the arguments doesn't matter either.
+    assert _canonical_calls([_tool_call("echo", '{"y": 2, "x": 1}')]) == _canonical_calls([a])
+    # …but different arguments never collide (paging / per-item calls stay distinct).
+    assert _canonical_calls([_tool_call("echo", '{"x": 2}')]) != _canonical_calls(
+        [_tool_call("echo", '{"x": 1}')]
+    )
+
+
+def test_loop_guard_repeat_verdict_new_then_nudge_then_stop() -> None:
+    guard = _LoopGuard()
+    same = [_tool_call("echo", "{}")]
+    assert guard.repeat_verdict(same) == "new"  # first sight
+    assert guard.repeat_verdict(same) == "nudge"  # immediate repeat → one-shot nudge
+    assert guard.repeat_verdict(same) == "stop"  # a further repeat → stop
+    # The nudge is one-shot per turn: a fresh distinct call is "new", but its own repeat now stops
+    # straight away (the single nudge is already spent) — matching _ANSWER_NUDGE's one-shot rule.
+    assert guard.repeat_verdict([_tool_call("echo", '{"x": 1}')]) == "new"
+    assert guard.repeat_verdict([_tool_call("echo", '{"x": 1}')]) == "stop"
+
+
+def test_loop_guard_error_streak_counts_consecutive_and_resets() -> None:
+    assert _MAX_CONSECUTIVE_TOOL_ERRORS == 3
+    guard = _LoopGuard()
+    assert guard.note_results([True]) is False  # streak 1
+    assert guard.note_results([True]) is False  # streak 2
+    assert guard.note_results([False]) is False  # a success resets the streak to 0
+    assert guard.note_results([True, True]) is False  # 1, 2 within one step
+    assert guard.note_results([True]) is True  # 3 consecutive → stop
+
+
+@pytest.mark.timeout(10)
+async def test_repeated_identical_call_nudges_then_stops() -> None:
+    # The model re-issues the exact same call three times: the first repeat earns a one-shot
+    # nudge, the second stops the turn (repeat_call). The tool runs ONCE — not re-executed each
+    # time (a repeated write would double-apply) — and a real final answer replaces the silent stop.
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="here is the answer"),
+        ]
+    )
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == _STOPPED_REPEAT_CALL
+    assert turn.content == "here is the answer"
+    assert mcp.called == [("echo", {})]  # invoked once, not three times
+    # the one-shot nudge was injected after the first repeat (step 3's convo carries it)
+    assert any(m.role == "user" and m.content == _REPEAT_NUDGE for m in gw.calls[2])
+
+
+@pytest.mark.timeout(10)
+async def test_distinct_args_repeats_are_not_flagged() -> None:
+    # Paging / per-item calls: the same tool with *different* arguments must pass untouched.
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 1}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 2}')]),
+            ChatResult(model="m", content="all pages read"),
+        ]
+    )
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(
+        [ChatMessage(role="user", content="read all")]
+    )
+    assert turn.stopped == "completed"
+    assert turn.content == "all pages read"
+    assert mcp.called == [("echo", {"page": 1}), ("echo", {"page": 2})]  # both ran
+    assert not any(m.role == "user" and m.content == _REPEAT_NUDGE for c in gw.calls for m in c)
+
+
+class _AlwaysFailMcp(_FakeMcp):
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        self.called.append((name, arguments))
+        raise ToolCallError("boom: cannot do that")
+
+
+@pytest.mark.timeout(10)
+async def test_error_streak_stops_early_with_what_failed() -> None:
+    # The model retries variants of a broken call (distinct args, so this is the error-streak
+    # path, not the repeat path). Three consecutive errors stop the turn early (tool_errors)
+    # rather than burning every step, and it answers with what failed.
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"try": 1}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"try": 2}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"try": 3}')]),
+            ChatResult(model="m", content="that didn't work; here's what failed"),
+        ]
+    )
+    mcp = _AlwaysFailMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=10).run(
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == _STOPPED_TOOL_ERRORS
+    assert turn.content == "that didn't work; here's what failed"
+    assert len(mcp.called) == 3  # stopped after the 3rd error, well before max_steps=10
+
+
+class _PickyMcp(_FakeMcp):
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        self.called.append((name, arguments))
+        if arguments.get("ok"):
+            return "worked"
+        raise ToolCallError("boom")
+
+
+@pytest.mark.timeout(10)
+async def test_error_streak_resets_on_a_successful_call() -> None:
+    # A success between errors resets the streak: a turn that errors, recovers, then errors again
+    # (never three in a row) is NOT cut short — no over-eager stopping of an otherwise healthy turn.
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 1}')]),  # err
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 2}')]),  # err
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"ok": 1}')]),  # ok
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 3}')]),  # err
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 4}')]),  # err
+            ChatResult(model="m", content="done despite the bumps"),
+        ]
+    )
+    mcp = _PickyMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=10).run(
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == "completed"
+    assert turn.content == "done despite the bumps"
+    assert len(mcp.called) == 5  # all ran; the success reset the streak so 3-in-a-row never hit
 
 
 # ── Standing profile: static injection, no turn-time embed (#527) ─────────────

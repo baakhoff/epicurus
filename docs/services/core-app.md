@@ -87,6 +87,28 @@ silent "stop". The loop nudges such a step once to commit to an answer, then (if
 nothing, even on the forced final round) substitutes a clear fallback message and logs `turn
 produced no answer; using fallback` with whether the model reasoned and whether it was nudged.
 
+**Loop hygiene — outcome-aware early stops (ADR-0091).** Two tool-call shapes used to burn the
+whole `max_steps` budget and end in the same silent stop: the model re-issuing the **exact same**
+call over and over, and a **streak of tool errors** (retrying a broken call to exhaustion). A small
+`_LoopGuard` wraps the loop (ADR-0001 stays thin — this is outcome-aware *stopping*, not planning),
+applied identically to `run` and `run_stream`:
+
+- **Repeated identical call** — each step's calls are canonicalized to an order-free
+  `(name, sorted-args)` signature; matching the immediately previous step, the **first** repeat gets
+  a one-shot nudge (like the empty-answer nudge) and is **not re-executed** (a repeated *write* would
+  double-apply — the earlier result already stands), and a **further** repeat ends the turn with
+  `stopped="repeat_call"`. Comparing *arguments* leaves a legitimate distinct-args repeat (paging,
+  per-item work) untouched.
+- **Error streak** — three consecutive tool errors end the turn with `stopped="tool_errors"`; **any**
+  success resets the streak, so a turn that errors once and recovers is unaffected.
+
+Either early stop then takes the **same single tool-less final round** `max_steps` already uses, so
+the turn ends with a real answer — "here's what I found / what failed" — never a silent stall. So
+`AgentTurn.stopped` is now one of `completed` · `max_steps` · `repeat_call` · `tool_errors` (plus
+`error` on a mid-stream failure, streaming only); the streamed `done` event carries it for the web
+to key stop-reason copy off. The repeated / errored tool steps stay in the activity timeline (errors
+render red), so the process that led to the cut is visible.
+
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
 **Durable, re-attachable turns (ADR-0055).** A streamed turn runs in a **detached task** (the

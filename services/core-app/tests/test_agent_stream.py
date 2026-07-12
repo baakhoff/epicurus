@@ -14,6 +14,9 @@ from epicurus_core import draft_review
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
     _EMPTY_ANSWER_FALLBACK,
+    _REPEAT_NUDGE,
+    _STOPPED_REPEAT_CALL,
+    _STOPPED_TOOL_ERRORS,
     _STREAM_STALLED_MESSAGE,
     Agent,
     AgentEvent,
@@ -300,10 +303,12 @@ async def test_stream_tool_steps_are_captured_in_activity() -> None:
 
 
 async def test_stream_max_steps_forces_final_answer() -> None:
+    # Distinct args each round, so it's a genuine budget exhaustion (real tool work every step),
+    # not the repeated-call path #524's guard intercepts.
     gw = _FakeStreamGateway(
         [
-            ([], ChatResult(model="m", content="", tool_calls=[_tool_call()])),
-            ([], ChatResult(model="m", content="", tool_calls=[_tool_call()])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"a": 1}')])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"a": 2}')])),
             (["final"], ChatResult(model="m", content="final")),
         ]
     )
@@ -750,3 +755,87 @@ async def test_compose_error_string_does_not_suspend() -> None:
     assert "awaiting_input" not in [e.type for e in events]
     assert events[-1].type == "done"
     assert any(m.role == "tool" and "reconnect Google" in (m.content or "") for m in gw.calls[1])
+
+
+# ── Loop hygiene: same rules as run(), applied to run_stream (#524) ───────────
+
+
+class _CountingMcp(_FakeMcp):
+    """A faked MCP that records each tool invocation (and optionally fails every call)."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(fail=fail)
+        self.calls_made: list[dict[str, Any]] = []
+
+    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        self.calls_made.append(arguments)
+        if self._fail:
+            raise ToolCallError("boom: cannot do that")
+        return "out"
+
+
+@pytest.mark.timeout(10)
+async def test_stream_repeated_identical_call_nudges_then_stops() -> None:
+    # The streamed loop applies the same repeat rule as run(): first repeat nudges, the second
+    # stops (repeat_call), the tool runs once, and a real final answer streams — no silent stop.
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")])),
+            (["the ", "answer"], ChatResult(model="m", content="the answer")),
+        ]
+    )
+    mcp = _CountingMcp()
+    agent = Agent(gateway=gw, mcp=mcp, max_steps=6)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    done = events[-1]
+    assert done.type == "done" and done.turn is not None
+    assert done.turn.stopped == _STOPPED_REPEAT_CALL
+    assert done.turn.content == "the answer"
+    assert len(mcp.calls_made) == 1  # invoked once, not three times
+    # the streamed final answer still reaches the user as deltas (never a silent stop)
+    assert [e.text for e in events if e.type == "delta"] == ["the ", "answer"]
+    # the one-shot repeat nudge was injected after the first repeat (round 3 sees it)
+    assert any(m.role == "user" and m.content == _REPEAT_NUDGE for m in gw.calls[2])
+
+
+@pytest.mark.timeout(10)
+async def test_stream_error_streak_stops_early() -> None:
+    # Three consecutive tool errors (distinct args → the error-streak path, not repeat) stop the
+    # streamed turn early with what failed, rather than exhausting max_steps.
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"try": 1}')])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"try": 2}')])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"try": 3}')])),
+            (["failed"], ChatResult(model="m", content="failed")),
+        ]
+    )
+    mcp = _CountingMcp(fail=True)
+    agent = Agent(gateway=gw, mcp=mcp, max_steps=10)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    done = events[-1]
+    assert done.turn is not None and done.turn.stopped == _STOPPED_TOOL_ERRORS
+    assert done.turn.content == "failed"
+    assert len(mcp.calls_made) == 3  # stopped after the 3rd error, well before max_steps=10
+
+
+@pytest.mark.timeout(10)
+async def test_stream_distinct_args_repeats_pass_untouched() -> None:
+    # Same tool, different args (paging) must stream through untouched — no nudge, no early stop.
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 1}')])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 2}')])),
+            (["all ", "read"], ChatResult(model="m", content="all read")),
+        ]
+    )
+    mcp = _CountingMcp()
+    agent = Agent(gateway=gw, mcp=mcp, max_steps=6)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    done = events[-1]
+    assert done.turn is not None and done.turn.stopped == "completed"
+    assert done.turn.content == "all read"
+    assert len(mcp.calls_made) == 2  # both distinct calls ran
+    assert not any(m.role == "user" and m.content == _REPEAT_NUDGE for c in gw.calls for m in c)

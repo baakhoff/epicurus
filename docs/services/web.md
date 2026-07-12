@@ -453,7 +453,7 @@ sheet (see the PWA install surface section below for the manifest/service-worker
 this) lands here too: the share-target handler calls this same `uploadFiles`, so a shared
 photo gets the identical spinner-pill-then-real-pill treatment as a paste or a drop.
 
-### Reviewing suggested changes (#KB-refactor, ADR-0033)
+### Reviewing suggested changes (#KB-refactor, ADR-0033; edit-before-approve + audit, ADR-0090)
 
 Every agent change to a module's content — the knowledge base **and** private **notes** — is
 **staged for operator review**, never applied directly. The shell surfaces the pending queue in
@@ -480,11 +480,17 @@ special-casing:
 The **review window** (`src/components/SuggestionReviewModal.tsx`) is a core-owned overlay
 shaped by the operation, with three actions — **Approve**, **Reject**, **Ignore**:
 
-- **edit** (`update` / `create` / `append`) → a **diff with per-hunk checkboxes**: each change
-  can be ticked or unticked, the accepted hunks are merged client-side (`src/lib/linediff.ts`)
-  and sent as the approve `{content}` so only the chosen part is written; a `create` also offers
-  a rendered preview. `append` (notes — the agent supplies only the text to add) is content-like:
-  its diff shows the added text, so it reviews per-hunk like any edit.
+- **edit** (`update` / `create` / `append`) → a **diff with per-hunk checkboxes** *plus an
+  editable draft* (ADR-0090): each change can be ticked or unticked, the accepted hunks are
+  merged client-side (`src/lib/linediff.ts`) into a draft textarea the operator can go on to
+  hand-edit directly — "edit anywhere before approving anything," not just accept/reject whole
+  hunks. The draft starts synced to the hunk-merged result and stays that way until the
+  operator types; from then on their free edit wins over further hunk toggling (adjusted
+  during render, not an effect, so toggling a hunk after a manual edit doesn't silently
+  overwrite it). Whatever the draft holds at Approve time is sent as `{content}`; a `create`
+  also offers a rendered preview of the current draft. `append` (notes — the agent supplies
+  only the text to add) is content-like: its diff shows the added text, so it reviews the same
+  way as any edit.
 - **delete** → a confirmation showing the document/note body that will be removed.
 - **move** → a `from → to` confirmation; **new folder** / **new knowledge base** → a simple
   "create this?" confirmation.
@@ -495,6 +501,15 @@ The `ReviewSuggestion` operation enum (`src/lib/contracts.ts`) carries
 Approve/reject post to `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/{action}`
 (the core proxies to the module); these are operator-only — the agent never approves its own
 proposals.
+
+**Recently resolved (ADR-0090).** Below the pending queue, `ReviewView` renders a collapsed
+"Recently resolved (N)" `<details>` panel (empty ⇒ not shown at all) backed by
+`GET /platform/v1/modules/{name}/pages/{page_id}/audit` (`api.reviewAudit`). Each row shows the
+operation, outcome (`approved`/`rejected`), path, and when it was decided; "See what changed"
+expands a read-only diff of `proposed_content` → `applied_content` for an approval (no diff
+toggles — this is history, not a pending decision), or just the original proposal for a
+rejection. This is the operator-visible half of the audit trail the module now records on every
+approve/reject.
 
 The **Suggestions page header** carries a per-module **review on/off** switch — *Review agent
 changes before applying* (#KB-refactor, `src/components/archetypes/ReviewView.tsx`). It reads

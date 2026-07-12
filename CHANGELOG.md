@@ -28,8 +28,23 @@ images to GHCR.
   profile is `edited`) until cleared. Best-effort throughout — no profile is exactly today's
   behavior, a failed synthesis keeps the previous profile. Nightly auto-runs ride the opt-in
   maintenance schedule (`MAINTENANCE_SCHEDULE_ENABLED`) or the manual "run everything" trigger.
-  `core-app` 0.68.0→0.69.0, `web` 0.94.0→0.95.0.
+  `core-app` 0.69.0→0.70.0, `web` 0.95.0→0.96.0.
 
+- **Review: edit the draft before approving, with an audit trail** (#542, ADR-0090) — review
+  surfaces (knowledge's Suggestions, notes' Note suggestions) were approve/reject only; the
+  operator can now hand-edit the proposed content directly in the review window before
+  approving — "edit anywhere before approving anything" — layered on top of the existing
+  per-hunk merge. Approve carries the edited draft back to the module, which writes what was
+  actually approved. Every approve/reject now also records an audit row (the agent's original
+  proposal alongside what was actually applied), visible in a **Recently resolved** panel
+  under the pending queue — the pending queue itself still holds only unresolved suggestions
+  (ADR-0033), so this is the durable trail that survives resolution. The wire contract
+  (`ReviewSuggestion`/`ReviewData`/`ApplyResult`/`ApproveBody`/`ReviewDecision`/
+  `ReviewAuditData`) moves into a shared `epicurus_core.review` module so every review-page
+  adopter — knowledge and notes today, governed playbooks (#525) next — gets
+  edit-before-approve and the audit trail for free instead of reimplementing it. `epicurus-core`
+  0.25.0→0.26.0, `knowledge` 0.21.0→0.22.0, `notes` 0.6.0→0.7.0, `core-app` 0.68.0→0.69.0, `web`
+  0.94.0→0.95.0.
 - **Mail: a full mail client in the shell** (#550, ADR-0087) — mail becomes a first-class
   left-nav page like Files / Calendar / Tasks / Notes, through a new **`mailbox` page
   archetype**: a labels rail with unread counts → a cursor-paginated thread list → the full

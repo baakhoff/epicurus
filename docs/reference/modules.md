@@ -343,11 +343,13 @@ For notes the editor `path` is a Postgres **slug** (not a filesystem path); fold
 persisted so empty folders survive a reload, and a `move` re-keys the slug. The trust
 boundary is still the module — it validates each path.
 
-**The `review` archetype (suggested-changes queue, #220).** A queue of agent-proposed
-changes the operator approves or rejects, each with a server-computed unified diff. Its
-`GET /pages/{id}` returns the pending queue, and it owns two **operator-only** mutation
-endpoints the core proxies (they are deliberately *not* MCP tools — the agent could
-otherwise approve its own proposals):
+**The `review` archetype (suggested-changes queue, #220; edit-before-approve + audit trail,
+ADR-0090).** A queue of agent-proposed changes the operator approves or rejects, each with a
+server-computed unified diff **and an editable draft** — the operator can hand-edit the
+proposed content before approving, not just tick/untick diff hunks; Approve carries whatever
+the operator's draft actually says back to the module. Its `GET /pages/{id}` returns the
+pending queue, and it owns three **operator-only** endpoints the core proxies (approve/reject
+are deliberately *not* MCP tools — the agent could otherwise approve its own proposals):
 
 ```jsonc
 // GET /pages/{id}  →  the pending queue
@@ -366,10 +368,21 @@ otherwise approve its own proposals):
   ]
 }
 // POST /pages/{id}/suggestions/{sid}/approve  →  applies + indexes, drops the row
+// optional body {content} is the operator's edited draft (ADR-0090); absent ⇒ the raw proposal
 { "id": "9f2c…", "status": "approved", "path": "projects/goals.md",
   "operation": "update", "indexed": true }
 // POST /pages/{id}/suggestions/{sid}/reject   →  discards the row, vault untouched
 { "id": "9f2c…", "status": "rejected", "path": "projects/goals.md", "operation": "update" }
+// GET /pages/{id}/audit  →  the resolved-decision history, newest first (ADR-0090)
+{
+  "decisions": [
+    { "id": "9f2c…", "title": "goals", "path": "projects/goals.md", "operation": "update",
+      "origin": "agent", "note": "", "created_at": "2026-06-18T21:30:00+00:00",
+      "decided_at": "2026-06-18T21:32:00+00:00", "decision": "approved",
+      "proposed_content": "…the agent's proposal…",
+      "applied_content": "…what the operator actually approved…" }
+  ]
+}
 ```
 
 Proxied at:
@@ -377,12 +390,24 @@ Proxied at:
 - `GET  /platform/v1/modules/{name}/pages/{id}` (the queue — same proxy as any page)
 - `POST /platform/v1/modules/{name}/pages/{id}/suggestions/{sid}/approve`
 - `POST /platform/v1/modules/{name}/pages/{id}/suggestions/{sid}/reject`
+- `GET  /platform/v1/modules/{name}/pages/{id}/audit` (resolved-decision history, ADR-0090)
 
 The trust boundary is the **author**: agent-initiated changes (the knowledge
 `knowledge_propose_edit` tool) stage a suggestion and land only on approval; direct
 *operator* edits (the editor save, the file-tree CRUD above) stay immediate, since the
 operator is the approver. Knowledge is the first user (ADR-0033); see
 [knowledge](../services/knowledge.md).
+
+**The wire contract lives in `epicurus_core.review`** (ADR-0090): `ReviewSuggestion` /
+`ReviewData` / `ApplyResult` / `ApproveBody` / `ReviewDecision` / `ReviewAuditData` are shared
+Pydantic models every `review`-page module imports, rather than each redefining an identical
+shape — so a new adopter (e.g. governed playbooks, #525) gets edit-before-approve and the
+audit trail for free. Persistence stays per-module (each owns its own `*_suggestions` and
+`*_suggestion_decisions` tables), mirroring the editor version-history precedent (ADR-0046):
+shared code for the wire shape, per-module tables for storage. The audit table is
+append-only and capped per tenant (newest `MAX_DECISIONS` rows, currently 200), pruned on
+each insert — the pending queue drops a row on resolution (ADR-0033: "the queue *is* the set
+of rows"), so the audit table is what actually survives to be reviewed later.
 
 The `calendar` archetype's data shape is a window of events (the shell renders the month /
 week / agenda views and re-fetches as the user navigates). Like the `board`, it is

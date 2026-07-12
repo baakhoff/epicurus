@@ -29,13 +29,15 @@ def _review_platform(store: SuggestionStore, vault: object, vault_path: Path):  
     from epicurus_core import PlatformClient
     from epicurus_knowledge.pages import VaultPages
     from epicurus_knowledge.reader import DiskVaultReader
-    from epicurus_knowledge.suggestions import SuggestionReview
+    from epicurus_knowledge.suggestions import SuggestionAuditStore, SuggestionReview
 
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=True)
     reader = DiskVaultReader(vault_path)
     pages = VaultPages(vault_path, vault, platform=platform, core_prefix="knowledge", reader=reader)  # type: ignore[arg-type]
-    review = SuggestionReview(store, pages, vault, reader=reader, tenant="test")  # type: ignore[arg-type]
+    # Never exercised (no approve/reject here), so an uninitialised store is fine.
+    audit = SuggestionAuditStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    review = SuggestionReview(store, pages, vault, reader=reader, tenant="test", audit=audit)  # type: ignore[arg-type]
     return review, platform, reader
 
 

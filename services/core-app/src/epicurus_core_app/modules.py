@@ -118,8 +118,8 @@ class MoveRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    """Optional approve body (#KB-refactor): the operator's per-hunk-merged content for an
-    edit. Absent ⇒ apply the agent's full proposal."""
+    """Optional approve body: the operator's edited content (ADR-0090) — a free-form edit,
+    a per-hunk merge, or both. Absent ⇒ apply the module's proposal unedited."""
 
     content: str | None = None
 
@@ -1010,8 +1010,8 @@ class ModuleRegistry:
         triggers a write + embed round-trip back through the core. *action* is supplied by
         the core's own route handlers (never the caller), so it needs no segment guard.
 
-        On *approve*, *content* (optional) is the operator's per-hunk-merged result for an
-        edit (#KB-refactor) — forwarded so only the approved part is written.
+        On *approve*, *content* (optional) is the operator's edited result (ADR-0090) —
+        forwarded so the module writes what was actually approved, not the raw proposal.
         """
         _safe_segment(page_id, label="page_id")
         _safe_segment(suggestion_id, label="suggestion_id")
@@ -1026,6 +1026,23 @@ class ModuleRegistry:
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
             return data
+
+    async def review_audit(self, name: str, page_id: str, *, limit: int = 50) -> dict[str, Any]:
+        """Proxy the resolved-decision audit trail for a review page (ADR-0090, #542).
+
+        ``GET /pages/{page_id}/audit`` — what the module proposed vs. what the operator
+        actually approved (including any edit), newest first. Only a ``review`` page
+        exposes this, same gate as :meth:`review_action`.
+        """
+        _safe_segment(page_id, label="page_id")
+        base = await self._resolve_review_page(name, page_id)
+        data: dict[str, Any] = await self._get_json(
+            base,
+            f"/pages/{page_id}/audit",
+            params={"limit": str(limit)},
+            op=f"{name} suggestion audit",
+        )
+        return data
 
     async def read_text(self, name: str, path: str) -> dict[str, Any]:
         """Proxy a module's inline text-read endpoint (#KB-refactor): ``GET /read?path=``.
@@ -1480,6 +1497,13 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     async def reject_suggestion(name: str, page_id: str, suggestion_id: str) -> dict[str, Any]:
         """Reject a staged suggestion: the module discards it, vault untouched (#220)."""
         return await registry.review_action(name, page_id, suggestion_id, "reject")
+
+    @router.get("/{name}/pages/{page_id}/audit")
+    async def get_review_audit(
+        name: str, page_id: str, limit: int = Query(50, ge=1, le=200)
+    ) -> dict[str, Any]:
+        """The resolved-decision audit trail for a review page (#542, ADR-0090)."""
+        return await registry.review_audit(name, page_id, limit=limit)
 
     @router.post("/{name}/pages/{page_id}/send")
     async def send_mailbox_message(name: str, page_id: str, body: MailboxSend) -> dict[str, Any]:

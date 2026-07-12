@@ -221,3 +221,16 @@ async def test_truncate_after_is_tenant_and_session_scoped() -> None:
     assert removed == [a]  # only this tenant's, this session's tail
     assert [m.content for m in await store.messages(tenant="t2", session_id="s")] == ["y"]
     assert [m.content for m in await store.messages(tenant="t1", session_id="other")] == ["z"]
+
+
+async def test_distinct_tenants_lists_every_tenant_with_history() -> None:
+    store, _ = await _fresh_store()
+    await store.append(tenant="t1", session_id="a", role="user", content="hi")
+    await store.append(tenant="t1", session_id="b", role="user", content="again")
+    await store.append(tenant="t2", session_id="a", role="user", content="hi")
+    assert sorted(await store.distinct_tenants()) == ["t1", "t2"]  # deduped across sessions
+
+
+async def test_distinct_tenants_is_empty_with_no_history() -> None:
+    store, _ = await _fresh_store()
+    assert await store.distinct_tenants() == []

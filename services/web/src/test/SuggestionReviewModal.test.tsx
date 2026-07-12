@@ -121,4 +121,38 @@ describe("SuggestionReviewModal", () => {
     expect(mockApprove).not.toHaveBeenCalled();
     expect(mockReject).not.toHaveBeenCalled();
   });
+
+  // ADR-0090: the operator can hand-edit the draft directly, not just tick/untick hunks.
+  it("editing the draft directly overrides the hunk-merged content", async () => {
+    render(
+      <SuggestionReviewModal
+        suggestion={suggestion({ current: "a\nb\n", content: "a\nB\n" })}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+    const draft = screen.getByLabelText(/editable draft/i);
+    fireEvent.change(draft, { target: { value: "a\nhand-typed\n" } });
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() =>
+      expect(mockApprove).toHaveBeenCalledWith("knowledge", "vault", "s1", "a\nhand-typed\n"),
+    );
+  });
+
+  it("a manual edit survives further hunk toggling", async () => {
+    render(
+      <SuggestionReviewModal
+        suggestion={suggestion({ current: "a\nb\n", content: "a\nB\n" })}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+    const draft = screen.getByLabelText(/editable draft/i);
+    fireEvent.change(draft, { target: { value: "hand-typed\n" } });
+    fireEvent.click(screen.getByLabelText(/apply change 1/i)); // untick — would normally re-merge
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() =>
+      expect(mockApprove).toHaveBeenCalledWith("knowledge", "vault", "s1", "hand-typed\n"),
+    );
+  });
 });

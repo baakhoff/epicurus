@@ -14,6 +14,19 @@ images to GHCR.
 
 ### Added
 
+- **Agent: scheduled turns — recurring prompts that run unattended** (#526, ADR-0092) — the
+  agent was purely reactive, needing an HTTP caller or an inbound bridge message for every
+  turn; an operator can now author a prompt with a daily/weekly cadence at a local hour, and
+  it fires on its own, delivering into its own chat session (a fresh session that comes into
+  being — titled from the prompt itself — the moment it first fires). A single background poll
+  loop (not one wake-at-hour task per row, since each row carries its own independently
+  configured hour and rows are created/paused/deleted at runtime) finds due rows each tick and
+  runs them sequentially through the normal headless-turn path, metered under the row's own
+  tenant. Respects power state: a paused runtime skips a due row and records the skip (not a
+  silent no-op, and never a burst of catch-up runs on resume). Settings-surface only (no module
+  UI) — a new **Scheduled turns** card: list, create (prompt + cadence + hour + weekday),
+  enable/disable, delete. `core-app` 0.70.0→0.71.0, `web` 0.96.0→0.97.0.
+
 - **Memory: a standing user profile, synthesized nightly and injected statically** (#527, ADR-0094)
   — recall was top-k vector search over the fact store at *turn time*, so the stable common case
   (who the user is, durable preferences) paid an embedding round-trip and a single-GPU model-swap

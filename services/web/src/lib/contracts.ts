@@ -77,6 +77,24 @@ export type LlmPrefs = z.infer<typeof LlmPrefs>;
 export const TimezonePrefs = z.object({ timezone: z.string() });
 export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 
+/**
+ * A recurring prompt that runs unattended and delivers into its own chat session
+ * (ADR-0092). `weekday` (0=Monday..6=Sunday) is only meaningful for a `"weekly"` cadence.
+ */
+export const ScheduledTurn = z.object({
+  id: z.string(),
+  prompt: z.string(),
+  cadence: z.enum(["daily", "weekly"]),
+  hour: z.number(),
+  weekday: z.number().nullable().default(null),
+  delivery_target: z.string(),
+  enabled: z.boolean(),
+  created_at: z.string(),
+  last_run_at: z.string().nullable().default(null),
+  last_status: z.string().nullable().default(null),
+});
+export type ScheduledTurn = z.infer<typeof ScheduledTurn>;
+
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;

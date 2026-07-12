@@ -231,6 +231,42 @@ the same run) and polls a few seconds apart while one is live. The nightly sched
 
 ---
 
+## Scheduled turns (ADR-0092)
+
+Recurring prompts that run unattended and deliver into their own chat session — a
+Settings-surface CRUD (list/create/pause/delete), not a module page (ADR-0018).
+
+### `GET /platform/v1/scheduled-turns`
+
+The tenant's scheduled turns, oldest first: each as
+`{id, prompt, cadence, hour, weekday, delivery_target, enabled, created_at, last_run_at,
+last_status}`. `cadence` is `"daily"` or `"weekly"`; `weekday` (0=Monday..6=Sunday) is only
+meaningful for `"weekly"`. `last_status` is `"ok"`, `"skipped (paused)"`, or an `"error: …"`
+string; both `last_run_at`/`last_status` are `null` until the turn has fired once.
+
+### `POST /platform/v1/scheduled-turns`
+
+Create one: `{prompt, cadence, hour, weekday?}`. **400** on a blank prompt, an hour outside
+0-23, an unknown cadence, or a `"weekly"` cadence with no (or an out-of-range) `weekday`.
+Mints a fresh session id (`scheduled-<uuid>`) as `delivery_target` — the session comes into
+being, titled from the prompt itself, the moment the turn first fires; there is no separate
+"create session" step or picker for an existing one in v1.
+
+### `POST /platform/v1/scheduled-turns/{id}/enabled`
+
+Pause/resume: `{enabled}`. **404** if `id` is unknown (or belongs to another tenant).
+
+### `DELETE /platform/v1/scheduled-turns/{id}`
+
+Remove it. **204** on success; **404** if unknown.
+
+Driven by the web **Settings → Scheduled turns** card. A background poll loop (not one
+`sleep_until_hour` task per row — see [core-app](../services/core-app.md#scheduled-turns-adr-0092))
+finds due rows each tick and runs them sequentially through the normal headless-turn path
+(`Agent.run`), metered under the row's own tenant.
+
+---
+
 ## Knowledge-base / notes / suggestions endpoints (shell-facing)
 
 These are consumed by the web shell, not the `PlatformClient`. The full module-registry

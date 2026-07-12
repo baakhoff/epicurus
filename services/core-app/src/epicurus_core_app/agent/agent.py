@@ -39,6 +39,7 @@ from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.extraction import FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.memory.profile import StandingProfileStore
 from epicurus_core_app.readiness import Readiness
 
 log = get_logger("epicurus_core_app.agent")
@@ -332,6 +333,7 @@ class Agent:
         suspended: SuspendedRunStore | None = None,
         pending_drafts: PendingDraftStore | None = None,
         instructions: AgentInstructionsStore | None = None,
+        profile: StandingProfileStore | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
@@ -359,6 +361,10 @@ class Agent:
         # Editable base system prompt (#497, ADR-0083). None disables it (the agent runs with no
         # base prompt, as it did before this store existed); resolved per turn in ``_assemble``.
         self._instructions = instructions
+        # Standing user profile (#527, ADR-0094): a compact, nightly-synthesized picture of the
+        # user, injected STATICALLY (no turn-time embed) in ``_assemble``. None disables it (no
+        # profile → exactly today's behavior); best-effort, so a read failure never breaks a turn.
+        self._profile = profile
 
     async def _effective_max_steps(self, tenant_id: str | None) -> int:
         """The active agent loop bound: the stored pref if set, else the env default.
@@ -863,6 +869,36 @@ class Agent:
             return []
         return [ChatMessage(role="system", content=text)] if text.strip() else []
 
+    async def _profile_messages(self, tenant: str) -> list[ChatMessage]:
+        """The tenant's standing profile as a static system block (#527, ADR-0094), or ``[]``.
+
+        The whole point is **no turn-time embedding**: recall pays an embed round-trip (and a
+        single-GPU model-swap risk) every turn for the stable common case, so a nightly job distils
+        that into this compact profile and it is injected verbatim — no vector search on the
+        response path. Sits just after the base prompt and *before* recalled facts: the profile is
+        the durable "who the user is"; recall stays for the long-tail specifics. Best-effort like
+        the rest of memory — no profile, or a read failure, degrades to exactly today's behavior.
+        Applies to headless bridge turns too (ADR-0058), which still assemble through here.
+        """
+        if self._profile is None:
+            return []
+        try:
+            profile = await self._profile.latest(tenant=tenant)
+        except Exception as exc:  # a profile read must never break the turn
+            log.warning("standing-profile read failed; proceeding without it", error=str(exc))
+            return []
+        if profile is None or not profile.content.strip():
+            return []
+        return [
+            ChatMessage(
+                role="system",
+                content=(
+                    "Standing profile of the user (stable background; use it when relevant, "
+                    f"don't recite it):\n{profile.content}"
+                ),
+            )
+        ]
+
     async def _assemble(
         self,
         messages: list[ChatMessage],
@@ -881,11 +917,13 @@ class Agent:
         and nothing new is persisted — the user message is already in history.
 
         The base system prompt (#497) leads every path — the no-memory/headless early return, the
-        assembled convo, and the degraded fallback — so it is always the first message.
+        assembled convo, and the degraded fallback — so it is always the first message; the static
+        standing profile (#527) follows it on every path, ahead of any recalled facts.
         """
         system = await self._system_messages(tenant)
+        profile = await self._profile_messages(tenant)
         if self._memory is None or not session_id:
-            return [*system, *messages]
+            return [*system, *profile, *messages]
         try:
             convo: list[ChatMessage] = []
             history = await self._memory.history(tenant=tenant, session_id=session_id)
@@ -924,10 +962,10 @@ class Agent:
                                 else None
                             ),
                         )
-            return [*system, *convo]
+            return [*system, *profile, *convo]
         except Exception as exc:  # memory is an enhancement, never a hard dependency
             log.warning("memory read failed; proceeding without it", error=str(exc))
-            return [*system, *messages]
+            return [*system, *profile, *messages]
 
     async def _loop(
         self, messages: list[ChatMessage], *, model: str | None, tenant_id: str | None

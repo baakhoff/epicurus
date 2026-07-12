@@ -22,6 +22,7 @@ from epicurus_core_app.maintenance import (
     extraction_drain_job,
     facts_reembed_job,
     module_reindex_job,
+    profile_synthesis_job,
 )
 
 TENANT = "local"
@@ -319,3 +320,12 @@ async def test_facts_reembed_job_reports_count() -> None:
     job = facts_reembed_job(reembed)
     assert job.key == "facts-reembed" and job.nightly is False
     assert await job.run() == ("ok", "re-embedded 3 fact(s)")
+
+
+async def test_profile_synthesis_job_reports_count() -> None:
+    async def synthesize() -> int:
+        return 2
+
+    job = profile_synthesis_job(synthesize)
+    assert job.key == "memory-profile" and job.nightly is True  # light → runs on the nightly batch
+    assert await job.run() == ("ok", "synthesized 2 standing profile(s)")

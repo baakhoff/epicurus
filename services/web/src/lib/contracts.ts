@@ -285,6 +285,26 @@ export const MemoryListing = z.object({
 });
 export type MemoryListing = z.infer<typeof MemoryListing>;
 
+/** One stored version of the user's standing profile (#527, ADR-0094). `source` is "auto"
+ *  (nightly synthesis) or "edited" (an operator correction, which survives re-synthesis). */
+export const StandingProfile = z.object({
+  id: z.number(),
+  content: z.string(),
+  source: z.string().default("auto"),
+  created_at: z.coerce.date().nullish(),
+});
+export type StandingProfile = z.infer<typeof StandingProfile>;
+
+/** The standing profile for the memory view: the current one (or null before first synthesis),
+ *  whether it's a pinned operator edit, and the recent history. */
+export const ProfileView = z.object({
+  profile: StandingProfile.nullish(),
+  source: z.string().nullish(),
+  pinned: z.boolean().default(false),
+  versions: z.array(StandingProfile).default([]),
+});
+export type ProfileView = z.infer<typeof ProfileView>;
+
 export const AgentTurn = z.object({
   content: z.string(),
   tools_used: z.array(z.string()),

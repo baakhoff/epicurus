@@ -18,6 +18,7 @@ from epicurus_core_app.agent.instructions import (
 from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.memory.profile import StandingProfile
 
 
 async def _fresh_instructions(default: str = DEFAULT_AGENT_INSTRUCTIONS) -> AgentInstructionsStore:
@@ -865,3 +866,69 @@ async def test_base_prompt_leads_the_memory_path_too() -> None:
     # Then the prior history, then the new user turn — order preserved.
     assert [m.content for m in sent if m.role == "user"] == ["earlier question", "what's my name?"]
     assert any(m.role == "assistant" and m.content == "earlier answer" for m in sent)
+
+
+# ── Standing profile: static injection, no turn-time embed (#527) ─────────────
+
+
+class _FakeProfile:
+    """A standing-profile store stand-in — returns a fixed profile (or None / an error)."""
+
+    def __init__(self, content: str | None = None, *, fail: bool = False) -> None:
+        self._content = content
+        self._fail = fail
+
+    async def latest(self, *, tenant: str) -> StandingProfile | None:
+        if self._fail:
+            raise RuntimeError("profile db down")
+        if not self._content:
+            return None
+        return StandingProfile(id=1, content=self._content, source="auto")
+
+
+async def test_profile_injected_as_a_static_leading_block() -> None:
+    # The profile is injected as a system block with NO embed — even headless (no session),
+    # where recall never runs. This is the whole point: the common case leaves the response path.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    profile = _FakeProfile("The user lives in Belgrade and prefers metric units.")
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), profile=profile).run(  # type: ignore[arg-type]
+        [ChatMessage(role="user", content="hello")]
+    )
+    assert turn.content == "hi"
+    sent = gw.calls[0]
+    assert sent[0].role == "system" and "Belgrade" in (sent[0].content or "")
+    assert [m.role for m in sent] == ["system", "user"]  # profile block, then the user message
+
+
+async def test_no_profile_is_todays_behavior() -> None:
+    # No stored profile leaves the assembled turn exactly as before — no system block injected.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), profile=_FakeProfile(None)).run(  # type: ignore[arg-type]
+        [ChatMessage(role="user", content="hello")]
+    )
+    assert turn.content == "hi"
+    assert [m.role for m in gw.calls[0]] == ["user"]
+
+
+async def test_profile_precedes_recalled_facts() -> None:
+    # With memory + a session, the static profile leads and the (embedded) recalled facts follow:
+    # both coexist — the profile covers the common case, recall stays for the long-tail specifics.
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    memory = _FakeMemory(recalled=["the user is planning a trip to Rome"])
+    profile = _FakeProfile("The user lives in Belgrade.")
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory, profile=profile)  # type: ignore[arg-type]
+    await agent.run([ChatMessage(role="user", content="where next?")], session_id="s1")
+    systems = [m.content or "" for m in gw.calls[0] if m.role == "system"]
+    assert "Belgrade" in systems[0]  # profile block first
+    assert "Rome" in systems[1]  # recalled-facts block second
+
+
+async def test_profile_read_failure_degrades_to_no_profile() -> None:
+    # A profile read error must never break the turn — proceed without it.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    profile = _FakeProfile("x", fail=True)
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), profile=profile).run(  # type: ignore[arg-type]
+        [ChatMessage(role="user", content="hello")]
+    )
+    assert turn.content == "hi"
+    assert [m.role for m in gw.calls[0]] == ["user"]  # degraded to no profile

@@ -139,6 +139,20 @@ Both take an optional `tenant_id` query param, falling back to the default tenan
 
 ---
 
+## `GET /platform/v1/page-order` · `PUT /platform/v1/page-order`
+
+The operator's drag-and-drop order for left-nav module pages (#543) — purely a shell/nav
+concern (ADR-0018), no module ever reads or writes it. `GET` returns `{order: string[]}`, each
+entry a page's `path` (e.g. `/m/calendar/main`), most-preferred-first; `[]` means no
+preference is set and the nav falls back to its manifest-declared (`nav_order`-then-label)
+default. `PUT {order}` replaces the stored list wholesale — no validation against the current
+module set, since merge semantics (unknown ids append, stale ids are ignored) are resolved
+client-side, not here (`sortByPageOrder` in `src/app/registry.ts`). Both take an optional
+`tenant_id` query param, falling back to the default tenant when omitted. Edited from the web
+**Modules** screen's **Page order** card, never the sidebar itself.
+
+---
+
 ## `GET` · `POST` · `DELETE /platform/v1/llm/saved-models`
 
 The operator's saved hosted-model ids (#496) — a tenant-scoped, durable home for the hosted
@@ -228,6 +242,42 @@ interrupted by app shutdown is discarded, not published. Driven by the web **Set
 Maintenance** card: it rehydrates onto `current_run` on mount (a refresh mid-batch lands back on
 the same run) and polls a few seconds apart while one is live. The nightly schedule runs only
 `nightly` jobs and is off unless `MAINTENANCE_SCHEDULE_ENABLED` is set.
+
+---
+
+## Scheduled turns (ADR-0092)
+
+Recurring prompts that run unattended and deliver into their own chat session — a
+Settings-surface CRUD (list/create/pause/delete), not a module page (ADR-0018).
+
+### `GET /platform/v1/scheduled-turns`
+
+The tenant's scheduled turns, oldest first: each as
+`{id, prompt, cadence, hour, weekday, delivery_target, enabled, created_at, last_run_at,
+last_status}`. `cadence` is `"daily"` or `"weekly"`; `weekday` (0=Monday..6=Sunday) is only
+meaningful for `"weekly"`. `last_status` is `"ok"`, `"skipped (paused)"`, or an `"error: …"`
+string; both `last_run_at`/`last_status` are `null` until the turn has fired once.
+
+### `POST /platform/v1/scheduled-turns`
+
+Create one: `{prompt, cadence, hour, weekday?}`. **400** on a blank prompt, an hour outside
+0-23, an unknown cadence, or a `"weekly"` cadence with no (or an out-of-range) `weekday`.
+Mints a fresh session id (`scheduled-<uuid>`) as `delivery_target` — the session comes into
+being, titled from the prompt itself, the moment the turn first fires; there is no separate
+"create session" step or picker for an existing one in v1.
+
+### `POST /platform/v1/scheduled-turns/{id}/enabled`
+
+Pause/resume: `{enabled}`. **404** if `id` is unknown (or belongs to another tenant).
+
+### `DELETE /platform/v1/scheduled-turns/{id}`
+
+Remove it. **204** on success; **404** if unknown.
+
+Driven by the web **Settings → Scheduled turns** card. A background poll loop (not one
+`sleep_until_hour` task per row — see [core-app](../services/core-app.md#scheduled-turns-adr-0092))
+finds due rows each tick and runs them sequentially through the normal headless-turn path
+(`Agent.run`), metered under the row's own tenant.
 
 ---
 
@@ -335,11 +385,45 @@ control; the agent's equivalent (`knowledge_propose_project`) goes through the r
 Approve a staged suggestion: the module applies + indexes it (ADR-0033). Generic across any
 module that declares a `review` page — both **knowledge** (`page_id: "review"`) and private
 **notes** (`page_id: "review"`) expose this surface. The body is **optional** `{content}` — the
-operator's **per-hunk-merged** result for a content op (an edit, or a notes `append`), forwarded
-so only the approved changes are written; absent ⇒ apply the module's full proposal (for notes,
-the server composes the body — `append` concatenates onto the current note). Operator-only
-(paired with `…/reject`, which discards). **409** for knowledge when the target vault is
-externally owned (watch mode, #232); notes have no external-owner mode.
+operator's **edited draft** (ADR-0090: a free-form edit, a per-hunk merge, or both layered
+together), forwarded so what's written is what the operator actually approved; absent ⇒ apply
+the module's full proposal unedited (for notes, the server composes the body — `append`
+concatenates onto the current note). Operator-only (paired with `…/reject`, which discards).
+**409** for knowledge when the target vault is externally owned (watch mode, #232); notes have
+no external-owner mode. Both approve and reject record a row in the module's resolved-decision
+audit trail (see the next endpoint) before the pending suggestion is dropped from the queue.
+
+### `GET /platform/v1/modules/{name}/pages/{page_id}/audit`
+
+The resolved-decision **audit trail** for a `review` page (ADR-0090): what a module proposed
+vs. what the operator actually approved (or that it was rejected), newest first. Generic across
+any module with a `review` page. Query param `limit` (default 50, 1–200). **404** if the page
+isn't a `review` page or the module is unknown — same gate as approve/reject.
+
+```json
+{
+  "decisions": [
+    {
+      "id": "9f2c…",
+      "title": "goals",
+      "path": "projects/goals.md",
+      "operation": "update",
+      "origin": "agent",
+      "note": "",
+      "created_at": "2026-06-24T10:00:00+00:00",
+      "decided_at": "2026-06-24T10:02:00+00:00",
+      "decision": "approved",
+      "proposed_content": "…the agent's proposal…",
+      "applied_content": "…what the operator actually approved…",
+      "to_path": ""
+    }
+  ]
+}
+```
+
+`applied_content` is empty for a `reject` (nothing was applied) or for a structural op that
+carries no content (`move` / `mkdir` / `mkproject`). Each module retains up to `MAX_DECISIONS`
+(200) rows per tenant, pruned oldest-first on each new decision.
 
 ### `POST /platform/v1/modules/{name}/pages/{page_id}/send`
 

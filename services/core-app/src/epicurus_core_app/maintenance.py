@@ -352,6 +352,24 @@ def module_reindex_job(reembed: Callable[[], Awaitable[list[dict[str, str]]]]) -
     )
 
 
+def profile_synthesis_job(synthesize: Callable[[], Awaitable[int]]) -> MaintenanceJob:
+    """Synthesize each tenant's standing profile from its facts (ADR-0094) — light, nightly-run.
+
+    *synthesize* is :meth:`ProfileSynthesizer.run`; it is best-effort per tenant, skips a paused
+    gateway, and preserves an operator-pinned profile, so this job only reports how many profiles it
+    (re)wrote. Distilling a few hundred tokens per tenant is cheap — the whole point is to pay it
+    off-hours instead of on every turn — so it rides the nightly batch, not the manual-only tier.
+    """
+
+    async def _run() -> tuple[JobStatus, str]:
+        count = await synthesize()
+        return "ok", f"synthesized {count} standing profile(s)"
+
+    return MaintenanceJob(
+        key="memory-profile", label="Memory standing-profile synthesis", run=_run, nightly=True
+    )
+
+
 def facts_reembed_job(reembed: Callable[[], Awaitable[int]]) -> MaintenanceJob:
     """Re-embed the tenant's memory facts (#436) — heavy, so manual-only (``nightly=False``).
 

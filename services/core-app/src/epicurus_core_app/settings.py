@@ -145,6 +145,16 @@ class CoreAppSettings(CoreSettings):
     # finish — at 2s recall timed out on nearly every turn. Raise on slow hardware; lower if the
     # embed model is kept warm.
     memory_recall_timeout_s: float = 4.0
+    # ── Standing profile (ADR-0094) ─────────────────────────────────────────────
+    # A compact per-tenant profile of the user, synthesized from the fact store on the nightly
+    # maintenance batch and injected STATICALLY in _assemble (no turn-time embed) — moving the
+    # common-case recall cost off the response path (the same trade ADR-0051 made for extraction).
+    # Optional dedicated model for the synthesis LLM call (blank = the operator's default chat
+    # model); a small model keeps the nightly pass cheap.
+    memory_profile_model: str = ""
+    # How many past profile versions to retain per tenant (the newest is injected). Mirrors the
+    # editor's MAX_VERSIONS idiom (ADR-0046) — enough to browse/restore, bounded so it can't grow.
+    memory_profile_max_versions: int = 5
     # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
     # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
     # deployment sets its own in the Settings screen (persisted) or via this env.
@@ -159,6 +169,12 @@ class CoreAppSettings(CoreSettings):
     # Local hour (0-23) of the scheduled nightly batch, in the operator's timezone. 4 = 4 AM, an
     # hour after the extraction drain's default so the two never overlap when both are on.
     maintenance_hour: int = 4
+
+    # ── Scheduled turns (ADR-0092) ────────────────────────────────────────────────
+    # How often the scheduler checks for a due row (a plain poll, not one sleep-until-hour task
+    # per row — rows are created/paused/deleted at runtime with independently configured hours).
+    # 60s keeps the worst-case delivery lag under a minute without meaningfully polling Postgres.
+    scheduled_turns_poll_interval_s: int = 60
 
     # ── File space (ADR-0052) ───────────────────────────────────────────────────
     # The core owns the per-tenant user file space behind a swappable backend (constraint #3).

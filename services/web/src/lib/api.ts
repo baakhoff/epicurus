@@ -37,12 +37,16 @@ import {
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
+  PageOrderPrefs,
   PendingSuggestion,
   PlatformInfo,
   PowerStatus,
+  ProfileView,
   ProviderInfo,
   Readiness,
+  ReviewAuditData,
   SavedModelsResponse,
+  ScheduledTurn,
   SessionSummary,
   SystemInfo,
   TimezonePrefs,
@@ -205,6 +209,47 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ timezone }),
     }),
+  // Recurring prompts that run unattended and deliver into their own session (ADR-0092).
+  scheduledTurns: () => request(z.array(ScheduledTurn), "/platform/v1/scheduled-turns"),
+  createScheduledTurn: (body: {
+    prompt: string;
+    cadence: "daily" | "weekly";
+    hour: number;
+    weekday?: number | null;
+  }) =>
+    request(ScheduledTurn, "/platform/v1/scheduled-turns", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  setScheduledTurnEnabled: (id: string, enabled: boolean) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/scheduled-turns/${encodeURIComponent(id)}/enabled`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+  deleteScheduledTurn: async (id: string): Promise<void> => {
+    const response = await epFetch(
+      `/platform/v1/scheduled-turns/${encodeURIComponent(id)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(response.status, detail);
+    }
+  },
+
+  // The operator's drag-and-drop left-nav page order (#543), reordered on the Modules page.
+  pageOrder: () => request(PageOrderPrefs, "/platform/v1/page-order"),
+  setPageOrder: (order: string[]) =>
+    request(PageOrderPrefs, "/platform/v1/page-order", {
+      method: "PUT",
+      body: JSON.stringify({ order }),
+    }),
 
   // The agent's editable base system prompt (#497). GET returns the effective prompt + whether
   // it's the shipped default; PUT sets it, or resets to the default when `instructions` is null.
@@ -287,6 +332,20 @@ export const api = {
   // Forget one remembered fact so it stops being recalled (the conversation is kept).
   forgetMemory: (id: string) =>
     request(z.object({ forgotten: z.number() }), `/platform/v1/agent/memory/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // The standing profile the agent injects each turn (#527) — null before first synthesis.
+  profile: () => request(ProfileView, "/platform/v1/agent/memory/profile"),
+  // Save an operator edit (pinned, survives re-synthesis); a blank body clears it (resume auto).
+  saveProfile: (content: string) =>
+    request(ProfileView, "/platform/v1/agent/memory/profile", {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+  // Clear the profile (all versions); the next nightly synthesis regenerates a fresh one.
+  clearProfile: () =>
+    request(z.object({ cleared: z.number() }), "/platform/v1/agent/memory/profile", {
       method: "DELETE",
     }),
 
@@ -480,6 +539,13 @@ export const api = {
   // The cross-module pending-suggestions feed (#KB-refactor): drives the chat composer
   // bubble and the Suggestions page; each item carries its owning module + page id.
   suggestions: () => request(z.array(PendingSuggestion), `/platform/v1/suggestions`),
+  // The resolved-decision audit trail for a review page (ADR-0090): what was proposed vs.
+  // what was actually approved, including any operator edit.
+  reviewAudit: (name: string, pageId: string, limit = 50) =>
+    request(
+      ReviewAuditData,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/audit?limit=${limit}`,
+    ),
   // Whether a module's agent changes go through review (#KB-refactor). Off ⇒ auto-accept.
   suggestionsEnabled: (module: string) =>
     request(

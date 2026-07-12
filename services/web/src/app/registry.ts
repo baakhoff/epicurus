@@ -80,3 +80,35 @@ export function modulePageNavs(modules: ModuleSnapshot[]): ModulePageNav[] {
 export function reviewPageNavs(modules: ModuleSnapshot[]): ModulePageNav[] {
   return modulePageNavs(modules).filter((p) => p.archetype === "review");
 }
+
+/**
+ * Apply the operator's persisted left-nav order (#543) on top of `modulePageNavs`' default
+ * order. `order` holds each page's `path` (already the unique id every caller keys off),
+ * most-preferred-first. Merge semantics, by construction rather than special-casing:
+ *
+ * - **A page in `order`** sorts by its position there, ahead of every page that isn't.
+ * - **A page not in `order`** (a newly wired module, or one reordering never touched) keeps its
+ *   relative `modulePageNavs` position, appended after every ordered page — it never vanishes.
+ * - **An id in `order` with no matching live page** (a stale entry — the module was removed, or
+ *   the id predates a rename) is simply never looked up; it's inert, not an error.
+ * - **A disabled module's page** is absent from `pages` entirely (`modulePageNavs` already
+ *   filters it out), so it's untouched by this sort. Since `order` is never pruned when a page
+ *   disappears, re-enabling the module restores its old position automatically — no dedicated
+ *   disable/enable bookkeeping needed.
+ *
+ * Relies on `Array.prototype.sort`'s stability (guaranteed since ES2019): two unordered pages
+ * keep the relative order `pages` already arrived in, so their own navOrder/label tiebreak
+ * never needs to be recomputed here.
+ */
+export function sortByPageOrder(pages: ModulePageNav[], order: string[]): ModulePageNav[] {
+  if (order.length === 0) return pages;
+  const rank = new Map(order.map((id, i) => [id, i]));
+  return [...pages].sort((a, b) => {
+    const ra = rank.get(a.path);
+    const rb = rank.get(b.path);
+    if (ra === undefined && rb === undefined) return 0;
+    if (ra === undefined) return 1;
+    if (rb === undefined) return -1;
+    return ra - rb;
+  });
+}

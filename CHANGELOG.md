@@ -28,7 +28,52 @@ images to GHCR.
   constraint #1); best-effort like the rest of memory — the facts half embeds through the
   gateway (constraint #8), so a cold embedder degrades to just the sessions text search (no
   embed) rather than failing the tool call. Results are capped (≤10/source, snippets trimmed)
-  for token discipline — never a raw session dump. `core-app` 0.68.0→0.69.0.
+  for token discipline — never a raw session dump. `core-app` 0.72.0→0.73.0.
+
+- **Agent: scheduled turns — recurring prompts that run unattended** (#526, ADR-0092) — the
+  agent was purely reactive, needing an HTTP caller or an inbound bridge message for every
+  turn; an operator can now author a prompt with a daily/weekly cadence at a local hour, and
+  it fires on its own, delivering into its own chat session (a fresh session that comes into
+  being — titled from the prompt itself — the moment it first fires). A single background poll
+  loop (not one wake-at-hour task per row, since each row carries its own independently
+  configured hour and rows are created/paused/deleted at runtime) finds due rows each tick and
+  runs them sequentially through the normal headless-turn path, metered under the row's own
+  tenant. Respects power state: a paused runtime skips a due row and records the skip (not a
+  silent no-op, and never a burst of catch-up runs on resume). Settings-surface only (no module
+  UI) — a new **Scheduled turns** card: list, create (prompt + cadence + hour + weekday),
+  enable/disable, delete. `core-app` 0.70.0→0.71.0, `web` 0.96.0→0.97.0.
+
+- **Memory: a standing user profile, synthesized nightly and injected statically** (#527, ADR-0094)
+  — recall was top-k vector search over the fact store at *turn time*, so the stable common case
+  (who the user is, durable preferences) paid an embedding round-trip and a single-GPU model-swap
+  risk on **every** turn, for content that barely changes. Now a nightly `profile_synthesis_job`
+  (added to the ADR-0060 maintenance registry, beside the extraction drain) distils each tenant's
+  facts into one compact **standing profile** via a single gateway call, and `Agent._assemble`
+  injects it as a static system block with **no turn-time embed** — moving the common-case cost off
+  the response path (the same trade ADR-0051 made for fact extraction); vector recall stays for the
+  long-tail specifics. Stored per tenant and versioned (`standing_profiles`, last 5 kept). Visible,
+  **editable, and clearable** in the Settings → Memory view (`GET/PUT/DELETE /memory/profile`): an
+  operator edit is **pinned** and survives re-synthesis (the synthesizer skips a tenant whose
+  profile is `edited`) until cleared. Best-effort throughout — no profile is exactly today's
+  behavior, a failed synthesis keeps the previous profile. Nightly auto-runs ride the opt-in
+  maintenance schedule (`MAINTENANCE_SCHEDULE_ENABLED`) or the manual "run everything" trigger.
+  `core-app` 0.69.0→0.70.0, `web` 0.95.0→0.96.0.
+
+- **Review: edit the draft before approving, with an audit trail** (#542, ADR-0090) — review
+  surfaces (knowledge's Suggestions, notes' Note suggestions) were approve/reject only; the
+  operator can now hand-edit the proposed content directly in the review window before
+  approving — "edit anywhere before approving anything" — layered on top of the existing
+  per-hunk merge. Approve carries the edited draft back to the module, which writes what was
+  actually approved. Every approve/reject now also records an audit row (the agent's original
+  proposal alongside what was actually applied), visible in a **Recently resolved** panel
+  under the pending queue — the pending queue itself still holds only unresolved suggestions
+  (ADR-0033), so this is the durable trail that survives resolution. The wire contract
+  (`ReviewSuggestion`/`ReviewData`/`ApplyResult`/`ApproveBody`/`ReviewDecision`/
+  `ReviewAuditData`) moves into a shared `epicurus_core.review` module so every review-page
+  adopter — knowledge and notes today, governed playbooks (#525) next — gets
+  edit-before-approve and the audit trail for free instead of reimplementing it. `epicurus-core`
+  0.25.0→0.26.0, `knowledge` 0.21.0→0.22.0, `notes` 0.6.0→0.7.0, `core-app` 0.68.0→0.69.0, `web`
+  0.94.0→0.95.0.
 - **Mail: a full mail client in the shell** (#550, ADR-0087) — mail becomes a first-class
   left-nav page like Files / Calendar / Tasks / Notes, through a new **`mailbox` page
   archetype**: a labels rail with unread counts → a cursor-paginated thread list → the full

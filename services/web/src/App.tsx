@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
-import { SURFACES, modulePageNavs, type ModulePageNav } from "@/app/registry";
+import { SURFACES, modulePageNavs, sortByPageOrder, type ModulePageNav } from "@/app/registry";
 import { CommandPalette, shortcutLabel } from "@/components/CommandPalette";
 import { CornerStack } from "@/components/CornerStack";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
@@ -187,6 +187,12 @@ export function Shell() {
   // Module-contributed pages join the nav at runtime (ADR-0018): the shell renders
   // them, the modules only declare which archetype + supply data.
   const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
+  // The operator's drag-and-drop left-nav order (#543), set on the Modules page.
+  const pageOrder = useQuery({
+    queryKey: ["page-order"],
+    queryFn: () => api.pageOrder(),
+    staleTime: 30_000,
+  });
 
   // Connection recovery wiring (#494): the `online` event and a return-to-visible tab
   // re-check the always-on queries at once; the down→up flip un-stales everything so
@@ -206,7 +212,10 @@ export function Shell() {
   useAwayFinishedWatch();
   // Review pages are aggregated into the top-level Suggestions inbox (#KB-refactor), so they
   // no longer get their own per-module rail entry.
-  const modulePages = modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review");
+  const modulePages = sortByPageOrder(
+    modulePageNavs(modules.data ?? []).filter((p) => p.archetype !== "review"),
+    pageOrder.data?.order ?? [],
+  );
 
   // The command palette (#491): Ctrl/Cmd+K anywhere (the listener lives in the palette,
   // which is always mounted); the rail button below is its pointer-first doorway.

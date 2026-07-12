@@ -19,10 +19,10 @@ SSE streams pass through unbuffered; a CSP pins the app to its own origin.
 | Screen | What it does |
 | --- | --- |
 | **Chat** | Streaming agent turns (SSE readiness/delta/thinking/tool/done/error) with a warming **readiness bar** (#122) and a step-by-step **activity timeline** of the agent's thinking + tool calls that persists folded with the turn (#121, ADR-0041), session sidebar (cross-chat memory), per-chat model picker (shows each model's **size**), and last-turn **Regenerate** / inline **Edit** controls that re-answer in place (#302). **Durable across a refresh / PWA backgrounding (#376, ADR-0055):** the `sessionId` is persisted so the transcript rehydrates on reload, and an in-flight turn — which keeps running server-side regardless of the connection — is **re-attached** on a dropped stream / reload / tab-resume (`visibilitychange`/`online`) instead of showing a network error; **Stop** cancels it server-side. The re-attach retry (#477) distinguishes an opportunistic **probe** (mount/`visibilitychange`/`online`, with no evidence a turn is even running) from a confirmed **recovery** (a 409 on send, or a stream that dropped mid-turn, or a probe that *did* find a live run before losing it again): only a recovery that exhausts its retry budget shows the "lost connection" banner, with an in-place **Reconnect** action (re-runs the same probe — the transcript endpoint already has the answer, no reload needed); a pure probe that never confirms anything real just gives up quietly, and the next mount/`visibilitychange`/`online` gets a fresh retry budget for free. When the selected local model can't call tools (its `/api/show` capabilities lack `tools`), the composer shows a **"can't use tools — chat only"** hint. When the assistant calls **`ask_user`** to clarify (#360, ADR-0053), the turn pauses and an **inline question + answer input** appears in the live turn; answering resumes it (`POST …/runs/{id}/resume`) and the persisted prompt survives a refresh. When it composes an **outbound email** (draft-first send, ADR-0085/#563), the turn pauses and the draft opens in the **right-panel split-pane** with **Confirm** / **Decline** — the agent never sends on its own; only Confirm transmits, and a refresh re-opens the review pane. The **Conversations list** marks each chat that has an in-flight turn with a subtle **pulsing accent dot** (#396) — the current chat from its own live state, other sessions polled from `GET /agent/active-runs` while the list is open. A session leaving that active set while it isn't the open one reads as **finished while you were away** (#492, one boolean marker per session — no counts, no push notifications): a shell-level watcher (`useAwayFinishedWatch`, `src/stores/chat.ts`, mounted once in `Shell()` alongside `useConnectionWatch`) polls the same `["active-runs"]` query at a steady 15 s regardless of which screen is showing and diffs each result against the previous one — React Query already pauses `refetchInterval` while the tab is hidden, so this costs nothing extra backgrounded. A marked session gets a static (non-pulsing) accent dot + a bolder title in the sheet, the History button picks up the same dot plus an `aria-label` that says so, and the document title gets a `•` prefix (so a backgrounded tab/PWA shows it too) — all three clear the instant that session opens, via the one `openSession` action every entry point (sheet row, palette, hover-card) already funnels through. The **header names the open conversation** (serif title, or an italic *New conversation* placeholder), so switching sessions always shows where you are (#480). The Conversations sheet **groups sessions by recency** (Today / Yesterday / This week / This month / Earlier — `recencyBucket` in `src/lib/format.ts`), offers a **title search** (matches flat-listed while searching), and **never deletes without confirming**; deleting the *open* conversation starts a fresh one rather than leaving an orphaned transcript on screen. Scrolling up to re-read — including during a stream — surfaces a sticky **jump-to-latest** button that re-pins the view. Every assistant turn offers **Copy** (always visible on the latest turn, hover/focus-revealed on earlier ones); copying goes through `src/lib/clipboard.ts`, which falls back to the legacy selection path on plain-HTTP LAN origins where `navigator.clipboard` doesn't exist. A fresh conversation shows **module-aware starter chips** beneath a day-rotating Epicurus quote — a shell-owned mapping keyed by installed (enabled + healthy) module names; a chip fills the composer and focuses it, never sends (#480). |
-| **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. |
+| **Memory** | What epicurus remembers across chats — the cross-chat recall corpus (ADR-0040). Browse it newest-first, **search** to see exactly what surfaces for a topic (real semantic recall), and **forget** any snippet so it stops being recalled; each links back to its source conversation. Atop it sits the **standing profile** (#527, ADR-0094) — a compact picture of the user synthesized overnight from the facts and injected into every chat with no per-turn cost; **edit** it to correct/add (your edit is *pinned* and survives re-synthesis) or **clear** it to resume auto-synthesis, with an `auto`/`your edit` provenance badge. |
 | **Suggestions** | **One inbox** for every module's agent-proposed changes (`GET /platform/v1/suggestions`), grouped by module — each group carries that module's review on/off toggle and its pending changes, each opening the shared review window. Replaces the per-module `review`-archetype nav entries (see **Reviewing suggested changes** below). |
 | **Models** | **Catalog browser** — search and filter the model catalog by **multi-select** tags (General, Code, Multilingual, **Vision**, **Tools**, **Thinking**, Embedding, Small, **Cloud-only** — combined with **AND**, so a model must carry every checked tag; "All" clears them; #389/#571), plus, once the system is known, a **fit-rating filter** (Fits / Tight / Too big — each model's size judged against your hardware; #388); pull with live progress (a freshly pulled model is given a **recommended per-model context window** sized to itself, not the global default; #386). Rows show a **real download size in GB** once the core's tags-page size fill has reached the family (#571) — the fit icon then judges the real size, with the params estimate as fallback. **Cloud-only rows** (no local weights; the family's only upstream tag is a cloud alias) get a `cloud-only` badge in place of Pull and no fit verdict, **by design** — the reason is on the badge's hover/touch title (#571). The list is **fetched from the core** (`GET /platform/v1/llm/catalog`), which parses it from upstream on a schedule (#269), with a bundled offline fallback; the screen shows its provenance. Plus the local model list: each row is a **tap-to-expand disclosure** ([per-model rows](#models--per-model-rows-328)) — collapsed it shows name + `loaded`/`default`/`hidden` badges + a **suitability status icon** (✓ fits / ⚠ tight / ✕ too big, full reason on hover; #327) + **icon-only capability badges** (tools/vision/…, label on hover; #384) + size; expanded it reveals the model's settings inline. **Global embedding default** picker (#214) — modules with no per-module override use it, per-module selections in Modules take precedence — with a **Re-embed everything** action (#332) that rebuilds every embedding-backed module's vectors after a model change (changing the model alone doesn't re-embed existing data); a server-wide **KV-cache type** with a **hardware-aware suggested** pick (q8_0 / q4_0 on tight VRAM, f16 when ample; #329); hosted providers: status + API-key entry (stored core → OpenBao, never in the browser). |
-| **Modules** | Every module's manifest-rendered config form, status, and actions. |
+| **Modules** | Every module's manifest-rendered config form, status, and actions. A **Page order** card (#543) lists every left-nav page across all enabled modules in one flat, drag-and-drop-reorderable list (native HTML5 DnD, mirroring the tasks board, #380) with Up/Down buttons alongside as the keyboard-operable path (WCAG AA) — reordering persists server-side (`page_order`, syncs across devices) and the left nav picks it up immediately. |
 | **Files** | The core-owned file space (ADR-0063) rendered through the `browser` archetype's `BrowserView` with a core-backed source (`/platform/v1/files/{page,search,read,download,move,upload}` + the `entry` delete): directory navigation with breadcrumbs + up-nav, name/path search, split-screen text reader, download, drag-to-move/rename for movable entries. **Upload (#479):** an **Upload** toolbar button puts files **into the directory being viewed** — on phones it opens a bottom-sheet **source menu** (Photo or video → gallery picker, `image/*,video/*` multiple; Camera → `capture="environment"`; Document → bare file input), on wide screens it goes straight to the file dialog, and the listing also accepts **external file drops** — dropped on empty listing space they upload into the current directory, and dropped onto a **folder row** or breadcrumb they upload **into that directory** (#556; the target highlights, and an in-flight internal move-drag is never mistaken for an upload). Multi-file picks upload **sequentially** with a per-file **pill strip** (spinner → done, auto-clearing; a failure pins the server's own 413/415 detail and raises a toast) and the listing refreshes per success, so new entries appear without a reload. Uploads — and moves/renames (#554) — are refused into module-owned folders (`knowledge/…`, `notes/…`): those subtrees stay read-only, the server 400s a move whose destination is a module folder (surfaced as a toast), and a rename typed with a `/` or `\` is rejected inline in the field before it can relocate the file. **Delete (#564):** a **trash** affordance on each deletable row (and in the file preview) removes a file, folder, or object behind the shared **Confirm** — a folder's prompt spells out that everything inside goes (the delete is recursive), and it is a hard delete (no trash/undo). It appears only where the #479 ownership rule allows (`deletable` on the item — broader than `movable`, since directories are deletable too); module-owned subtrees show no button and are refused server-side. |
 | **Settings** | Theme (dark/light/system), **connected accounts** (OAuth client credentials + connect/disconnect), **chat bridges** (connect/disconnect external messaging channels like Discord — a write-only bot token, an on/off switch, and live per-bridge status; #369, ADR-0062 — the card itself only renders once the **messaging module is installed and enabled**, #430), **timezone**, **agent cycles**, **assistant instructions** (the editable base system prompt, #497 — the one long-form editor in Settings, so an unsaved draft **guards against an accidental reload/close** dropping it, #536), platform info, and memory. The connected-account and bridge rows keep their credential/disconnect actions **icon-only** (label via the shared `Tooltip` + `aria-label`) so they never overflow a phone (#393); every field uses the one themed field style (#394). |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
@@ -318,7 +318,8 @@ identical.
 
 A module declares `pages` in its manifest, each naming a core **archetype** —
 `browser` (tree/list + detail), `calendar`, `editor`, `board`. The shell merges the pages
-of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`) and
+of reachable modules into the left nav (`modulePageNavs` in `src/app/registry.ts`), applies
+the operator's saved order on top (`sortByPageOrder`, #543 — see below), and
 renders each at `/m/:module/:pageId` via a first-party screen for that archetype
 (`src/screens/ModulePageScreen.tsx` → `src/components/archetypes/`). `browser` (list +
 detail), `calendar` (month / week / agenda — with per-calendar **visibility toggles** listing
@@ -333,6 +334,21 @@ tap-navigation mobile PWAs can fire (a short debounce on folder taps plus a path
 remount, #428). Page data is fetched through the core proxy
 (`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
 calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
+
+**Left-nav page order (#543).** The operator's drag-and-drop order for these pages is a
+tenant-scoped preference (`GET`/`PUT /platform/v1/page-order`, `{order: string[]}` of each
+page's `path`) — the Modules screen's **Page order** card is the only place it's edited
+(drag rows, or the Up/Down buttons for keyboard access); the sidebar itself stays render-only.
+Purely a shell/nav concern (ADR-0018) — modules never see it, no manifest change. Merge
+semantics live client-side in `sortByPageOrder` (`src/app/registry.ts`), applied on top of
+`modulePageNavs`' default (nav_order-then-label) order: a page named in the preference sorts
+by its position there; a page *not* named (a newly wired module, or one a reorder never
+touched) appends after every named page, in its default relative order — it never
+disappears; a stale id with no matching live page is simply never looked up, so it's inert
+rather than an error. Because the preference is only ever *replaced* by an explicit reorder,
+never pruned when a page is filtered out, a disabled module's remembered position survives
+untouched and is picked back up automatically the moment it's re-enabled — no dedicated
+disable/enable bookkeeping.
 
 Unlike `browser`, a `board` **mutates**: its cards and board carry declarative *actions*,
 each naming one of the module's MCP tools. The shell invokes the tool through the core
@@ -453,7 +469,7 @@ sheet (see the PWA install surface section below for the manifest/service-worker
 this) lands here too: the share-target handler calls this same `uploadFiles`, so a shared
 photo gets the identical spinner-pill-then-real-pill treatment as a paste or a drop.
 
-### Reviewing suggested changes (#KB-refactor, ADR-0033)
+### Reviewing suggested changes (#KB-refactor, ADR-0033; edit-before-approve + audit, ADR-0090)
 
 Every agent change to a module's content — the knowledge base **and** private **notes** — is
 **staged for operator review**, never applied directly. The shell surfaces the pending queue in
@@ -480,11 +496,17 @@ special-casing:
 The **review window** (`src/components/SuggestionReviewModal.tsx`) is a core-owned overlay
 shaped by the operation, with three actions — **Approve**, **Reject**, **Ignore**:
 
-- **edit** (`update` / `create` / `append`) → a **diff with per-hunk checkboxes**: each change
-  can be ticked or unticked, the accepted hunks are merged client-side (`src/lib/linediff.ts`)
-  and sent as the approve `{content}` so only the chosen part is written; a `create` also offers
-  a rendered preview. `append` (notes — the agent supplies only the text to add) is content-like:
-  its diff shows the added text, so it reviews per-hunk like any edit.
+- **edit** (`update` / `create` / `append`) → a **diff with per-hunk checkboxes** *plus an
+  editable draft* (ADR-0090): each change can be ticked or unticked, the accepted hunks are
+  merged client-side (`src/lib/linediff.ts`) into a draft textarea the operator can go on to
+  hand-edit directly — "edit anywhere before approving anything," not just accept/reject whole
+  hunks. The draft starts synced to the hunk-merged result and stays that way until the
+  operator types; from then on their free edit wins over further hunk toggling (adjusted
+  during render, not an effect, so toggling a hunk after a manual edit doesn't silently
+  overwrite it). Whatever the draft holds at Approve time is sent as `{content}`; a `create`
+  also offers a rendered preview of the current draft. `append` (notes — the agent supplies
+  only the text to add) is content-like: its diff shows the added text, so it reviews the same
+  way as any edit.
 - **delete** → a confirmation showing the document/note body that will be removed.
 - **move** → a `from → to` confirmation; **new folder** / **new knowledge base** → a simple
   "create this?" confirmation.
@@ -495,6 +517,15 @@ The `ReviewSuggestion` operation enum (`src/lib/contracts.ts`) carries
 Approve/reject post to `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/{action}`
 (the core proxies to the module); these are operator-only — the agent never approves its own
 proposals.
+
+**Recently resolved (ADR-0090).** Below the pending queue, `ReviewView` renders a collapsed
+"Recently resolved (N)" `<details>` panel (empty ⇒ not shown at all) backed by
+`GET /platform/v1/modules/{name}/pages/{page_id}/audit` (`api.reviewAudit`). Each row shows the
+operation, outcome (`approved`/`rejected`), path, and when it was decided; "See what changed"
+expands a read-only diff of `proposed_content` → `applied_content` for an approval (no diff
+toggles — this is history, not a pending decision), or just the original proposal for a
+rejection. This is the operator-visible half of the audit trail the module now records on every
+approve/reject.
 
 The **Suggestions page header** carries a per-module **review on/off** switch — *Review agent
 changes before applying* (#KB-refactor, `src/components/archetypes/ReviewView.tsx`). It reads

@@ -33,6 +33,8 @@ from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.reader import DiskVaultReader
 from epicurus_knowledge.service import build_module
 from epicurus_knowledge.suggestions import (
+    MAX_DECISIONS,
+    SuggestionAuditStore,
     SuggestionReview,
     SuggestionStore,
     create_review_router,
@@ -160,6 +162,12 @@ async def _store() -> SuggestionStore:
     return store
 
 
+async def _audit_store() -> SuggestionAuditStore:
+    store = SuggestionAuditStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    return store
+
+
 async def _add(
     store: SuggestionStore,
     *,
@@ -251,7 +259,14 @@ async def _review(tmp_path: Path) -> tuple[SuggestionReview, SuggestionStore, _F
     indexer = _FakeIndexer()
     vault = _make_vault(tmp_path)
     pages = _pages(tmp_path, indexer)
-    review = SuggestionReview(store, pages, indexer, reader=DiskVaultReader(vault), tenant=TENANT)
+    review = SuggestionReview(
+        store,
+        pages,
+        indexer,
+        reader=DiskVaultReader(vault),
+        tenant=TENANT,
+        audit=await _audit_store(),
+    )
     return review, store, indexer
 
 
@@ -350,6 +365,7 @@ async def _read_only_review(
         indexer,
         reader=DiskVaultReader(vault),
         tenant=TENANT,
+        audit=await _audit_store(),
         read_only=True,
     )
     return review, store, indexer
@@ -456,7 +472,7 @@ async def test_reject_endpoint_discards(tmp_path: Path) -> None:
 # ── the knowledge_propose_edit tool ───────────────────────────────────────────
 
 
-def _module_with_store(store: SuggestionStore, files_root: Path, *, review_on: bool = True):  # type: ignore[no-untyped-def]
+async def _module_with_store(store: SuggestionStore, files_root: Path, *, review_on: bool = True):  # type: ignore[no-untyped-def]
     from epicurus_core import PlatformClient
     from epicurus_knowledge.module_docs import ModuleDocsIndexer
 
@@ -470,7 +486,9 @@ def _module_with_store(store: SuggestionStore, files_root: Path, *, review_on: b
     module_docs = AsyncMock(spec=ModuleDocsIndexer)
     pages = _pages(files_root, vault_indexer)
     reader = DiskVaultReader(vault)
-    review = SuggestionReview(store, pages, vault_indexer, reader=reader, tenant=TENANT)
+    review = SuggestionReview(
+        store, pages, vault_indexer, reader=reader, tenant=TENANT, audit=await _audit_store()
+    )
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=review_on)
     return build_module(
@@ -492,7 +510,7 @@ def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
 
 async def test_propose_edit_stages_a_suggestion(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_edit",
         {"path": "ideas/new.md", "content": "# Idea\n", "operation": "create"},
@@ -508,7 +526,7 @@ async def test_propose_edit_stages_a_suggestion(tmp_path: Path) -> None:
 
 async def test_propose_edit_rejects_bad_operation(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_edit",
         {"path": "a.md", "content": "x", "operation": "rename"},
@@ -520,7 +538,7 @@ async def test_propose_edit_rejects_bad_operation(tmp_path: Path) -> None:
 
 async def test_propose_edit_rejects_traversal_path(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_edit",
         {"path": "../escape.md", "content": "x", "operation": "create"},
@@ -532,7 +550,7 @@ async def test_propose_edit_rejects_traversal_path(tmp_path: Path) -> None:
 
 async def test_propose_edit_rejects_non_md_path(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_edit",
         {"path": "notes.txt", "content": "x", "operation": "create"},
@@ -547,7 +565,7 @@ async def test_propose_edit_rejects_non_md_path(tmp_path: Path) -> None:
 
 async def test_create_document_stages_a_create_suggestion(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_create_document",
         {"path": "ideas/new.md", "content": "# Idea\n"},
@@ -563,7 +581,7 @@ async def test_create_document_stages_a_create_suggestion(tmp_path: Path) -> Non
 
 async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     (vault_dir(tmp_path) / "existing.md").write_text("# Already here\n", encoding="utf-8")
     content, _ = await module.mcp.call_tool(
         "knowledge_create_document",
@@ -576,7 +594,7 @@ async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
 
 async def test_create_document_applies_directly_when_review_off(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path, review_on=False)
+    module = await _module_with_store(store, tmp_path, review_on=False)
     content, _ = await module.mcp.call_tool(
         "knowledge_create_document",
         {"path": "kb/auto.md", "content": "# Auto\n"},
@@ -587,7 +605,7 @@ async def test_create_document_applies_directly_when_review_off(tmp_path: Path) 
 
 async def test_manifest_declares_review_page(tmp_path: Path) -> None:
     store = await _store()
-    manifest = await _module_with_store(store, tmp_path).manifest()
+    manifest = await (await _module_with_store(store, tmp_path)).manifest()
     review_pages = [p for p in manifest.pages if p.archetype == "review"]
     assert len(review_pages) == 1
     assert review_pages[0].id == "review"
@@ -716,7 +734,7 @@ async def test_approve_endpoint_accepts_content_body(tmp_path: Path) -> None:
 
 async def test_propose_move_stages_suggestion(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_move", {"from_path": "kb/a.md", "to_path": "kb/sub/a.md"}
     )
@@ -731,7 +749,7 @@ async def test_propose_move_stages_suggestion(tmp_path: Path) -> None:
 
 async def test_propose_folder_stages_suggestion(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool("knowledge_propose_folder", {"path": "kb/ideas"})
     _envelope(content)
     rows = await store.list(tenant=TENANT)
@@ -740,7 +758,7 @@ async def test_propose_folder_stages_suggestion(tmp_path: Path) -> None:
 
 async def test_propose_project_stages_suggestion(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool("knowledge_propose_project", {"name": "research"})
     _envelope(content)
     rows = await store.list(tenant=TENANT)
@@ -749,7 +767,7 @@ async def test_propose_project_stages_suggestion(tmp_path: Path) -> None:
 
 async def test_propose_project_rejects_bad_name(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool("knowledge_propose_project", {"name": "a/b"})
     env = _envelope(content)
     assert "cannot propose" in env.text.lower()
@@ -758,7 +776,7 @@ async def test_propose_project_rejects_bad_name(tmp_path: Path) -> None:
 
 async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_edit", {"path": "kb/a.md", "content": "x", "operation": "move"}
     )
@@ -769,7 +787,7 @@ async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None
 
 async def test_propose_rename_stages_a_move(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "b"}
     )
@@ -784,7 +802,7 @@ async def test_propose_rename_stages_a_move(tmp_path: Path) -> None:
 
 async def test_propose_rename_rejects_a_slash(tmp_path: Path) -> None:
     store = await _store()
-    module = _module_with_store(store, tmp_path)
+    module = await _module_with_store(store, tmp_path)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "sub/b"}
     )
@@ -796,7 +814,7 @@ async def test_propose_rename_rejects_a_slash(tmp_path: Path) -> None:
 async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None:
     # With review turned off, the agent's change is applied directly — nothing left pending.
     store = await _store()
-    module = _module_with_store(store, tmp_path, review_on=False)
+    module = await _module_with_store(store, tmp_path, review_on=False)
     content, _ = await module.mcp.call_tool(
         "knowledge_propose_edit",
         {"path": "kb/new.md", "content": "# Auto\n", "operation": "create"},
@@ -805,3 +823,128 @@ async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None
     assert "applied directly" in env.text.lower()
     assert (vault_dir(tmp_path) / "kb" / "new.md").read_text(encoding="utf-8") == "# Auto\n"
     assert await store.list(tenant=TENANT) == []
+
+
+# ── resolved-decision audit trail (ADR-0090, #542) ─────────────────────────────
+
+
+async def test_approve_records_audit_decision_with_edited_content(tmp_path: Path) -> None:
+    # The audit row keeps BOTH the agent's original proposal and what the operator actually
+    # approved — the whole point of an editable draft is that the two may differ.
+    review, store, _ = await _review(tmp_path)
+    (vault_dir(tmp_path) / "kb").mkdir()
+    (vault_dir(tmp_path) / "kb" / "doc.md").write_text("old\n", encoding="utf-8")
+    sid = await _add(store, path="kb/doc.md", operation="update", content="agent proposal\n")
+    await review.approve(sid, content="operator edited\n")
+    audit = (await review.list_audit()).decisions
+    assert len(audit) == 1
+    assert audit[0].id == sid
+    assert audit[0].decision == "approved"
+    assert audit[0].proposed_content == "agent proposal\n"
+    assert audit[0].applied_content == "operator edited\n"
+    assert audit[0].decided_at  # stamped
+
+
+async def test_approve_without_edit_records_proposal_as_applied(tmp_path: Path) -> None:
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="new.md", operation="create", content="# New\n")
+    await review.approve(sid)
+    audit = (await review.list_audit()).decisions
+    assert audit[0].proposed_content == "# New\n"
+    assert audit[0].applied_content == "# New\n"
+
+
+async def test_reject_records_audit_decision_with_no_applied_content(tmp_path: Path) -> None:
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="doc.md", operation="update", content="proposal\n")
+    await review.reject(sid)
+    audit = (await review.list_audit()).decisions
+    assert len(audit) == 1
+    assert audit[0].decision == "rejected"
+    assert audit[0].proposed_content == "proposal\n"
+    assert audit[0].applied_content == ""
+
+
+async def test_structural_approve_records_audit_with_no_content(tmp_path: Path) -> None:
+    # move/mkdir/mkproject carry no content — the audit row still records the decision.
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="research", operation="mkproject")
+    await review.approve(sid)
+    audit = (await review.list_audit()).decisions
+    assert audit[0].decision == "approved"
+    assert audit[0].operation == "mkproject"
+    assert audit[0].applied_content == ""
+
+
+async def test_list_audit_is_newest_first(tmp_path: Path) -> None:
+    review, store, _ = await _review(tmp_path)
+    sid_a = await _add(store, path="a.md", operation="create", content="a\n")
+    await review.approve(sid_a)
+    sid_b = await _add(store, path="b.md", operation="create", content="b\n")
+    await review.approve(sid_b)
+    audit = (await review.list_audit()).decisions
+    assert [d.id for d in audit] == [sid_b, sid_a]
+
+
+async def test_list_audit_is_tenant_scoped() -> None:
+    from datetime import UTC, datetime
+
+    audit_store = await _audit_store()
+    await audit_store.record(
+        tenant="tenant-a",
+        sid="s1",
+        path="a.md",
+        operation="create",
+        origin="agent",
+        note="",
+        proposed_at=datetime.now(UTC),
+        decision="approved",
+        proposed_content="a\n",
+        applied_content="a\n",
+    )
+    assert len(await audit_store.list(tenant="tenant-a")) == 1
+    assert await audit_store.list(tenant="tenant-b") == []
+
+
+async def test_audit_retention_caps_at_max_decisions(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime
+
+    import epicurus_knowledge.suggestions as suggestions_module
+
+    monkeypatch.setattr(suggestions_module, "MAX_DECISIONS", 3)
+    audit_store = await _audit_store()
+    for i in range(5):
+        await audit_store.record(
+            tenant=TENANT,
+            sid=f"s{i}",
+            path=f"{i}.md",
+            operation="create",
+            origin="agent",
+            note="",
+            proposed_at=datetime.now(UTC),
+            decision="approved",
+            proposed_content=str(i),
+            applied_content=str(i),
+        )
+    rows = await audit_store.list(tenant=TENANT, limit=10)
+    assert len(rows) == 3
+    # The newest 3 survive (s4, s3, s2); s0/s1 were pruned.
+    assert [r.id for r in rows] == ["s4", "s3", "s2"]
+
+
+def test_default_max_decisions_is_200() -> None:
+    assert MAX_DECISIONS == 200
+
+
+async def test_review_audit_endpoint_returns_decisions(tmp_path: Path) -> None:
+    review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="note.md", operation="create", content="# Note\n")
+    await review.approve(sid)
+    pages = _pages(tmp_path, indexer)
+    client = _app(review, pages)
+    resp = client.get("/pages/review/audit")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["decisions"]) == 1
+    assert body["decisions"][0]["decision"] == "approved"
+    assert body["decisions"][0]["path"] == "note.md"

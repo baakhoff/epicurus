@@ -1,21 +1,23 @@
 /**
- * The suggestion review overlay (#KB-refactor). Every agent change to the knowledge base
- * is staged for review (ADR-0033); this core-owned window opens over the UI — from the chat
- * composer's suggestion bubble or the Suggestions page — and shows what's needed, shaped by
- * the operation:
- *   - update / create → a diff with per-hunk checkboxes (approve only what you want);
+ * The suggestion review overlay (#KB-refactor, ADR-0090). Every agent change to the
+ * knowledge base is staged for review (ADR-0033); this core-owned window opens over the UI
+ * — from the chat composer's suggestion bubble or the Suggestions page — and shows what's
+ * needed, shaped by the operation:
+ *   - update / create / append → a diff with per-hunk checkboxes, plus an editable draft
+ *     the operator can hand-edit before approving ("edit anywhere before approving
+ *     anything" — ADR-0090);
  *   - delete          → a confirmation showing what will be removed;
  *   - move            → a from → to confirmation;
  *   - mkdir / mkproject → a simple "create this?" confirmation.
- * Three actions: Approve (apply — for an edit, only the accepted hunks), Reject (discard),
- * Ignore (close; it stays pending on the Suggestions page).
+ * Three actions: Approve (apply the current draft — ticked hunks, free edits, or both),
+ * Reject (discard), Ignore (close; it stays pending on the Suggestions page).
  */
 import { useMutation } from "@tanstack/react-query";
 import { Check, FilePlus, FolderPlus, Library, Pencil, Trash2, X } from "lucide-react";
 import { type ComponentType, useMemo, useState } from "react";
 
 import { Markdown } from "@/components/Markdown";
-import { Badge, Button, cn } from "@/components/ui";
+import { Badge, Button, TextArea, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import type { PendingSuggestion } from "@/lib/contracts";
 import { type DiffLine, diffLines, mergeHunks, toHunks } from "@/lib/linediff";
@@ -152,6 +154,20 @@ export function SuggestionReviewModal({
       return next;
     });
 
+  // The editable draft (ADR-0090): defaults to the hunk-merged result and stays synced to
+  // it until the operator types — from then on their free edit wins over further hunk
+  // toggling, since re-deriving from hunks would silently discard what they typed. Adjusted
+  // during render (not an effect) per the React-recommended pattern for state that tracks a
+  // changing value until overridden: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  const hunkMerged = useMemo(() => mergeHunks(diff, accepted), [diff, accepted]);
+  const [draft, setDraft] = useState(hunkMerged);
+  const [syncedMerge, setSyncedMerge] = useState(hunkMerged);
+  const [edited, setEdited] = useState(false);
+  if (!edited && hunkMerged !== syncedMerge) {
+    setSyncedMerge(hunkMerged);
+    setDraft(hunkMerged);
+  }
+
   const resolved = () => {
     onResolved?.();
     onClose();
@@ -160,8 +176,7 @@ export function SuggestionReviewModal({
     toast.error(err instanceof ApiError ? err.detail : "Action failed.");
 
   const approve = useMutation({
-    mutationFn: () =>
-      api.approveSuggestion(module, pageId, id, isEdit ? mergeHunks(diff, accepted) : undefined),
+    mutationFn: () => api.approveSuggestion(module, pageId, id, isEdit ? draft : undefined),
     onSuccess: resolved,
     onError,
   });
@@ -245,11 +260,27 @@ export function SuggestionReviewModal({
                 Tick the changes to apply — unticked changes are left as they are.
               </p>
               <DiffReview diff={diff} accepted={accepted} onToggle={toggle} />
-              {operation === "create" && suggestion.content && (
+              <div className="mt-3">
+                <p className="mb-1 text-xs text-ink-faint">
+                  Edit the draft directly before approving — your edits take over from the
+                  ticked changes above.
+                </p>
+                <TextArea
+                  value={draft}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    setEdited(true);
+                  }}
+                  rows={10}
+                  className="font-mono text-[12px]"
+                  aria-label="Editable draft"
+                />
+              </div>
+              {operation === "create" && draft && (
                 <details className="mt-3">
                   <summary className="cursor-pointer text-xs text-ink-dim">Preview rendered</summary>
                   <div className="mt-2 rounded-(--radius-field) border border-edge p-3">
-                    <Markdown>{suggestion.content}</Markdown>
+                    <Markdown>{draft}</Markdown>
                   </div>
                 </details>
               )}

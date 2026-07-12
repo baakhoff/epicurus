@@ -21,12 +21,19 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, String, Text, func, select
+from sqlalchemy import DateTime, String, Text, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import get_logger
+from epicurus_core.review import (
+    ApplyResult,
+    ApproveBody,
+    ReviewAuditData,
+    ReviewData,
+    ReviewDecision,
+    ReviewSuggestion,
+)
 from epicurus_notes.db import NotesStore
 from epicurus_notes.pages import NotesPages, derive_title
 
@@ -169,42 +176,132 @@ def _to_value(row: _StoredNoteSuggestion) -> NoteSuggestion:
     )
 
 
-# ── review payloads (must match the shared web ReviewData shape) ───────────────
+# ── review payloads (the `review` archetype data shape, ADR-0090) ─────────────
+#
+# ReviewSuggestion / ReviewData / ApplyResult / ApproveBody / ReviewDecision /
+# ReviewAuditData are the shared epicurus-core contract (imported above) — the same shapes
+# knowledge's review page uses, so the core's cross-module feed and the shared web overlay
+# render notes suggestions with no special-casing (they used to be copy-pasted locally).
 
 
-class ReviewSuggestion(BaseModel):
-    """One pending note change, with a server-computed unified diff."""
+# ── suggestion audit trail (ADR-0090) ──────────────────────────────────────────
 
-    id: str
-    title: str
-    path: str  # the note slug
-    operation: str  # create | update | append | delete
-    origin: str
-    note: str = ""
-    created_at: str
-    diff: str
-    to_path: str = ""  # unused for notes — present for shape parity with knowledge
-    current: str = ""
-    content: str = ""
+# Per-tenant retention cap, mirroring the editor version-history MAX_VERSIONS (ADR-0046).
+MAX_DECISIONS = 200
 
 
-class ReviewData(BaseModel):
-    title: str = "Note suggestions"
-    suggestions: list[ReviewSuggestion] = Field(default_factory=list)
+class _NoteAuditBase(DeclarativeBase):
+    pass
 
 
-class ApplyResult(BaseModel):
-    id: str
-    status: str
-    path: str
-    operation: str
-    indexed: bool = False
+class _StoredNoteDecision(_NoteAuditBase):
+    """An immutable audit row for one resolved note suggestion (tenant-scoped, ADR-0090).
+
+    Recorded before the pending row is dropped, pairing what was proposed with what the
+    operator actually approved (including any edit).
+    """
+
+    __tablename__ = "notes_suggestion_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    sid: Mapped[str] = mapped_column(String(32))
+    slug: Mapped[str] = mapped_column(String(512))
+    operation: Mapped[str] = mapped_column(String(16))
+    origin: Mapped[str] = mapped_column(String(64), default="agent")
+    note: Mapped[str] = mapped_column(Text, default="")
+    proposed_content: Mapped[str] = mapped_column(Text, default="")
+    applied_content: Mapped[str] = mapped_column(Text, default="")
+    decision: Mapped[str] = mapped_column(String(16))
+    proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ApproveBody(BaseModel):
-    """Optional approve payload: the operator's per-hunk-merged content for an edit/append."""
+class NoteSuggestionAuditStore:
+    """An append-only, capped audit trail of resolved note suggestions (ADR-0090).
 
-    content: str | None = None
+    Mirrors :class:`epicurus_knowledge.suggestions.SuggestionAuditStore` — one row per
+    approve/reject, retained up to ``MAX_DECISIONS`` per tenant.
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def init(self) -> None:
+        async with self._engine.begin() as conn:
+            await conn.run_sync(_NoteAuditBase.metadata.create_all)
+
+    async def record(
+        self,
+        *,
+        tenant: str,
+        sid: str,
+        slug: str,
+        operation: str,
+        origin: str,
+        note: str,
+        proposed_at: datetime,
+        decision: str,
+        proposed_content: str,
+        applied_content: str,
+    ) -> None:
+        """Append one decision row, then prune anything past the retention cap."""
+        async with self._session() as session:
+            session.add(
+                _StoredNoteDecision(
+                    tenant=tenant,
+                    sid=sid,
+                    slug=slug,
+                    operation=operation,
+                    origin=origin,
+                    note=note,
+                    proposed_content=proposed_content,
+                    applied_content=applied_content,
+                    decision=decision,
+                    proposed_at=proposed_at,
+                )
+            )
+            await session.commit()
+            stale_ids = list(
+                await session.scalars(
+                    select(_StoredNoteDecision.id)
+                    .where(_StoredNoteDecision.tenant == tenant)
+                    .order_by(_StoredNoteDecision.id.desc())
+                    .offset(MAX_DECISIONS)
+                )
+            )
+            if stale_ids:
+                await session.execute(
+                    delete(_StoredNoteDecision).where(_StoredNoteDecision.id.in_(stale_ids))
+                )
+                await session.commit()
+
+    async def list(self, *, tenant: str, limit: int = 50) -> list[ReviewDecision]:
+        """The newest *limit* resolved decisions for *tenant*, most recent first."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredNoteDecision)
+                .where(_StoredNoteDecision.tenant == tenant)
+                .order_by(_StoredNoteDecision.id.desc())
+                .limit(limit)
+            )
+            return [
+                ReviewDecision(
+                    id=row.sid,
+                    title=row.slug,
+                    path=row.slug,
+                    operation=row.operation,
+                    origin=row.origin,
+                    note=row.note,
+                    created_at=row.proposed_at.isoformat(),
+                    decided_at=row.decided_at.isoformat(),
+                    decision=row.decision,
+                    proposed_content=row.proposed_content,
+                    applied_content=row.applied_content,
+                )
+                for row in rows
+            ]
 
 
 def _unified_diff(path: str, before: str, after: str) -> str:
@@ -237,12 +334,20 @@ class NoteSuggestionReview:
     """Renders the note-suggestion queue and applies/discards on the operator's word."""
 
     def __init__(
-        self, store: NoteSuggestionStore, pages: NotesPages, notes: NotesStore, *, tenant: str
+        self,
+        store: NoteSuggestionStore,
+        pages: NotesPages,
+        notes: NotesStore,
+        *,
+        tenant: str,
+        audit: NoteSuggestionAuditStore,
     ) -> None:
         self._store = store
         self._pages = pages
         self._notes = notes
         self._tenant = tenant
+        # Resolved-decision audit trail (ADR-0090) — recorded before a row leaves the queue.
+        self._audit = audit
 
     async def _current_content(self, slug: str) -> str:
         note = await self._notes.get(tenant=self._tenant, slug=slug)
@@ -270,22 +375,41 @@ class NoteSuggestionReview:
         return ReviewData(suggestions=items)
 
     async def approve(self, sid: str, content: str | None = None) -> ApplyResult:
-        """Apply a staged note change, then drop it from the queue. 404 if unknown."""
+        """Apply a staged note change, then drop it from the queue. 404 if unknown.
+
+        Records an audit row (ADR-0090) — the proposal alongside what was actually
+        applied, including any operator edit — before the pending row drops.
+        """
         from fastapi import HTTPException
 
         s = await self._store.get(tenant=self._tenant, sid=sid)
         if s is None:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
         indexed = False
+        applied_content = ""
         if s.operation == "delete":
             await self._pages.delete_doc(s.slug)
         else:
-            # Honour the operator's per-hunk-merged content; else compose from the current body.
+            # Honour the operator's edited content (ADR-0090); else compose from the
+            # current body.
             if content is None:
                 current = await self._current_content(s.slug)
                 content = _compose(s.operation, current, s.proposed_content)
+            applied_content = content
             result = await self._pages.write_doc(s.slug, content)
             indexed = result.indexed
+        await self._audit.record(
+            tenant=self._tenant,
+            sid=sid,
+            slug=s.slug,
+            operation=s.operation,
+            origin=s.origin,
+            note=s.note,
+            proposed_at=s.created_at,
+            decision="approved",
+            proposed_content=s.proposed_content,
+            applied_content=applied_content,
+        )
         await self._store.delete(tenant=self._tenant, sid=sid)
         log.info("note suggestion approved", sid=sid, operation=s.operation, slug=s.slug)
         return ApplyResult(
@@ -293,14 +417,34 @@ class NoteSuggestionReview:
         )
 
     async def reject(self, sid: str) -> ApplyResult:
+        """Discard a suggestion without touching the note. 404 if unknown.
+
+        Records an audit row (ADR-0090) so a rejected proposal stays visible in history.
+        """
         from fastapi import HTTPException
 
         s = await self._store.get(tenant=self._tenant, sid=sid)
         if s is None:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
+        await self._audit.record(
+            tenant=self._tenant,
+            sid=sid,
+            slug=s.slug,
+            operation=s.operation,
+            origin=s.origin,
+            note=s.note,
+            proposed_at=s.created_at,
+            decision="rejected",
+            proposed_content=s.proposed_content,
+            applied_content="",
+        )
         await self._store.delete(tenant=self._tenant, sid=sid)
         log.info("note suggestion rejected", sid=sid, operation=s.operation, slug=s.slug)
         return ApplyResult(id=sid, status="rejected", path=s.slug, operation=s.operation)
+
+    async def list_audit(self, limit: int = 50) -> ReviewAuditData:
+        """The resolved-decision audit trail for this tenant, newest first (ADR-0090)."""
+        return ReviewAuditData(decisions=await self._audit.list(tenant=self._tenant, limit=limit))
 
 
 def validate_note_operation(operation: str) -> str:
@@ -331,17 +475,25 @@ def create_note_review_router(review: NoteSuggestionReview) -> APIRouter:
     async def reject(suggestion_id: str) -> ApplyResult:
         return await review.reject(suggestion_id)
 
+    @router.get("/pages/review/audit", response_model=ReviewAuditData)
+    async def get_audit(limit: int = 50) -> ReviewAuditData:
+        return await review.list_audit(limit=limit)
+
     return router
 
 
 __all__ = [
+    "MAX_DECISIONS",
     "REVIEW_PAGE_ID",
     "ApplyResult",
     "ApproveBody",
     "NoteSuggestion",
+    "NoteSuggestionAuditStore",
     "NoteSuggestionReview",
     "NoteSuggestionStore",
+    "ReviewAuditData",
     "ReviewData",
+    "ReviewDecision",
     "ReviewSuggestion",
     "create_note_review_router",
     "derive_title",

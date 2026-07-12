@@ -167,7 +167,7 @@ write 409s there (#232), **external/watched-vault edits are not versioned in v1*
 in-app editor saves accrue history. Browse the list newest-first; each entry carries an
 opaque `version_id`, the snapshot `title`, its `created_at`, and its `size`.
 
-### Suggestions page (`review` archetype, ADR-0033, #220)
+### Suggestions page (`review` archetype, ADR-0033, #220; edit-before-approve + audit, ADR-0090)
 
 Agent-initiated knowledge-base changes are **staged for review, never applied directly**.
 Every agent write — content (`knowledge_propose_edit`) *and* structural
@@ -180,7 +180,9 @@ A suggestion carries one of six **operations**: `create` / `update` / `delete` (
 ops, with a server-computed unified diff) and `move` / `mkdir` / `mkproject` (structural
 ops, reviewed as a simple confirmation from `path` / `to_path`). The review payload includes
 the full `current` (live document, empty for a create) and `content` (the proposal, empty for
-a delete) so the shell can render a **per-hunk** review of an edit (#KB-refactor).
+a delete) so the shell can render a **per-hunk** review of an edit, plus an **editable draft**
+the operator can hand-edit directly before approving (ADR-0090 — "edit anywhere before
+approving anything"; #KB-refactor shipped the per-hunk merge this builds on).
 
 The **trust boundary is the author**: agent edits route through review; direct *operator*
 edits (the editor save, the file-tree CRUD) stay immediate, since the operator is already the
@@ -212,11 +214,19 @@ the change in Obsidian instead (ADR-0035).
 - `POST /pages/review/suggestions/{id}/approve` — apply the change and drop it from the
   queue: create/update write + re-index; delete unlinks + de-indexes; move relocates +
   re-indexes; mkdir/mkproject create a folder / knowledge base. The body is **optional**
-  `{content}` — the operator's per-hunk-merged result for an edit, so only the accepted
-  changes are written; absent ⇒ apply the agent's full proposal (#KB-refactor).
+  `{content}` — the operator's **edited draft** (ADR-0090: a free-form edit, a per-hunk
+  merge, or both), so what's written is what was actually approved; absent ⇒ apply the
+  agent's full proposal unedited.
 - `POST /pages/review/suggestions/{id}/reject` — discard the suggestion; nothing is touched.
+- `GET /pages/review/audit?limit=` — the resolved-decision **audit trail** (ADR-0090), newest
+  first: each entry pairs the agent's original `proposed_content` with the operator's
+  `applied_content` (empty for a reject, or a content-less structural op), plus `decision`
+  (`approved`/`rejected`) and `decided_at`. `limit` defaults to 50.
 
-Pending suggestions are stored in `knowledge_suggestions` (tenant-scoped — see *Data model*).
+Pending suggestions are stored in `knowledge_suggestions` (tenant-scoped — see *Data model*);
+approve/reject record a row in `knowledge_suggestion_decisions` before dropping the pending
+row, since the queue itself holds only pending suggestions (ADR-0033) — the decisions table
+is the durable trail. Capped at `MAX_DECISIONS` (200) rows per tenant, pruned oldest-first.
 
 ### Attachments (chat-context source, #137)
 
@@ -477,6 +487,12 @@ container user needs read access). `EPICURUS_FILES_ROOT` **replaces** the old pe
   removed on approve (after the change is applied) or reject; the table only ever holds
   pending suggestions. The `to_path` column is added in place at init on a pre-#KB-refactor
   deployment (the store uses `create_all`, no migration tool — mirrors `storage_files`).
+- **Postgres `knowledge_suggestion_decisions`** — resolved-decision audit trail (ADR-0090):
+  `id`, `tenant`, `sid`, `path`, `operation`, `origin`, `note`, `proposed_content`,
+  `applied_content` (empty for a reject or a content-less structural op), `to_path`,
+  `decision` (`approved`/`rejected`), `proposed_at`, `decided_at`. Append-only — recorded
+  before the matching `knowledge_suggestions` row is dropped — and capped at the newest
+  `MAX_DECISIONS` (200) rows per tenant, pruned in the same transaction as each insert.
 - **Postgres `knowledge_versions`** — editor-save content snapshots (#ADR-0046): `id` (PK,
   also the opaque `version_id`), `tenant`, `note_path`, `title`, `content` (Text — full
   snapshot), `created_at`; indexed on `(tenant, note_path)`. One row per distinct save
@@ -526,7 +542,7 @@ Package `epicurus_knowledge`:
 | `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). The one path that still reads the disk directly — inotify has no file-API analogue — so it (and the reads it triggers) run only in **watch mode**, where the vault is a disk mount (#346/ADR-0070). Started by `app.py` when `VAULT_WATCH=true`. |
 | `service.py` | MCP tools — read-only navigation (`knowledge_search` → entity-ref chips, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`), `knowledge_reindex`, and the write tools that stage suggestions (`knowledge_create_document` (create), `knowledge_propose_edit` update/delete, `knowledge_propose_move`, `knowledge_propose_rename` (rename-in-place → a `move` suggestion), `knowledge_propose_folder`, `knowledge_propose_project` — #KB-refactor / #220) + manifest UI + the `editor` and `review` page specs. |
 | `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` **reads** through a `VaultReader` (the file API by default — #346/ADR-0070; a `DiskVaultReader` for the bundled `__docs__` scope) and **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>` — #356/ADR-0064); `create_pages_router` registers the HTTP endpoints. `move_item` relocates the file then calls the indexer's `move_path` to keep the ledger + Qdrant in step (#470) — before this fix only the suggestion-approval path re-indexed a move. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |
-| `suggestions.py` | The `review` page surface (#220, ADR-0033): the `knowledge_suggestions` store (with the added `to_path` column), `SuggestionReview` (diff + apply on approve / discard on reject, across create/update/delete/move/mkdir/mkproject; approve takes optional per-hunk `content` — #KB-refactor), and `create_review_router`. The review diff reads the current content through a `VaultReader` (#346/ADR-0070); apply writes through the core file API like the editor save (#356/ADR-0064). Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
+| `suggestions.py` | The `review` page surface (#220, ADR-0033; edit-before-approve + audit, ADR-0090): the `knowledge_suggestions` store (with the added `to_path` column), `SuggestionReview` (diff + apply on approve / discard on reject, across create/update/delete/move/mkdir/mkproject; approve takes optional edited `content`), the `knowledge_suggestion_decisions` audit store (`SuggestionAuditStore`, capped at `MAX_DECISIONS`), and `create_review_router`. The shared wire contract (`ReviewSuggestion`/`ReviewData`/`ApplyResult`/`ApproveBody`/`ReviewDecision`/`ReviewAuditData`) is imported from `epicurus_core.review`, not locally redefined. The review diff reads the current content through a `VaultReader` (#346/ADR-0070); apply writes through the core file API like the editor save (#356/ADR-0064). Approve/reject are operator-only — never MCP tools; `read_only` (watch mode, #232) 409s approve. |
 | `reader.py` | The vault **read** seam (#346, ADR-0070): `VaultReader` (`list_dir`/`read_text`/`stat` + the shared recursive `projects`/`tree`/`md_entries` walks) with two backends — `ApiVaultReader` (the default: reads through `PlatformClient.files_*`, no `/data` mount) and `DiskVaultReader` (the bundled `/docs`, and the watch-mode vault). Every read site consumes this instead of the filesystem. |
 | `refs.py` | Opaque document refs (base64url `source:path`) + path-safety boundaries: `safe_relative`/`safe_dir_relative`/`safe_project` (resolve against a real root — used by the disk reader + write path) and the filesystem-independent `safe_vault_rel`/`safe_vault_dir_rel` (validate a vault-relative `.md` / dir path and return clean posix — used by the read sites over the file API). |
 | `attachments.py` | The attachment source (#137): vault-doc picker + resolve (`VaultAttachments`), reading through the `VaultReader`. |

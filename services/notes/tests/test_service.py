@@ -16,7 +16,11 @@ from epicurus_notes.db import NotesStore
 from epicurus_notes.indexer import NotesIndexer
 from epicurus_notes.pages import NotesPages
 from epicurus_notes.service import SAVED_SUBJECT, build_module
-from epicurus_notes.suggestions import NoteSuggestionReview, NoteSuggestionStore
+from epicurus_notes.suggestions import (
+    NoteSuggestionAuditStore,
+    NoteSuggestionReview,
+    NoteSuggestionStore,
+)
 
 
 def _module() -> EpicurusModule:
@@ -24,7 +28,8 @@ def _module() -> EpicurusModule:
     # manifest()/tool listing don't touch the DB, so uninitialised stores are fine here.
     store, sugg = NotesStore(engine), NoteSuggestionStore(engine)
     pages = NotesPages(store, AsyncMock(spec=NotesIndexer), tenant="test")
-    review = NoteSuggestionReview(sugg, pages, store, tenant="test")
+    audit = NoteSuggestionAuditStore(engine)  # never exercised (no approve/reject here)
+    review = NoteSuggestionReview(sugg, pages, store, tenant="test", audit=audit)
     platform = AsyncMock(spec=PlatformClient)
     platform.get_suggestions_enabled = AsyncMock(return_value=True)
     return build_module(store, sugg, review, platform, tenant="test")

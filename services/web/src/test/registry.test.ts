@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { modulePageNavs, modulePagePath, reviewPageNavs } from "@/app/registry";
+import { modulePageNavs, modulePagePath, reviewPageNavs, sortByPageOrder } from "@/app/registry";
 import { ModuleSnapshot } from "@/lib/contracts";
 
 function snapshot(
@@ -69,5 +69,53 @@ describe("reviewPageNavs", () => {
     ]);
     expect(down).toEqual([]);
     expect(off).toEqual([]);
+  });
+});
+
+describe("sortByPageOrder (#543)", () => {
+  const modules = [
+    snapshot("a", true, [{ id: "p", title: "Alpha", nav_order: 10 }]),
+    snapshot("b", true, [{ id: "p", title: "Beta", nav_order: 20 }]),
+    snapshot("c", true, [{ id: "p", title: "Gamma", nav_order: 30 }]),
+  ];
+  const [a, b, c] = modulePageNavs(modules);
+
+  it("returns the default order unchanged when no preference is set", () => {
+    expect(sortByPageOrder(modulePageNavs(modules), [])).toEqual([a, b, c]);
+  });
+
+  it("sorts ordered pages by their position in the preference (ordered ∪ ...)", () => {
+    const result = sortByPageOrder(modulePageNavs(modules), [c.path, a.path, b.path]);
+    expect(result.map((p) => p.label)).toEqual(["Gamma", "Alpha", "Beta"]);
+  });
+
+  it("appends a page missing from the preference after every ordered page, never hiding it (... ∪ unknown ∪ ...)", () => {
+    // Only "b" has an explicit preference; "a" and "c" are unknown to it and keep their
+    // modulePageNavs-relative order (nav_order 10 < 30), appended after "b".
+    const result = sortByPageOrder(modulePageNavs(modules), [b.path]);
+    expect(result.map((p) => p.label)).toEqual(["Beta", "Alpha", "Gamma"]);
+  });
+
+  it("ignores a stale id with no matching live page, as inert rather than fatal (... ∪ stale)", () => {
+    const result = sortByPageOrder(modulePageNavs(modules), [
+      "/m/ghost/gone",
+      c.path,
+      a.path,
+      b.path,
+    ]);
+    expect(result.map((p) => p.label)).toEqual(["Gamma", "Alpha", "Beta"]);
+  });
+
+  it("restores a page's remembered position once its module is re-enabled", () => {
+    const order = [c.path, a.path, b.path];
+    // "b"'s module goes down: modulePageNavs no longer yields it, but its id stays in `order`
+    // untouched (the store is never pruned) — sortByPageOrder simply has nothing to place it at.
+    const disabled = [modules[0], snapshot("b", false, [{ id: "p", title: "Beta" }]), modules[2]];
+    const whileDown = sortByPageOrder(modulePageNavs(disabled), order);
+    expect(whileDown.map((p) => p.label)).toEqual(["Gamma", "Alpha"]);
+    // Back up: "b" reappears at exactly its old position, third in `order`, with no special
+    // re-enable handling required.
+    const backUp = sortByPageOrder(modulePageNavs(modules), order);
+    expect(backUp.map((p) => p.label)).toEqual(["Gamma", "Alpha", "Beta"]);
   });
 });

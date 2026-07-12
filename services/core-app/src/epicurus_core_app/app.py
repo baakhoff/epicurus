@@ -97,6 +97,8 @@ from epicurus_core_app.modules import (
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.object_backend import StorageObjectBackend
+from epicurus_core_app.page_order_prefs import PageOrderStore
+from epicurus_core_app.page_order_routes import create_page_order_router
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.scheduled_turns import ScheduledTurnScheduler, ScheduledTurnStore
@@ -206,6 +208,9 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # The operator's drag-and-drop left-nav page order (#543): one row per tenant, syncing
+    # across devices. Resolved/merged client-side (ADR-0018) — this store is opaque storage.
+    page_order_prefs = PageOrderStore(engine)
     # Recurring prompts that run unattended and deliver into a session (ADR-0092): the
     # tenant-scoped row store; the scheduler poll loop is built below, once `agent` exists.
     scheduled_turns = ScheduledTurnStore(engine)
@@ -416,6 +421,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
         try:
+            await page_order_prefs.init()
+        except Exception as exc:
+            log.error("page-order prefs init failed; nav reorder disabled", error=str(exc))
+        try:
             await agent_instructions.init()
         except Exception as exc:
             log.error("agent instructions init failed; using the default prompt", error=str(exc))
@@ -571,6 +580,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         create_timezone_router(timezone_prefs, default_tenant=settings.default_tenant_id)
+    )
+    app.include_router(
+        create_page_order_router(page_order_prefs, default_tenant=settings.default_tenant_id)
     )
     app.include_router(
         create_instructions_router(agent_instructions, default_tenant=settings.default_tenant_id)

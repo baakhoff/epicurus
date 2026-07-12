@@ -77,6 +77,10 @@ export type LlmPrefs = z.infer<typeof LlmPrefs>;
 export const TimezonePrefs = z.object({ timezone: z.string() });
 export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 
+/** The operator's stored left-nav page order (#543) — `order` is `[]` when unset. */
+export const PageOrderPrefs = z.object({ order: z.array(z.string()) });
+export type PageOrderPrefs = z.infer<typeof PageOrderPrefs>;
+
 /**
  * A recurring prompt that runs unattended and delivers into its own chat session
  * (ADR-0092). `weekday` (0=Monday..6=Sunday) is only meaningful for a `"weekly"` cadence.

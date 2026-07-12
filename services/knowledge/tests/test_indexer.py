@@ -36,7 +36,7 @@ def _module_for(vault_indexer: Any, docs_indexer: Any, module_docs: Any, vault: 
     from epicurus_knowledge.pages import VaultPages
     from epicurus_knowledge.reader import DiskVaultReader
     from epicurus_knowledge.service import build_module
-    from epicurus_knowledge.suggestions import SuggestionReview
+    from epicurus_knowledge.suggestions import SuggestionAuditStore, SuggestionReview
 
     store = _suggestions()
     platform = AsyncMock(spec=PlatformClient)
@@ -48,7 +48,11 @@ def _module_for(vault_indexer: Any, docs_indexer: Any, module_docs: Any, vault: 
     pages = VaultPages(
         vault, vault_indexer, platform=platform, core_prefix="knowledge", reader=reader
     )
-    review = SuggestionReview(store, pages, vault_indexer, reader=reader, tenant=TENANT)
+    # Never exercised (no approve/reject here), so an uninitialised store is fine.
+    audit = SuggestionAuditStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    review = SuggestionReview(
+        store, pages, vault_indexer, reader=reader, tenant=TENANT, audit=audit
+    )
     return build_module(
         vault_indexer,
         docs_indexer,

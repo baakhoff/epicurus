@@ -40,8 +40,10 @@ import {
   PendingSuggestion,
   PlatformInfo,
   PowerStatus,
+  ProfileView,
   ProviderInfo,
   Readiness,
+  ReviewAuditData,
   SavedModelsResponse,
   ScheduledTurn,
   SessionSummary,
@@ -324,6 +326,20 @@ export const api = {
       method: "DELETE",
     }),
 
+  // The standing profile the agent injects each turn (#527) — null before first synthesis.
+  profile: () => request(ProfileView, "/platform/v1/agent/memory/profile"),
+  // Save an operator edit (pinned, survives re-synthesis); a blank body clears it (resume auto).
+  saveProfile: (content: string) =>
+    request(ProfileView, "/platform/v1/agent/memory/profile", {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+  // Clear the profile (all versions); the next nightly synthesis regenerates a fresh one.
+  clearProfile: () =>
+    request(z.object({ cleared: z.number() }), "/platform/v1/agent/memory/profile", {
+      method: "DELETE",
+    }),
+
   // `refresh: true` bypasses the core's short-TTL probe cache for a fleet-wide re-probe —
   // the Modules page's manual refresh (#478); the default read serves from cache.
   modules: (opts?: { refresh?: boolean }) =>
@@ -514,6 +530,13 @@ export const api = {
   // The cross-module pending-suggestions feed (#KB-refactor): drives the chat composer
   // bubble and the Suggestions page; each item carries its owning module + page id.
   suggestions: () => request(z.array(PendingSuggestion), `/platform/v1/suggestions`),
+  // The resolved-decision audit trail for a review page (ADR-0090): what was proposed vs.
+  // what was actually approved, including any operator edit.
+  reviewAudit: (name: string, pageId: string, limit = 50) =>
+    request(
+      ReviewAuditData,
+      `/platform/v1/modules/${encodeURIComponent(name)}/pages/${encodeURIComponent(pageId)}/audit?limit=${limit}`,
+    ),
   // Whether a module's agent changes go through review (#KB-refactor). Off ⇒ auto-accept.
   suggestionsEnabled: (module: string) =>
     request(

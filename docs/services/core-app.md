@@ -52,6 +52,9 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/runs/{run_id}/stream?after_seq=N` | **Re-attach** to an in-flight turn (ADR-0055), replaying buffered events after `N` (or `Last-Event-ID`) then tailing live — same SSE protocol as `/chat/stream`, no readiness prelude. A `gone` event if the run is unknown / finished-and-reaped (the client then falls back to the durable transcript). Note: this `run_id` is a **live-run** id (in-memory, for re-attach), distinct from the suspended-run id used by `/resume`. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
+| `GET /platform/v1/agent/memory/profile` | The **standing profile** the agent injects each turn (#527, ADR-0094). Returns `{profile, source, pinned, versions}` — `profile` is `null` before first synthesis (the agent then behaves exactly as before); `source` is `auto` (nightly synthesis) or `edited`; `pinned` flags an operator edit that survives re-synthesis; `versions` is the recent history. Backs the **Settings → Memory** standing-profile panel. Declared **before** `/memory/{id}` so a DELETE isn't captured as "forget the fact `profile`". |
+| `PUT /platform/v1/agent/memory/profile` | Save an operator edit (`{content}`) — stored as an `edited`, **pinned** version the nightly synthesizer won't clobber. A blank body **clears** the profile (resume auto-synthesis), same as DELETE. |
+| `DELETE /platform/v1/agent/memory/profile` | Clear the profile (all versions); the next nightly synthesis regenerates a fresh `auto` one. Returns `{cleared}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
 | `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. |
 
@@ -414,8 +417,9 @@ down produces no repeat log.
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 | `GET /platform/v1/modules/{name}/read?path=…` | Proxy an **editor** module's `GET /read` text-file endpoint for its split-screen reader (knowledge, notes): `{path, name, content}`. Upstream 4xx pass through (415 binary, 413 too large, 404 missing); an unreachable module is a controlled **502**. (The unified **Files** read is core-owned at `GET /platform/v1/files/read` — ADR-0063; see [file space](../reference/files.md).) |
 | `POST /platform/v1/modules/{name}/pages/{page_id}/project?project=…` | Create a new knowledge base (project / top-level scope) in an editor page's store (#KB-refactor). 409 if it exists, 400 for an invalid name; the module enforces name-safety. |
-| `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve` | Approve a staged suggestion — the module applies + indexes it (#220, ADR-0033). Optional `{content}` body is the operator's **per-hunk-merged** result for an edit, forwarded so only the approved changes are written (#KB-refactor). Operator-only. |
-| `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/reject` | Reject a staged suggestion — the module discards it, nothing written (#220). Operator-only. |
+| `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/approve` | Approve a staged suggestion — the module applies + indexes it (#220, ADR-0033). Optional `{content}` body is the operator's **edited draft** (ADR-0090 — a free-form edit, a per-hunk merge, or both), forwarded so what's written is what was actually approved; absent ⇒ apply the module's proposal unedited. Operator-only. Records a row in the module's audit trail before dropping the pending suggestion. |
+| `POST /platform/v1/modules/{name}/pages/{page_id}/suggestions/{id}/reject` | Reject a staged suggestion — the module discards it, nothing written (#220). Operator-only. Also records an audit row (ADR-0090). |
+| `GET /platform/v1/modules/{name}/pages/{page_id}/audit?limit=` | The resolved-decision **audit trail** for a `review` page (ADR-0090): what the module proposed vs. what the operator actually approved (or that it was rejected), newest first. `limit` defaults to 50 (1–200). Same 404 gate as approve/reject (only a `review` page exposes it). |
 | `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 | `GET /platform/v1/calendar-feed?start=&end=` | **Cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items (e.g. open tasks with a due date) from every enabled, healthy module — each stamped with its owning `module`. **Not a manifest-declared capability** — probes every module for `GET {base}/calendar-feed?start=&end=` and skips it on a 404/unreachable, the same best-effort tolerance `/suggestions` already relies on, so a module opts in purely by serving the path (`tasks` is the first). Item shape: `{id, title, date, status, ref_id, kind}` (`date` a floating `YYYY-MM-DD`, `end` exclusive — ADR-0023's own range convention; `kind` + `ref_id` + the stamped `module` route a click to that module's existing `GET /resolve/{kind}/{ref_id}` hover-card, ADR-0019 — no new UI contract). Backs the calendar page's read-only task-due-date overlay. (Lives at `/platform/v1/calendar-feed`, not under `/modules`.) |
 
@@ -469,13 +473,15 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Three
+registers by being added to the list; the run / route / schedule machinery is unchanged. Four
 ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
-deferred-extraction queue, ADR-0051), the **module re-index** fan-out (heavy, manual-only — the
-same `reembed` fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
-`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
-single GPU) and each is contained: one job's failure becomes an `error` result, never aborting
-the rest.
+deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light, nightly-eligible
+— `ProfileSynthesizer.run` distils each tenant's facts into its statically-injected profile,
+ADR-0094), the **module re-index** fan-out (heavy, manual-only — the same `reembed` fan-out as
+above), and **memory facts re-embed** (heavy, manual-only — calls `UserFactStore.reembed_all` for
+the default tenant, #436). Jobs run **sequenced** (gentle on a single GPU) and each is contained:
+one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs are opt-in
+(`MAINTENANCE_SCHEDULE_ENABLED`); the manual "run everything" trigger is always available.
 
 A batch runs as a **detached background task**, decoupled from the request that started it (#561)
 — the same shape as chat turns (`agent/live_runs.py`, #376). `POST /run` starts it and returns
@@ -591,6 +597,8 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `MEMORY_EXTRACTION_MODEL` | — | Optional small dedicated model for the extraction call (e.g. `llama3.2:3b`); blank = the default chat model. |
 | `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
 | `MEMORY_RECALL_TIMEOUT_S` | `4.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). 4s (was 2s) fits a single-GPU embed-model swap. |
+| `MEMORY_PROFILE_MODEL` | `""` | Optional dedicated model for the nightly **standing-profile** synthesis (ADR-0094); blank = the operator's default chat model. A small model keeps the pass cheap. |
+| `MEMORY_PROFILE_MAX_VERSIONS` | `5` | How many past standing-profile versions to retain per tenant (the newest is injected). |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
@@ -686,6 +694,15 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   the `ExtractionRunner` drains it once a day (at `MEMORY_EXTRACTION_HOUR` in the operator's
   timezone), serially, so extraction never competes with a live turn for the GPU. Drained rows
   are deleted; because the queue is durable, a restart never loses a pending exchange.
+- **Postgres `standing_profiles`** — the compact per-tenant **standing profile** the agent injects
+  each turn (#527, ADR-0094): `id`, `tenant`, `content`, `source` (`auto` | `edited`), `created_at`.
+  Append-only and **versioned** — each write keeps the last `MEMORY_PROFILE_MAX_VERSIONS` (5) per
+  tenant, newest injected (the ADR-0046 snapshot idiom). Synthesized on the nightly **maintenance
+  batch** (`profile_synthesis_job`, ADR-0060) from the fact store via one gateway call, and injected
+  **statically** in `_assemble` with no turn-time embed — moving the common-case recall cost off the
+  response path (the ADR-0051 trade, now for the profile). An operator edit is stored `edited` and
+  **pinned**: synthesis skips a tenant whose current profile is `edited`, so a correction survives
+  re-synthesis until the operator clears it.
 
 Memory is **best-effort**: if Postgres, Qdrant, or the embedder is down, a turn still
 answers — just without memory — and never blocks core startup. Recall (the one memory step left

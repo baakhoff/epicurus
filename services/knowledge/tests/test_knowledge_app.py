@@ -67,7 +67,11 @@ def _module():  # type: ignore[no-untyped-def]
     from epicurus_knowledge.pages import VaultPages
     from epicurus_knowledge.reader import DiskVaultReader
     from epicurus_knowledge.service import build_module
-    from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore
+    from epicurus_knowledge.suggestions import (
+        SuggestionAuditStore,
+        SuggestionReview,
+        SuggestionStore,
+    )
 
     store = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
     vault = _indexer_stub()
@@ -76,6 +80,8 @@ def _module():  # type: ignore[no-untyped-def]
     # Manifest-only test — no vault read/write happens, so the mocked platform satisfies the
     # VaultPages file-API client requirement and the reader is never exercised.
     reader = DiskVaultReader(Path("/vault"))
+    # Never exercised (no approve/reject here), so an uninitialised store is fine.
+    audit = SuggestionAuditStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
     review = SuggestionReview(
         store,
         VaultPages(
@@ -84,6 +90,7 @@ def _module():  # type: ignore[no-untyped-def]
         vault,
         reader=reader,
         tenant="test",
+        audit=audit,
     )
     return build_module(
         vault,

@@ -25,6 +25,7 @@ from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftSto
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory, MemoryItem
+from epicurus_core_app.memory.profile import SOURCE_EDITED, StandingProfile, StandingProfileStore
 from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
 from epicurus_core_app.readiness import ReadinessProbe
 
@@ -108,6 +109,27 @@ class MemoryListing(BaseModel):
     total: int
 
 
+class ProfileView(BaseModel):
+    """The standing profile for the memory view (#527, ADR-0094).
+
+    ``profile`` is ``None`` when none has been synthesized yet (the agent then behaves exactly as
+    before). ``source`` is ``auto`` (nightly synthesis) or ``edited`` (an operator correction, which
+    survives re-synthesis); ``pinned`` restates that as a plain flag the UI can badge. ``versions``
+    is the recent history, newest first, so the operator can see how it evolved.
+    """
+
+    profile: StandingProfile | None
+    source: str | None = None
+    pinned: bool = False
+    versions: list[StandingProfile] = []
+
+
+class ProfileBody(BaseModel):
+    """Body for PUT /memory/profile — the operator's edited standing profile."""
+
+    content: str
+
+
 class ActiveRunInfo(BaseModel):
     """An in-flight run a client can re-attach to (from GET /sessions/{id}/active-run, #376).
 
@@ -146,6 +168,7 @@ def create_agent_router(
     pending_drafts: PendingDraftStore | None = None,
     send_draft: SendDraft | None = None,
     live_runs: LiveRunRegistry | None = None,
+    profile: StandingProfileStore | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
@@ -469,6 +492,50 @@ def create_agent_router(
         else:
             items, total = await memory.memories(tenant=tenant, limit=limit)
         return MemoryListing(items=items, total=total)
+
+    # NOTE: /memory/profile is declared BEFORE /memory/{memory_id} so a DELETE to it isn't
+    # captured as "forget the fact with id 'profile'" (FastAPI matches in declaration order).
+    @router.get("/memory/profile", response_model=ProfileView)
+    async def get_profile() -> ProfileView:
+        """The standing profile the agent injects each turn (#527, ADR-0094), plus its history.
+
+        ``profile`` is ``null`` when none has been synthesized (the agent then behaves as before).
+        A backend failure surfaces as a 5xx — an inspection view must not mask errors. Disabled
+        (no profile store wired) is a clean empty view, not an error.
+        """
+        if profile is None:
+            return ProfileView(profile=None)
+        latest = await profile.latest(tenant=tenant)
+        versions = await profile.versions(tenant=tenant, limit=10)
+        return ProfileView(
+            profile=latest,
+            source=latest.source if latest else None,
+            pinned=latest is not None and latest.source == SOURCE_EDITED,
+            versions=versions,
+        )
+
+    @router.put("/memory/profile", response_model=ProfileView)
+    async def set_profile(body: ProfileBody) -> ProfileView:
+        """Replace the standing profile with an operator edit — pinned, surviving re-synthesis.
+
+        Saved as an ``edited`` version, which the nightly synthesizer preserves (it won't clobber a
+        correction). A blank body **clears** the profile instead (resume auto-synthesis) — the same
+        as DELETE — so the memory view's editor can reset with an empty field.
+        """
+        if profile is None:
+            raise HTTPException(status_code=503, detail="standing profile is not available")
+        if not body.content.strip():
+            await profile.clear(tenant=tenant)
+            return ProfileView(profile=None)
+        saved = await profile.save(tenant=tenant, content=body.content, source=SOURCE_EDITED)
+        return ProfileView(profile=saved, source=saved.source, pinned=True, versions=[saved])
+
+    @router.delete("/memory/profile")
+    async def clear_profile() -> dict[str, int]:
+        """Clear the standing profile (all versions); the next synthesis regenerates a fresh one."""
+        if profile is None:
+            return {"cleared": 0}
+        return {"cleared": await profile.clear(tenant=tenant)}
 
     @router.delete("/memory/{memory_id}")
     async def forget_memory(memory_id: str) -> dict[str, int]:

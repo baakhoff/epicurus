@@ -104,6 +104,20 @@ def _mock_client(response_data: dict[str, Any]) -> Any:
     return ctx, mock_client
 
 
+def _mock_get_client(response_data: dict[str, Any]) -> Any:
+    mock_response = MagicMock()
+    mock_response.json.return_value = response_data
+    mock_response.status_code = 200
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return ctx, mock_client
+
+
 # ── review_action ───────────────────────────────────────────────────────────────
 
 
@@ -149,3 +163,43 @@ async def test_review_action_rejects_unsafe_suggestion_id(bad: str) -> None:
     with pytest.raises(HTTPException) as err:
         await registry.review_action("knowledge", "review", bad, "approve")
     assert err.value.status_code == 400
+
+
+# ── review_audit (ADR-0090, #542) ──────────────────────────────────────────────
+
+
+async def test_review_audit_proxies_get_to_module() -> None:
+    registry = _registry(_review_manifest())
+    ctx, mock_client = _mock_get_client(
+        {"decisions": [{"id": "abc", "decision": "approved", "path": "a.md"}]}
+    )
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient", return_value=ctx):
+        result = await registry.review_audit("knowledge", "review")
+
+    assert result == {"decisions": [{"id": "abc", "decision": "approved", "path": "a.md"}]}
+    mock_client.get.assert_called_once_with("/pages/review/audit", params={"limit": "50"})
+
+
+async def test_review_audit_forwards_limit() -> None:
+    registry = _registry(_review_manifest())
+    ctx, mock_client = _mock_get_client({"decisions": []})
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient", return_value=ctx):
+        await registry.review_audit("knowledge", "review", limit=10)
+
+    mock_client.get.assert_called_once_with("/pages/review/audit", params={"limit": "10"})
+
+
+async def test_review_audit_404_for_non_review_page() -> None:
+    registry = _registry(_review_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.review_audit("knowledge", "vault")
+    assert err.value.status_code == 404
+
+
+async def test_review_audit_404_for_unknown_module() -> None:
+    registry = _registry(_review_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.review_audit("ghost", "review")
+    assert err.value.status_code == 404

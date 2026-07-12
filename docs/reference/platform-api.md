@@ -371,11 +371,45 @@ control; the agent's equivalent (`knowledge_propose_project`) goes through the r
 Approve a staged suggestion: the module applies + indexes it (ADR-0033). Generic across any
 module that declares a `review` page — both **knowledge** (`page_id: "review"`) and private
 **notes** (`page_id: "review"`) expose this surface. The body is **optional** `{content}` — the
-operator's **per-hunk-merged** result for a content op (an edit, or a notes `append`), forwarded
-so only the approved changes are written; absent ⇒ apply the module's full proposal (for notes,
-the server composes the body — `append` concatenates onto the current note). Operator-only
-(paired with `…/reject`, which discards). **409** for knowledge when the target vault is
-externally owned (watch mode, #232); notes have no external-owner mode.
+operator's **edited draft** (ADR-0090: a free-form edit, a per-hunk merge, or both layered
+together), forwarded so what's written is what the operator actually approved; absent ⇒ apply
+the module's full proposal unedited (for notes, the server composes the body — `append`
+concatenates onto the current note). Operator-only (paired with `…/reject`, which discards).
+**409** for knowledge when the target vault is externally owned (watch mode, #232); notes have
+no external-owner mode. Both approve and reject record a row in the module's resolved-decision
+audit trail (see the next endpoint) before the pending suggestion is dropped from the queue.
+
+### `GET /platform/v1/modules/{name}/pages/{page_id}/audit`
+
+The resolved-decision **audit trail** for a `review` page (ADR-0090): what a module proposed
+vs. what the operator actually approved (or that it was rejected), newest first. Generic across
+any module with a `review` page. Query param `limit` (default 50, 1–200). **404** if the page
+isn't a `review` page or the module is unknown — same gate as approve/reject.
+
+```json
+{
+  "decisions": [
+    {
+      "id": "9f2c…",
+      "title": "goals",
+      "path": "projects/goals.md",
+      "operation": "update",
+      "origin": "agent",
+      "note": "",
+      "created_at": "2026-06-24T10:00:00+00:00",
+      "decided_at": "2026-06-24T10:02:00+00:00",
+      "decision": "approved",
+      "proposed_content": "…the agent's proposal…",
+      "applied_content": "…what the operator actually approved…",
+      "to_path": ""
+    }
+  ]
+}
+```
+
+`applied_content` is empty for a `reject` (nothing was applied) or for a structural op that
+carries no content (`move` / `mkdir` / `mkproject`). Each module retains up to `MAX_DECISIONS`
+(200) rows per tenant, pruned oldest-first on each new decision.
 
 ### `POST /platform/v1/modules/{name}/pages/{page_id}/send`
 

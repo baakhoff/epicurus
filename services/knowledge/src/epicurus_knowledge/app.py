@@ -32,6 +32,7 @@ from epicurus_knowledge.runner import IndexRunner
 from epicurus_knowledge.service import MODULE_NAME, build_module, module_docs
 from epicurus_knowledge.settings import KnowledgeSettings
 from epicurus_knowledge.suggestions import (
+    SuggestionAuditStore,
     SuggestionReview,
     SuggestionStore,
     create_review_router,
@@ -57,6 +58,9 @@ def create_app() -> FastAPI:
     doc_index = DocIndex(engine)
     module_doc_ledger = ModuleDocLedger(engine)
     suggestion_store = SuggestionStore(engine)
+    # Resolved-decision audit trail (ADR-0090): what was proposed vs. what was actually
+    # approved (including any operator edit) — recorded before the pending row is dropped.
+    suggestion_audit = SuggestionAuditStore(engine)
     # Editor-save version history (#ADR-0046): shares the same Postgres engine as the
     # index ledgers; one content snapshot per save, retained per (tenant, note_path).
     version_store = VersionStore(engine)
@@ -139,6 +143,7 @@ def create_app() -> FastAPI:
         vault_indexer,
         reader=vault_reader,
         tenant=settings.default_tenant_id,
+        audit=suggestion_audit,
         read_only=vault_read_only,
     )
     # build_module takes the review + platform so its propose tools can auto-apply when the
@@ -187,6 +192,7 @@ def create_app() -> FastAPI:
             await doc_index.init()
             await module_doc_ledger.init()
             await suggestion_store.init()
+            await suggestion_audit.init()
             await version_store.init()
             await bus.connect()
             log.info(

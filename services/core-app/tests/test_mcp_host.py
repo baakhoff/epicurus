@@ -276,6 +276,55 @@ async def test_call_dispatches_builtin_in_process_with_tenant() -> None:
     assert out == "got UTC for t1"
 
 
+async def test_memory_search_builtin_dispatches_end_to_end() -> None:
+    # The real memory_search handler, registered + discovered + dispatched through the host —
+    # proves the tool surface (spec → route → in-process call → tenant → formatted text), the
+    # #523 "done means" that unit-testing the handler alone doesn't reach.
+    from datetime import UTC, datetime
+
+    from epicurus_core_app.agent.builtins import (
+        MEMORY_SEARCH_SPEC,
+        MEMORY_SEARCH_TOOL,
+        make_memory_search_handler,
+    )
+    from epicurus_core_app.memory.memory import MemoryItem, SessionHit
+
+    class _Searcher:
+        def __init__(self) -> None:
+            self.tenants: list[str] = []
+
+        async def search_memory(
+            self, *, tenant: str, query: str, limit: int = 20
+        ) -> tuple[list[MemoryItem], int]:
+            self.tenants.append(tenant)
+            return [MemoryItem(id="f", text="Prefers restic", source="tool")], 1
+
+        async def search_sessions(
+            self, *, tenant: str, query: str, limit: int = 5
+        ) -> list[SessionHit]:
+            return [
+                SessionHit(
+                    session_id="s1",
+                    title="Backups",
+                    role="assistant",
+                    snippet="use a nightly restic cron",
+                    created_at=datetime(2026, 7, 4, tzinfo=UTC),
+                )
+            ]
+
+    searcher = _Searcher()
+    host = McpHost([])
+    host.register_builtin(
+        MEMORY_SEARCH_TOOL, MEMORY_SEARCH_SPEC, make_memory_search_handler(searcher)
+    )
+    specs, route = await host.discover()
+    assert {s["function"]["name"] for s in specs} == {"memory_search"}
+    out = await host.call("memory_search", {"query": "backup"}, route["memory_search"], tenant="t9")
+    assert searcher.tenants == ["t9"]  # the calling tenant scoped the search (constraint #1)
+    assert "Prefers restic" in out
+    assert "Backups" in out
+
+
 async def test_builtin_respects_disabled_filter() -> None:
     async def tool_filter() -> set[str]:
         return {"now"}

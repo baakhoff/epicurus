@@ -30,14 +30,21 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, String, Text, func, select
+from sqlalchemy import DateTime, String, Text, delete, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import get_logger
 from epicurus_core.db import ensure_columns
+from epicurus_core.review import (
+    ApplyResult,
+    ApproveBody,
+    ReviewAuditData,
+    ReviewData,
+    ReviewDecision,
+    ReviewSuggestion,
+)
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.pages import VaultPages
 from epicurus_knowledge.reader import VaultReader
@@ -230,49 +237,139 @@ def _to_value(row: _StoredSuggestion) -> Suggestion:
     )
 
 
-# ── review payloads (the `review` archetype data shape) ───────────────────────
+# ── review payloads (the `review` archetype data shape, ADR-0090) ─────────────
+#
+# ReviewSuggestion / ReviewData / ApplyResult / ApproveBody / ReviewDecision /
+# ReviewAuditData are the shared epicurus-core contract (imported above): every module
+# implementing a `review` page uses the same shapes, so edit-before-approve and the audit
+# trail apply here with no local redefinition (they used to be copy-pasted, #KB-refactor).
 
 
-class ReviewSuggestion(BaseModel):
-    """One pending change in the review queue, with a server-computed unified diff."""
+# ── suggestion audit trail (ADR-0090) ──────────────────────────────────────────
 
-    id: str
-    title: str
-    path: str
-    operation: str  # create | update | delete | move | mkdir | mkproject
-    origin: str
-    note: str = ""
-    created_at: str  # ISO-8601
-    diff: str  # unified diff (current content → proposed); empty for non-content ops
-    to_path: str = ""  # destination for a ``move`` (empty otherwise)
-    # Full texts so the shell can render a per-hunk review (#KB-refactor): ``current`` is
-    # the live document (empty for a create), ``content`` is the proposal (empty for delete).
-    current: str = ""
-    content: str = ""
+# Per-tenant retention cap, mirroring the editor version-history MAX_VERSIONS (ADR-0046).
+MAX_DECISIONS = 200
 
 
-class ReviewData(BaseModel):
-    """The ``review`` archetype's data: the queue of pending suggestions (ADR-0018)."""
-
-    title: str = "Suggestions"
-    suggestions: list[ReviewSuggestion] = Field(default_factory=list)
+class _AuditBase(DeclarativeBase):
+    pass
 
 
-class ApplyResult(BaseModel):
-    """The outcome of approving or rejecting a suggestion."""
+class _StoredDecision(_AuditBase):
+    """An immutable audit row for one resolved suggestion (tenant-scoped, ADR-0090).
 
-    id: str
-    status: str  # "approved" | "rejected"
-    path: str
-    operation: str
-    indexed: bool = False
+    Recorded before the pending row is dropped — approve/reject deletes it (ADR-0033:
+    "the queue *is* the set of rows") — so this is the durable record that survives,
+    pairing what was proposed with what the operator actually approved.
+    """
+
+    __tablename__ = "knowledge_suggestion_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    sid: Mapped[str] = mapped_column(String(32))
+    path: Mapped[str] = mapped_column(String(4096))
+    operation: Mapped[str] = mapped_column(String(16))
+    origin: Mapped[str] = mapped_column(String(64), default="agent")
+    note: Mapped[str] = mapped_column(Text, default="")
+    proposed_content: Mapped[str] = mapped_column(Text, default="")
+    applied_content: Mapped[str] = mapped_column(Text, default="")
+    to_path: Mapped[str] = mapped_column(String(4096), default="")
+    decision: Mapped[str] = mapped_column(String(16))
+    proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ApproveBody(BaseModel):
-    """Optional approve payload: the operator's edited content for a partial (per-hunk)
-    approval of an ``update``/``create``. Absent ⇒ apply the agent's full proposal."""
+class SuggestionAuditStore:
+    """An append-only, capped audit trail of resolved suggestions (ADR-0090).
 
-    content: str | None = None
+    One row per approve/reject, recording the original proposal alongside whatever was
+    actually applied (including any operator edit). Retention is capped at
+    ``MAX_DECISIONS`` per tenant, pruned in the same transaction as each insert — the same
+    shape as the editor version-history cap (ADR-0046).
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def init(self) -> None:
+        async with self._engine.begin() as conn:
+            await conn.run_sync(_AuditBase.metadata.create_all)
+
+    async def record(
+        self,
+        *,
+        tenant: str,
+        sid: str,
+        path: str,
+        operation: str,
+        origin: str,
+        note: str,
+        proposed_at: datetime,
+        decision: str,
+        proposed_content: str,
+        applied_content: str,
+        to_path: str = "",
+    ) -> None:
+        """Append one decision row, then prune anything past the retention cap."""
+        async with self._session() as session:
+            session.add(
+                _StoredDecision(
+                    tenant=tenant,
+                    sid=sid,
+                    path=path,
+                    operation=operation,
+                    origin=origin,
+                    note=note,
+                    proposed_content=proposed_content,
+                    applied_content=applied_content,
+                    to_path=to_path,
+                    decision=decision,
+                    proposed_at=proposed_at,
+                )
+            )
+            await session.commit()
+            stale_ids = list(
+                await session.scalars(
+                    select(_StoredDecision.id)
+                    .where(_StoredDecision.tenant == tenant)
+                    .order_by(_StoredDecision.id.desc())
+                    .offset(MAX_DECISIONS)
+                )
+            )
+            if stale_ids:
+                await session.execute(
+                    delete(_StoredDecision).where(_StoredDecision.id.in_(stale_ids))
+                )
+                await session.commit()
+
+    async def list(self, *, tenant: str, limit: int = 50) -> list[ReviewDecision]:
+        """The newest *limit* resolved decisions for *tenant*, most recent first."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredDecision)
+                .where(_StoredDecision.tenant == tenant)
+                .order_by(_StoredDecision.id.desc())
+                .limit(limit)
+            )
+            return [
+                ReviewDecision(
+                    id=row.sid,
+                    title=doc_title(row.path),
+                    path=row.path,
+                    operation=row.operation,
+                    origin=row.origin,
+                    note=row.note,
+                    created_at=row.proposed_at.isoformat(),
+                    decided_at=row.decided_at.isoformat(),
+                    decision=row.decision,
+                    proposed_content=row.proposed_content,
+                    applied_content=row.applied_content,
+                    to_path=row.to_path,
+                )
+                for row in rows
+            ]
 
 
 # ── review orchestration ──────────────────────────────────────────────────────
@@ -302,6 +399,7 @@ class SuggestionReview:
         *,
         reader: VaultReader,
         tenant: str,
+        audit: SuggestionAuditStore,
         read_only: bool = False,
     ) -> None:
         self._store = store
@@ -310,6 +408,8 @@ class SuggestionReview:
         # Reads the current content for the review diff through the file API (#346, ADR-0070).
         self._reader = reader
         self._tenant = tenant
+        # Resolved-decision audit trail (ADR-0090) — recorded before a row leaves the queue.
+        self._audit = audit
         # Watch mode (#232, ADR-0035): the vault is externally owned, so an approval —
         # which would write the vault — is refused. The agent may still *propose* (no
         # write) and the operator may still reject to clear the queue; only the apply is
@@ -357,10 +457,11 @@ class SuggestionReview:
         """Apply a suggestion to the vault (and index it), then drop it from the queue.
 
         404 if the suggestion is unknown. ``create``/``update`` write the proposed content
-        — or *content*, when the operator approved only part of an edit (per-hunk review,
-        #KB-refactor) — and re-index the file; ``delete`` removes the file and its vectors;
-        ``move`` relocates a file/folder and re-indexes; ``mkdir`` / ``mkproject`` create a
-        folder / knowledge base.
+        — or *content*, when the operator edited it before approving (ADR-0090, formerly a
+        per-hunk-only merge under #KB-refactor) — and re-index the file; ``delete`` removes
+        the file and its vectors; ``move`` relocates a file/folder and re-indexes;
+        ``mkdir`` / ``mkproject`` create a folder / knowledge base. Records an audit row
+        (the proposal alongside what was actually applied) before the pending row drops.
 
         409 when the vault is externally owned (watch mode, #232): applying would write a
         vault Obsidian owns, so the apply is refused. Reject still works to clear the queue.
@@ -377,9 +478,10 @@ class SuggestionReview:
         if s is None:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
         indexed = False
+        applied_content = ""
         if s.operation in ("create", "update"):
-            body = s.proposed_content if content is None else content
-            result = await self._pages.write_doc(s.path, body)
+            applied_content = s.proposed_content if content is None else content
+            result = await self._pages.write_doc(s.path, applied_content)
             indexed = result.indexed
         elif s.operation == "delete":
             # Delete through the core file API (ADR-0064); an already-gone file (404) is fine.
@@ -400,6 +502,19 @@ class SuggestionReview:
             await self._pages.create_project(s.path)
         else:  # defensive — propose validates, but never trust stored data blindly
             raise HTTPException(status_code=400, detail=f"unknown operation: {s.operation}")
+        await self._audit.record(
+            tenant=self._tenant,
+            sid=sid,
+            path=s.path,
+            operation=s.operation,
+            origin=s.origin,
+            note=s.note,
+            proposed_at=s.created_at,
+            decision="approved",
+            proposed_content=s.proposed_content,
+            applied_content=applied_content,
+            to_path=s.to_path,
+        )
         await self._store.delete(tenant=self._tenant, sid=sid)
         log.info("suggestion approved", sid=sid, operation=s.operation, path=s.path)
         return ApplyResult(
@@ -411,13 +526,34 @@ class SuggestionReview:
         )
 
     async def reject(self, sid: str) -> ApplyResult:
-        """Discard a suggestion without touching the vault. 404 if unknown."""
+        """Discard a suggestion without touching the vault. 404 if unknown.
+
+        Records an audit row (ADR-0090) so a rejected proposal stays visible in history —
+        a repeated rejection of the same kind of change is itself a useful signal.
+        """
         s = await self._store.get(tenant=self._tenant, sid=sid)
         if s is None:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
+        await self._audit.record(
+            tenant=self._tenant,
+            sid=sid,
+            path=s.path,
+            operation=s.operation,
+            origin=s.origin,
+            note=s.note,
+            proposed_at=s.created_at,
+            decision="rejected",
+            proposed_content=s.proposed_content,
+            applied_content="",
+            to_path=s.to_path,
+        )
         await self._store.delete(tenant=self._tenant, sid=sid)
         log.info("suggestion rejected", sid=sid, operation=s.operation, path=s.path)
         return ApplyResult(id=sid, status="rejected", path=s.path, operation=s.operation)
+
+    async def list_audit(self, limit: int = 50) -> ReviewAuditData:
+        """The resolved-decision audit trail for this tenant, newest first (ADR-0090)."""
+        return ReviewAuditData(decisions=await self._audit.list(tenant=self._tenant, limit=limit))
 
 
 def validate_operation(operation: str) -> str:
@@ -450,16 +586,24 @@ def create_review_router(review: SuggestionReview) -> APIRouter:
     async def reject(suggestion_id: str) -> ApplyResult:
         return await review.reject(suggestion_id)
 
+    @router.get("/pages/review/audit", response_model=ReviewAuditData)
+    async def get_audit(limit: int = 50) -> ReviewAuditData:
+        return await review.list_audit(limit=limit)
+
     return router
 
 
 __all__ = [
+    "MAX_DECISIONS",
     "REVIEW_PAGE_ID",
     "ApplyResult",
     "ApproveBody",
+    "ReviewAuditData",
     "ReviewData",
+    "ReviewDecision",
     "ReviewSuggestion",
     "Suggestion",
+    "SuggestionAuditStore",
     "SuggestionReview",
     "SuggestionStore",
     "create_review_router",

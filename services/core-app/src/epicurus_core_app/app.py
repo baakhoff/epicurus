@@ -38,9 +38,12 @@ from epicurus_core_app.agent.attachments import AttachmentExpander
 from epicurus_core_app.agent.builtins import (
     ASK_USER_SPEC,
     ASK_USER_TOOL,
+    MEMORY_SEARCH_SPEC,
+    MEMORY_SEARCH_TOOL,
     NOW_SPEC,
     REMEMBER_SPEC,
     make_ask_user_handler,
+    make_memory_search_handler,
     make_now_handler,
     make_remember_handler,
 )
@@ -72,12 +75,14 @@ from epicurus_core_app.maintenance import (
     extraction_drain_job,
     facts_reembed_job,
     module_reindex_job,
+    profile_synthesis_job,
 )
 from epicurus_core_app.maintenance_routes import create_maintenance_router
 from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
+from epicurus_core_app.memory.profile import ProfileSynthesizer, StandingProfileStore
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
 from epicurus_core_app.messaging import (
     BridgeAdmin,
@@ -95,8 +100,12 @@ from epicurus_core_app.modules import (
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.object_backend import StorageObjectBackend
+from epicurus_core_app.page_order_prefs import PageOrderStore
+from epicurus_core_app.page_order_routes import create_page_order_router
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
+from epicurus_core_app.scheduled_turns import ScheduledTurnScheduler, ScheduledTurnStore
+from epicurus_core_app.scheduled_turns_routes import create_scheduled_turns_router
 from epicurus_core_app.settings import CoreAppSettings
 from epicurus_core_app.system_info import create_system_router
 from epicurus_core_app.timezone_prefs import TimezonePrefsStore
@@ -175,12 +184,25 @@ def create_app() -> FastAPI:
     # Cross-chat memory is a corpus of durable *facts* about the user (ADR-0045), written by
     # the agent's `remember` tool and by background extraction — not a dump of raw messages.
     facts = UserFactStore(qdrant, embed)
-    memory = Memory(ConversationStore(engine), facts)
+    conversation_store = ConversationStore(engine)
+    memory = Memory(conversation_store, facts)
     # Deferred fact extraction (ADR-0051): finished exchanges queue here, and a nightly runner
     # distils them off-hours so extraction never competes with a live turn for the GPU. The
     # extractor may target a small dedicated model to keep the nightly pass cheap.
     extraction_queue = ExtractionQueue(engine)
     extractor = FactExtractor(gateway, facts, model=settings.memory_extraction_model or None)
+    # Standing user profile (ADR-0094): a compact per-tenant picture of the user, synthesized from
+    # the fact store on the nightly maintenance batch and injected STATICALLY in _assemble — no
+    # turn-time embed — so the common-case recall cost leaves the response path (the ADR-0051 trade,
+    # now for the profile). Best-effort: no profile → exactly today's behavior.
+    profile_store = StandingProfileStore(engine, max_versions=settings.memory_profile_max_versions)
+    profile_synthesizer = ProfileSynthesizer(
+        gateway,
+        facts,
+        profile_store,
+        tenants=conversation_store.distinct_tenants,
+        model=settings.memory_profile_model or None,
+    )
     attachment_store = AttachmentStore(engine)
     attachment_sink = (
         AttachmentSink(settings.attachment_sink_url)
@@ -189,6 +211,12 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # The operator's drag-and-drop left-nav page order (#543): one row per tenant, syncing
+    # across devices. Resolved/merged client-side (ADR-0018) — this store is opaque storage.
+    page_order_prefs = PageOrderStore(engine)
+    # Recurring prompts that run unattended and deliver into a session (ADR-0092): the
+    # tenant-scoped row store; the scheduler poll loop is built below, once `agent` exists.
+    scheduled_turns = ScheduledTurnStore(engine)
     # The agent's editable base system prompt (#497, ADR-0083): one row per tenant, NULL = the
     # shipped default. Resolved per turn in ``Agent._assemble``, edited in web Settings.
     agent_instructions = AgentInstructionsStore(engine)
@@ -249,6 +277,12 @@ def create_app() -> FastAPI:
     # Core `remember` built-in tool (ADR-0045): the agent's explicit path for saving a durable
     # fact about the user to long-term memory; background extraction covers the implicit path.
     mcp_host.register_builtin("remember", REMEMBER_SPEC, make_remember_handler(memory))
+    # Core `memory_search` built-in tool (ADR-0089): deliberate recall over the fact store and
+    # past conversations — the agent-initiated complement to the ambient recall `_assemble`
+    # injects each turn. Tenant-scoped (built-ins receive the tenant), best-effort like recall.
+    mcp_host.register_builtin(
+        MEMORY_SEARCH_TOOL, MEMORY_SEARCH_SPEC, make_memory_search_handler(memory)
+    )
     # Core `ask_user` built-in tool (ADR-0053): lets the model pause the turn to ask a
     # clarifying question. The agent loop intercepts the call to suspend; this handler is a
     # safety net (the spec reaches the model via the same discovery path as now/remember).
@@ -275,6 +309,9 @@ def create_app() -> FastAPI:
         # The editable base system prompt (#497), resolved per turn and injected first — so both
         # chat and the headless bridge consumer below run with the same instructions.
         instructions=agent_instructions,
+        # The standing profile (#527), injected statically after the base prompt with no embed —
+        # so both chat and the headless bridge carry the same durable picture of the user.
+        profile=profile_store,
     )
     # Inbound messaging consumer (ADR-0058) — the first inbound NATS subscriber in core. It
     # turns a bridge message (``messaging.inbound``) into a headless agent turn and routes the
@@ -296,6 +333,16 @@ def create_app() -> FastAPI:
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         hour=settings.memory_extraction_hour,
         batch_limit=settings.memory_extraction_batch_limit,
+    )
+    # Scheduled-turns poll loop (ADR-0092): the same headless-turn shape InboundConsumer uses
+    # for a bridge message (no HTTP caller, an explicit tenant_id + session_id) — reused here
+    # for a due recurring prompt instead of an inbound message.
+    scheduled_turn_scheduler = ScheduledTurnScheduler(
+        scheduled_turns,
+        agent,
+        power,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        poll_interval_s=settings.scheduled_turns_poll_interval_s,
     )
     oauth = OAuthService(
         secrets,
@@ -348,6 +395,7 @@ def create_app() -> FastAPI:
     maintenance = MaintenanceOrchestrator(
         [
             extraction_drain_job(extraction_runner.drain_once),
+            profile_synthesis_job(profile_synthesizer.run),
             module_reindex_job(registry.reembed),
             facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
         ],
@@ -382,6 +430,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
         try:
+            await page_order_prefs.init()
+        except Exception as exc:
+            log.error("page-order prefs init failed; nav reorder disabled", error=str(exc))
+        try:
             await agent_instructions.init()
         except Exception as exc:
             log.error("agent instructions init failed; using the default prompt", error=str(exc))
@@ -405,6 +457,14 @@ def create_app() -> FastAPI:
             await extraction_queue.init()
         except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
             log.error("extraction queue init failed; nightly extraction off", error=str(exc))
+        try:
+            await scheduled_turns.init()
+        except Exception as exc:  # store down → scheduled turns degrade; chat is unaffected
+            log.error("scheduled-turns init failed; scheduled turns disabled", error=str(exc))
+        try:
+            await profile_store.init()
+        except Exception as exc:  # profile down → static injection degrades; recall still runs
+            log.error("standing-profile store init failed; profile injection off", error=str(exc))
         # Provision the tenant's file-space root and index it (core-owned, ADR-0052/0061). The
         # core now mounts the shared volume (Phase 2), so the local root exists at boot: init the
         # file index, ensure the tenant root, then walk it in. Best-effort throughout — a DB or
@@ -428,6 +488,9 @@ def create_app() -> FastAPI:
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
+        # Scheduled turns (ADR-0092): a plain poll loop finding due rows and delivering each as
+        # a headless agent turn. Fire-and-forget, same shape as the tasks around it.
+        scheduled_turns_task = asyncio.create_task(scheduled_turn_scheduler.run_periodic())
         # Evict finished in-flight runs past their grace window (#376), even with no new traffic.
         live_run_reaper = asyncio.create_task(live_runs.reap_periodically())
         # Keep the file index live: re-walk on a debounced change (local backend only, ADR-0063).
@@ -453,6 +516,7 @@ def create_app() -> FastAPI:
             catalog_task.cancel()
             catalog_size_task.cancel()
             extraction_task.cancel()
+            scheduled_turns_task.cancel()
             live_run_reaper.cancel()
             maintenance_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -461,6 +525,8 @@ def create_app() -> FastAPI:
                 await catalog_size_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
+            with suppress(asyncio.CancelledError):
+                await scheduled_turns_task
             with suppress(asyncio.CancelledError):
                 await live_run_reaper
             with suppress(asyncio.CancelledError):
@@ -525,7 +591,13 @@ def create_app() -> FastAPI:
         create_timezone_router(timezone_prefs, default_tenant=settings.default_tenant_id)
     )
     app.include_router(
+        create_page_order_router(page_order_prefs, default_tenant=settings.default_tenant_id)
+    )
+    app.include_router(
         create_instructions_router(agent_instructions, default_tenant=settings.default_tenant_id)
+    )
+    app.include_router(
+        create_scheduled_turns_router(scheduled_turns, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(
@@ -542,6 +614,8 @@ def create_app() -> FastAPI:
             # via the owning module's ``POST /send`` — the one place the core sends outbound mail.
             send_draft=registry.send_draft,
             live_runs=live_runs,
+            # The standing profile (#527): the memory view reads/edits/clears it here.
+            profile=profile_store,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

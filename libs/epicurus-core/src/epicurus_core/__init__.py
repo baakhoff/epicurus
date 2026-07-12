@@ -68,6 +68,14 @@ from epicurus_core.messaging import (
 from epicurus_core.module import EpicurusModule, add_manifest_route
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
 from epicurus_core.platform_client import PlatformClient
+from epicurus_core.review import (
+    ApplyResult,
+    ApproveBody,
+    ReviewAuditData,
+    ReviewData,
+    ReviewDecision,
+    ReviewSuggestion,
+)
 from epicurus_core.routing import route_paths
 from epicurus_core.secret_store import SecretError, SecretStore
 from epicurus_core.tenancy import (
@@ -92,6 +100,8 @@ __all__ = [
     "MESSAGING_OUTBOUND",
     "Account",
     "AccountsView",
+    "ApplyResult",
+    "ApproveBody",
     "Attachment",
     "AttachmentSource",
     "ChatMessage",
@@ -131,6 +141,10 @@ __all__ = [
     "PlatformClient",
     "PlatformMessage",
     "Replier",
+    "ReviewAuditData",
+    "ReviewData",
+    "ReviewDecision",
+    "ReviewSuggestion",
     "Role",
     "S3FileStore",
     "SecretError",

@@ -77,6 +77,28 @@ export type LlmPrefs = z.infer<typeof LlmPrefs>;
 export const TimezonePrefs = z.object({ timezone: z.string() });
 export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 
+/** The operator's stored left-nav page order (#543) — `order` is `[]` when unset. */
+export const PageOrderPrefs = z.object({ order: z.array(z.string()) });
+export type PageOrderPrefs = z.infer<typeof PageOrderPrefs>;
+
+/**
+ * A recurring prompt that runs unattended and delivers into its own chat session
+ * (ADR-0092). `weekday` (0=Monday..6=Sunday) is only meaningful for a `"weekly"` cadence.
+ */
+export const ScheduledTurn = z.object({
+  id: z.string(),
+  prompt: z.string(),
+  cadence: z.enum(["daily", "weekly"]),
+  hour: z.number(),
+  weekday: z.number().nullable().default(null),
+  delivery_target: z.string(),
+  enabled: z.boolean(),
+  created_at: z.string(),
+  last_run_at: z.string().nullable().default(null),
+  last_status: z.string().nullable().default(null),
+});
+export type ScheduledTurn = z.infer<typeof ScheduledTurn>;
+
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
@@ -284,6 +306,26 @@ export const MemoryListing = z.object({
   total: z.number(),
 });
 export type MemoryListing = z.infer<typeof MemoryListing>;
+
+/** One stored version of the user's standing profile (#527, ADR-0094). `source` is "auto"
+ *  (nightly synthesis) or "edited" (an operator correction, which survives re-synthesis). */
+export const StandingProfile = z.object({
+  id: z.number(),
+  content: z.string(),
+  source: z.string().default("auto"),
+  created_at: z.coerce.date().nullish(),
+});
+export type StandingProfile = z.infer<typeof StandingProfile>;
+
+/** The standing profile for the memory view: the current one (or null before first synthesis),
+ *  whether it's a pinned operator edit, and the recent history. */
+export const ProfileView = z.object({
+  profile: StandingProfile.nullish(),
+  source: z.string().nullish(),
+  pinned: z.boolean().default(false),
+  versions: z.array(StandingProfile).default([]),
+});
+export type ProfileView = z.infer<typeof ProfileView>;
 
 export const AgentTurn = z.object({
   content: z.string(),
@@ -908,6 +950,33 @@ export const PendingSuggestion = ReviewSuggestion.extend({
   page_id: z.string(),
 });
 export type PendingSuggestion = z.infer<typeof PendingSuggestion>;
+
+/**
+ * An audit record of one resolved suggestion (ADR-0090): the proposal alongside what was
+ * actually applied, including any edit the operator made before approving. The pending
+ * queue drops a row on resolution (ADR-0033); this is the durable trail that replaces it.
+ */
+export const ReviewDecision = z.object({
+  id: z.string(),
+  title: z.string(),
+  path: z.string(),
+  operation: z.enum(["create", "update", "append", "delete", "move", "mkdir", "mkproject"]),
+  origin: z.string().default("agent"),
+  note: z.string().default(""),
+  created_at: z.string(),
+  decided_at: z.string(),
+  decision: z.enum(["approved", "rejected"]),
+  proposed_content: z.string().default(""),
+  applied_content: z.string().default(""),
+  to_path: z.string().default(""),
+});
+export type ReviewDecision = z.infer<typeof ReviewDecision>;
+
+/** The resolved-decision audit trail for a review page, newest first (ADR-0090). */
+export const ReviewAuditData = z.object({
+  decisions: z.array(ReviewDecision).default([]),
+});
+export type ReviewAuditData = z.infer<typeof ReviewAuditData>;
 
 /* ── right-panel views (ADR-0018 / ADR-0019) ─────────────────────────────── */
 

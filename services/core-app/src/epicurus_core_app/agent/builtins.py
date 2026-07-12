@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from epicurus_core import get_logger
 from epicurus_core_app.memory.facts import SOURCE_TOOL, UserFact
+from epicurus_core_app.memory.memory import MemoryItem, SessionHit
 
 log = get_logger("epicurus_core_app.agent.builtins")
 
@@ -171,6 +172,142 @@ def make_remember_handler(
         if saved is None:
             return "Already in memory — nothing new to add."
         return f"Saved to memory: {saved.text}"
+
+    return handler
+
+
+# ── memory_search (ADR-0089) ────────────────────────────────────────────────
+
+#: The tool name for deliberate recall over the fact store and past conversations.
+MEMORY_SEARCH_TOOL = "memory_search"
+
+# Result discipline: cap what the tool returns so a broad query can't flood the context.
+_MEMORY_SEARCH_DEFAULT_LIMIT = 5
+_MEMORY_SEARCH_MAX_LIMIT = 10
+_MEMORY_SNIPPET_CAP = 240
+_MEMORY_SEARCH_SCOPES = ("facts", "sessions", "both")
+
+MEMORY_SEARCH_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": MEMORY_SEARCH_TOOL,
+        "description": (
+            "Search your long-term memory for something from the past: durable facts you "
+            "remember about the user, and excerpts of earlier conversations with them. Call "
+            "this when the user refers to something discussed or decided before — 'what did we "
+            "settle on for the backup strategy?', 'the library I mentioned last week' — and it "
+            "isn't already in this conversation. You already receive ambient memory "
+            "automatically each turn; use this to deliberately dig for specifics you weren't "
+            "handed. Returns the most relevant facts and past-conversation snippets, newest "
+            "first for conversations."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What to look for, in a few words — e.g. 'backup strategy', "
+                        "'the user's sister's name', 'database we chose'."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": list(_MEMORY_SEARCH_SCOPES),
+                    "description": (
+                        "Which memory to search: 'facts' (durable facts about the user), "
+                        "'sessions' (past conversations), or 'both' (default)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum results per source (1-10, default 5). Keep it small unless "
+                        "you truly need more."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+class MemorySearcher(Protocol):
+    """The slice of the memory facade ``memory_search`` needs (eases faking in tests)."""
+
+    async def search_memory(
+        self, *, tenant: str, query: str, limit: int = ...
+    ) -> tuple[list[MemoryItem], int]: ...
+
+    async def search_sessions(
+        self, *, tenant: str, query: str, limit: int = ...
+    ) -> list[SessionHit]: ...
+
+
+def _coerce_limit(raw: Any) -> int:
+    """Clamp the model-supplied ``limit`` to ``[1, _MEMORY_SEARCH_MAX_LIMIT]`` (default on junk)."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _MEMORY_SEARCH_DEFAULT_LIMIT
+    return max(1, min(value, _MEMORY_SEARCH_MAX_LIMIT))
+
+
+def _format_session_hit(hit: SessionHit) -> str:
+    """One compact past-conversation line: date + conversation title + role + snippet."""
+    when = hit.created_at.date().isoformat() if hit.created_at else "unknown date"
+    title = hit.title.strip() or "(untitled)"
+    snippet = " ".join(hit.snippet.split())[:_MEMORY_SNIPPET_CAP]
+    return f'- [{when} · "{title}"] {hit.role}: {snippet}'
+
+
+def make_memory_search_handler(
+    memory: MemorySearcher,
+) -> Callable[[dict[str, Any], str], Awaitable[str]]:
+    """Build the ``memory_search`` handler closed over the memory facade (ADR-0089).
+
+    Deliberate recall for the **calling tenant** — built-in handlers receive the tenant precisely
+    so a cross-session search never leaks another tenant's memory (constraint #1). Best-effort
+    like the rest of memory: the facts half embeds the query (through the gateway, constraint #8),
+    so a cold or failing embedder degrades to just the sessions half (a Postgres text search that
+    needs no embedding) rather than failing the tool call hard; either half's error is caught and
+    that half is simply omitted. Results are capped and compact — never a raw session dump.
+    """
+
+    async def handler(arguments: dict[str, Any], tenant: str) -> str:
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            return "error: a `query` to search for is required."
+        scope = str(arguments.get("scope") or "both").strip().lower()
+        if scope not in _MEMORY_SEARCH_SCOPES:
+            scope = "both"
+        limit = _coerce_limit(arguments.get("limit"))
+        sections: list[str] = []
+
+        if scope in ("facts", "both"):
+            try:
+                items, _ = await memory.search_memory(tenant=tenant, query=query, limit=limit)
+            except Exception as exc:  # a cold embedder must not fail the call — degrade to text
+                log.warning("memory_search facts lookup failed; degrading", error=str(exc))
+                items = []
+            if items:
+                lines = "\n".join(f"- {item.text}" for item in items)
+                sections.append(f"Remembered facts:\n{lines}")
+
+        if scope in ("sessions", "both"):
+            try:
+                hits = await memory.search_sessions(tenant=tenant, query=query, limit=limit)
+            except Exception as exc:  # a DB hiccup omits this half rather than crashing the turn
+                log.warning("memory_search sessions lookup failed; degrading", error=str(exc))
+                hits = []
+            if hits:
+                lines = "\n".join(_format_session_hit(hit) for hit in hits)
+                sections.append(f"From past conversations:\n{lines}")
+
+        if not sections:
+            return f'No remembered facts or past conversations matched "{query}".'
+        return f'Memory search for "{query}":\n\n' + "\n\n".join(sections)
 
     return handler
 

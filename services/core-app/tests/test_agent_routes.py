@@ -15,6 +15,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.agent import routes as agent_routes
 from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
@@ -24,6 +25,7 @@ from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
 from epicurus_core_app.memory.memory import MemoryItem
+from epicurus_core_app.memory.profile import StandingProfileStore
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
 
 
@@ -256,6 +258,92 @@ async def test_forget_memory_deletes_one_fact() -> None:
     assert resp.status_code == 200
     assert resp.json() == {"forgotten": 1}
     assert memory.forgotten == ["f7"]
+
+
+# ── standing profile (#527, ADR-0094) ────────────────────────────────────────
+
+
+async def _fresh_profile_store() -> StandingProfileStore:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = StandingProfileStore(engine)
+    await store.init()
+    return store
+
+
+def _profile_app(profile: StandingProfileStore, memory: object | None = None) -> FastAPI:
+    app = FastAPI()
+    app.include_router(
+        create_agent_router(
+            _FakeAgent(),  # type: ignore[arg-type]
+            memory or _FakeMemory(),  # type: ignore[arg-type]
+            "local",
+            object(),  # attachment store — unused by the profile routes  # type: ignore[arg-type]
+            profile=profile,
+        )
+    )
+    return app
+
+
+async def test_profile_get_is_null_when_none_synthesized() -> None:
+    store = await _fresh_profile_store()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_profile_app(store)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory/profile")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["profile"] is None
+    assert body["pinned"] is False
+
+
+async def test_profile_put_pins_an_operator_edit() -> None:
+    store = await _fresh_profile_store()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_profile_app(store)), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/agent/memory/profile", json={"content": "My own words about me."}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["profile"]["content"] == "My own words about me."
+    assert body["source"] == "edited"
+    assert body["pinned"] is True  # an operator edit is pinned (survives re-synthesis)
+    latest = await store.latest(tenant="local")
+    assert latest is not None and latest.source == "edited"
+
+
+async def test_profile_put_empty_content_clears() -> None:
+    store = await _fresh_profile_store()
+    await store.save(tenant="local", content="auto profile", source="auto")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_profile_app(store)), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/agent/memory/profile", json={"content": "   "})
+    assert resp.status_code == 200
+    assert resp.json()["profile"] is None
+    assert await store.latest(tenant="local") is None  # cleared
+
+
+async def test_profile_delete_clears_without_hitting_the_forget_fact_route() -> None:
+    # DELETE /memory/profile must not be captured as DELETE /memory/{memory_id="profile"} — the
+    # route is declared before the fact-forget route precisely to avoid that (FastAPI matches
+    # in declaration order).
+    store = await _fresh_profile_store()
+    await store.save(tenant="local", content="x", source="auto")
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_profile_app(store, memory)), base_url="http://test"
+    ) as client:
+        resp = await client.delete("/platform/v1/agent/memory/profile")
+    assert resp.status_code == 200
+    assert resp.json() == {"cleared": 1}
+    assert memory.forgotten == []  # the fact-forget route was NOT hit
+    assert await store.latest(tenant="local") is None
 
 
 # ── regenerate / edit the conversation tail (#302) ───────────────────────────

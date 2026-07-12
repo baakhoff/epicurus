@@ -108,7 +108,7 @@ editor renames files, not folders) **re-keys its slug** via `POST /pages/{id}/mo
 its vectors, and its `.md` mirror all follow the new slug. Folder management is the
 **operator's** surface — the agent has no folder/move tool and notes stay private.
 
-### Note suggestions page (`review` archetype, ADR-0033)
+### Note suggestions page (`review` archetype, ADR-0033; edit-before-approve + audit, ADR-0090)
 
 The agent's note changes are **staged for review, never applied directly**. The module
 contributes a second left-nav page — **Note suggestions** — declared as
@@ -124,7 +124,8 @@ body. There is **no** `move` / folder **suggestion** operation — folders are t
 managed in the editor (the agent has no folder/move tool); `append` is notes-specific — the
 agent supplies only the text to add and the server concatenates it onto the current body. The
 review payload carries the full `current` (live body, empty for a create) and `content` (the
-body approving would produce) so the shell can render the per-hunk diff.
+body approving would produce) so the shell can render the per-hunk diff, plus an **editable
+draft** the operator can hand-edit directly before approving (ADR-0090).
 
 The **trust boundary is the author**: agent changes route through review; the operator's own
 editor saves stay immediate, since the operator is already the approver. Approve/reject are
@@ -147,14 +148,21 @@ module defaults to the safe path (review on).
   `create`/`update`/`append`/`delete`.
 - `POST /pages/review/suggestions/{id}/approve` — apply the change and drop it from the queue:
   create/update/append write the body + re-index; delete removes the note (row, vectors, and
-  `.md` mirror). The body is **optional** `{content}` — the operator's per-hunk-merged result
-  for a content op, so only the accepted changes are written; absent ⇒ compose from the
-  current body (append concatenates, update/create use the proposal).
+  `.md` mirror). The body is **optional** `{content}` — the operator's **edited draft**
+  (ADR-0090: a free-form edit, a per-hunk merge, or both), so what's written is what was
+  actually approved; absent ⇒ compose from the current body (append concatenates, update/create
+  use the proposal unedited).
 - `POST /pages/review/suggestions/{id}/reject` — discard the suggestion; nothing is touched.
+- `GET /pages/review/audit?limit=` — the resolved-decision **audit trail** (ADR-0090), newest
+  first: each entry pairs the agent's original `proposed_content` with the operator's
+  `applied_content` (empty for a reject). `limit` defaults to 50.
 
-Pending suggestions are stored in `notes_suggestions` (tenant-scoped — see *Data model*).
-The review router is registered **before** the editor pages router so its literal
-`/pages/review` route wins over the editor's `/pages/{page_id}` path parameter.
+Pending suggestions are stored in `notes_suggestions` (tenant-scoped — see *Data model*);
+approve/reject record a row in `notes_suggestion_decisions` before dropping the pending row —
+the durable trail, since the queue itself holds only pending suggestions. Capped at
+`MAX_DECISIONS` (200) rows per tenant, pruned oldest-first. The review router is registered
+**before** the editor pages router so its literal `/pages/review` route wins over the editor's
+`/pages/{page_id}` path parameter.
 
 **Version history (ADR-0046).** The page is **versioned** (`versioned: true`): every save
 snapshots the note's body, and the shell offers a **browse + restore past versions**
@@ -268,6 +276,11 @@ note. The agent's view of `notes/` through the storage file tools is hidden by s
   create/update, the text to add for append, empty for delete), `origin`, `note`,
   `created_at`. A row is removed on approve (after the change is applied) or reject; the table
   only ever holds pending suggestions.
+- **Postgres `notes_suggestion_decisions`** — resolved-decision audit trail (ADR-0090): `id`,
+  `tenant`, `sid`, `slug`, `operation`, `origin`, `note`, `proposed_content`,
+  `applied_content` (empty for a reject), `decision` (`approved`/`rejected`), `proposed_at`,
+  `decided_at`. Append-only — recorded before the matching `notes_suggestions` row is
+  dropped — and capped at the newest `MAX_DECISIONS` (200) rows per tenant.
 - **Qdrant `<tenant>__notes`** — note chunk embeddings (cosine), one collection per tenant.
   Each point payload: `{slug, chunk_index, heading, text}`.
 - **`notes/<slug>.md`** (core path) → **`/data/<tenant>/notes/<slug>.md`** on disk — the
@@ -305,7 +318,7 @@ Package `epicurus_notes`:
 | `indexer.py` | Chunk + embed + upsert into `<tenant>__notes` (`NotesIndexer`); no search method (private + attach-only). |
 | `mirror.py` | The write-only `.md` mirror to the shared file space via **the core file API** (#KB-refactor; #357/ADR-0065): `NotesMirror` maps a slug to core path `notes/<rel>` and calls `PlatformClient.files_write` / `files_delete` (`write` per save, `delete` on note removal, a one-time `backfill`), best-effort throughout. No direct disk I/O — the core performs the on-disk write. |
 | `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + version snapshot + re-index), `delete_doc`, the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following), and `list_versions`/`get_version` (ADR-0046). |
-| `suggestions.py` | The `review` page surface (ADR-0033): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional per-hunk `content`), and `create_note_review_router`. Approve/reject are operator-only — never MCP tools. |
+| `suggestions.py` | The `review` page surface (ADR-0033; edit-before-approve + audit, ADR-0090): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional edited `content`), the `notes_suggestion_decisions` audit store (`NoteSuggestionAuditStore`, capped at `MAX_DECISIONS`), and `create_note_review_router`. The shared wire contract is imported from `epicurus_core.review`, not locally redefined. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |
 | `service.py` | The manifest — `pages` (editor + review), `attachable`, the `notes.saved` event, and the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no read tool**). |
 | `app.py` | Lifespan (incl. the suggestion-store + folder-store init + mirror backfill), `GET /status`, the review router (registered first) + the `/pages/*` and `/attachments/*` routers, event publish. |

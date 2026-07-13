@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { HOUR_HEIGHT } from "@/components/archetypes/calendarGrid";
 import { CalendarView } from "@/components/archetypes/CalendarView";
 import { usePanel } from "@/stores/panel";
 
@@ -778,5 +779,130 @@ describe("Task-feed overlay (#469)", () => {
 
     await screen.findByText("Standup");
     expect(screen.queryByText("Buy milk")).not.toBeInTheDocument();
+  });
+});
+
+// The week view is now an hourly day-grid (#631): events placed by time, a pinned all-day
+// strip, and drag-to-move that persists through the event's own update action (#208/ADR-0034).
+describe("Week grid (#631)", () => {
+  // A timed event carrying the editable-calendar Edit/Delete actions the module supplies (#208).
+  const EDITABLE_EVENT = {
+    id: "e1",
+    title: "Standup",
+    start: "2026-06-15T09:00:00",
+    end: "2026-06-15T09:30:00",
+    provider: "local",
+    calendar_id: "local",
+    actions: [
+      {
+        tool: "calendar_update_event",
+        label: "Edit",
+        form: true,
+        args: { event_id: "e1", calendar_id: "local" },
+        fields: ["title", "all_day", "start", "end", "location", "description"],
+        form_values: {},
+      },
+      {
+        tool: "calendar_delete_event",
+        label: "Delete",
+        intent: "danger",
+        args: { event_id: "e1", calendar_id: "local" },
+        confirm: "Delete 'Standup'? This can't be undone.",
+      },
+    ],
+  };
+
+  const showWeek = async () => {
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    // The toolbar (with the view switch) renders before data; switch to week, then each test
+    // awaits its own event text, which only appears once the page has loaded.
+    fireEvent.click(await screen.findByRole("button", { name: "Week" }));
+  };
+
+  it("places a timed event as a positioned box sized by its duration", async () => {
+    mockModulePage.mockResolvedValue({ ...sample, events: [EDITABLE_EVENT] });
+    await showWeek();
+
+    const box = (await screen.findByText("Standup")).closest("button")!;
+    // 09:00 → top = 9 * HOUR_HEIGHT; 30-minute duration → height = HOUR_HEIGHT / 2.
+    expect(box.style.top).toBe(`${9 * HOUR_HEIGHT}px`);
+    expect(box.style.height).toBe(`${HOUR_HEIGHT / 2}px`);
+  });
+
+  it("persists a dragged move through the event's update action, one hour later", async () => {
+    mockModulePage.mockResolvedValue({ ...sample, events: [EDITABLE_EVENT] });
+    mockInvoke.mockResolvedValue({});
+    await showWeek();
+
+    const box = (await screen.findByText("Standup")).closest("button")!;
+    fireEvent.pointerDown(box, { clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { clientY: 200 + HOUR_HEIGHT }); // one hour-row down → +60 min
+    fireEvent.pointerUp(window, { clientY: 200 + HOUR_HEIGHT });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "calendar",
+        "calendar_update_event",
+        expect.objectContaining({ event_id: "e1", calendar_id: "local" }),
+      ),
+    );
+    const call = mockInvoke.mock.calls.find((c) => c[1] === "calendar_update_event")!;
+    const args = call[2] as { start: string; end: string };
+    // Both endpoints shifted +1h, preserving the 30-minute duration (asserted in local terms,
+    // so it holds regardless of the runner's timezone).
+    expect(new Date(args.start).getTime() - new Date("2026-06-15T09:00:00").getTime()).toBe(3_600_000);
+    expect(new Date(args.end).getTime() - new Date("2026-06-15T09:30:00").getTime()).toBe(3_600_000);
+  });
+
+  it("opens the event detail on a plain click (no drag)", async () => {
+    mockModulePage.mockResolvedValue({ ...sample, events: [EDITABLE_EVENT] });
+    await showWeek();
+
+    fireEvent.click((await screen.findByText("Standup")).closest("button")!);
+    expect(await screen.findByRole("dialog", { name: "Standup" })).toBeInTheDocument();
+  });
+
+  it("does not move a read-only event (no update action) on drag", async () => {
+    // Same event without any actions → not draggable; a drag must not call any tool.
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [{ ...EDITABLE_EVENT, actions: [] }],
+    });
+    mockInvoke.mockResolvedValue({});
+    await showWeek();
+
+    const box = (await screen.findByText("Standup")).closest("button")!;
+    fireEvent.pointerDown(box, { clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { clientY: 200 + HOUR_HEIGHT });
+    fireEvent.pointerUp(window, { clientY: 200 + HOUR_HEIGHT });
+
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("pins an all-day event in the all-day strip, not the hour grid", async () => {
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        {
+          id: "ad1",
+          title: "Conference",
+          start: "2026-06-15",
+          end: "2026-06-17",
+          all_day: true,
+          provider: "local",
+        },
+      ],
+    });
+    await showWeek();
+
+    // A 2-day span (end exclusive on the 17th) shows a chip on each day it covers, 15th + 16th.
+    const chips = await screen.findAllByText("Conference");
+    expect(chips).toHaveLength(2);
+    const chip = chips[0].closest("button")!;
+    // A strip chip is not absolutely positioned into the hour grid (no top/height styles).
+    expect(chip.style.top).toBe("");
+    expect(chip.style.height).toBe("");
+    // The "All-day" gutter label is present, confirming the strip rendered.
+    expect(screen.getByText("All-day")).toBeInTheDocument();
   });
 });

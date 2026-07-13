@@ -26,11 +26,13 @@ from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
     MailAttachment,
+    MailCursor,
     MailLabel,
     MailMessage,
     MailProvider,
     MailThread,
     MailThreadSummary,
+    ThreadChanges,
     ThreadPage,
 )
 
@@ -235,18 +237,26 @@ class GmailProvider(MailProvider):
             resp = await client.get("/users/me/threads", params=params)
             resp.raise_for_status()
             data = resp.json()
-            summaries: list[MailThreadSummary] = []
-            for stub in data.get("threads", []):
-                detail = await client.get(
-                    f"/users/me/threads/{stub['id']}",
-                    params={
-                        "format": "metadata",
-                        "metadataHeaders": ["Subject", "From", "Date"],
-                    },
-                )
-                detail.raise_for_status()
-                summaries.append(_thread_summary(detail.json()))
+            summaries = [
+                await self._fetch_thread_summary(client, stub["id"])
+                for stub in data.get("threads", [])
+            ]
             return ThreadPage(threads=summaries, next_cursor=data.get("nextPageToken") or None)
+
+    @staticmethod
+    async def _fetch_thread_summary(client: httpx.AsyncClient, thread_id: str) -> MailThreadSummary:
+        """One metadata ``threads.get`` -> a list row (ADR-0087).
+
+        Shared by :meth:`list_threads` (a whole page) and :meth:`get_thread_summary` (one
+        row an incremental reconcile needs to rebuild), so the two never derive a row
+        differently.
+        """
+        detail = await client.get(
+            f"/users/me/threads/{thread_id}",
+            params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]},
+        )
+        detail.raise_for_status()
+        return _thread_summary(detail.json())
 
     async def get_thread(self, thread_id: str) -> MailThread:
         """The full conversation — every message with body + attachment metadata (ADR-0087)."""
@@ -302,6 +312,66 @@ class GmailProvider(MailProvider):
                 content=content,
             )
 
+    # ── incremental sync (ADR-0096, #623) ────────────────────────────────────
+
+    async def current_cursor(self) -> MailCursor:
+        """The mailbox's ``historyId`` right now, via ``users.getProfile`` (ADR-0096).
+
+        One cheap call; Gmail returns ``historyId`` as a string, coerced to the ``int`` the
+        cache stores as ``BigInteger`` (it is ~1e10+ and climbs, so never an int32 column).
+        """
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            resp = await client.get("/users/me/profile")
+            resp.raise_for_status()
+            return MailCursor(history_id=_as_int(resp.json().get("historyId")))
+
+    async def changed_threads_since(self, cursor: MailCursor) -> ThreadChanges | None:
+        """Threads touched since *cursor* via ``users.history.list`` (ADR-0096, #623).
+
+        Replays every change after ``cursor.history_id`` (messages added/deleted, labels
+        added/removed) and collects each referenced ``threadId`` — so a reconcile rebuilds
+        only those rows. Paginates ``nextPageToken`` to the end. A **404** means the start
+        history is older than Gmail retains (~a week) → returns ``None`` so the caller does a
+        full resync. The advanced cursor is the response's own ``historyId`` (the mailbox top),
+        falling back to *cursor* when Gmail omits it.
+        """
+        start = cursor.history_id
+        if start is None:  # never synced — the orchestrator should full-sync, not diff
+            return None
+        token = await self._get_token()
+        changed: set[str] = set()
+        latest = start
+        page_token: str | None = None
+        async with self._make_client(token) as client:
+            while True:
+                params: dict[str, Any] = {"startHistoryId": start}
+                if page_token:
+                    params["pageToken"] = page_token
+                resp = await client.get("/users/me/history", params=params)
+                if resp.status_code == httpx.codes.NOT_FOUND:
+                    return None  # history expired → caller full-resyncs
+                resp.raise_for_status()
+                data = resp.json()
+                for record in data.get("history", []):
+                    changed.update(_history_thread_ids(record))
+                latest = _as_int(data.get("historyId")) or latest
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+        return ThreadChanges(changed_thread_ids=changed, next_cursor=MailCursor(history_id=latest))
+
+    async def get_thread_summary(self, thread_id: str) -> MailThreadSummary | None:
+        """One thread's list row, or ``None`` if it was deleted (a 404) (ADR-0096, #623)."""
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            try:
+                return await self._fetch_thread_summary(client, thread_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == httpx.codes.NOT_FOUND:
+                    return None
+                raise
+
     async def health_check(self) -> bool:
         try:
             token = await self._get_token()
@@ -333,9 +403,11 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
     to_raw = headers.get("to", "")
     to_list = [t.strip() for t in to_raw.split(",") if t.strip()]
     body: str | None = None
+    body_html: str | None = None
     attachments: list[MailAttachment] = []
     if full:
         body = _extract_body(payload)
+        body_html = _extract_html(payload)
         attachments = _extract_attachments(payload)
     # Gmail flags an unread message with the system ``UNREAD`` label; ``labelIds`` is
     # returned for both the ``metadata`` and ``full`` formats, so search and read agree.
@@ -349,6 +421,7 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         date=headers.get("date", ""),
         snippet=data.get("snippet", ""),
         body=body,
+        body_html=body_html,
         unread=unread,
         attachments=attachments,
     )
@@ -408,6 +481,11 @@ def _thread_summary(data: dict[str, Any]) -> MailThreadSummary:
     first_headers = _headers_of(first)
     last_headers = _headers_of(last)
     unread = any("UNREAD" in m.get("labelIds", []) for m in messages)
+    # The thread belongs to every label any of its messages carries (Gmail thread-label
+    # semantics), so a reconcile can tell if it still sits in a cached folder (ADR-0096).
+    label_ids = sorted({lid for m in messages for lid in m.get("labelIds", [])})
+    # Order by the newest message's internalDate (epoch ms) — Gmail's own thread ordering.
+    sort_ts = _as_int(last.get("internalDate")) or 0
     return MailThreadSummary(
         id=str(data.get("id", "")),
         subject=first_headers.get("subject", "(no subject)"),
@@ -416,24 +494,79 @@ def _thread_summary(data: dict[str, Any]) -> MailThreadSummary:
         date=last_headers.get("date", ""),
         unread=unread,
         message_count=len(messages),
+        sort_ts=sort_ts,
+        label_ids=label_ids,
     )
 
 
+def _as_int(value: Any) -> int | None:
+    """Coerce Gmail's string ``historyId`` (and kin) to ``int``; ``None`` on missing/garbage.
+
+    Gmail serializes ``historyId`` as a decimal string (``"987654"``); the cache stores it as
+    a ``BigInteger``. Defensive so a malformed body can't crash a reconcile with ``ValueError``.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _history_thread_ids(record: dict[str, Any]) -> set[str]:
+    """Every ``threadId`` referenced by one ``users.history.list`` record (ADR-0096, #623).
+
+    A record carries the affected messages under ``messages`` plus the typed change arrays
+    (``messagesAdded`` / ``messagesDeleted`` / ``labelsAdded`` / ``labelsRemoved``), each entry
+    wrapping a ``message`` object. Walking all of them catches every thread whose row may now be
+    stale — a new/removed message *or* a flag flip (read/unread, archived) — which is the set the
+    reconcile rebuilds.
+    """
+    ids: set[str] = set()
+    for message in record.get("messages", []):
+        if isinstance(message, dict) and message.get("threadId"):
+            ids.add(str(message["threadId"]))
+    for key in ("messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved"):
+        for entry in record.get(key, []):
+            message = entry.get("message", {}) if isinstance(entry, dict) else {}
+            if isinstance(message, dict) and message.get("threadId"):
+                ids.add(str(message["threadId"]))
+    return ids
+
+
+def _part_headers(part: dict[str, Any]) -> dict[str, str]:
+    """Lowercased ``{header: value}`` for one Gmail payload *part* (empty if none)."""
+    return {h["name"].lower(): h["value"] for h in part.get("headers", [])}
+
+
 def _extract_attachments(payload: dict[str, Any]) -> list[MailAttachment]:
-    """Walk a Gmail payload for attachment parts (a filename + a body ``attachmentId``)."""
+    """Walk a Gmail payload for attachment parts (ADR-0097, #627).
+
+    Includes a part with a body ``attachmentId`` and **either** a filename (an ordinary
+    attachment) **or** a ``Content-ID`` (an inline image an HTML body references as
+    ``cid:<id>``). ``content_id`` is the header stripped of its angle brackets; ``inline`` is
+    set when the part is dispositioned inline or carries a ``Content-ID`` — the shell resolves
+    those for the HTML body and keeps them out of the download row.
+    """
     found: list[MailAttachment] = []
 
     def walk(part: dict[str, Any]) -> None:
         body = part.get("body", {})
         attachment_id = body.get("attachmentId")
         filename = part.get("filename") or ""
-        if attachment_id and filename:
+        headers = _part_headers(part)
+        content_id = headers.get("content-id", "").strip().strip("<>").strip() or None
+        disposition = headers.get("content-disposition", "").lower()
+        is_inline = "inline" in disposition or content_id is not None
+        if attachment_id and (filename or content_id):
             found.append(
                 MailAttachment(
                     id=str(attachment_id),
-                    filename=filename,
+                    filename=filename or content_id or "inline",
                     mime_type=str(part.get("mimeType", "")),
                     size=int(body.get("size", 0) or 0),
+                    content_id=content_id,
+                    inline=is_inline,
                 )
             )
         for sub in part.get("parts", []):
@@ -441,6 +574,16 @@ def _extract_attachments(payload: dict[str, Any]) -> list[MailAttachment]:
 
     walk(payload)
     return found
+
+
+def _extract_html(payload: dict[str, Any]) -> str | None:
+    """The message's raw ``text/html`` body part, decoded, or ``None`` (ADR-0097, #627).
+
+    Unlike :func:`_extract_body` (which decodes HTML *to text* as a fallback), this returns the
+    HTML verbatim for the shell to render in a sandboxed iframe. Safety lives at the render
+    boundary (the sandbox + the shell's inert-parse sanitize), not here.
+    """
+    return _first_part_text(payload, "text/html")
 
 
 def _find_attachment_part(payload: dict[str, Any], attachment_id: str) -> MailAttachment | None:

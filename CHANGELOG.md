@@ -26,7 +26,43 @@ images to GHCR.
   and rolls back with a dismissible message on provider failure. A read-only event stays
   click-to-open. On a phone the grid **pans horizontally** with the time gutter and day headers
   pinned. Placement and drag maths are framework-free and unit-tested
-  (`services/web/src/components/archetypes/calendarGrid.ts`). `web` 0.98.0→0.99.0.
+  (`services/web/src/components/archetypes/calendarGrid.ts`). `web` 0.100.0→0.101.0.
+
+- **Mail: render HTML email properly (images, styling)** (#627, ADR-0097) — HTML mail rendered
+  badly: the shell decoded every message to plain text (no images, no layout), because rendering
+  raw mail HTML in the shell would be an XSS surface. The module now surfaces the message's
+  **`body_html`** (plus inline images' `Content-ID`s, marked `inline`), and the shell renders it in
+  a **sandboxed iframe** (`allow-same-origin allow-popups`, **never** `allow-scripts`) — so email JS
+  can never run and the email's CSS can't bleed into or restyle the app shell. Two independent safety
+  layers: the HTML is first sanitized by an **inert `DOMParser` pass** (strip `<script>`/`<link>`/
+  `<iframe>`/`<form>`, every `on*=` handler, `javascript:`/`vbscript:` URLs) — the raw HTML never
+  touches the live DOM — then the sandbox neutralizes anything missed. Inline **`cid:` images** are
+  rewritten to the module's same-origin attachment proxy (fetched through the module, never a direct
+  provider URL), so they load with the session cookie; inline images are kept out of the download
+  row. **Remote images are blocked by default** (a remote `<img>` is a tracking pixel) with a
+  per-message "Load images" affordance — the deliberate privacy default. Plain text stays the
+  fallback for text-only mail and the `mail_read` tool; emails render on a white canvas in both app
+  themes (the mainstream mail-client convention) for legibility. `mail` 0.11.0→0.12.0; `web`
+  0.99.0→0.100.0.
+
+- **Mail: local cache + incremental sync — stop full-fetching on every open** (#623, ADR-0096) —
+  the mailbox page fetched everything from Gmail on *every* open (the rail + one metadata
+  `threads.get` per thread, ~28 calls for a 25-row page), so opening Mail was slow. The module now
+  keeps a tenant-scoped **local cache** (`mail_thread`/`mail_label`/`mail_sync`/`mail_landing`, owned
+  by the mail service — no shared DB) and reconciles it incrementally. The plain landing view serves
+  the cached rows + rail with **no** provider call (the first open of a folder is a one-time cold
+  sync; every open after renders in ~a second); the web then fires a background `?reconcile=1` read
+  that pulls **only the delta** — via a provider-neutral change cursor (`MailCursor {history_id,
+  uid_validity, uid_next}` behind the `MailProvider` seam; Gmail uses `historyId` +
+  `users.history.list`, IMAP's `UIDVALIDITY`/`UIDNEXT` reserved) — rebuilding only the touched thread
+  rows so new/changed messages, read/unread flips, and archives appear without a manual refresh. A
+  cursor too old to replay (Gmail expires history after ~a week) or an IMAP `UIDVALIDITY` rotation
+  triggers a full resync. Read/unread converges both ways (a mark-read writes through to the cache
+  optimistically). Search (`?q=`) and deeper pages (`?cursor=`) still read live — the cache only
+  accelerates the landing open. Large-int columns are `BigInteger` (a Gmail `historyId` and the
+  epoch-millisecond `sort_ts` ordering key both exceed int32); the schema evolves via `create_all` +
+  the shared additive `ensure_columns` reconcile (ADR-0067). `mail` 0.10.0→0.11.0; `web`
+  0.98.0→0.99.0 (the mailbox view's cache-then-reconcile flow).
 
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole

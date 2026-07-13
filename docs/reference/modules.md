@@ -461,13 +461,17 @@ panes (query params forwarded, no new read endpoint): the **list** (`?label=`, `
 returns the folders rail + one cursor-paginated page of thread summaries; the **thread**
 (`?thread_id=`) returns `{thread: {id, subject, messages, reply}}`, where each message reuses the
 `EmailMessage` shape (extended with `attachments`) so the page and the panel `email-reader` share
-one renderer. Pagination is **cursor-only** (`next_cursor`, never offset — mailboxes are unbounded);
+one renderer. The mail module additionally serves the plain **landing** list (no `?q=`/`?cursor=`)
+from a tenant-scoped **local cache** for an instant open, with `?reconcile=1` as a background
+second read that pulls only the provider delta into the cache (ADR-0096, #623) — a
+module-internal optimization the archetype contract doesn't otherwise mandate. Pagination is **cursor-only** (`next_cursor`, never offset — mailboxes are unbounded);
 triage is message-level `BoardAction`s (`mail_mark_read`/`unread`, `mail_archive`, `mail_trash`)
 through the normal tool proxy. Two `mailbox`-gated core proxies back the rest: **`POST
 …/pages/{id}/send`** (a *human-initiated* compose/reply — shares the module transmit but never the
 agent draft pane, ADR-0085) and **`GET …/pages/{id}/attachment`** (streams a message's attachment
-bytes). Rendering is **plain-text-first**: HTML-only mail is decoded to text server-side, so the
-shell never renders mail HTML.
+bytes). A message's HTML body is rendered in a **sandboxed iframe** (no `allow-scripts`; inline
+`cid:` images proxied through the module, remote images blocked by default) so email CSS/JS can
+never bleed into or script the shell (ADR-0097, #627); plain text is the fallback.
 
 ### Entity references & the resolver (ADR-0019)
 

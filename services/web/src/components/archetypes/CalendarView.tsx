@@ -24,6 +24,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -611,40 +612,45 @@ function Toolbar({
   onNext: () => void;
   onToday: () => void;
 }) {
+  // One deliberate control row, laid out to the shell's toolbar convention (the board's
+  // `gap-x-3 gap-y-2` bar, #628): the navigation cluster (Today · ‹ › · period) sits left,
+  // the actions + calendars + view switch are pushed right by `ml-auto` so the row stretches
+  // the full width. It wraps — with gap-y breathing room, not a ragged clip — only on the
+  // narrowest phones, where the icon-only "New event"/Calendars keep it to one line far more often.
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge px-3 py-2">
-      <div className="flex items-center gap-2">
-        <div className="flex items-center">
-          <button
-            aria-label="Previous"
-            onClick={onPrev}
-            className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <button
-            aria-label="Next"
-            onClick={onNext}
-            className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          >
-            <ChevronRight size={18} />
-          </button>
-        </div>
-        <h2 className="font-serif text-base text-ink">
-          <span className="hidden sm:inline">{label.full}</span>
-          <span className="sm:hidden">{label.short}</span>
-        </h2>
-        {fetching && <Spinner className="size-3.5 text-ink-faint" />}
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge px-3 py-2.5">
+      <div className="flex items-center gap-1">
+        <button
+          onClick={onToday}
+          className="rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs text-ink-dim hover:border-accent hover:text-accent-strong"
+        >
+          Today
+        </button>
+        <button
+          aria-label="Previous"
+          onClick={onPrev}
+          className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
+        >
+          <ChevronLeft size={18} />
+        </button>
+        <button
+          aria-label="Next"
+          onClick={onNext}
+          className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
+        >
+          <ChevronRight size={18} />
+        </button>
       </div>
+      <h2 className="font-serif text-base whitespace-nowrap text-ink">
+        <span className="hidden sm:inline">{label.full}</span>
+        <span className="sm:hidden">{label.short}</span>
+      </h2>
+      {fetching && <Spinner className="size-3.5 text-ink-faint" />}
 
-      {/* flex-wrap is the last-resort fallback (#562) — icon-only "New event" plus the
-          tighter narrow gap should fit this group on one line at ~380px, but a phone
-          with several writable calendars (the Calendars menu adds real width) may still
-          need the second line rather than clip. */}
-      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         {/* Page-level actions (e.g. "New event") — core-rendered from the page data (#208).
-            size="sm" matches the Today/view-switcher controls in this toolbar (#427);
-            iconOnlyNarrow drops the label below `sm`, keeping just the icon (#562). */}
+            size="sm" matches the view-switcher controls (#427); iconOnlyNarrow drops the label
+            below `sm`, keeping just the icon (#562). */}
         {actions.map((action) => (
           <ActionControl
             key={action.tool + action.label}
@@ -659,12 +665,6 @@ function Toolbar({
         {calendars.length >= 2 && (
           <CalendarsMenu calendars={calendars} hidden={hidden} onToggle={onToggleCalendar} />
         )}
-        <button
-          onClick={onToday}
-          className="rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs text-ink-dim hover:border-accent hover:text-accent-strong"
-        >
-          Today
-        </button>
         <div className="flex rounded-(--radius-field) border border-edge p-0.5">
           {VIEWS.map((v) => (
             <button
@@ -703,20 +703,70 @@ function CalendarsMenu({
   onToggle: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>();
   const shown = calendars.length - calendars.filter((c) => hidden.has(c.id)).length;
+  const filtered = shown < calendars.length;
+
+  // Clamp the dropdown to the viewport (#629). The old `absolute right-0` ran partly off a
+  // phone screen; this positions it `fixed` from the trigger's rect, **shifts** it horizontally
+  // to stay on-screen, **flips** above when there's more room up than down, and caps its height
+  // with a scroll — so every entry is reachable no matter where the trigger sits or how narrow
+  // the viewport is. `useLayoutEffect` places it before paint (no flash); it re-places on
+  // open and on resize/scroll while open.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const el = triggerRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const M = 8; // viewport margin
+      const GAP = 4; // gap between trigger and menu
+      const W = 224; // menu width (was `w-56`)
+      const left = Math.min(Math.max(r.right - W, M), Math.max(M, window.innerWidth - W - M));
+      const spaceBelow = window.innerHeight - r.bottom - GAP - M;
+      const spaceAbove = r.top - GAP - M;
+      const flipUp = spaceBelow < 180 && spaceAbove > spaceBelow;
+      setMenuStyle({
+        position: "fixed",
+        left,
+        width: W,
+        ...(flipUp
+          ? { bottom: window.innerHeight - r.top + GAP, maxHeight: spaceAbove }
+          : { top: r.bottom + GAP, maxHeight: spaceBelow }),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
         aria-label="Choose visible calendars"
         aria-expanded={open}
         className={cn(
           "flex items-center gap-1.5 rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs transition-colors hover:border-accent hover:text-accent-strong",
-          shown < calendars.length ? "text-accent-strong" : "text-ink-dim",
+          filtered ? "text-accent-strong" : "text-ink-dim",
         )}
       >
         <Layers size={14} />
-        <span>Calendars{shown < calendars.length ? ` (${shown}/${calendars.length})` : ""}</span>
+        {/* Below `sm` the icon (+ count when filtered) stands in for the word, keeping the
+            toolbar to one row on a phone (#628). */}
+        <span className="hidden sm:inline">Calendars</span>
+        {filtered && (
+          <span className="tabular-nums">
+            <span className="hidden sm:inline"> </span>
+            {shown}/{calendars.length}
+          </span>
+        )}
       </button>
       {open && (
         <>
@@ -724,10 +774,13 @@ function CalendarsMenu({
             type="button"
             aria-hidden
             tabIndex={-1}
-            className="fixed inset-0 z-10 cursor-default"
+            className="fixed inset-0 z-40 cursor-default"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute right-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)">
+          <div
+            style={menuStyle}
+            className="z-50 overflow-y-auto overflow-x-hidden rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)"
+          >
             {calendars.map((c) => {
               const visible = !hidden.has(c.id);
               return (

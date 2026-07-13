@@ -14,6 +14,18 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: toolbar reworked into one stretched row; calendars picker clamped on mobile**
+  (#628, #629) — the control row read as cramped and unbalanced; it now follows the shell's toolbar
+  convention (the board's `gap-x-3 gap-y-2` bar) — a **Today · ‹ › · period** navigation cluster on
+  the left, the page actions + **Calendars** picker + view switch pushed right by `ml-auto` so the
+  row stretches the full width; icon-only "New event"/Calendars keep it to one line on all but the
+  narrowest phones (where it wraps to a tidy second line). The **Calendars** visibility popover
+  opened **partly off a phone screen**; it is now **clamped to the viewport** — positioned `fixed`
+  from its trigger, shifted horizontally to stay on-screen, flipped above when there's more room up
+  than down, and height-capped with a scroll — so every calendar is reachable regardless of trigger
+  position. Calendar-local components only; no shared shell component changed. `web`
+  0.102.0→0.103.0.
+
 - **Calendar: tap a month day to open its week; slim event lines on phone** (#630, #632) — in the
   month view, tapping a day **navigated into a half-started create**; it now **opens that day's
   week view** (with the day highlighted), making the month a navigator and putting legible detail

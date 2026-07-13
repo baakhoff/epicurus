@@ -361,6 +361,15 @@ week grid's **empty-slot tap** (the #473 slot-seed create, relocated from the mo
 labels — the tap-through carries the detail), collapsing to a `+N` marker only past what genuinely
 fits; **desktop** keeps the labelled chips with a `+N more` overflow.
 
+**Calendar toolbar (#628 / #629).** The calendar's control row follows the shell's toolbar
+convention (the board's `gap-x-3 gap-y-2` bar): a navigation cluster (**Today** · ‹ › · period
+label) on the left, the page actions + **Calendars** picker + view switch pushed right by `ml-auto`
+so the row stretches full-width; the icon-only "New event"/Calendars keep it to one line on all but
+the narrowest phones, where it wraps to a tidy second line. The **Calendars** visibility popover is
+**clamped to the viewport** (#629): positioned `fixed` from its trigger, shifted horizontally to
+stay on-screen, flipped above when there's more room up than down, and height-capped with a scroll —
+so on a phone every calendar is reachable regardless of where the trigger sits.
+
 **Left-nav page order (#543).** The operator's drag-and-drop order for these pages is a
 tenant-scoped preference (`GET`/`PUT /platform/v1/page-order`, `{order: string[]}` of each
 page's `path`) — the Modules screen's **Page order** card is the only place it's edited

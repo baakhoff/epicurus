@@ -367,6 +367,37 @@ describe("CalendarView", () => {
     );
   });
 
+  it("clamps the Calendars popover into the viewport with a scroll (#629)", async () => {
+    // Two calendars (default Google + the local event token) → the menu renders.
+    mockModulePage.mockResolvedValue({
+      ...sample,
+      events: [
+        { ...sample.events[0], calendar_id: "local" },
+        {
+          id: "e2",
+          title: "Sync",
+          start: "2026-06-16T10:00:00",
+          end: "2026-06-16T10:30:00",
+          provider: "google",
+          calendar_id: "google:primary",
+        },
+      ],
+    });
+    render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup");
+
+    fireEvent.click(await screen.findByLabelText("Choose visible calendars"));
+    const menu = (await screen.findByText("Work Calendar")).closest("div[style]") as HTMLElement;
+    const style = menu.getAttribute("style") ?? "";
+    // Fixed-positioned (not the old `absolute right-0`), height-capped so a long list scrolls,
+    // and shifted so its left edge never lands off-screen (negative).
+    expect(style).toContain("position: fixed");
+    expect(style).toMatch(/max-height/);
+    expect(menu.className).toContain("overflow-y-auto");
+    const left = Number.parseFloat(/left:\s*([-\d.]+)px/.exec(style)?.[1] ?? "-1");
+    expect(left).toBeGreaterThanOrEqual(0);
+  });
+
   // Regression guard (#427): the page-level action ("New event") must match the
   // toolbar's other hand-rolled controls (Today, view switcher: text-xs), not the
   // full form-sized Button used e.g. by the tasks board toolbar.

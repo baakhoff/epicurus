@@ -14,6 +14,25 @@ images to GHCR.
 
 ### Added
 
+- **Mail: local cache + incremental sync — stop full-fetching on every open** (#623, ADR-0096) —
+  the mailbox page fetched everything from Gmail on *every* open (the rail + one metadata
+  `threads.get` per thread, ~28 calls for a 25-row page), so opening Mail was slow. The module now
+  keeps a tenant-scoped **local cache** (`mail_thread`/`mail_label`/`mail_sync`/`mail_landing`, owned
+  by the mail service — no shared DB) and reconciles it incrementally. The plain landing view serves
+  the cached rows + rail with **no** provider call (the first open of a folder is a one-time cold
+  sync; every open after renders in ~a second); the web then fires a background `?reconcile=1` read
+  that pulls **only the delta** — via a provider-neutral change cursor (`MailCursor {history_id,
+  uid_validity, uid_next}` behind the `MailProvider` seam; Gmail uses `historyId` +
+  `users.history.list`, IMAP's `UIDVALIDITY`/`UIDNEXT` reserved) — rebuilding only the touched thread
+  rows so new/changed messages, read/unread flips, and archives appear without a manual refresh. A
+  cursor too old to replay (Gmail expires history after ~a week) or an IMAP `UIDVALIDITY` rotation
+  triggers a full resync. Read/unread converges both ways (a mark-read writes through to the cache
+  optimistically). Search (`?q=`) and deeper pages (`?cursor=`) still read live — the cache only
+  accelerates the landing open. Large-int columns are `BigInteger` (a Gmail `historyId` and the
+  epoch-millisecond `sort_ts` ordering key both exceed int32); the schema evolves via `create_all` +
+  the shared additive `ensure_columns` reconcile (ADR-0067). `mail` 0.10.0→0.11.0; `web`
+  0.98.0→0.99.0 (the mailbox view's cache-then-reconcile flow).
+
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole
   `max_steps` budget and ended in a silent stop: the model re-issuing the *exact same* call over and

@@ -1049,6 +1049,8 @@ export const MailThreadSummary = z.object({
   date: z.string().default(""),
   unread: z.boolean().default(false),
   message_count: z.number().default(1),
+  /** The thread's last-message epoch ms — the local cache's ordering key (ADR-0096, #623). */
+  sort_ts: z.number().default(0),
 });
 export type MailThreadSummary = z.infer<typeof MailThreadSummary>;
 

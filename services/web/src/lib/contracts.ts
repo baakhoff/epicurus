@@ -1208,9 +1208,26 @@ export type MaintenanceCurrentRun = z.infer<typeof MaintenanceCurrentRun>;
 /** The maintenance surface: the schedule, the registered jobs, the last run, and any live run. */
 export const MaintenanceStatus = z.object({
   schedule_enabled: z.boolean(),
+  // "hourly" | "daily" | "weekly" — kept as a plain string so an older/newer core's cadence
+  // this build doesn't know about still round-trips (the Select just shows it verbatim).
+  schedule_cadence: z.string(),
   schedule_hour: z.number(),
+  // 0=Monday..6=Sunday; only meaningful (non-null) for a "weekly" cadence.
+  schedule_weekday: z.number().nullish(),
+  // ISO 8601 in the tenant's timezone; null when the schedule is disabled — an estimate for
+  // display, not a guarantee (the scheduler's own due-check additionally dedupes a window).
+  next_run_at: z.string().nullish(),
   jobs: z.array(MaintenanceJob).default([]),
   last_run: MaintenanceRun.nullish(),
   current_run: MaintenanceCurrentRun.nullish(),
 });
 export type MaintenanceStatus = z.infer<typeof MaintenanceStatus>;
+
+/** A ``PUT /maintenance/schedule`` body (#621) — validated server-side as a whole. */
+export const MaintenanceScheduleUpdate = z.object({
+  enabled: z.boolean(),
+  cadence: z.string(),
+  hour: z.number(),
+  weekday: z.number().nullish(),
+});
+export type MaintenanceScheduleUpdate = z.infer<typeof MaintenanceScheduleUpdate>;

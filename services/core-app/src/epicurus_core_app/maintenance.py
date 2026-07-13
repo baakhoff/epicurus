@@ -16,6 +16,11 @@ A batch runs as a **detached background task** (:meth:`MaintenanceOrchestrator.s
 (``agent/live_runs.py``, #376). ``current_run`` exposes its live per-job progress while it's in
 flight; a second start while one is running raises :class:`MaintenanceRunConflictError` so a
 caller joins the in-flight run instead of racing a second one.
+
+The *trigger* — enable/disable, cadence (hourly/daily/weekly), time of day, weekday — is a
+real, per-tenant, runtime-editable schedule (#621); see ``maintenance_schedule_prefs.py``. This
+module only generalizes *when* the nightly batch fires, never *what* it runs: the job registry
+above stays a static, additive-only list.
 """
 
 from __future__ import annotations
@@ -24,13 +29,20 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from epicurus_core import EventBus, get_logger
-from epicurus_core_app.scheduling import TimezoneProvider, sleep_until_hour
+from epicurus_core_app.maintenance_schedule_prefs import MaintenanceSchedule, is_due
+from epicurus_core_app.scheduling import TimezoneProvider
 
 log = get_logger("epicurus_core_app.maintenance")
+
+# A provider of the tenant's current maintenance schedule (#621) — re-read every tick, so an
+# operator's enable/disable or cadence/hour/weekday change (via PUT) takes effect without a
+# process restart. Mirrors ``TimezoneProvider``'s zero-arg-async-callable shape.
+MaintenanceScheduleProvider = Callable[[], Awaitable[MaintenanceSchedule]]
 
 # Base subject (tenant-scoped at publish time, constraint #1) announced after a batch completes.
 MAINTENANCE_COMPLETED_SUBJECT = "maintenance.completed"
@@ -120,12 +132,14 @@ class MaintenanceRunConflictError(RuntimeError):
 class MaintenanceOrchestrator:
     """Runs the registered maintenance jobs as one coordinated, sequenced batch.
 
-    Construction takes the job list (the registry) plus the event bus and schedule config. The
-    manual trigger runs **every** job (``scope="all"``); the opt-in nightly loop runs only the
-    ``nightly`` jobs. Either way a tenant-scoped ``maintenance.completed`` event is published and
-    the last run is cached for the UI. The scheduler is **off by default** — the per-runner nightly
-    schedules already cover the unattended case; an operator opts into a single coordinated batch
-    (consolidating them onto this orchestrator is the follow-up, ADR-0060).
+    Construction takes the job list (the registry) plus the event bus and a schedule provider.
+    The manual trigger runs **every** job (``scope="all"``); the poll-based nightly loop runs
+    only the ``nightly`` jobs, and only when the current schedule (read fresh each tick, #621)
+    says to. Either way a tenant-scoped ``maintenance.completed`` event is published and the last
+    run is cached for the UI. The schedule is **off by default** (an env-configured default,
+    operator-overridable at runtime) — the per-runner nightly schedules already cover the
+    unattended case; an operator opts into a single coordinated batch (consolidating them onto
+    this orchestrator is the follow-up, ADR-0060).
     """
 
     def __init__(
@@ -135,26 +149,24 @@ class MaintenanceOrchestrator:
         bus: EventBus,
         default_tenant: str,
         timezone: TimezoneProvider,
-        hour: int = 4,
-        schedule_enabled: bool = False,
+        schedule: MaintenanceScheduleProvider,
+        poll_interval_s: int = 60,
     ) -> None:
         self._jobs = list(jobs)
         self._bus = bus
         self._tenant = default_tenant
         self._timezone = timezone
-        self._hour = hour % 24
-        self._schedule_enabled = schedule_enabled
+        self._schedule = schedule
+        self._poll_interval_s = poll_interval_s
+        # In-memory only, like the rest of this scheduler's state (a restart re-evaluates due-ness
+        # fresh against the wall clock — the same characteristic the old sleep_until_hour design
+        # had). Set right before attempting a fire (not only on success), so a run that skips on
+        # MaintenanceRunConflictError doesn't retry-storm every tick for the rest of the window —
+        # it waits for the next one, matching the old design's one-attempt-per-window behavior.
+        self._last_scheduled_fire: datetime | None = None
         self._last_run: MaintenanceRun | None = None
         self._current: MaintenanceCurrentRun | None = None
         self._current_task: asyncio.Task[MaintenanceRun] | None = None
-
-    @property
-    def schedule_enabled(self) -> bool:
-        return self._schedule_enabled
-
-    @property
-    def schedule_hour(self) -> int:
-        return self._hour
 
     def descriptors(self) -> list[dict[str, object]]:
         """The registered jobs as ``{key, label, nightly}`` dicts (for the UI)."""
@@ -289,23 +301,39 @@ class MaintenanceOrchestrator:
                 await task
 
     async def run_periodic(self) -> None:
-        """Loop forever running the nightly batch at the configured hour — a no-op when disabled.
+        """Poll every ``poll_interval_s`` and run the nightly batch when the schedule is due.
 
-        Each iteration is self-contained: a failed run logs and waits for the next window rather
-        than killing the loop, and an overlapping manual run is skipped (not an error) — the
-        operator's "run now" wins and the schedule catches up tomorrow. Returns immediately
-        (never loops) when the schedule is off.
+        A plain poll loop, not a single ``sleep_until_hour`` — the schedule is now dynamic and
+        operator-editable at runtime (#621: enable/disable, cadence, hour, weekday), so a fixed
+        sleep computed once at wake-time can't react to a change made while it's sleeping. Never
+        exits (even while disabled): an operator can toggle it on later in the same process
+        lifetime, and each tick re-reads the schedule fresh. Never dies on a transient error.
         """
-        if not self._schedule_enabled:
-            return
         while True:
-            await sleep_until_hour(self._hour, self._timezone)
+            await asyncio.sleep(self._poll_interval_s)
             try:
-                await self.run(scope="nightly")
-            except MaintenanceRunConflictError:
-                log.info("nightly maintenance skipped; a manual run is already in progress")
-            except Exception as exc:  # never let the scheduler die on a transient error
-                log.warning("scheduled maintenance run failed", error=str(exc))
+                await self._tick()
+            except Exception as exc:  # a bad tick must not kill the scheduler
+                log.warning("maintenance schedule tick failed", error=str(exc))
+
+    async def _tick(self) -> None:
+        """Evaluate the current schedule against local time; run the nightly batch if due."""
+        schedule = await self._schedule()
+        tz: tzinfo
+        try:
+            tz = ZoneInfo((await self._timezone()).strip() or "UTC")
+        except Exception:  # unknown/blank/bad tz — fall back to UTC rather than skip the tick
+            tz = UTC
+        local_now = datetime.now(tz)
+        if not is_due(schedule, local_now, self._last_scheduled_fire):
+            return
+        self._last_scheduled_fire = datetime.now(UTC)
+        try:
+            await self.run(scope="nightly")
+        except MaintenanceRunConflictError:
+            log.info("nightly maintenance skipped; a manual run is already in progress")
+        except Exception as exc:  # never let the scheduler die on a transient error
+            log.warning("scheduled maintenance run failed", error=str(exc))
 
 
 # ── Built-in jobs ─────────────────────────────────────────────────────────────

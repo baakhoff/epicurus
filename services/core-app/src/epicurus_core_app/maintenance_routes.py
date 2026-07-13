@@ -1,14 +1,19 @@
 """The maintenance-orchestrator platform API (ADR-0060), under ``/platform/v1/maintenance``.
 
-``GET`` reports the registered jobs, the schedule, the last completed run, and any run currently
-in flight. ``POST /run`` starts the manual "run everything" batch as a background task and
-returns immediately (202) with that run's live progress — it does not wait for the batch, which
-can take minutes (#561). A second ``POST`` while one is already running responds 409 rather than
-starting a competing batch; the caller re-``GET``s to observe/join the in-flight run. The shell's
-Settings screen drives it: it rehydrates onto ``current_run`` on mount and polls while one is live.
+``GET`` reports the registered jobs, the effective schedule + next planned run, the last
+completed run, and any run currently in flight. ``PUT /schedule`` sets the schedule — enable/
+disable, cadence, hour, weekday (#621) — validated before it's persisted. ``POST /run`` starts
+the manual "run everything" batch as a background task and returns immediately (202) with that
+run's live progress — it does not wait for the batch, which can take minutes (#561). A second
+``POST`` while one is already running responds 409 rather than starting a competing batch; the
+caller re-``GET``s to observe/join the in-flight run. The shell's Settings screen drives it: it
+rehydrates onto ``current_run`` on mount and polls while one is live.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
@@ -19,6 +24,13 @@ from epicurus_core_app.maintenance import (
     MaintenanceRun,
     MaintenanceRunConflictError,
 )
+from epicurus_core_app.maintenance_schedule_prefs import (
+    MaintenanceSchedule,
+    MaintenanceScheduleStore,
+    next_run_at,
+    validate_cadence,
+)
+from epicurus_core_app.scheduling import TimezoneProvider
 
 
 class MaintenanceJobView(BaseModel):
@@ -67,10 +79,24 @@ class MaintenanceStatusView(BaseModel):
     """The maintenance surface: schedule, registered jobs, the last run, and any live run."""
 
     schedule_enabled: bool
+    schedule_cadence: str
     schedule_hour: int
+    schedule_weekday: int | None
+    # ISO 8601, in the tenant's timezone — an estimate for display, not a guaranteed fire time
+    # (the scheduler's own due-check additionally avoids re-firing within an already-run window).
+    next_run_at: str | None
     jobs: list[MaintenanceJobView]
     last_run: MaintenanceRunView | None
     current_run: MaintenanceCurrentRunView | None
+
+
+class MaintenanceScheduleUpdate(BaseModel):
+    """A ``PUT /schedule`` body — validated as a whole before being persisted."""
+
+    enabled: bool
+    cadence: str
+    hour: int
+    weekday: int | None = None
 
 
 def _run_view(run: MaintenanceRun) -> MaintenanceRunView:
@@ -96,18 +122,39 @@ def _current_view(current: MaintenanceCurrentRun) -> MaintenanceCurrentRunView:
 
 
 def create_maintenance_router(
-    orchestrator: MaintenanceOrchestrator, *, default_tenant: str = "local"
+    orchestrator: MaintenanceOrchestrator,
+    *,
+    schedule_store: MaintenanceScheduleStore,
+    timezone: TimezoneProvider,
+    default_tenant: str = "local",
 ) -> APIRouter:
-    """Build the ``/platform/v1/maintenance`` router over a :class:`MaintenanceOrchestrator`."""
+    """Build the ``/platform/v1/maintenance`` router over a :class:`MaintenanceOrchestrator`.
+
+    ``schedule_store``/``timezone`` back the schedule GET/PUT surface directly (#621) — the
+    orchestrator itself only ever *reads* the current schedule (via the same store, wired as its
+    own provider in ``app.py``); the route is what writes it.
+    """
     router = APIRouter(prefix="/platform/v1/maintenance", tags=["maintenance"])
+
+    async def _local_now() -> datetime:
+        try:
+            return datetime.now(ZoneInfo((await timezone()).strip() or "UTC"))
+        except Exception:  # unknown/blank/bad tz — fall back to UTC rather than error the GET
+            return datetime.now(UTC)
 
     @router.get("", response_model=MaintenanceStatusView)
     async def maintenance_status() -> MaintenanceStatusView:
         last = orchestrator.last_run()
         current = orchestrator.current_run()
+        schedule = await schedule_store.get(default_tenant)
         return MaintenanceStatusView(
-            schedule_enabled=orchestrator.schedule_enabled,
-            schedule_hour=orchestrator.schedule_hour,
+            schedule_enabled=schedule.enabled,
+            schedule_cadence=schedule.cadence,
+            schedule_hour=schedule.hour,
+            schedule_weekday=schedule.weekday,
+            next_run_at=(
+                next_run_at(schedule, await _local_now()).isoformat() if schedule.enabled else None
+            ),
             jobs=[
                 MaintenanceJobView(
                     key=str(d["key"]), label=str(d["label"]), nightly=bool(d["nightly"])
@@ -117,6 +164,20 @@ def create_maintenance_router(
             last_run=_run_view(last) if last else None,
             current_run=_current_view(current) if current else None,
         )
+
+    @router.put("/schedule", response_model=MaintenanceStatusView)
+    async def update_schedule(body: MaintenanceScheduleUpdate) -> MaintenanceStatusView:
+        try:
+            validate_cadence(body.cadence, body.hour, body.weekday)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        await schedule_store.set(
+            default_tenant,
+            MaintenanceSchedule(
+                enabled=body.enabled, cadence=body.cadence, hour=body.hour, weekday=body.weekday
+            ),
+        )
+        return await maintenance_status()
 
     @router.post(
         "/run", response_model=MaintenanceCurrentRunView, status_code=status.HTTP_202_ACCEPTED

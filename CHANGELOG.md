@@ -14,6 +14,26 @@ images to GHCR.
 
 ### Added
 
+- **Core: maintenance schedule controls — on/off, cadence, time of day** (#621, ADR-0098) — the
+  maintenance panel read "manual only — nightly schedule off" with no way to change it: the
+  nightly trigger was a code-level default (`MAINTENANCE_SCHEDULE_ENABLED`/`MAINTENANCE_HOUR`),
+  fixed for the process's whole lifetime, with no endpoint to edit it. Now a real, per-tenant,
+  runtime-editable schedule — enable/disable, an hourly/daily/weekly cadence, an hour (+weekday
+  for weekly), read in the tenant's timezone (ADR-0039) — governs the orchestrator's nightly
+  batch as a whole (the job registry itself stays untouched and additive-only, so the incoming
+  reflection job, #615, still rides this one shared hour per ADR-0093). Persisted per tenant
+  (`maintenance_schedule_prefs`, the same settings-primitives shape as `timezone_prefs`/
+  `page_order_prefs`); a missing row falls back to the env-configured default, so a fresh
+  install behaves exactly as before. The orchestrator now **polls** every
+  `MAINTENANCE_POLL_INTERVAL_S` (default 60s) and re-reads the schedule fresh each tick — a
+  fixed `sleep_until_hour` computed once at wake couldn't react to a schedule changed while it
+  slept. `GET /platform/v1/maintenance` gains `schedule_cadence`/`schedule_weekday`/
+  `next_run_at` (an estimate for display); a new `PUT .../schedule` validates and persists the
+  whole schedule at once (400 on an invalid shape, e.g. weekly with no weekday). The Settings
+  panel grows enable/cadence/hour/weekday controls plus an effective-schedule + next-planned-run
+  summary — a multi-field draft the operator edits and explicitly saves (auto-saving per field
+  would fire invalid combinations mid-edit). `core-app` 0.74.0→0.75.0, `web` 0.98.0→0.99.0.
+
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole
   `max_steps` budget and ended in a silent stop: the model re-issuing the *exact same* call over and

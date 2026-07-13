@@ -36,6 +36,7 @@ from epicurus_core import (
     draft_review,
     tool_envelope,
 )
+from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.gmail import GMAIL_API_SCOPES
 from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
 
@@ -190,7 +191,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.0",
+        version="0.12.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -530,6 +531,10 @@ def message_payload(message: MailMessage) -> dict[str, Any]:
         "from": message.sender,
         "date": message.date,
         "body": message.body or "",
+        # The HTML body (ADR-0097, #627) — the shell renders it in a sandboxed iframe with
+        # inline ``cid:`` images resolved through the module and remote images blocked by
+        # default; ``body`` (text) stays the fallback for a text-only message.
+        "body_html": message.body_html,
         "module": MODULE_NAME,
         "message_id": message.id,
         "unread": message.unread,
@@ -541,9 +546,11 @@ def message_payload(message: MailMessage) -> dict[str, Any]:
 async def build_mailbox_list(
     provider: MailProvider,
     *,
+    mailbox: CachedMailbox | None = None,
     label: str | None = None,
     query: str | None = None,
     cursor: str | None = None,
+    reconcile: bool = False,
     limit: int = MAILBOX_PAGE_SIZE,
 ) -> dict[str, Any]:
     """The `mailbox` list read (ADR-0087): the rail + one cursor page of threads.
@@ -554,16 +561,34 @@ async def build_mailbox_list(
     label to bound the rail's provider calls. ``limit`` is clamped to the page cap so one
     fetch can't scan an unbounded mailbox (#539); the shell pages on with ``next_cursor``.
 
+    Cache-first landing (ADR-0096, #623): when a *mailbox* orchestrator is supplied and this
+    is the plain landing view (no *query*, first page), it serves from the local cache
+    instantly — ``reconcile=True`` first pulls the provider delta into the cache. Search and
+    deeper (*cursor*) pages bypass the cache and read the provider live, since the cache only
+    materializes the default landing page.
+
     Args:
         provider: The active mail backend.
+        mailbox: The cache orchestrator for the landing fast path (``None`` → always live).
         label: The rail selection; defaults to the Inbox.
         query: Optional provider-native search; searches all mail when present.
         cursor: Opaque next-page token from a previous read (``None`` for the first page).
+        reconcile: On the cached landing path, pull the provider delta before serving.
         limit: Requested page size, clamped to :data:`MAILBOX_PAGE_SIZE`.
     """
     active = label or DEFAULT_LABEL
     capped = max(1, min(limit, MAILBOX_PAGE_SIZE))
     q = (query or "").strip() or None
+    if mailbox is not None and q is None and not cursor:
+        bundle = await (mailbox.reconcile(active) if reconcile else mailbox.landing(active))
+        return {
+            "title": "Mail",
+            "labels": [lbl.model_dump() for lbl in bundle.labels],
+            "active_label": active,
+            "query": "",
+            "threads": [thread.model_dump() for thread in bundle.threads],
+            "next_cursor": bundle.next_cursor,
+        }
     labels = await provider.list_labels(count_ids=(DEFAULT_LABEL, active))
     page = await provider.list_threads(
         label=None if q else active, query=q, cursor=cursor, limit=capped

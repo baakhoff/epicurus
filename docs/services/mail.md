@@ -115,10 +115,13 @@ data over the page proxy:
   fetch can't scan an unbounded mailbox (#539).
 - **Read.** `GET /pages/mailbox?thread_id=` returns the full conversation — every message through
   the **same renderer** as the panel `email-reader` (not forked) — plus each message's attachments
-  and a server-derived reply prefill. **Plain-text-first:** an HTML-only message is decoded to
-  readable **text** server-side (`_html_to_text`, adversarial-tested) — no HTML is ever rendered in
-  the shell, so there is no HTML-mail XSS surface. Rich sanitized-HTML rendering is a deferred
-  follow-up.
+  and a server-derived reply prefill. **HTML rendering (ADR-0097, #627):** a message's `body_html`
+  is rendered in a **sandboxed iframe** (`allow-same-origin allow-popups`, never `allow-scripts` —
+  so email JS never runs and the email's CSS can't bleed into the shell), with inline `cid:` images
+  resolved through the module's attachment proxy and **remote images blocked by default** (a
+  per-message "Load images" reveals them — a remote `<img>` is a tracking pixel). `body` (plain
+  text, `_html_to_text` for HTML-only mail) stays the fallback for a text-only message and for the
+  `mail_read` agent tool.
 - **Triage.** Two new message-level tools, `mail_archive` (drop the `INBOX` label) and `mail_trash`
   (move to Trash — recoverable, not a permanent delete), both inside the already-granted
   `gmail.modify` scope (no reconnect). They join `mail_mark_read`/`mail_mark_unread` as per-message
@@ -132,8 +135,7 @@ data over the page proxy:
 
 The `MailProvider` seam gains `list_labels` / `list_threads` / `get_thread` / `archive` / `trash` /
 `get_attachment` (typed in mail-domain terms; a future IMAP/Microsoft provider capability-gates
-rather than forcing symmetry). Deferred: thread-level bulk triage, the unread-count nav badge, and
-rich HTML rendering.
+rather than forcing symmetry). Deferred: thread-level bulk triage and the unread-count nav badge.
 
 ---
 
@@ -196,7 +198,7 @@ proxies them to the web shell (the shell never calls the module directly).
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body, `module`/`message_id`, the `unread` state, and a one-element `actions` toggle (mark read/unread, ADR-0024). |
 | `POST` | `/send` | body: `ComposedMessage` → `{"id": str}` | **The module's only send path (ADR-0085, #563).** Transmits an operator-confirmed draft verbatim and publishes `mail.sent`. Not an MCP tool, so the agent cannot reach it — the core calls it after the operator Confirms a draft in the split-pane. A 403 maps to the same reconnect / rate-limit hint the tools use (#513/#538), as an HTTP 403. |
 | `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
-| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?cursor=`). Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. |
+| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?cursor=`). The plain landing view (no `q`/`cursor`) serves from the **local cache** instantly (ADR-0096, #623); `?reconcile=1` first pulls the provider delta into the cache. Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. |
 | `POST` | `/pages/mailbox/send` | body: `MailboxSend` → `{"id": str}` | **Human-initiated compose/reply from the page (ADR-0087).** With `reply_to_message_id` re-derives threading via `compose_reply`, else composes from `to`/`subject`/`body`/`cc`; then transmits and publishes `mail.sent`. Operator-only via the gated core proxy — never an MCP tool, so the agent still cannot send (ADR-0085). |
 | `GET` | `/pages/mailbox/attachment` | `?message_id=&attachment_id=` → bytes | Streams one attachment's bytes (with content-type + download disposition) for the core proxy to relay; nothing is stored (ADR-0087). |
 
@@ -206,7 +208,7 @@ The core exposes these via:
 GET  /platform/v1/modules/mail/resolve/message/{ref_id}        → HoverCard
 GET  /platform/v1/modules/mail/messages/{ref_id}               → EmailMessage
 GET  /platform/v1/modules/mail/status                          → status JSON
-GET  /platform/v1/modules/mail/pages/mailbox[?thread_id|label|q|cursor]  → MailboxList | {thread}
+GET  /platform/v1/modules/mail/pages/mailbox[?thread_id|label|q|cursor|reconcile]  → MailboxList | {thread}
 POST /platform/v1/modules/mail/pages/mailbox/send              → {"id": str}   (mailbox-gated)
 GET  /platform/v1/modules/mail/pages/mailbox/attachment        → streamed bytes (mailbox-gated)
 ```
@@ -220,7 +222,9 @@ the `mailbox` archetype (a non-mailbox page 404s), mirroring the editor doc gate
 #### `mailbox` archetype shapes (ADR-0087)
 
 The list read (no `thread_id`): the rail carries `unread` only where cheaply known (the active
-label + Inbox); pagination is by opaque `next_cursor` (never offset).
+label + Inbox); pagination is by opaque `next_cursor` (never offset). `sort_ts` is the thread's
+last-message epoch **milliseconds** — the local cache's ordering key (ADR-0096, #623), `0` when
+the provider didn't supply one.
 
 ```json
 {
@@ -231,7 +235,7 @@ label + Inbox); pagination is by opaque `next_cursor` (never offset).
   "threads": [
     { "id": "t1", "subject": "Project kickoff", "sender": "alice@example.com",
       "snippet": "Let's get started", "date": "Mon, 1 Jan 2024 10:00:00 +0000",
-      "unread": true, "message_count": 2 }
+      "unread": true, "message_count": 2, "sort_ts": 1704106800000 }
   ],
   "next_cursor": "PAGE2"
 }
@@ -290,7 +294,11 @@ read-only `email-reader` panel directly (in-app navigation, not an outbound URL)
 `actions` carries a single tool-backed toggle (ADR-0024) computed from `unread`: a **Mark as
 read** action (`mail_mark_read`) when the message is unread, or **Mark as unread**
 (`mail_mark_unread`) when it is read. `module`/`message_id` let the reader invoke the action
-through the core proxy and re-fetch itself afterwards.
+through the core proxy and re-fetch itself afterwards. `body_html` (ADR-0097, #627) is the HTML
+body when present — rendered in a sandboxed iframe with inline images resolved and remote images
+blocked by default; `body` (text) is the fallback. `attachments` carries `content_id`/`inline`
+for inline (`cid:`) images (the shell resolves those in the HTML body and hides them from the
+download row).
 
 ```json
 {
@@ -298,9 +306,14 @@ through the core proxy and re-fetch itself afterwards.
   "from": "acme@example.com",
   "date": "Mon, 1 Jan 2024 10:00:00 +0000",
   "body": "Dear customer,\n\nPlease find the invoice attached.\n\nRegards",
+  "body_html": "<p>Dear customer, <img src=\"cid:logo\"></p>",
   "module": "mail",
   "message_id": "msg1",
   "unread": true,
+  "attachments": [
+    { "id": "att-logo", "filename": "logo.png", "mime_type": "image/png",
+      "size": 1024, "content_id": "logo", "inline": true }
+  ],
   "actions": [
     {
       "tool": "mail_mark_read",
@@ -325,11 +338,41 @@ really sent (ADR-0085).
 
 ---
 
+## Local cache & incremental sync (ADR-0096, #623)
+
+Before v0.11.0 the mailbox page fetched everything from Gmail on **every** open — the rail's
+labels plus one metadata `threads.get` per thread, ~28 calls for a 25-row page — so opening Mail
+was slow. The module now keeps a tenant-scoped **local cache** and reconciles it against the
+mailbox incrementally.
+
+- **On open — instant.** The plain landing view (default folder, no search, first page) serves
+  the cached rows + rail with **no** provider call. The *first ever* open of a folder is a
+  one-time cold sync that populates the cache; every open after renders in ~a second.
+- **In the background — the delta only.** The web fires a second read with `?reconcile=1`. The
+  orchestrator asks the provider what changed since the last sync (Gmail `historyId` via
+  `users.history.list`) and rebuilds **only** the touched thread rows — a new message re-sorts to
+  the top, a read/unread flip converges, an archived thread drops out, a deleted one is removed.
+  When nothing changed it just advances the cursor (one cheap call). A cursor too old to replay
+  (Gmail expires history after ~a week) or an IMAP `UIDVALIDITY` rotation triggers a full resync.
+- **Provider-neutral.** The change cursor is a neutral `MailCursor {history_id, uid_validity,
+  uid_next}` and the delta a thread-granular `ThreadChanges`, both behind the `MailProvider` seam
+  — so a future IMAP provider fills `uid_validity`/`uid_next` and reuses the same cache unchanged.
+- **Bounded to the landing view.** Search (`?q=`) and deeper pages (`?cursor=`) still read the
+  provider live — the cache only accelerates the default landing page, which is the open path.
+- **Read/unread converges both ways.** A mark-read is written through to the cache optimistically
+  (the list reflects it before the provider round-trips); a mark made elsewhere flows back in
+  through the next reconcile.
+
+The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `epicurus_mail.db`.
+
+---
+
 ## Configuration
 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PLATFORM_URL` | `http://localhost:8080` | Internal core base URL. On the Docker network: `http://core-app:8080`. |
+| `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Postgres DSN for the tenant-scoped local cache (ADR-0096, #623). The module owns its own `mail_*` tables in the shared Postgres — no shared database, just a shared server. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant this module acts on behalf of. |
 | `NATS_URL` | `nats://localhost:4222` | NATS event backbone. |
 | `LOG_LEVEL` | `info` | Logging verbosity. |
@@ -343,11 +386,24 @@ call time from the core's OAuth vault.
 
 ## Data model
 
-The mail module holds **no persistent state**.  It is a pure pass-through to the
-provider API.  The access token is managed by the core's OpenBao vault
+Message **content** is never persisted — the module is still a pass-through to the provider for
+bodies and attachments, and the access token stays in the core's OpenBao vault
 (`oauth/tokens/google` — see [OAuth reference](../reference/oauth.md)). A **pending draft**
 awaiting Confirm/Decline is held **core-side** on the suspended run (`agent_pending_drafts`,
-ADR-0085), not in the module — the module stays stateless.
+ADR-0085), not in the module.
+
+What the module *does* own is the tenant-scoped **local cache** (ADR-0096, #623) — a
+materialization of the landing view, not a mail store. Every table is scoped by `tenant_id`
+(constraint #1); large-int columns are `BigInteger` (a Gmail `historyId` and an epoch-millisecond
+`sort_ts` both exceed int32). There is no migration framework — the schema evolves via
+`create_all` + the shared additive [`ensure_columns`](../reference/db.md) reconcile (ADR-0067).
+
+| Table | Scope | Holds |
+| --- | --- | --- |
+| `mail_thread` | `(tenant_id, label, thread_id)` | One cached landing row — subject/sender/snippet/date, `unread`, `message_count`, and the `sort_ts` ordering key. |
+| `mail_label` | `(tenant_id, label_id)` | The rail's folders + unread counts, in rail order. |
+| `mail_sync` | `(tenant_id)` | The change cursor: Gmail `history_id`; IMAP `uid_validity`/`uid_next` reserved (all `BigInteger`). |
+| `mail_landing` | `(tenant_id, label)` | Per-folder landing metadata: the page-1 `next_cursor` (so a cached view keeps its "Older") and when it was last full-synced. |
 
 ---
 
@@ -356,6 +412,7 @@ ADR-0085), not in the module — the module stays stateless.
 | Service | Purpose |
 | --- | --- |
 | `core-app` | Platform API — token retrieval, event bus |
+| `postgres` | The tenant-scoped local cache (`mail_*` tables, ADR-0096) |
 | `nats` | Event publication (`mail.sent`) |
 | Gmail API (`gmail.googleapis.com`) | The underlying mail provider |
 

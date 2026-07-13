@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from epicurus_core.contracts import DraftReview, ToolEnvelope
+from epicurus_mail.cache import CachedMailbox, LandingBundle
 from epicurus_mail.provider import (
     ComposedMessage,
     MailAttachment,
@@ -469,11 +470,11 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_10_0() -> None:
+async def test_manifest_version_is_0_12_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.10.0"
+    assert manifest.version == "0.12.0"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:
@@ -584,6 +585,52 @@ async def test_build_mailbox_list_clamps_limit_to_cap() -> None:
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
     await build_mailbox_list(provider, limit=9999)  # type: ignore[arg-type]
     assert provider.list_threads.await_args.kwargs["limit"] == 25  # clamped (#539)
+
+
+def _fake_mailbox() -> AsyncMock:
+    """A CachedMailbox stub whose landing/reconcile return a one-row bundle (ADR-0096)."""
+    mailbox = AsyncMock(spec=CachedMailbox)
+    bundle = LandingBundle(
+        labels=[MailLabel(id="INBOX", title="Inbox", unread=2)],
+        threads=[_summary("cached", unread=True)],
+        next_cursor="OLDER",
+    )
+    mailbox.landing = AsyncMock(return_value=bundle)
+    mailbox.reconcile = AsyncMock(return_value=bundle)
+    return mailbox
+
+
+async def test_build_mailbox_list_landing_serves_from_cache() -> None:
+    """The plain landing view routes through the cache orchestrator, not a live fetch (#623)."""
+    provider = AsyncMock(spec=MailProvider)
+    provider.list_threads = AsyncMock()
+    mailbox = _fake_mailbox()
+    data = await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
+    assert data["threads"][0]["id"] == "cached"
+    assert data["next_cursor"] == "OLDER"
+    mailbox.landing.assert_awaited_once_with("INBOX")
+    mailbox.reconcile.assert_not_awaited()
+    provider.list_threads.assert_not_awaited()  # cache path: no live fetch
+
+
+async def test_build_mailbox_list_reconcile_flag_pulls_delta() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    mailbox = _fake_mailbox()
+    await build_mailbox_list(provider, mailbox=mailbox, label="INBOX", reconcile=True)  # type: ignore[arg-type]
+    mailbox.reconcile.assert_awaited_once_with("INBOX")
+    mailbox.landing.assert_not_awaited()
+
+
+async def test_build_mailbox_list_search_bypasses_cache() -> None:
+    """A query (or a deeper page) reads the provider live even when a cache is present (#623)."""
+    provider = AsyncMock(spec=MailProvider)
+    provider.list_labels = AsyncMock(return_value=[])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+    mailbox = _fake_mailbox()
+    await build_mailbox_list(provider, mailbox=mailbox, query="is:unread")  # type: ignore[arg-type]
+    mailbox.landing.assert_not_awaited()
+    mailbox.reconcile.assert_not_awaited()
+    provider.list_threads.assert_awaited_once()  # live search
 
 
 async def test_build_mailbox_thread_renders_messages_and_reply() -> None:

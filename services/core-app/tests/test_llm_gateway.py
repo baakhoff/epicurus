@@ -1347,6 +1347,86 @@ async def test_supports_tools_assumes_hosted_models_can() -> None:
     assert await _gateway().supports_tools("claude/claude-3-5-sonnet-latest") is True
 
 
+# ── vision-capability gating (#633: an image attachment is only sent to a model that can
+# see it) ──────────────────────────────────────────────────────────────────────────────
+
+
+async def test_supports_vision_reads_local_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
+    g = "epicurus_core_app.llm.gateway.httpx.AsyncClient"
+    monkeypatch.setattr(g, _show_client(["completion", "vision"]))
+    assert await _gateway().supports_vision("llama3.2") is True
+    monkeypatch.setattr(g, _show_client(["completion", "tools"]))
+    assert await _gateway().supports_vision("llama3.2") is False
+    # Unlike supports_tools, an empty/unreported capability list defaults to False here — the
+    # failure mode (an image silently ignored, or a provider 400) is worse than being over-strict.
+    monkeypatch.setattr(g, _show_client([]))
+    assert await _gateway().supports_vision("llama3.2") is False
+
+
+async def test_supports_vision_asks_litellm_for_hosted_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_supports_vision(model: str) -> bool:
+        seen["model"] = model
+        return True
+
+    monkeypatch.setattr(
+        "epicurus_core_app.llm.gateway.litellm.supports_vision", fake_supports_vision
+    )
+    assert await _gateway().supports_vision("claude/claude-3-7-sonnet-20250219") is True
+    assert seen["model"] == "anthropic/claude-3-7-sonnet-20250219"  # resolved via the registry
+
+
+async def test_supports_vision_defaults_false_when_litellm_has_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(model: str) -> bool:
+        raise Exception("This model isn't mapped yet.")  # litellm's own bare-Exception shape
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.supports_vision", boom)
+    assert await _gateway().supports_vision("custom/some-unlisted-model") is False
+
+
+async def test_show_hosted_reports_capabilities_and_context_length_from_litellm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get_model_info(model: str) -> dict[str, Any]:
+        assert model == "anthropic/claude-3-7-sonnet-20250219"
+        return {"max_input_tokens": 200000, "supports_vision": True}
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
+    details = await _gateway().show("claude/claude-3-7-sonnet-20250219")
+    assert details.context_length == 200000
+    assert details.capabilities == ["tools", "vision"]
+    # No /api/show call was made for a hosted model — no runtime client is mocked here.
+
+
+async def test_show_hosted_omits_vision_and_context_when_litellm_reports_neither(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get_model_info(model: str) -> dict[str, Any]:
+        return {"supports_vision": False}
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
+    details = await _gateway().show("gpt/some-text-only-model")
+    assert details.context_length is None
+    assert details.capabilities == ["tools"]  # hosted is still assumed tool-capable
+
+
+async def test_show_hosted_degrades_to_tools_only_when_model_is_unmapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(model: str) -> dict[str, Any]:
+        raise Exception("This model isn't mapped yet.")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", boom)
+    details = await _gateway().show("custom/some-unlisted-model")
+    assert details.context_length is None  # never a fake default
+    assert details.capabilities == ["tools"]
+
+
 async def test_models_with_capabilities_enriches_each(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Resp:
         def __init__(self, data: dict[str, Any]) -> None:

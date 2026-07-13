@@ -17,6 +17,11 @@ function uid(): string {
   return crypto.randomUUID();
 }
 
+// Mirrors the server's upload allowlist (#175, DEFAULT_ALLOWED_UPLOAD_TYPES) so the native
+// file picker pre-filters to what will actually be accepted — a hint only, the server remains
+// the real gate.
+const ACCEPTED_UPLOAD_TYPES = "text/*,image/*,application/pdf,application/json";
+
 const SOURCE_ICON = { file: File, chat: MessageSquare, module: Blocks } as const;
 
 /** A pill for an attached item, with a remove affordance. */
@@ -76,6 +81,7 @@ function FileSection({ onAttach }: { onAttach: (a: Attachment) => void }) {
       <input
         ref={inputRef}
         type="file"
+        accept={ACCEPTED_UPLOAD_TYPES}
         className="hidden"
         aria-label="Upload a file"
         onChange={(e) => {

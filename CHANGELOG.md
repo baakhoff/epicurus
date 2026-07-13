@@ -14,6 +14,25 @@ images to GHCR.
 
 ### Added
 
+- **Chat: image input — vision models see the picture, end-to-end** (#633, ADR-0095) — attaching
+  an image was silently mangled regardless of model: every `file` attachment was blindly
+  `decode("utf-8")`'d into a text preamble, so a vision-capable model never received real pixel
+  data, hosted or local. Now an image resolves separately (checked against the **stored**
+  upload's real content-type) into multimodal content parts (`image_url`) spliced into the
+  assembled turn just before the provider call — never into what gets persisted, so a stored
+  turn never balloons with base64. Gated on the selected model's **actual** vision support
+  (`gateway.supports_vision`) — stricter than the existing tool-capability check, since a
+  mis-sent image either gets ignored or draws a provider 400: hosted models are checked against
+  LiteLLM's own model-cost map (never assumed capable), and a local model with unreported
+  capabilities defaults to **not** vision-capable. A non-vision model gets a clear explanation
+  before any provider call, same shape as a normal answer, not a raw error. The same LiteLLM
+  lookup also fills in **hosted-model context length + capabilities** for
+  `GET /llm/models/details` (previously local-only), so the composer's "can't use tools"-style
+  hint now works for hosted models too, alongside a new "can't see images" hint (advisory —
+  Send still works; the server's own gate is the real enforcement). Web: the upload picker's
+  accepted types now align with the server's #175 allowlist. `epicurus-core` 0.26.0→0.27.0,
+  `core-app` 0.74.0→0.75.0, `web` 0.98.0→0.99.0.
+
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole
   `max_steps` budget and ended in a silent stop: the model re-issuing the *exact same* call over and

@@ -55,7 +55,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/memory/profile` | The **standing profile** the agent injects each turn (#527, ADR-0094). Returns `{profile, source, pinned, versions}` — `profile` is `null` before first synthesis (the agent then behaves exactly as before); `source` is `auto` (nightly synthesis) or `edited`; `pinned` flags an operator edit that survives re-synthesis; `versions` is the recent history. Backs the **Settings → Memory** standing-profile panel. Declared **before** `/memory/{id}` so a DELETE isn't captured as "forget the fact `profile`". |
 | `PUT /platform/v1/agent/memory/profile` | Save an operator edit (`{content}`) — stored as an `edited`, **pinned** version the nightly synthesizer won't clobber. A blank body **clears** the profile (resume auto-synthesis), same as DELETE. |
 | `DELETE /platform/v1/agent/memory/profile` | Clear the profile (all versions); the next nightly synthesis regenerates a fresh `auto` one. Returns `{cleared}`. |
-| `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). |
+| `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). An `image/*` upload rides the turn as real multimodal content when the selected model supports vision (#633) — see below. |
 | `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. |
 
 Tools are offered to the model **only when it can use them**: the loop checks the resolved
@@ -63,6 +63,24 @@ model's capabilities (`gateway.supports_tools` → `/api/show`; hosted providers
 capable) and, for a tool-less local model, calls without tools so the turn falls back to a
 plain text answer instead of the runtime erroring. The web shell surfaces the same fact as a
 "can't use tools" hint in the composer.
+
+**Image attachments are gated on vision support the same way — but stricter (#633).** An
+uploaded `image/*` file never goes through the text-attachment expander (decoding it as UTF-8
+would just produce replacement-character noise); it resolves separately to an `ImagePart` and,
+just before the provider call, is spliced into the user message as OpenAI-style multimodal
+content parts (`[{type: "text", ...}, {type: "image_url", ...}]`) — never into what gets
+persisted, so a stored turn never balloons with base64 image data. LiteLLM's own provider
+adapters translate that shape per backend (a local `ollama_chat` call becomes Ollama's `images`
+field), so no per-provider branching is needed here. The gate itself
+(`gateway.supports_vision`) differs from `supports_tools` in two ways because the failure mode
+is worse — a mis-sent image either gets silently ignored or draws a provider 400, the exact
+thing this exists to prevent: hosted providers are **not** assumed capable (LiteLLM's own
+model-cost map is asked instead of guessing), and a local model with no reported capabilities
+defaults to **not** vision-capable rather than "don't restrict". When the check fails, the turn
+never reaches the provider at all — it ends immediately with a canned explanation
+(`stopped="unsupported_media"`), the same shape as any other turn (persisted, streamed as a
+normal answer), just skipping the extraction hand-off (a canned rejection is nothing to learn
+facts from).
 
 **Tool results that carry entity refs also teach the model the ids** (ADR-0079). When a module
 tool returns an envelope (`tool_envelope(text, [EntityRef…])`), the loop lifts the refs onto the
@@ -104,9 +122,10 @@ applied identically to `run` and `run_stream`:
 
 Either early stop then takes the **same single tool-less final round** `max_steps` already uses, so
 the turn ends with a real answer — "here's what I found / what failed" — never a silent stall. So
-`AgentTurn.stopped` is now one of `completed` · `max_steps` · `repeat_call` · `tool_errors` (plus
-`error` on a mid-stream failure, streaming only); the streamed `done` event carries it for the web
-to key stop-reason copy off. The repeated / errored tool steps stay in the activity timeline (errors
+`AgentTurn.stopped` is now one of `completed` · `max_steps` · `repeat_call` · `tool_errors` ·
+`unsupported_media` (an image attachment blocked before any provider call, #633; plus `error` on a
+mid-stream failure, streaming only); the streamed `done` event carries it for the web to key
+stop-reason copy off. The repeated / errored tool steps stay in the activity timeline (errors
 render red), so the process that led to the cut is visible.
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
@@ -199,7 +218,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) from `/api/show` — opt-in (one call per model), so the Models page can badge them while the chat picker stays light. |
-| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a local model from the runtime's `/api/show`: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported). Backs the model-settings sheet and the chat "can't use tools" hint. `model` is a query param (names carry `:`/`/`). |
+| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a model: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported — never a fake default). Local models read the runtime's `/api/show`; **hosted** models (#633/#618) read LiteLLM's own model-cost/context map instead (no provider call) — `quantization`/`parameter_size`/`family` stay `null` there (Ollama-only concepts), `capabilities` always includes `tools` (hosted providers are assumed tool-capable) plus `vision` when LiteLLM's map says so. Backs the model-settings sheet, the Models page's context-window chip, and the chat "can't use tools" / "can't see images" hints. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; each entry's `size_gb` is the **real on-disk size** backfilled from its family's tags page (#571; `null` until the size fill or a variant lookup reaches the family, and always `null` for `cloud` rows). `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant, size_gb}]}` — `size_gb` is the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a cloud alias). Best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. A successful lookup also piggybacks its sizes onto the catalog snapshot. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
@@ -656,6 +675,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `memory_search` built-in's *sessions* half (ADR-0089) runs a tenant-scoped case-insensitive
   content match here (portable `ILIKE`, no full-text index — a single operator's history is
   small; FTS is a future optimization), joined back to each session's opening-message title.
+- **Postgres `agent_attachments`** — the core-side handle for an uploaded chat attachment
+  (ADR-0019): `att_id` (primary key), `tenant`, `kind` (the upload's MIME content-type), `title`,
+  `content` (raw bytes), `created_at`. Written by `POST /agent/attachments`; read back once per
+  turn by the attachment expander (`AttachmentStore.get`), scoped to the requesting tenant.
+  `kind.startswith("image/")` is what routes a `file` attachment to the vision path instead of
+  text expansion (#633) — see **Agent** above.
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
   `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297),

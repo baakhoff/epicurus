@@ -899,7 +899,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-core"
-version = "0.26.0"
+version = "0.27.0"
 source = { editable = "libs/epicurus-core" }
 dependencies = [
     { name = "fastapi" },
@@ -947,7 +947,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.74.0"
+version = "0.75.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },

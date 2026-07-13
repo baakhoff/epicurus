@@ -8,7 +8,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronLeft, ChevronRight, Mail, PenSquare, Search, WifiOff } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MailMessageView } from "@/components/MailMessageView";
 import { Button, EmptyState, Select, Spinner, TextArea, TextInput, cn } from "@/components/ui";
@@ -17,9 +17,33 @@ import {
   MailboxListData,
   MailboxThreadData,
   type MailboxReply,
+  type MailThreadData,
   type MailThreadSummary,
 } from "@/lib/contracts";
 import { useConnection } from "@/stores/connection";
+
+/**
+ * Optimistically flip a thread to read (#625) across whichever module-page query this is: a list
+ * page (flip the matching thread row) or the open thread (flip every message's unread badge).
+ * Shape-guarded so it's a no-op on any other cached page under the same key prefix.
+ */
+function optimisticallyMarkRead(data: unknown, threadId: string): unknown {
+  if (!data || typeof data !== "object") return data;
+  const d = data as { threads?: MailThreadSummary[]; thread?: MailThreadData };
+  if (Array.isArray(d.threads)) {
+    return {
+      ...d,
+      threads: d.threads.map((t) => (t.id === threadId ? { ...t, unread: false } : t)),
+    };
+  }
+  if (d.thread && Array.isArray(d.thread.messages)) {
+    return {
+      ...d,
+      thread: { ...d.thread, messages: d.thread.messages.map((m) => ({ ...m, unread: false })) },
+    };
+  }
+  return data;
+}
 
 /** A raw provider date string shortened for a list row; falls back to the raw text. */
 function shortDate(raw: string): string {
@@ -343,6 +367,32 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
     setComposing(false);
     void queryClient.invalidateQueries({ queryKey: ["module-page", module, pageId] });
   }, [queryClient, module, pageId]);
+
+  // Mark a thread read on open (#625): flip the list row + message badges optimistically, mark at
+  // the provider in the background (the module also writes the read state through to its cache),
+  // and converge on settle. `markedRef` stops a re-render from re-firing for the same thread.
+  const markedRef = useRef<Set<string>>(new Set());
+  const { mutate: markThreadRead } = useMutation({
+    mutationFn: (vars: { threadId: string; messageIds: string[] }) =>
+      api.markMailboxThreadRead(module, pageId, {
+        thread_id: vars.threadId,
+        message_ids: vars.messageIds,
+      }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["module-page", module, pageId] }),
+  });
+
+  useEffect(() => {
+    if (!openThreadId || !thread || markedRef.current.has(openThreadId)) return;
+    const unreadIds = thread.messages
+      .filter((m) => m.unread && m.message_id)
+      .map((m) => m.message_id);
+    if (unreadIds.length === 0) return;
+    markedRef.current.add(openThreadId);
+    queryClient.setQueriesData({ queryKey: ["module-page", module, pageId] }, (data: unknown) =>
+      optimisticallyMarkRead(data, openThreadId),
+    );
+    markThreadRead({ threadId: openThreadId, messageIds: unreadIds });
+  }, [openThreadId, thread, module, pageId, queryClient, markThreadRead]);
 
   return (
     <div className="flex h-full min-h-0">

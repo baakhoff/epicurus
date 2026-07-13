@@ -1026,7 +1026,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-mail"
-version = "0.12.0"
+version = "0.13.0"
 source = { editable = "services/mail" }
 dependencies = [
     { name = "asyncpg" },

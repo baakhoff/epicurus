@@ -9,6 +9,7 @@ const mockModulePage = vi.fn();
 const mockInvoke = vi.fn();
 const mockSend = vi.fn();
 const mockAttachmentUrl = vi.fn();
+const mockMarkRead = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -16,6 +17,7 @@ vi.mock("@/lib/api", () => ({
     invokeModuleTool: (...args: unknown[]) => mockInvoke(...args),
     sendMailboxMessage: (...args: unknown[]) => mockSend(...args),
     mailboxAttachmentUrl: (...args: unknown[]) => mockAttachmentUrl(...args),
+    markMailboxThreadRead: (...args: unknown[]) => mockMarkRead(...args),
   },
 }));
 
@@ -86,6 +88,7 @@ beforeEach(() => {
   mockSend.mockResolvedValue({ id: "sent-1" });
   mockInvoke.mockResolvedValue({ result: "ok" });
   mockAttachmentUrl.mockReturnValue("/platform/v1/modules/mail/pages/mailbox/attachment?x=1");
+  mockMarkRead.mockResolvedValue({ thread_id: "t1", marked: 1 });
 });
 
 it("renders the labels rail and a thread row", async () => {
@@ -121,6 +124,32 @@ it("reconciles the landing in the background and swaps in fresh data (#623)", as
   expect(await screen.findByText("Just arrived")).toBeInTheDocument();
   await waitFor(() =>
     expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { reconcile: "1" }),
+  );
+});
+
+it("marks a thread's unread messages read on open (#625)", async () => {
+  const UNREAD_THREAD = {
+    thread: {
+      id: "t1",
+      subject: "Project kickoff",
+      messages: [{ ...THREAD.thread.messages[0], message_id: "m1", unread: true }],
+      reply: null,
+    },
+  };
+  mockModulePage.mockImplementation(
+    (_m: string, _p: string, params?: Record<string, string>) => {
+      if (params?.thread_id) return Promise.resolve(UNREAD_THREAD);
+      return Promise.resolve(LIST);
+    },
+  );
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  fireEvent.click(await screen.findByText("Project kickoff")); // open the thread
+  // Opening it wires to the mark-read seam with the thread's unread message ids (background).
+  await waitFor(() =>
+    expect(mockMarkRead).toHaveBeenCalledWith("mail", "mailbox", {
+      thread_id: "t1",
+      message_ids: ["m1"],
+    }),
   );
 });
 

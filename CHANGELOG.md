@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Mail: mark message read on open** (#625) — a message stayed unread until acted on explicitly.
+  Opening a conversation now marks its unread messages read at once: the shell flips the list row
+  (and the messages' badges) **optimistically**, then calls a new operator-gated
+  `POST /pages/mailbox/mark-read` in the background, which clears each message's flag at the
+  provider (`set_unread`, the #277 seam) and **writes the read state through to the local cache**
+  (ADR-0096) so the row converges immediately — no reconcile-race flicker — and reverts on a
+  provider failure. Marking a whole thread read is the one case where a thread-level cache
+  write-through is unambiguous (this also retires the write-through primitives #623 added). `mail`
+  0.12.0→0.13.0; `web` 0.100.0→0.101.0.
+
 - **Mail: render HTML email properly (images, styling)** (#627, ADR-0097) — HTML mail rendered
   badly: the shell decoded every message to plain text (no images, no layout), because rendering
   raw mail HTML in the shell would be an XSS surface. The module now surfaces the message's

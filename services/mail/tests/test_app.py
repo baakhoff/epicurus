@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
+    MailCursor,
     MailLabel,
     MailMessage,
     MailProvider,
@@ -20,8 +23,22 @@ from epicurus_mail.provider import (
 )
 
 
+def _test_engine() -> AsyncEngine:
+    """A fresh in-memory SQLite cache engine per app, isolated across tests (ADR-0096)."""
+    return create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+
+
 def _client_with_provider(provider: MailProvider) -> TestClient:
-    """A TestClient over *provider* with a mocked event bus (ADR-0087 route tests)."""
+    """A TestClient over *provider* with a mocked event bus + in-memory cache (ADR-0087 tests).
+
+    The cache path (the plain landing view) needs the schema, which ``create_app`` builds in
+    its lifespan — enter the client as a context manager (``with``) for those tests so
+    ``MailCache.init`` runs; the live/thread/send routes work without it.
+    """
     if not hasattr(provider.health_check, "assert_awaited"):  # ensure health_check is mocked
         provider.health_check = AsyncMock(return_value=True)  # type: ignore[method-assign]
     with (
@@ -30,7 +47,7 @@ def _client_with_provider(provider: MailProvider) -> TestClient:
     ):
         from epicurus_mail.app import create_app
 
-        app = create_app()
+        app = create_app(engine=_test_engine())
     return TestClient(app, raise_server_exceptions=True)
 
 
@@ -328,6 +345,7 @@ def _mailbox_message(msg_id: str = "m1", *, body: str = "Hello") -> MailMessage:
 class TestMailboxListRoute:
     def test_returns_rail_and_threads(self) -> None:
         provider = AsyncMock(spec=MailProvider)
+        provider.current_cursor = AsyncMock(return_value=MailCursor(history_id=1))
         provider.list_labels = AsyncMock(
             return_value=[MailLabel(id="INBOX", title="Inbox", unread=2)]
         )
@@ -339,7 +357,10 @@ class TestMailboxListRoute:
                 next_cursor="N2",
             )
         )
-        resp = _client_with_provider(provider).get("/pages/mailbox")
+        # Landing goes through the cache (ADR-0096): enter the client so MailCache.init runs;
+        # a cold cache does a one-time full sync from the (mocked) provider.
+        with _client_with_provider(provider) as client:
+            resp = client.get("/pages/mailbox")
         assert resp.status_code == 200
         body = resp.json()
         assert body["active_label"] == "INBOX"
@@ -383,7 +404,10 @@ class TestMailboxListRoute:
         provider.list_labels = AsyncMock(
             side_effect=httpx.HTTPStatusError("403", request=request, response=response)
         )
-        resp = _client_with_provider(provider).get("/pages/mailbox")
+        # The cold-cache full sync calls list_labels, which raises here; the route relays the
+        # Gmail scope hint with its status (the cache never masks a provider error).
+        with _client_with_provider(provider) as client:
+            resp = client.get("/pages/mailbox")
         assert resp.status_code == 403
         assert "Reconnect Google" in resp.json()["detail"]
 

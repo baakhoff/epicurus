@@ -284,9 +284,28 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
       return api.modulePage(module, pageId, params);
     },
   });
+
+  // Cache-first landing (ADR-0096, #623): the plain folder view (no search, first page) serves
+  // from the module's local cache instantly, then this second read reconciles the provider delta
+  // into the cache and swaps in the fresh list — new/changed messages and flag flips appear
+  // without a manual refresh. Gated on the cached read succeeding first, so a cold cache does one
+  // full sync (the list read) rather than two racing ones. Search / deeper pages skip it.
+  const isLanding = !submitted && !cursor;
+  const reconcileQuery = useQuery({
+    queryKey: ["module-page", module, pageId, "reconcile", label],
+    queryFn: () => {
+      const params: Record<string, string> = { reconcile: "1" };
+      if (label) params.label = label;
+      return api.modulePage(module, pageId, params);
+    },
+    enabled: isLanding && listQuery.isSuccess,
+  });
+
+  // Prefer the reconciled data once it lands; until then paint the instant cached read.
+  const listData = (isLanding && reconcileQuery.data) || listQuery.data;
   const list = useMemo(
-    () => (listQuery.data ? MailboxListData.parse(listQuery.data) : null),
-    [listQuery.data],
+    () => (listData ? MailboxListData.parse(listData) : null),
+    [listData],
   );
   const activeLabel = label ?? list?.active_label ?? "INBOX";
 

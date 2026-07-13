@@ -70,6 +70,16 @@ class MailThreadSummary(BaseModel):
     date: str
     unread: bool = False
     message_count: int = 1
+    # The thread's last-message time as epoch **milliseconds** — the cache's ordering key
+    # (ADR-0096, #623), provider-neutral (Gmail ``internalDate``; IMAP ``INTERNALDATE``).
+    # 0 when the provider didn't supply one; such rows sort last.
+    sort_ts: int = 0
+    # The folders/labels this thread is filed under (Gmail label ids; IMAP folders / JMAP
+    # mailboxes map the same way) — provider-neutral. Lets an incremental reconcile decide
+    # whether a changed thread still belongs to a cached folder without a second fetch. Empty
+    # on a plain list read (the query already scoped the folder); populated by
+    # :meth:`MailProvider.get_thread_summary`.
+    label_ids: list[str] = Field(default_factory=list)
 
 
 class ThreadPage(BaseModel):
@@ -101,6 +111,54 @@ class AttachmentContent(BaseModel):
     filename: str
     mime_type: str
     content: bytes
+
+
+class MailCursor(BaseModel):
+    """A provider-neutral change cursor for incremental sync (ADR-0096, #623).
+
+    The local cache persists this opaque token and hands it back to
+    :meth:`MailProvider.changed_threads_since` to pull only the delta since it was taken.
+    Each provider fills the field(s) it uses and ignores the rest:
+
+    - **Gmail** uses ``history_id`` — the mailbox's monotonic ``historyId`` (from
+      ``users.getProfile`` / any message). ``users.history.list`` replays every change
+      after it.
+    - **IMAP** (future) uses ``uid_validity`` + ``uid_next`` — a folder's ``UIDVALIDITY``
+      pins the UID namespace (a rotation invalidates every cached UID → full resync) and
+      ``UIDNEXT`` bounds the highest UID seen, so a later ``UID FETCH`` pulls only newer
+      messages.
+
+    An all-``None`` cursor means "never synced" (a cold cache), which the orchestrator
+    treats as a full sync.
+    """
+
+    history_id: int | None = None
+    uid_validity: int | None = None
+    uid_next: int | None = None
+
+    def is_empty(self) -> bool:
+        """True when no provider has stamped this cursor yet (a cold cache)."""
+        return self.history_id is None and self.uid_validity is None and self.uid_next is None
+
+
+class ThreadChanges(BaseModel):
+    """The delta a provider reports since a :class:`MailCursor` (ADR-0096, #623).
+
+    Thread-granular because the cache materializes *thread rows*: ``changed_thread_ids`` is
+    every thread touched by any message added/removed or (un)labeled since the cursor, so the
+    orchestrator re-derives exactly those rows (a single ``get_thread_summary`` each) and
+    leaves the rest of the cache untouched — the "pull only the delta" property. ``next_cursor``
+    is the advanced cursor to persist after the delta is applied.
+
+    A provider returns ``None`` from :meth:`MailProvider.changed_threads_since` (not an empty
+    ``ThreadChanges``) when the cursor is too old to replay — Gmail expires history after a
+    week, an IMAP ``UIDVALIDITY`` rotation drops the namespace — signalling the orchestrator to
+    fall back to a full resync. An empty ``changed_thread_ids`` with a fresh ``next_cursor``
+    means "nothing changed" (the cheap common case).
+    """
+
+    changed_thread_ids: set[str] = Field(default_factory=set)
+    next_cursor: MailCursor = Field(default_factory=MailCursor)
 
 
 class ComposedMessage(BaseModel):
@@ -226,6 +284,35 @@ class MailProvider(ABC):
 
         The bytes are never persisted by the module — they flow provider -> module ->
         core proxy -> browser. Raises if the message or attachment does not exist.
+        """
+
+    # ── incremental sync (ADR-0096, #623) ────────────────────────────────────
+
+    @abstractmethod
+    async def current_cursor(self) -> MailCursor:
+        """The mailbox's change cursor *right now* — the top of the change log (ADR-0096).
+
+        A cheap read (Gmail: one ``users.getProfile``). Stamped into the cache after a full
+        sync so the next reconcile can ask :meth:`changed_threads_since` for just the delta.
+        """
+
+    @abstractmethod
+    async def changed_threads_since(self, cursor: MailCursor) -> ThreadChanges | None:
+        """Which threads changed since *cursor*, and the advanced cursor (ADR-0096, #623).
+
+        Returns a thread-granular :class:`ThreadChanges` so the caller re-derives only the
+        affected rows. Returns ``None`` when *cursor* is too old to replay (Gmail history
+        expired, or an IMAP ``UIDVALIDITY`` rotation) — the caller then does a full resync.
+        An empty delta with a fresh ``next_cursor`` is the cheap "nothing changed" case.
+        """
+
+    @abstractmethod
+    async def get_thread_summary(self, thread_id: str) -> MailThreadSummary | None:
+        """One thread's list-row summary (ADR-0096, #623), or ``None`` if it no longer exists.
+
+        The single-thread counterpart to :meth:`list_threads`, used by an incremental
+        reconcile to rebuild exactly the rows a delta touched. ``None`` means the thread was
+        deleted (its cached row should be dropped).
         """
 
     @abstractmethod

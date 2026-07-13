@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from epicurus_core import (
     EventBus,
@@ -21,6 +22,8 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_mail.cache import CachedMailbox
+from epicurus_mail.db import MailCache
 from epicurus_mail.gmail import GmailProvider
 from epicurus_mail.provider import ComposedMessage
 from epicurus_mail.service import (
@@ -69,8 +72,14 @@ def _content_disposition(filename: str) -> str:
     return f'attachment; filename="{safe or "attachment"}"'
 
 
-def create_app() -> FastAPI:
-    """Build the mail ASGI app."""
+def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
+    """Build the mail ASGI app.
+
+    Args:
+        engine: An optional pre-built async engine for the local cache (ADR-0096). Tests inject
+            an in-memory SQLite engine; production defaults to a Postgres engine on
+            ``settings.database_url``.
+    """
     settings = MailSettings(service_name=MODULE_NAME)
     configure_logging(settings)
     log = get_logger(MODULE_NAME)
@@ -84,15 +93,25 @@ def create_app() -> FastAPI:
     module = build_module(provider)
     mcp_app = module.http_app()
 
+    # Tenant-scoped local cache (ADR-0096, #623): the landing view serves from here instantly
+    # and a background reconcile pulls only the delta, so opening Mail no longer fans out ~28
+    # Gmail calls on every open. The module owns its own tables; state is externalized to
+    # Postgres (constraint #2).
+    engine = engine or create_async_engine(settings.database_url)
+    cache = MailCache(engine)
+    mailbox = CachedMailbox(provider, cache, tenant_id=settings.default_tenant_id)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
+            await cache.init()
             await bus.connect()
             log.info("mail service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
                 await bus.close()
+                await engine.dispose()
 
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
@@ -220,20 +239,26 @@ def create_app() -> FastAPI:
         q: str | None = None,
         cursor: str | None = None,
         thread_id: str | None = None,
+        reconcile: bool = False,
     ) -> dict[str, Any]:
         """The `mailbox` archetype data (ADR-0087): the thread list, or one thread.
 
         ``?thread_id=`` returns the full conversation ``{thread: …}``; otherwise the rail +
-        a cursor page of threads for ``?label=``/``?q=``/``?cursor=``. A Gmail 403 (missing
-        scope or a ``usageLimits`` rate limit) / 429 is relayed as that status with the
-        module's reconnect / wait hint, not a raw 500 (#538/#557).
+        a cursor page of threads for ``?label=``/``?q=``/``?cursor=``. The plain landing view
+        serves from the local cache instantly (ADR-0096, #623); ``?reconcile=1`` first pulls
+        the provider delta into the cache (the web fires it as a background second read, so the
+        list updates in place without a manual refresh). Search / deeper pages read live. A
+        Gmail 403 (missing scope or a ``usageLimits`` rate limit) / 429 is relayed as that
+        status with the module's reconnect / wait hint, not a raw 500 (#538/#557).
         """
         if page_id != MAILBOX_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no such page {page_id!r}")
         try:
             if thread_id:
                 return await build_mailbox_thread(provider, thread_id)
-            return await build_mailbox_list(provider, label=label, query=q, cursor=cursor)
+            return await build_mailbox_list(
+                provider, mailbox=mailbox, label=label, query=q, cursor=cursor, reconcile=reconcile
+            )
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)
             if hint is not None:

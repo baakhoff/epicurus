@@ -57,8 +57,9 @@ function EntityDetailView({ payload }: { payload: unknown }) {
  * The `email-reader` view (ADR-0024): one message shown through the shared `MailMessageView`
  * (ADR-0087) — the same renderer the mailbox page's thread pane uses, so the two never fork.
  * After a mark read/unread action it re-fetches the message and swaps it into the panel so the
- * toggle flips. No attachment links here — the panel reader doesn't fetch attachments (the
- * mailbox page does).
+ * toggle flips. It passes an attachment-proxy URL builder so an HTML body's inline `cid:` images
+ * resolve through the module (ADR-0097, #627) — the mail page's `mailbox` archetype gates that
+ * same proxy.
  */
 function EmailReaderView({ payload }: { payload: unknown }) {
   const mail = EmailMessage.parse(payload);
@@ -66,7 +67,18 @@ function EmailReaderView({ payload }: { payload: unknown }) {
   const onActed = useCallback(async () => {
     replace(await api.readMailMessage(mail.module, mail.message_id));
   }, [replace, mail.module, mail.message_id]);
-  return <MailMessageView message={mail} onActed={mail.message_id ? onActed : undefined} />;
+  const attachmentUrl = useCallback(
+    (messageId: string, attachmentId: string) =>
+      api.mailboxAttachmentUrl(mail.module, "mailbox", messageId, attachmentId),
+    [mail.module],
+  );
+  return (
+    <MailMessageView
+      message={mail}
+      attachmentUrl={attachmentUrl}
+      onActed={mail.message_id ? onActed : undefined}
+    />
+  );
 }
 
 /**

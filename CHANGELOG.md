@@ -31,7 +31,80 @@ images to GHCR.
   hint now works for hosted models too, alongside a new "can't see images" hint (advisory —
   Send still works; the server's own gate is the real enforcement). Web: the upload picker's
   accepted types now align with the server's #175 allowlist. `epicurus-core` 0.26.0→0.27.0,
-  `core-app` 0.74.0→0.75.0, `web` 0.98.0→0.99.0.
+  `core-app` 0.74.0→0.75.0, `web` 0.103.0→0.104.0.
+
+- **Calendar: toolbar reworked into one stretched row; calendars picker clamped on mobile**
+  (#628, #629) — the control row read as cramped and unbalanced; it now follows the shell's toolbar
+  convention (the board's `gap-x-3 gap-y-2` bar) — a **Today · ‹ › · period** navigation cluster on
+  the left, the page actions + **Calendars** picker + view switch pushed right by `ml-auto` so the
+  row stretches the full width; icon-only "New event"/Calendars keep it to one line on all but the
+  narrowest phones (where it wraps to a tidy second line). The **Calendars** visibility popover
+  opened **partly off a phone screen**; it is now **clamped to the viewport** — positioned `fixed`
+  from its trigger, shifted horizontally to stay on-screen, flipped above when there's more room up
+  than down, and height-capped with a scroll — so every calendar is reachable regardless of trigger
+  position. Calendar-local components only; no shared shell component changed. `web`
+  0.102.0→0.103.0.
+
+- **Calendar: tap a month day to open its week; slim event lines on phone** (#630, #632) — in the
+  month view, tapping a day **navigated into a half-started create**; it now **opens that day's
+  week view** (with the day highlighted), making the month a navigator and putting legible detail
+  one tap away in the hourly grid. Event **creation** moves to the explicit affordances — the
+  toolbar **New event** and the week grid's **empty-slot tap** (the #473 slot-seed create,
+  relocated from the month cell to the grid where Google-style calendars put it). On a **phone**,
+  a busy day showed a few blank-looking chips plus a `+2 more`; it now renders **every** event as a
+  **slim textless colour line** (density over labels — the tap-through carries the detail),
+  collapsing to a `+N` marker only past what genuinely fits. **Desktop** keeps the labelled chips.
+  `web` 0.101.0→0.102.0.
+
+- **Calendar: week view is now an hourly day-grid with drag-to-move** (#631) — the week view was a
+  plain per-day list of event cards; it is now a Google-Calendar-like **hourly grid**: one column
+  per day over hour rows, timed events **placed and sized by start/duration**, overlapping events
+  **split into side-by-side lanes**, a **pinned all-day strip** (ADR-0037) that stays put while the
+  hours scroll, a **current-time line**, and a default scroll to the morning. A timed event on a
+  writable calendar is **dragged to move** (or its bottom edge dragged to **resize**), snapped to the
+  quarter-hour and applied **optimistically**; the write goes through the event's *own* editable-
+  calendar **Edit** action (`calendar_update_event`, #208/ADR-0034) — the same tool the Edit form
+  calls, so **no module contract changes** (the module supplies data, the shell renders, ADR-0018) —
+  and rolls back with a dismissible message on provider failure. A read-only event stays
+  click-to-open. On a phone the grid **pans horizontally** with the time gutter and day headers
+  pinned. Placement and drag maths are framework-free and unit-tested
+  (`services/web/src/components/archetypes/calendarGrid.ts`). `web` 0.100.0→0.101.0.
+
+- **Mail: render HTML email properly (images, styling)** (#627, ADR-0097) — HTML mail rendered
+  badly: the shell decoded every message to plain text (no images, no layout), because rendering
+  raw mail HTML in the shell would be an XSS surface. The module now surfaces the message's
+  **`body_html`** (plus inline images' `Content-ID`s, marked `inline`), and the shell renders it in
+  a **sandboxed iframe** (`allow-same-origin allow-popups`, **never** `allow-scripts`) — so email JS
+  can never run and the email's CSS can't bleed into or restyle the app shell. Two independent safety
+  layers: the HTML is first sanitized by an **inert `DOMParser` pass** (strip `<script>`/`<link>`/
+  `<iframe>`/`<form>`, every `on*=` handler, `javascript:`/`vbscript:` URLs) — the raw HTML never
+  touches the live DOM — then the sandbox neutralizes anything missed. Inline **`cid:` images** are
+  rewritten to the module's same-origin attachment proxy (fetched through the module, never a direct
+  provider URL), so they load with the session cookie; inline images are kept out of the download
+  row. **Remote images are blocked by default** (a remote `<img>` is a tracking pixel) with a
+  per-message "Load images" affordance — the deliberate privacy default. Plain text stays the
+  fallback for text-only mail and the `mail_read` tool; emails render on a white canvas in both app
+  themes (the mainstream mail-client convention) for legibility. `mail` 0.11.0→0.12.0; `web`
+  0.99.0→0.100.0.
+
+- **Mail: local cache + incremental sync — stop full-fetching on every open** (#623, ADR-0096) —
+  the mailbox page fetched everything from Gmail on *every* open (the rail + one metadata
+  `threads.get` per thread, ~28 calls for a 25-row page), so opening Mail was slow. The module now
+  keeps a tenant-scoped **local cache** (`mail_thread`/`mail_label`/`mail_sync`/`mail_landing`, owned
+  by the mail service — no shared DB) and reconciles it incrementally. The plain landing view serves
+  the cached rows + rail with **no** provider call (the first open of a folder is a one-time cold
+  sync; every open after renders in ~a second); the web then fires a background `?reconcile=1` read
+  that pulls **only the delta** — via a provider-neutral change cursor (`MailCursor {history_id,
+  uid_validity, uid_next}` behind the `MailProvider` seam; Gmail uses `historyId` +
+  `users.history.list`, IMAP's `UIDVALIDITY`/`UIDNEXT` reserved) — rebuilding only the touched thread
+  rows so new/changed messages, read/unread flips, and archives appear without a manual refresh. A
+  cursor too old to replay (Gmail expires history after ~a week) or an IMAP `UIDVALIDITY` rotation
+  triggers a full resync. Read/unread converges both ways (a mark-read writes through to the cache
+  optimistically). Search (`?q=`) and deeper pages (`?cursor=`) still read live — the cache only
+  accelerates the landing open. Large-int columns are `BigInteger` (a Gmail `historyId` and the
+  epoch-millisecond `sort_ts` ordering key both exceed int32); the schema evolves via `create_all` +
+  the shared additive `ensure_columns` reconcile (ADR-0067). `mail` 0.10.0→0.11.0; `web`
+  0.98.0→0.99.0 (the mailbox view's cache-then-reconcile flow).
 
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole

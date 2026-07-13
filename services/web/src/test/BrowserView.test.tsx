@@ -78,6 +78,32 @@ describe("BrowserView", () => {
     await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("docs", ""));
   });
 
+  it("search then clear round-trips to the same directory (#619)", async () => {
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        search_enabled: true,
+        items: [{ id: "docs", title: "docs", nav_path: "docs" }],
+      }),
+    });
+    render(<BrowserView source={source} />, { wrapper });
+
+    // Drill into "docs" first.
+    fireEvent.click(await screen.findByText("docs"));
+    await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("docs", ""));
+
+    // Searching from inside "docs" is a global lookup (path cleared server-side) — but the
+    // client must remember where the search interrupted.
+    const input = await screen.findByPlaceholderText("Search…");
+    fireEvent.change(input, { target: { value: "report" } });
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("", "report"));
+
+    // Clearing the search must return to "docs", never the root.
+    fireEvent.click(await screen.findByRole("button", { name: /clear search/i }));
+    await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("docs", ""));
+  });
+
   it("fetches the initial listing at the root with no query", async () => {
     const source = fakeSource();
     render(<BrowserView source={source} />, { wrapper });
@@ -259,6 +285,20 @@ describe("BrowserView upload (#479)", () => {
 
     render(<BrowserView source={fakeSource()} />, { wrapper });
     await waitFor(() => expect(screen.queryByRole("button", { name: "Upload" })).toBeNull());
+  });
+
+  it("keeps the Upload button discoverable while its label collapses on phone (#620)", async () => {
+    const { source } = uploadSource();
+    render(<BrowserView source={source} />, { wrapper });
+    const button = await screen.findByRole("button", { name: "Upload" });
+
+    // The accessible name survives regardless of viewport (aria-label, not the visible text) —
+    // the visible "Upload" text is wrapped so CSS can hide it below `sm`, matching the shell's
+    // existing icon-only-on-phone convention (`hidden sm:inline`) rather than a bespoke pattern.
+    const label = within(button).getByText("Upload");
+    expect(label.tagName).toBe("SPAN");
+    expect(label.className).toContain("hidden");
+    expect(label.className).toContain("sm:inline");
   });
 
   it("carries the issue's picker contract on the hidden inputs", async () => {

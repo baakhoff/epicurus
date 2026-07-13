@@ -32,7 +32,7 @@ images to GHCR.
   whole schedule at once (400 on an invalid shape, e.g. weekly with no weekday). The Settings
   panel grows enable/cadence/hour/weekday controls plus an effective-schedule + next-planned-run
   summary — a multi-field draft the operator edits and explicitly saves (auto-saving per field
-  would fire invalid combinations mid-edit). `core-app` 0.74.0→0.75.0, `web` 0.98.0→0.99.0.
+  would fire invalid combinations mid-edit). `core-app` 0.74.0→0.75.0, `web` 0.100.0→0.101.0.
 
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole

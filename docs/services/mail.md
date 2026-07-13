@@ -115,10 +115,13 @@ data over the page proxy:
   fetch can't scan an unbounded mailbox (#539).
 - **Read.** `GET /pages/mailbox?thread_id=` returns the full conversation — every message through
   the **same renderer** as the panel `email-reader` (not forked) — plus each message's attachments
-  and a server-derived reply prefill. **Plain-text-first:** an HTML-only message is decoded to
-  readable **text** server-side (`_html_to_text`, adversarial-tested) — no HTML is ever rendered in
-  the shell, so there is no HTML-mail XSS surface. Rich sanitized-HTML rendering is a deferred
-  follow-up.
+  and a server-derived reply prefill. **HTML rendering (ADR-0097, #627):** a message's `body_html`
+  is rendered in a **sandboxed iframe** (`allow-same-origin allow-popups`, never `allow-scripts` —
+  so email JS never runs and the email's CSS can't bleed into the shell), with inline `cid:` images
+  resolved through the module's attachment proxy and **remote images blocked by default** (a
+  per-message "Load images" reveals them — a remote `<img>` is a tracking pixel). `body` (plain
+  text, `_html_to_text` for HTML-only mail) stays the fallback for a text-only message and for the
+  `mail_read` agent tool.
 - **Triage.** Two new message-level tools, `mail_archive` (drop the `INBOX` label) and `mail_trash`
   (move to Trash — recoverable, not a permanent delete), both inside the already-granted
   `gmail.modify` scope (no reconnect). They join `mail_mark_read`/`mail_mark_unread` as per-message
@@ -132,8 +135,7 @@ data over the page proxy:
 
 The `MailProvider` seam gains `list_labels` / `list_threads` / `get_thread` / `archive` / `trash` /
 `get_attachment` (typed in mail-domain terms; a future IMAP/Microsoft provider capability-gates
-rather than forcing symmetry). Deferred: thread-level bulk triage, the unread-count nav badge, and
-rich HTML rendering.
+rather than forcing symmetry). Deferred: thread-level bulk triage and the unread-count nav badge.
 
 ---
 
@@ -292,7 +294,11 @@ read-only `email-reader` panel directly (in-app navigation, not an outbound URL)
 `actions` carries a single tool-backed toggle (ADR-0024) computed from `unread`: a **Mark as
 read** action (`mail_mark_read`) when the message is unread, or **Mark as unread**
 (`mail_mark_unread`) when it is read. `module`/`message_id` let the reader invoke the action
-through the core proxy and re-fetch itself afterwards.
+through the core proxy and re-fetch itself afterwards. `body_html` (ADR-0097, #627) is the HTML
+body when present — rendered in a sandboxed iframe with inline images resolved and remote images
+blocked by default; `body` (text) is the fallback. `attachments` carries `content_id`/`inline`
+for inline (`cid:`) images (the shell resolves those in the HTML body and hides them from the
+download row).
 
 ```json
 {
@@ -300,9 +306,14 @@ through the core proxy and re-fetch itself afterwards.
   "from": "acme@example.com",
   "date": "Mon, 1 Jan 2024 10:00:00 +0000",
   "body": "Dear customer,\n\nPlease find the invoice attached.\n\nRegards",
+  "body_html": "<p>Dear customer, <img src=\"cid:logo\"></p>",
   "module": "mail",
   "message_id": "msg1",
   "unread": true,
+  "attachments": [
+    { "id": "att-logo", "filename": "logo.png", "mime_type": "image/png",
+      "size": 1024, "content_id": "logo", "inline": true }
+  ],
   "actions": [
     {
       "tool": "mail_mark_read",

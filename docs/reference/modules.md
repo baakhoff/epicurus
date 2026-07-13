@@ -469,8 +469,9 @@ triage is message-level `BoardAction`s (`mail_mark_read`/`unread`, `mail_archive
 through the normal tool proxy. Two `mailbox`-gated core proxies back the rest: **`POST
 …/pages/{id}/send`** (a *human-initiated* compose/reply — shares the module transmit but never the
 agent draft pane, ADR-0085) and **`GET …/pages/{id}/attachment`** (streams a message's attachment
-bytes). Rendering is **plain-text-first**: HTML-only mail is decoded to text server-side, so the
-shell never renders mail HTML.
+bytes). A message's HTML body is rendered in a **sandboxed iframe** (no `allow-scripts`; inline
+`cid:` images proxied through the module, remote images blocked by default) so email CSS/JS can
+never bleed into or script the shell (ADR-0097, #627); plain text is the fallback.
 
 ### Entity references & the resolver (ADR-0019)
 

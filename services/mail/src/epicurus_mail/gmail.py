@@ -403,9 +403,11 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
     to_raw = headers.get("to", "")
     to_list = [t.strip() for t in to_raw.split(",") if t.strip()]
     body: str | None = None
+    body_html: str | None = None
     attachments: list[MailAttachment] = []
     if full:
         body = _extract_body(payload)
+        body_html = _extract_html(payload)
         attachments = _extract_attachments(payload)
     # Gmail flags an unread message with the system ``UNREAD`` label; ``labelIds`` is
     # returned for both the ``metadata`` and ``full`` formats, so search and read agree.
@@ -419,6 +421,7 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         date=headers.get("date", ""),
         snippet=data.get("snippet", ""),
         body=body,
+        body_html=body_html,
         unread=unread,
         attachments=attachments,
     )
@@ -531,21 +534,39 @@ def _history_thread_ids(record: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _part_headers(part: dict[str, Any]) -> dict[str, str]:
+    """Lowercased ``{header: value}`` for one Gmail payload *part* (empty if none)."""
+    return {h["name"].lower(): h["value"] for h in part.get("headers", [])}
+
+
 def _extract_attachments(payload: dict[str, Any]) -> list[MailAttachment]:
-    """Walk a Gmail payload for attachment parts (a filename + a body ``attachmentId``)."""
+    """Walk a Gmail payload for attachment parts (ADR-0097, #627).
+
+    Includes a part with a body ``attachmentId`` and **either** a filename (an ordinary
+    attachment) **or** a ``Content-ID`` (an inline image an HTML body references as
+    ``cid:<id>``). ``content_id`` is the header stripped of its angle brackets; ``inline`` is
+    set when the part is dispositioned inline or carries a ``Content-ID`` — the shell resolves
+    those for the HTML body and keeps them out of the download row.
+    """
     found: list[MailAttachment] = []
 
     def walk(part: dict[str, Any]) -> None:
         body = part.get("body", {})
         attachment_id = body.get("attachmentId")
         filename = part.get("filename") or ""
-        if attachment_id and filename:
+        headers = _part_headers(part)
+        content_id = headers.get("content-id", "").strip().strip("<>").strip() or None
+        disposition = headers.get("content-disposition", "").lower()
+        is_inline = "inline" in disposition or content_id is not None
+        if attachment_id and (filename or content_id):
             found.append(
                 MailAttachment(
                     id=str(attachment_id),
-                    filename=filename,
+                    filename=filename or content_id or "inline",
                     mime_type=str(part.get("mimeType", "")),
                     size=int(body.get("size", 0) or 0),
+                    content_id=content_id,
+                    inline=is_inline,
                 )
             )
         for sub in part.get("parts", []):
@@ -553,6 +574,16 @@ def _extract_attachments(payload: dict[str, Any]) -> list[MailAttachment]:
 
     walk(payload)
     return found
+
+
+def _extract_html(payload: dict[str, Any]) -> str | None:
+    """The message's raw ``text/html`` body part, decoded, or ``None`` (ADR-0097, #627).
+
+    Unlike :func:`_extract_body` (which decodes HTML *to text* as a fallback), this returns the
+    HTML verbatim for the shell to render in a sandboxed iframe. Safety lives at the render
+    boundary (the sandbox + the shell's inert-parse sanitize), not here.
+    """
+    return _first_part_text(payload, "text/html")
 
 
 def _find_attachment_part(payload: dict[str, Any], attachment_id: str) -> MailAttachment | None:

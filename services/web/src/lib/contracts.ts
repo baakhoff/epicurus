@@ -1007,6 +1007,12 @@ export const MailAttachment = z.object({
   filename: z.string(),
   mime_type: z.string().default(""),
   size: z.number().default(0),
+  /** An inline image's `Content-ID` (no angle brackets) — the HTML body's `cid:<id>` targets
+   *  (ADR-0097, #627). Null for an ordinary attachment. */
+  content_id: z.string().nullish(),
+  /** Inline part (dispositioned inline or carrying a `Content-ID`): resolved for the HTML body,
+   *  hidden from the download row. */
+  inline: z.boolean().default(false),
 });
 export type MailAttachment = z.infer<typeof MailAttachment>;
 
@@ -1016,6 +1022,10 @@ export const EmailMessage = z.object({
   from: z.string().nullish(),
   date: z.string().nullish(),
   body: z.string().default(""),
+  /** The HTML body when the message has one (ADR-0097, #627) — rendered in a sandboxed iframe
+   *  with inline images resolved through the module and remote images blocked by default; `body`
+   *  (plain text) is the fallback. */
+  body_html: z.string().nullish(),
   /** Owning module + id, so the reader can invoke this message's actions and re-fetch itself. */
   module: z.string().default("mail"),
   message_id: z.string().default(""),

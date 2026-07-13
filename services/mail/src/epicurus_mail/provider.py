@@ -24,6 +24,15 @@ class MailAttachment(BaseModel):
     filename: str
     mime_type: str = ""
     size: int = 0
+    # The part's ``Content-ID`` (without the angle brackets), when it has one — an **inline**
+    # image an HTML body references as ``cid:<content_id>`` (ADR-0097, #627). The shell rewrites
+    # those ``cid:`` refs to the same-origin attachment proxy so inline images load through the
+    # module, never a direct provider URL. ``None`` for an ordinary (non-inline) attachment.
+    content_id: str | None = None
+    # Whether the part is inline (``Content-Disposition: inline`` or carries a ``Content-ID``) —
+    # the shell resolves these for the HTML body but keeps them out of the download row so a
+    # newsletter's logos don't clutter the attachment list (#627).
+    inline: bool = False
 
 
 class MailMessage(BaseModel):
@@ -37,6 +46,12 @@ class MailMessage(BaseModel):
     date: str
     snippet: str
     body: str | None = None
+    # The message's **HTML** body, when it has one (ADR-0097, #627) — the shell renders it in a
+    # sandboxed iframe (no style/script bleed) with inline ``cid:`` images resolved through the
+    # module and remote images blocked by default. ``None`` for a text-only message, in which
+    # case ``body`` (plain text, or HTML decoded to text) is the fallback. Populated only on a
+    # full read, like ``body``.
+    body_html: str | None = None
     # Whether the message is unread. Provider-agnostic; the Gmail provider derives it
     # from the ``UNREAD`` label. Surfaced in the hover-card resolver (ADR-0019).
     unread: bool = False

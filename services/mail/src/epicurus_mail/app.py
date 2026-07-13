@@ -181,6 +181,10 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
             "from": message.sender,
             "date": message.date,
             "body": message.body or "",
+            # HTML body + attachments (ADR-0097, #627) so the panel reader renders rich mail
+            # too, resolving inline ``cid:`` images through the module's attachment proxy.
+            "body_html": message.body_html,
+            "attachments": [att.model_dump() for att in message.attachments],
             "module": MODULE_NAME,
             "message_id": message.id,
             "unread": message.unread,

@@ -14,6 +14,23 @@ images to GHCR.
 
 ### Added
 
+- **Mail: render HTML email properly (images, styling)** (#627, ADR-0097) — HTML mail rendered
+  badly: the shell decoded every message to plain text (no images, no layout), because rendering
+  raw mail HTML in the shell would be an XSS surface. The module now surfaces the message's
+  **`body_html`** (plus inline images' `Content-ID`s, marked `inline`), and the shell renders it in
+  a **sandboxed iframe** (`allow-same-origin allow-popups`, **never** `allow-scripts`) — so email JS
+  can never run and the email's CSS can't bleed into or restyle the app shell. Two independent safety
+  layers: the HTML is first sanitized by an **inert `DOMParser` pass** (strip `<script>`/`<link>`/
+  `<iframe>`/`<form>`, every `on*=` handler, `javascript:`/`vbscript:` URLs) — the raw HTML never
+  touches the live DOM — then the sandbox neutralizes anything missed. Inline **`cid:` images** are
+  rewritten to the module's same-origin attachment proxy (fetched through the module, never a direct
+  provider URL), so they load with the session cookie; inline images are kept out of the download
+  row. **Remote images are blocked by default** (a remote `<img>` is a tracking pixel) with a
+  per-message "Load images" affordance — the deliberate privacy default. Plain text stays the
+  fallback for text-only mail and the `mail_read` tool; emails render on a white canvas in both app
+  themes (the mainstream mail-client convention) for legibility. `mail` 0.11.0→0.12.0; `web`
+  0.99.0→0.100.0.
+
 - **Mail: local cache + incremental sync — stop full-fetching on every open** (#623, ADR-0096) —
   the mailbox page fetched everything from Gmail on *every* open (the rail + one metadata
   `threads.get` per thread, ~28 calls for a 25-row page), so opening Mail was slow. The module now

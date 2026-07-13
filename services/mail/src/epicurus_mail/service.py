@@ -191,7 +191,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.12.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -531,6 +531,10 @@ def message_payload(message: MailMessage) -> dict[str, Any]:
         "from": message.sender,
         "date": message.date,
         "body": message.body or "",
+        # The HTML body (ADR-0097, #627) — the shell renders it in a sandboxed iframe with
+        # inline ``cid:`` images resolved through the module and remote images blocked by
+        # default; ``body`` (text) stays the fallback for a text-only message.
+        "body_html": message.body_html,
         "module": MODULE_NAME,
         "message_id": message.id,
         "unread": message.unread,

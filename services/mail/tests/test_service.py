@@ -470,11 +470,11 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_11_0() -> None:
+async def test_manifest_version_is_0_12_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.11.0"
+    assert manifest.version == "0.12.0"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:

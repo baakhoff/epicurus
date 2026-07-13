@@ -335,6 +335,23 @@ remount, #428). Page data is fetched through the core proxy
 (`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
 calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
 
+**Calendar week view — an hourly day-grid (#631).** The `calendar` archetype's week view is a
+Google-Calendar-like grid: one column per day over hour rows, timed events **placed and sized by
+start/duration**, and **overlapping events split into side-by-side lanes** (connected overlaps are
+grouped and greedily first-fit into columns, each sized to `1/lanes` of the day width). A **pinned
+all-day strip** holds all-day / multi-day events (ADR-0037) — sticky below the day headers while the
+hours scroll — with a **current-time line** on today's column and a default scroll to the morning
+(or the current hour when the week holds today). A timed event on a **writable** calendar is
+**dragged to move** by its body, or **resized** by its bottom edge (both snap to the quarter-hour);
+the new time is applied **optimistically** and persisted through the event's *own* editable-calendar
+**Edit** action (`calendar_update_event`, #208/ADR-0034) — the same write the Edit form performs, so
+there is **no new module contract** — and on a provider failure the event **snaps back** with a
+dismissible message. A **read-only** event (its calendar exposes no Edit action) stays click-to-open,
+never draggable. On a phone the grid **pans horizontally** (the day columns keep a min-width), with
+the time gutter and day headers staying pinned. The whole week is one `overflow-auto` CSS grid
+(`3.5rem repeat(7, minmax(6rem, 1fr))`); the placement and drag maths are framework-free and
+unit-tested in `src/components/archetypes/calendarGrid.ts`.
+
 **Left-nav page order (#543).** The operator's drag-and-drop order for these pages is a
 tenant-scoped preference (`GET`/`PUT /platform/v1/page-order`, `{order: string[]}` of each
 page's `path`) — the Modules screen's **Page order** card is the only place it's edited

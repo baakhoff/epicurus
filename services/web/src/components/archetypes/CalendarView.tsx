@@ -8,7 +8,7 @@
  * module), so the calendar scrolls arbitrarily far without loading every event up
  * front. Times are read in the viewer's local zone, as a calendar should be.
  */
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
   ChevronLeft,
@@ -21,7 +21,15 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 
 import { isExternalHref } from "@/components/CardLink";
 import type { FormValues } from "@/components/SchemaForm";
@@ -38,6 +46,19 @@ import {
 import { usePanel } from "@/stores/panel";
 
 import { ActionControl } from "./ActionControl";
+import {
+  applyDrag,
+  eventDayBounds,
+  findMoveAction,
+  formatHour,
+  HOUR_HEIGHT,
+  isSameLocalDay,
+  layoutDayColumns,
+  minutesOfDay,
+  pxToSnappedMinutes,
+  serializeTimed,
+  type DragMode,
+} from "./calendarGrid";
 
 type ViewMode = "month" | "week" | "agenda";
 
@@ -275,6 +296,14 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
   // Clicking an empty day/time slot opens the page's own create-event form, pre-filled
   // (#473) — no new module contract, just seed values fed into the existing action below.
   const [slotSeed, setSlotSeed] = useState<FormValues | null>(null);
+  // Optimistic overlay for a week-grid drag (#631): the new times for an event whose move is
+  // in flight, applied over the fetched events so the drag lands instantly and stays put while
+  // the write persists — cleared once the refetch confirms it (or rolls back on failure).
+  const [pendingMoves, setPendingMoves] = useState<Map<string, { start: Date; end: Date }>>(
+    () => new Map(),
+  );
+  const [moveError, setMoveError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const range = useMemo(() => visibleRange(view, cursor), [view, cursor]);
   const startISO = range.start.toISOString();
@@ -366,11 +395,57 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
     [meta],
   );
 
+  // Apply any in-flight drag (#631) over the fetched events before grouping, so the moved
+  // event renders at its new time immediately and the layout (overlap lanes) reflects it.
+  const overlaidEvents = useMemo(() => {
+    const base = data?.events ?? [];
+    if (pendingMoves.size === 0) return base;
+    return base.map((ev) => {
+      const moved = pendingMoves.get(ev.id);
+      return moved ? { ...ev, start: moved.start, end: moved.end } : ev;
+    });
+  }, [data, pendingMoves]);
+
   const visibleEvents = useMemo(
-    () => (data?.events ?? []).filter((e) => !(e.calendar_id && hidden.has(e.calendar_id))),
-    [data, hidden],
+    () => overlaidEvents.filter((e) => !(e.calendar_id && hidden.has(e.calendar_id))),
+    [overlaidEvents, hidden],
   );
   const byDay = useMemo(() => groupByDay(visibleEvents), [visibleEvents]);
+
+  // Persist a week-grid drag through the event's own editable-calendar action (#208/ADR-0034):
+  // find the "Edit" action that can set start/end and invoke it with the new times — the same
+  // write the Edit form does, minus the form. Optimistic: the overlay above shows the new time
+  // at once; on success we await the refetch (so real data has caught up before the overlay is
+  // dropped — no flicker), on failure the overlay is dropped (the event snaps back) and the
+  // error is surfaced. The module contract is untouched — the shell just drives it (#631).
+  const moveEvent = useCallback(
+    async (ev: CalendarEvent, start: Date, end: Date) => {
+      const action = findMoveAction(ev);
+      if (!action) {
+        setMoveError("This event can’t be moved — its calendar is read-only.");
+        return;
+      }
+      setMoveError(null);
+      setPendingMoves((prev) => new Map(prev).set(ev.id, { start, end }));
+      try {
+        await api.invokeModuleTool(module, action.tool, {
+          ...action.args,
+          start: serializeTimed(start),
+          end: serializeTimed(end),
+        });
+        await queryClient.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      } catch (e) {
+        setMoveError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setPendingMoves((prev) => {
+          const next = new Map(prev);
+          next.delete(ev.id);
+          return next;
+        });
+      }
+    },
+    [module, pageId, queryClient],
+  );
 
   const toggleCalendar = (id: string) =>
     setHidden((prev) => {
@@ -382,7 +457,7 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
     });
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
       <Toolbar
         view={view}
         label={periodLabel(view, cursor)}
@@ -425,7 +500,13 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
             }
           />
         ) : view === "week" ? (
-          <WeekView cursor={cursor} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
+          <WeekView
+            cursor={cursor}
+            byDay={byDay}
+            colorFor={colorFor}
+            onSelect={setSelected}
+            onMoveEvent={moveEvent}
+          />
         ) : (
           <AgendaView range={range} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
         )}
@@ -438,6 +519,26 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
           pageId={pageId}
           onClose={() => setSelected(null)}
         />
+      )}
+
+      {/* A dragged move that the provider rejected (#631): the event has already snapped back
+          (its overlay was dropped); this says why, and dismisses itself on the next action. */}
+      {moveError && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 z-40 flex justify-center px-4">
+          <div
+            role="alert"
+            className="pointer-events-auto flex max-w-md items-start gap-2 rounded-(--radius-card) border border-danger/40 bg-surface px-3 py-2 text-sm text-ink shadow-(--ep-shadow)"
+          >
+            <span className="flex-1">{moveError}</span>
+            <button
+              aria-label="Dismiss"
+              onClick={() => setMoveError(null)}
+              className="shrink-0 text-ink-faint hover:text-ink"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
       )}
 
       {/* No visible button — a slot click seeds this and opens it directly (#473). Reuses
@@ -803,59 +904,370 @@ function FeedItemChip({
   );
 }
 
-/* ── week ────────────────────────────────────────────────────────────────── */
+/* ── week (hourly day-grid, #631) ──────────────────────────────────────────── */
 
+const HOURS = Array.from({ length: 24 }, (_, h) => h);
+
+/**
+ * The week view as a Google-Calendar-like hourly grid: one column per day, hour rows, timed
+ * events placed and sized by start/duration, a pinned all-day strip on top, a current-time
+ * line, and drag-to-move / resize that persists through the event's own editable-calendar
+ * action (#208/ADR-0034). The whole week is one `overflow-auto` grid — the day headers stay
+ * sticky-top, the all-day strip pins below them, and the time gutter stays sticky-left, so on
+ * a phone the grid pans horizontally without losing its axes.
+ */
 function WeekView({
   cursor,
   byDay,
   colorFor,
   onSelect,
+  onMoveEvent,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
   colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
+  /** Persist a dragged event's new times (optimistic + rollback lives in the parent). */
+  onMoveEvent: (ev: CalendarEvent, start: Date, end: Date) => void;
 }) {
   const wkStart = startOfWeek(cursor);
-  const days = Array.from({ length: 7 }, (_, i) => addDays(wkStart, i));
-  const today = new Date();
+  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(wkStart, i)), [wkStart]);
+  const hasAllDay = days.some((d) => (byDay.get(dayKey(d)) ?? []).some((e) => e.all_day));
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // A click that concludes a real drag must not also open the event's detail. Set on a moved
+  // pointer-up, read (and cleared) by the following click.
+  const suppressClickRef = useRef(false);
+  // The live drag, kept in a ref so the window pointer handlers read the latest without
+  // re-subscribing on every move; `preview`/`dragging` are the render-facing mirror.
+  const dragRef = useRef<{
+    ev: CalendarEvent;
+    mode: DragMode;
+    startClientY: number;
+    origStart: Date;
+    origEnd: Date;
+    moved: boolean;
+    curStart: Date;
+    curEnd: Date;
+  } | null>(null);
+  const [preview, setPreview] = useState<{ id: string; start: Date; end: Date } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [nowTick, setNowTick] = useState(() => new Date());
+
+  const beginDrag = (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => {
+    if (!findMoveAction(ev)) return; // read-only event → not draggable
+    if (e.pointerType === "mouse" && e.button !== 0) return; // primary button only
+    dragRef.current = {
+      ev,
+      mode,
+      startClientY: e.clientY,
+      origStart: ev.start,
+      origEnd: ev.end,
+      moved: false,
+      curStart: ev.start,
+      curEnd: ev.end,
+    };
+    setPreview({ id: ev.id, start: ev.start, end: ev.end });
+    setDragging(true);
+  };
+
+  // Window-level pointer handlers while a drag is live — one subscription per drag, reading the
+  // mutable ref so a fast drag doesn't thrash React subscriptions.
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const deltaMin = pxToSnappedMinutes(e.clientY - d.startClientY);
+      if (deltaMin !== 0) d.moved = true;
+      const next = applyDrag(d.origStart, d.origEnd, d.mode, deltaMin);
+      d.curStart = next.start;
+      d.curEnd = next.end;
+      setPreview({ id: d.ev.id, start: next.start, end: next.end });
+    };
+    const onUp = () => {
+      const d = dragRef.current;
+      dragRef.current = null;
+      // Commit the move (parent applies its own overlay) and drop the preview in the same tick,
+      // so the handoff to the optimistic overlay is batched — no snap-back flicker.
+      if (d && d.moved) {
+        suppressClickRef.current = true;
+        onMoveEvent(d.ev, d.curStart, d.curEnd);
+      }
+      setPreview(null);
+      setDragging(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, onMoveEvent]);
+
+  // Tick the current-time line each minute.
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(new Date()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Open at a sensible scroll position once (morning, or the current time when this week holds
+  // today) — mount-only so the operator's scroll survives week-to-week navigation.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const todayInWeek = days.some((d) => isSameLocalDay(d, new Date()));
+    const focusMin = todayInWeek ? minutesOfDay(new Date()) : 8 * 60;
+    el.scrollTop = Math.max(0, (focusMin / 60) * HOUR_HEIGHT - el.clientHeight / 3);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: position once on mount
+  }, []);
+
+  const onEventClick = (ev: CalendarEvent) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    onSelect(ev);
+  };
+
+  const nowMin = minutesOfDay(nowTick);
 
   return (
-    <div className="flex h-full min-h-0 overflow-x-auto">
-      {days.map((day) => {
-        const evs = byDay.get(dayKey(day)) ?? [];
-        const today_ = isSameDay(day, today);
-        return (
-          <div
-            key={day.toISOString()}
-            className="flex min-w-[8.5rem] flex-1 flex-col border-r border-edge last:border-r-0"
-          >
-            <div className="sticky top-0 border-b border-edge bg-surface px-2 py-1.5 text-center">
+    <div ref={scrollRef} className="h-full min-h-0 overflow-auto">
+      <div
+        className="grid"
+        style={{ gridTemplateColumns: `3.5rem repeat(7, minmax(6rem, 1fr))` }}
+      >
+        {/* ── header row: corner + day headers (sticky top) ── */}
+        <div className="sticky left-0 top-0 z-40 h-14 border-b border-r border-edge bg-surface" />
+        {days.map((day) => {
+          const isToday = isSameDay(day, nowTick);
+          return (
+            <div
+              key={`h-${dayKey(day)}`}
+              className="sticky top-0 z-30 flex h-14 flex-col items-center justify-center border-b border-r border-edge bg-surface last:border-r-0"
+            >
               <div className="text-[11px] uppercase tracking-wide text-ink-faint">
                 {day.toLocaleDateString(undefined, { weekday: "short" })}
               </div>
               <div
                 className={cn(
-                  "mx-auto mt-0.5 flex size-6 items-center justify-center rounded-full text-sm",
-                  today_ ? "bg-accent font-medium text-on-accent" : "text-ink",
+                  "mt-0.5 flex size-6 items-center justify-center rounded-full text-sm",
+                  isToday ? "bg-accent font-medium text-on-accent" : "text-ink",
                 )}
               >
                 {day.getDate()}
               </div>
             </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1.5">
-              {evs.length === 0 ? (
-                <span className="px-1 pt-1 text-[11px] text-ink-faint">—</span>
-              ) : (
-                evs.map((ev) => (
-                  <EventRow key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
-                ))
+          );
+        })}
+
+        {/* ── all-day strip (pinned below the header, ADR-0037) — only when there are any ── */}
+        {hasAllDay && (
+          <>
+            <div className="sticky left-0 top-14 z-30 border-b border-r border-edge bg-surface px-1 py-1 text-right text-[10px] uppercase tracking-wide text-ink-faint">
+              All-day
+            </div>
+            {days.map((day) => {
+              const allDay = (byDay.get(dayKey(day)) ?? []).filter((e) => e.all_day);
+              return (
+                <div
+                  key={`ad-${dayKey(day)}`}
+                  className="sticky top-14 z-20 flex min-h-[1.75rem] flex-col gap-0.5 border-b border-r border-edge bg-surface p-1 last:border-r-0"
+                >
+                  {allDay.map((ev) => (
+                    <WeekAllDayChip
+                      key={ev.id}
+                      ev={ev}
+                      color={colorFor(ev.calendar_id)}
+                      onSelect={onSelect}
+                    />
+                  ))}
+                </div>
+              );
+            })}
+          </>
+        )}
+
+        {/* ── body: time gutter (sticky left) + day columns ── */}
+        <div className="sticky left-0 z-10 bg-surface">
+          {HOURS.map((h) => (
+            <div key={h} style={{ height: HOUR_HEIGHT }} className="relative border-r border-edge">
+              {h > 0 && (
+                <span className="absolute -top-2 right-1 text-[10px] tabular-nums text-ink-faint">
+                  {formatHour(h)}
+                </span>
               )}
             </div>
-          </div>
-        );
-      })}
+          ))}
+        </div>
+        {days.map((day) => (
+          <WeekDayColumn
+            key={`c-${dayKey(day)}`}
+            day={day}
+            events={(byDay.get(dayKey(day)) ?? []).filter((e) => !e.all_day)}
+            colorFor={colorFor}
+            onEventClick={onEventClick}
+            onBeginDrag={beginDrag}
+            isToday={isSameDay(day, nowTick)}
+            nowMin={nowMin}
+            preview={preview}
+          />
+        ))}
+      </div>
     </div>
+  );
+}
+
+/** One day's timed column: hour gridlines + absolutely-placed event boxes (lane-packed for
+ *  overlaps) + the current-time line when it's today. */
+function WeekDayColumn({
+  day,
+  events,
+  colorFor,
+  onEventClick,
+  onBeginDrag,
+  isToday,
+  nowMin,
+  preview,
+}: {
+  day: Date;
+  events: CalendarEvent[];
+  colorFor: ColorFor;
+  onEventClick: (ev: CalendarEvent) => void;
+  onBeginDrag: (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => void;
+  isToday: boolean;
+  nowMin: number;
+  preview: { id: string; start: Date; end: Date } | null;
+}) {
+  // Position boxes, mapping the live-dragged event to its preview times so it tracks the pointer.
+  const boxes = useMemo(() => {
+    const laid = layoutDayColumns(
+      events.map((ev) => {
+        const t = preview && preview.id === ev.id ? preview : ev;
+        const { startMin, endMin } = eventDayBounds({ start: t.start, end: t.end }, day);
+        return { id: ev.id, startMin, endMin };
+      }),
+    );
+    return new Map(laid.map((b) => [b.id, b]));
+  }, [events, preview, day]);
+
+  return (
+    <div className="relative border-r border-edge last:border-r-0">
+      {HOURS.map((h) => (
+        <div key={h} style={{ height: HOUR_HEIGHT }} className="border-b border-edge/50" />
+      ))}
+      <div className="absolute inset-0">
+        {events.map((ev) => {
+          const box = boxes.get(ev.id);
+          if (!box) return null;
+          return (
+            <TimedEventBox
+              key={ev.id}
+              ev={ev}
+              box={box}
+              color={colorFor(ev.calendar_id)}
+              movable={Boolean(findMoveAction(ev))}
+              onBeginDrag={onBeginDrag}
+              onClick={onEventClick}
+            />
+          );
+        })}
+      </div>
+      {isToday && (
+        <div
+          className="pointer-events-none absolute inset-x-0 z-[2]"
+          style={{ top: (nowMin / 60) * HOUR_HEIGHT }}
+          aria-hidden
+        >
+          <div className="-mt-px h-0.5 bg-danger" />
+          <div className="absolute -left-0.5 -top-[3px] size-2 rounded-full bg-danger" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A timed event, absolutely placed in its day column and (when its calendar is writable)
+ *  drag-to-move by its body / resize by its bottom edge. */
+function TimedEventBox({
+  ev,
+  box,
+  color,
+  movable,
+  onBeginDrag,
+  onClick,
+}: {
+  ev: CalendarEvent;
+  box: { startMin: number; endMin: number; lane: number; lanes: number };
+  color: string;
+  movable: boolean;
+  onBeginDrag: (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => void;
+  onClick: (ev: CalendarEvent) => void;
+}) {
+  const top = (box.startMin / 60) * HOUR_HEIGHT;
+  const height = ((box.endMin - box.startMin) / 60) * HOUR_HEIGHT;
+  return (
+    <button
+      type="button"
+      onPointerDown={movable ? (e) => onBeginDrag(ev, "move", e) : undefined}
+      onClick={() => onClick(ev)}
+      title={ev.title}
+      style={
+        {
+          top,
+          height,
+          left: `calc(${(box.lane / box.lanes) * 100}% + 1px)`,
+          width: `calc(${100 / box.lanes}% - 3px)`,
+          "--cal": color,
+        } as CSSProperties
+      }
+      className={cn(
+        "absolute z-[1] flex flex-col overflow-hidden rounded-sm border border-l-2 px-1 py-0.5 text-left leading-tight select-none",
+        "border-[color-mix(in_srgb,var(--cal)_40%,transparent)] border-l-(--cal) bg-[color-mix(in_srgb,var(--cal)_20%,var(--color-surface))]",
+        movable ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-pointer",
+      )}
+    >
+      <span className="truncate text-[11px] font-medium text-ink">{ev.title}</span>
+      {height >= 32 && (
+        <span className="truncate text-[10px] tabular-nums text-ink-dim">{fmtTime(ev.start)}</span>
+      )}
+      {movable && (
+        <span
+          onPointerDown={(e) => {
+            e.stopPropagation(); // resize, not move
+            onBeginDrag(ev, "resize-end", e);
+          }}
+          className="absolute inset-x-0 bottom-0 h-2 cursor-ns-resize touch-none"
+          aria-hidden
+        />
+      )}
+    </button>
+  );
+}
+
+/** A compact all-day / multi-day chip in the pinned strip, tinted with its calendar's colour. */
+function WeekAllDayChip({
+  ev,
+  color,
+  onSelect,
+}: {
+  ev: CalendarEvent;
+  color: string;
+  onSelect: (ev: CalendarEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(ev)}
+      title={ev.title}
+      style={{ "--cal": color } as CSSProperties}
+      className="truncate rounded-sm border-l-2 border-(--cal) bg-[color-mix(in_srgb,var(--cal)_18%,var(--color-surface))] px-1 py-0.5 text-left text-[11px] leading-tight text-ink"
+    >
+      {ev.title}
+    </button>
   );
 }
 

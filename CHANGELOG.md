@@ -14,6 +14,20 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: week view is now an hourly day-grid with drag-to-move** (#631) — the week view was a
+  plain per-day list of event cards; it is now a Google-Calendar-like **hourly grid**: one column
+  per day over hour rows, timed events **placed and sized by start/duration**, overlapping events
+  **split into side-by-side lanes**, a **pinned all-day strip** (ADR-0037) that stays put while the
+  hours scroll, a **current-time line**, and a default scroll to the morning. A timed event on a
+  writable calendar is **dragged to move** (or its bottom edge dragged to **resize**), snapped to the
+  quarter-hour and applied **optimistically**; the write goes through the event's *own* editable-
+  calendar **Edit** action (`calendar_update_event`, #208/ADR-0034) — the same tool the Edit form
+  calls, so **no module contract changes** (the module supplies data, the shell renders, ADR-0018) —
+  and rolls back with a dismissible message on provider failure. A read-only event stays
+  click-to-open. On a phone the grid **pans horizontally** with the time gutter and day headers
+  pinned. Placement and drag maths are framework-free and unit-tested
+  (`services/web/src/components/archetypes/calendarGrid.ts`). `web` 0.98.0→0.99.0.
+
 - **Agent: loop hygiene — stop on repeated calls and error streaks** (#524, ADR-0091) — the step
   loop continued on the blunt rule "the model made a tool call", so two shapes burned the whole
   `max_steps` budget and ended in a silent stop: the model re-issuing the *exact same* call over and

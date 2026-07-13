@@ -352,6 +352,15 @@ the time gutter and day headers staying pinned. The whole week is one `overflow-
 (`3.5rem repeat(7, minmax(6rem, 1fr))`); the placement and drag maths are framework-free and
 unit-tested in `src/components/archetypes/calendarGrid.ts`.
 
+**Calendar month view — tap-through + phone density (#630 / #632).** Tapping a day cell in the
+month view **navigates into that day's week** (highlighting it there) rather than starting a
+create — so the month is a navigator and the legible detail lives one tap away in the week grid.
+Event **creation** moved to the explicit affordances: the toolbar **New event** action and the
+week grid's **empty-slot tap** (the #473 slot-seed create, relocated from the month cell). On a
+**phone** each day renders **every** event as a **slim, textless colour line** (density over
+labels — the tap-through carries the detail), collapsing to a `+N` marker only past what genuinely
+fits; **desktop** keeps the labelled chips with a `+N more` overflow.
+
 **Left-nav page order (#543).** The operator's drag-and-drop order for these pages is a
 tenant-scoped preference (`GET`/`PUT /platform/v1/page-order`, `{order: string[]}` of each
 page's `path`) — the Modules screen's **Page order** card is the only place it's edited

@@ -107,6 +107,21 @@ function findEmptyDayCell(container: HTMLElement): HTMLElement {
   return cell;
 }
 
+/** True once the week hourly grid (#631) is rendered — keyed off its inline column template,
+ *  which is locale-independent (unlike the gutter's hour labels). */
+const weekGridUp = (container: HTMLElement): boolean =>
+  container.querySelector('[style*="minmax(6rem"]') !== null;
+
+/** A day column in the week grid: a `relative` cell whose direct child is the absolute event
+ *  layer — distinguishing it from the (also-`relative`) time-gutter hour cells. */
+function weekDayColumn(container: HTMLElement): HTMLElement {
+  const col = [...container.querySelectorAll("div.relative")].find((d) =>
+    d.querySelector(":scope > .absolute.inset-0"),
+  ) as HTMLElement | undefined;
+  if (!col) throw new Error("no week day column found");
+  return col;
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-06-15T12:00:00Z"));
@@ -537,33 +552,57 @@ describe("CalendarView", () => {
   });
 });
 
-describe("Slot-click create (#473)", () => {
-  it("opens the existing create form pre-filled with the clicked day, all-day on", async () => {
+// #630 moves event creation off the month day-tap (which now navigates into that day's week
+// view) and onto the explicit affordances: the toolbar "New event" and the week grid's empty
+// slots — the #473 slot-seed create, relocated from the month cell to the grid.
+describe("Month tap-through & week slot-create (#630)", () => {
+  const withCreate = {
+    ...sample,
+    actions: [{ tool: "calendar_create_event", label: "New event", form: true, form_values: {} }],
+  };
+
+  it("opens that day's week view on a month-cell tap, not the create form", async () => {
     mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
-    mockModulePage.mockResolvedValue({
-      ...sample,
-      actions: [
-        { tool: "calendar_create_event", label: "New event", form: true, form_values: {} },
-      ],
-    });
+    mockModulePage.mockResolvedValue(withCreate);
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup");
+
+    fireEvent.click(findEmptyDayCell(container));
+    await waitFor(() => expect(weekGridUp(container)).toBe(true)); // landed in the week grid
+    expect(screen.queryByLabelText("Start")).not.toBeInTheDocument(); // and not a create form
+  });
+
+  it("highlights the tapped day in the week it lands on", async () => {
+    mockModulePage.mockResolvedValue(sample);
     const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
     await screen.findByText("Standup");
 
     const cell = findEmptyDayCell(container);
-    const dayNum = cell.querySelector("span.rounded-full")!.textContent!.padStart(2, "0");
+    const dayNum = cell.querySelector("span.rounded-full")!.textContent!;
     fireEvent.click(cell);
-
-    const startInput = (await screen.findByLabelText("Start")) as HTMLInputElement;
-    const endInput = screen.getByLabelText("End") as HTMLInputElement;
-    expect(startInput).toHaveAttribute("type", "date"); // date_toggle collapsed it (#252/#473)
-    expect(startInput.value.endsWith(`-${dayNum}`)).toBe(true);
-    expect(endInput.value.endsWith(`-${dayNum}`)).toBe(false); // exclusive end = start + 1 day
-
-    const allDay = screen.getByRole("switch", { name: "All day" });
-    expect(allDay).toHaveAttribute("aria-checked", "true");
+    await waitFor(() => expect(weekGridUp(container)).toBe(true));
+    // The focused day's date badge carries the accent ring (distinct from today's filled pip).
+    const focusedBadge = [...container.querySelectorAll("div.ring-accent")].find(
+      (d) => d.textContent === dayNum,
+    );
+    expect(focusedBadge).toBeTruthy();
   });
 
-  it("submits the seeded date without the operator re-typing it", async () => {
+  it("opens the create form with a timed start when a week empty slot is tapped", async () => {
+    mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
+    mockModulePage.mockResolvedValue(withCreate);
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Standup");
+    fireEvent.click(screen.getByRole("button", { name: "Week" }));
+    await waitFor(() => expect(weekGridUp(container)).toBe(true));
+
+    fireEvent.click(weekDayColumn(container), { clientY: 240 });
+    const startInput = (await screen.findByLabelText("Start")) as HTMLInputElement;
+    expect(startInput).toHaveAttribute("type", "datetime-local"); // timed, not all-day
+    expect(screen.getByRole("switch", { name: "All day" })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("submits a week slot create as a timed event", async () => {
     mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
     mockModulePage.mockResolvedValue({
       ...sample,
@@ -579,39 +618,24 @@ describe("Slot-click create (#473)", () => {
     mockInvoke.mockResolvedValue({});
     const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
     await screen.findByText("Standup");
+    fireEvent.click(screen.getByRole("button", { name: "Week" }));
+    await waitFor(() => expect(weekGridUp(container)).toBe(true));
 
-    const cell = findEmptyDayCell(container);
-    const dayNum = cell.querySelector("span.rounded-full")!.textContent!.padStart(2, "0");
-    fireEvent.click(cell);
-    const startInput = (await screen.findByLabelText("Start")) as HTMLInputElement;
-    const seededStart = startInput.value;
-    expect(seededStart.endsWith(`-${dayNum}`)).toBe(true);
-
-    // Scoped to the open sheet: its submit button shares "New event" with the toolbar's
-    // own (separate, still-closed) trigger button, so an unscoped query would be ambiguous.
+    fireEvent.click(weekDayColumn(container), { clientY: 240 });
     const sheet = screen.getByRole("dialog", { name: "New event" });
     fireEvent.click(within(sheet).getByRole("button", { name: "New event" }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith(
         "calendar",
         "calendar_create_event",
-        expect.objectContaining({
-          calendar_id: "local", // the existing default (#473 must not clobber it)
-          start: seededStart,
-          all_day: true,
-        }),
+        expect.objectContaining({ calendar_id: "local", all_day: false }),
       ),
     );
   });
 
   it("does not open the create form when an event chip is clicked", async () => {
     mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
-    mockModulePage.mockResolvedValue({
-      ...sample,
-      actions: [
-        { tool: "calendar_create_event", label: "New event", form: true, form_values: {} },
-      ],
-    });
+    mockModulePage.mockResolvedValue(withCreate);
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
 
     fireEvent.click(await screen.findByText("Standup"));
@@ -619,7 +643,7 @@ describe("Slot-click create (#473)", () => {
     expect(screen.queryByLabelText("Start")).not.toBeInTheDocument();
   });
 
-  it('does not open the create form when the "+N more" button is clicked', async () => {
+  it('opens detail, not create, when the "+N more" button is clicked', async () => {
     mockModules.mockResolvedValue(CALENDAR_MODULE_WITH_CREATE_SCHEMA);
     const busyDay = Array.from({ length: 5 }, (_, i) => ({
       id: `e${i}`,
@@ -636,18 +660,52 @@ describe("Slot-click create (#473)", () => {
     });
     render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
 
-    fireEvent.click(await screen.findByText("+2 more"));
+    fireEvent.click(await screen.findByText("+2 more")); // desktop overflow chip
     expect(await screen.findByRole("dialog")).toBeInTheDocument(); // opened event detail…
     expect(screen.queryByLabelText("Start")).not.toBeInTheDocument(); // …not the create form
   });
 
-  it("leaves day cells inert when the page declares no create action", async () => {
+  it("still navigates to the week view when the page declares no create action", async () => {
     mockModulePage.mockResolvedValue(sample); // no `actions` at all
     const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
     await screen.findByText("Standup");
 
     fireEvent.click(findEmptyDayCell(container));
+    await waitFor(() => expect(weekGridUp(container)).toBe(true)); // navigation isn't gated on create
     expect(screen.queryByLabelText("Start")).not.toBeInTheDocument();
+  });
+});
+
+// #632: on a phone every event renders as a slim textless colour line — density over labels,
+// since detail now lives one tap away in the week view.
+describe("Month density on mobile (#632)", () => {
+  const daySpread = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `e${i}`,
+      title: `Event ${i}`,
+      start: "2026-06-15T09:00:00",
+      end: "2026-06-15T09:30:00",
+      calendar_id: "local",
+    }));
+
+  it("draws one slim line per event, with no premature overflow indicator", async () => {
+    mockModulePage.mockResolvedValue({ ...sample, events: daySpread(6) });
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Event 0"); // desktop chip present
+
+    // 6 events → 6 slim lines in the mobile lane; the desktop lane holds labelled chips, not these.
+    expect(container.querySelectorAll("div.h-1.rounded-full")).toHaveLength(6);
+    expect(screen.queryByText(/^\+\d+$/)).toBeNull(); // no "+N" overflow marker
+  });
+
+  it("collapses to a +N marker only past what genuinely fits", async () => {
+    mockModulePage.mockResolvedValue({ ...sample, events: daySpread(12) });
+    const { container } = render(<CalendarView module="calendar" pageId="calendar" />, { wrapper });
+    await screen.findByText("Event 0");
+
+    // Capped at the fit limit (10), the remaining 2 collapse into a slim "+2".
+    expect(container.querySelectorAll("div.h-1.rounded-full")).toHaveLength(10);
+    expect(screen.getByText("+2")).toBeInTheDocument();
   });
 });
 

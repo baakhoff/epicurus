@@ -28,6 +28,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
@@ -48,6 +49,7 @@ import { usePanel } from "@/stores/panel";
 import { ActionControl } from "./ActionControl";
 import {
   applyDrag,
+  DAY_MINUTES,
   eventDayBounds,
   findMoveAction,
   formatHour,
@@ -296,6 +298,8 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
   // Clicking an empty day/time slot opens the page's own create-event form, pre-filled
   // (#473) — no new module contract, just seed values fed into the existing action below.
   const [slotSeed, setSlotSeed] = useState<FormValues | null>(null);
+  // The day a month-cell tap jumped to (#630) — highlighted in the week view it lands on.
+  const [focusedDay, setFocusedDay] = useState<Date | null>(null);
   // Optimistic overlay for a week-grid drag (#631): the new times for an event whose move is
   // in flight, applied over the fetched events so the drag lands instantly and stays put while
   // the write persists — cleared once the refetch confirms it (or rolls back on failure).
@@ -447,6 +451,25 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
     [module, pageId, queryClient],
   );
 
+  // A month-cell tap now navigates into that day's week (#630) instead of starting a create;
+  // creation moves to the explicit affordances (the toolbar "New event", and the week grid's
+  // empty-slot tap below). The tapped day is remembered so the week view highlights it.
+  const openDay = (day: Date) => {
+    setCursor(day);
+    setFocusedDay(day);
+    setView("week");
+  };
+
+  // Tapping an empty slot in the week grid seeds the page's own create form (#473) with a
+  // timed start at that slot — the same one create surface, now reachable from the grid where
+  // Google-style calendars put it. A no-op when the page declares no create action.
+  const createSlot = (day: Date, minutes: number) => {
+    if (!createAction) return;
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, minutes, 0, 0);
+    const end = new Date(start.getTime() + 60 * 60_000);
+    setSlotSeed({ all_day: false, start: start.toISOString(), end: end.toISOString() });
+  };
+
   const toggleCalendar = (id: string) =>
     setHidden((prev) => {
       const next = new Set(prev);
@@ -493,11 +516,7 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
             colorFor={colorFor}
             onSelect={setSelected}
             onOpenFeedItem={openFeedItem}
-            onCreateDay={
-              createAction
-                ? (day) => setSlotSeed({ all_day: true, start: ymd(day), end: ymd(addDays(day, 1)) })
-                : undefined
-            }
+            onOpenDay={openDay}
           />
         ) : view === "week" ? (
           <WeekView
@@ -506,6 +525,8 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
             colorFor={colorFor}
             onSelect={setSelected}
             onMoveEvent={moveEvent}
+            focusedDay={focusedDay}
+            onCreateSlot={createAction ? createSlot : undefined}
           />
         ) : (
           <AgendaView range={range} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
@@ -749,7 +770,7 @@ function MonthView({
   colorFor,
   onSelect,
   onOpenFeedItem,
-  onCreateDay,
+  onOpenDay,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
@@ -758,15 +779,16 @@ function MonthView({
   colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
   onOpenFeedItem: (item: CalendarFeedItem) => void;
-  /** Clicking empty space in a day cell seeds + opens the create form (#473); omitted
-   *  when the page has no create action (no-op cells, same as before). */
-  onCreateDay?: (day: Date) => void;
+  /** Tapping a day cell opens that day's week view (#630) — creation moved to the toolbar
+   *  "New event" and the week grid's empty slots. */
+  onOpenDay: (day: Date) => void;
 }) {
   const gridStart = startOfWeek(startOfMonth(cursor));
   const days = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
   const today = new Date();
-  const MAX_CHIPS = 3;
+  const MAX_CHIPS = 3; // desktop: labelled chips, then "+N more"
   const MAX_FEED_CHIPS = 3;
+  const MOBILE_LINES = 10; // phone (#632): slim textless lines, "+N" only past what fits
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -783,16 +805,23 @@ function MonthView({
           const feedItems = feedByDay.get(dayKey(day)) ?? [];
           const inMonth = day.getMonth() === cursor.getMonth();
           const today_ = isSameDay(day, today);
+          // Phone density (#632): every event + feed item as a slim textless line; detail
+          // lives one tap away in the week view now, so the cell trades labels for density.
+          const lines = [
+            ...evs.map((ev) => ({ key: ev.id, color: colorFor(ev.calendar_id) as string | null })),
+            ...feedItems.map((it) => ({ key: `${it.module}:${it.id}`, color: null })),
+          ];
+          const shownLines = lines.slice(0, MOBILE_LINES);
+          const overflowLines = lines.length - shownLines.length;
           return (
             <div
               key={day.toISOString()}
-              // Event chips / "+more" stop propagation on their own click (they open
-              // detail, not create) — only genuinely empty space reaches this (#473).
-              onClick={onCreateDay && (() => onCreateDay(day))}
+              // Chips / "+more" stopPropagation (they open detail); slim lines bubble — either
+              // way a tap on the cell opens that day's week (#630).
+              onClick={() => onOpenDay(day)}
               className={cn(
-                "flex min-h-0 flex-col gap-0.5 overflow-hidden border-b border-r border-edge p-1",
+                "flex min-h-0 cursor-pointer flex-col gap-0.5 overflow-hidden border-b border-r border-edge p-1 hover:bg-surface-2/60",
                 !inMonth && "bg-surface-2/40",
-                onCreateDay && "cursor-pointer hover:bg-surface-2/60",
               )}
             >
               <div className="flex justify-end">
@@ -809,7 +838,8 @@ function MonthView({
                   {day.getDate()}
                 </span>
               </div>
-              <div className="flex min-h-0 flex-col gap-0.5 overflow-hidden">
+              {/* Desktop: labelled chips + "+N more". */}
+              <div className="hidden min-h-0 flex-col gap-0.5 overflow-hidden sm:flex">
                 {evs.slice(0, MAX_CHIPS).map((ev) => (
                   <EventChip key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
                 ))}
@@ -837,6 +867,19 @@ function MonthView({
                   >
                     +{feedItems.length - MAX_FEED_CHIPS} more
                   </button>
+                )}
+              </div>
+              {/* Phone: slim textless lines, one per event/feed item (#632). */}
+              <div className="flex min-h-0 flex-col gap-px overflow-hidden sm:hidden">
+                {shownLines.map((line) => (
+                  <div
+                    key={line.key}
+                    className={cn("h-1 shrink-0 rounded-full", line.color === null && "bg-ink-faint/40")}
+                    style={line.color ? { background: line.color } : undefined}
+                  />
+                ))}
+                {overflowLines > 0 && (
+                  <span className="text-[9px] leading-none text-ink-faint">+{overflowLines}</span>
                 )}
               </div>
             </div>
@@ -922,6 +965,8 @@ function WeekView({
   colorFor,
   onSelect,
   onMoveEvent,
+  focusedDay,
+  onCreateSlot,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
@@ -929,6 +974,11 @@ function WeekView({
   onSelect: (ev: CalendarEvent) => void;
   /** Persist a dragged event's new times (optimistic + rollback lives in the parent). */
   onMoveEvent: (ev: CalendarEvent, start: Date, end: Date) => void;
+  /** The day a month-cell tap jumped to (#630) — its column is highlighted; null otherwise. */
+  focusedDay?: Date | null;
+  /** Tapping an empty slot seeds the create form at that time (#473, relocated here); omitted
+   *  when the page has no create action. */
+  onCreateSlot?: (day: Date, minutes: number) => void;
 }) {
   const wkStart = startOfWeek(cursor);
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(wkStart, i)), [wkStart]);
@@ -1044,10 +1094,14 @@ function WeekView({
         <div className="sticky left-0 top-0 z-40 h-14 border-b border-r border-edge bg-surface" />
         {days.map((day) => {
           const isToday = isSameDay(day, nowTick);
+          const isFocused = focusedDay ? isSameDay(day, focusedDay) : false;
           return (
             <div
               key={`h-${dayKey(day)}`}
-              className="sticky top-0 z-30 flex h-14 flex-col items-center justify-center border-b border-r border-edge bg-surface last:border-r-0"
+              className={cn(
+                "sticky top-0 z-30 flex h-14 flex-col items-center justify-center border-b border-r border-edge bg-surface last:border-r-0",
+                isFocused && !isToday && "bg-accent-dim",
+              )}
             >
               <div className="text-[11px] uppercase tracking-wide text-ink-faint">
                 {day.toLocaleDateString(undefined, { weekday: "short" })}
@@ -1055,7 +1109,11 @@ function WeekView({
               <div
                 className={cn(
                   "mt-0.5 flex size-6 items-center justify-center rounded-full text-sm",
-                  isToday ? "bg-accent font-medium text-on-accent" : "text-ink",
+                  isToday
+                    ? "bg-accent font-medium text-on-accent"
+                    : isFocused
+                      ? "font-medium text-accent-strong ring-1 ring-accent"
+                      : "text-ink",
                 )}
               >
                 {day.getDate()}
@@ -1112,8 +1170,10 @@ function WeekView({
             onEventClick={onEventClick}
             onBeginDrag={beginDrag}
             isToday={isSameDay(day, nowTick)}
+            isFocused={focusedDay ? isSameDay(day, focusedDay) : false}
             nowMin={nowMin}
             preview={preview}
+            onCreateSlot={onCreateSlot}
           />
         ))}
       </div>
@@ -1130,8 +1190,10 @@ function WeekDayColumn({
   onEventClick,
   onBeginDrag,
   isToday,
+  isFocused,
   nowMin,
   preview,
+  onCreateSlot,
 }: {
   day: Date;
   events: CalendarEvent[];
@@ -1139,8 +1201,10 @@ function WeekDayColumn({
   onEventClick: (ev: CalendarEvent) => void;
   onBeginDrag: (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => void;
   isToday: boolean;
+  isFocused: boolean;
   nowMin: number;
   preview: { id: string; start: Date; end: Date } | null;
+  onCreateSlot?: (day: Date, minutes: number) => void;
 }) {
   // Position boxes, mapping the live-dragged event to its preview times so it tracks the pointer.
   const boxes = useMemo(() => {
@@ -1154,8 +1218,25 @@ function WeekDayColumn({
     return new Map(laid.map((b) => [b.id, b]));
   }, [events, preview, day]);
 
+  // Click empty grid space to create at that half-hour (#473, relocated to the grid). Event
+  // boxes stopPropagation, so only genuinely empty space reaches this.
+  const onBackgroundClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!onCreateSlot) return;
+    const offsetY = e.clientY - e.currentTarget.getBoundingClientRect().top;
+    const raw = (offsetY / HOUR_HEIGHT) * 60;
+    const minutes = Math.max(0, Math.min(DAY_MINUTES - 30, Math.floor(raw / 30) * 30));
+    onCreateSlot(day, minutes);
+  };
+
   return (
-    <div className="relative border-r border-edge last:border-r-0">
+    <div
+      onClick={onCreateSlot ? onBackgroundClick : undefined}
+      className={cn(
+        "relative border-r border-edge last:border-r-0",
+        isFocused && !isToday && "bg-accent-dim/25",
+        onCreateSlot && "cursor-pointer",
+      )}
+    >
       {HOURS.map((h) => (
         <div key={h} style={{ height: HOUR_HEIGHT }} className="border-b border-edge/50" />
       ))}
@@ -1213,7 +1294,10 @@ function TimedEventBox({
     <button
       type="button"
       onPointerDown={movable ? (e) => onBeginDrag(ev, "move", e) : undefined}
-      onClick={() => onClick(ev)}
+      onClick={(e) => {
+        e.stopPropagation(); // the column behind opens a create slot on empty-space clicks
+        onClick(ev);
+      }}
       title={ev.title}
       style={
         {

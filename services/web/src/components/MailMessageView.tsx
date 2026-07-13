@@ -1,9 +1,9 @@
 /**
  * The one message renderer (ADR-0087), shared by the right-panel `email-reader` (ADR-0024)
  * and the `mailbox` page's thread pane — the two never fork (#550). It renders a message's
- * subject (optional), sender/date/unread, its **plain-text** body (the module decodes HTML to
- * text server-side, so no HTML is ever rendered here — and JSX escapes the text anyway),
- * its attachments as core-proxied download links, and its tool-backed actions.
+ * subject (optional), sender/date/unread, its body — the **HTML** body in a sandboxed iframe
+ * when present (`MailHtmlBody`, ADR-0097/#627), else the plain-text `body` — its (non-inline)
+ * attachments as core-proxied download links, and its tool-backed actions.
  *
  * The surfaces differ only in what an action does afterwards (`onActed`: the panel re-fetches
  * + swaps itself; the page invalidates the thread query) and whether the subject shows —
@@ -12,6 +12,7 @@
 import { Paperclip } from "lucide-react";
 import { createElement, useCallback, useState } from "react";
 
+import { MailHtmlBody } from "@/components/MailHtmlBody";
 import { Button, Confirm } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { BoardAction, EmailMessage, MailAttachment } from "@/lib/contracts";
@@ -122,6 +123,9 @@ export function MailMessageView({
   /** Called after a successful action so the surface refreshes (panel swap / thread refetch). */
   onActed?: () => void | Promise<void>;
 }) {
+  // Inline images (referenced by the HTML body via cid:) are resolved in-body, not listed as
+  // downloads — so a newsletter's logos don't clutter the attachment row (#627).
+  const downloadable = message.attachments.filter((att) => !att.inline);
   return (
     <article>
       {showSubject && <h3 className="font-serif text-lg text-ink">{message.subject}</h3>}
@@ -135,12 +139,21 @@ export function MailMessageView({
           </span>
         )}
       </div>
-      <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">
-        {message.body}
-      </p>
-      {attachmentUrl && message.attachments.length > 0 && (
+      {message.body_html && message.body_html.trim().length > 0 ? (
+        <MailHtmlBody
+          html={message.body_html}
+          messageId={message.message_id}
+          attachments={message.attachments}
+          attachmentUrl={attachmentUrl}
+        />
+      ) : (
+        <p className="mt-4 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">
+          {message.body}
+        </p>
+      )}
+      {attachmentUrl && downloadable.length > 0 && (
         <div className="mt-4 flex flex-wrap gap-2 border-t border-edge pt-3">
-          {message.attachments.map((att) => (
+          {downloadable.map((att) => (
             <AttachmentLink
               key={att.id}
               href={attachmentUrl(message.message_id, att.id)}

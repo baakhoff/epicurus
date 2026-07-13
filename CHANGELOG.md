@@ -12,6 +12,16 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mail: paging pinned to the bottom, action row at the top + icon-only on phone** (#624, #626) —
+  two mailbox UX fixes. The **Newer/Older** paging controls scrolled away with the message rows
+  (attached mid-content); each mailbox view now owns its scroll, so the paging bar is a stable
+  footer pinned to the bottom of the list (#624). The per-message **action row** (mark read/unread,
+  archive, trash) sat at the bottom of the message and is now anchored at the **top**, and on a
+  narrow viewport the buttons are **icon-only** — labels hidden from `sm:` down, with the
+  aria-label + tooltip preserved so they stay named and accessible (#626). `web` 0.101.0→0.102.0.
+
 ### Added
 
 - **Mail: mark message read on open** (#625) — a message stayed unread until acted on explicitly.

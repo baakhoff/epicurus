@@ -67,11 +67,17 @@ function MailActionButton({
     <>
       <Button
         variant={variant}
+        size="sm"
         busy={busy}
+        // Icon-only on phone (#626): the label is hidden on a narrow viewport, but the
+        // aria-label + tooltip keep the action named. If an action has no icon, the label
+        // always shows so the button is never empty.
+        aria-label={action.label}
+        title={action.label}
         onClick={() => (action.confirm ? setConfirmOpen(true) : run())}
       >
         {action.icon && createElement(moduleIcon(action.icon), { size: 15 })}
-        {action.label}
+        <span className={action.icon ? "hidden sm:inline" : ""}>{action.label}</span>
       </Button>
       {error && <span className="text-[11px] text-danger">{error}</span>}
       {action.confirm && (
@@ -128,6 +134,20 @@ export function MailMessageView({
   const downloadable = message.attachments.filter((att) => !att.inline);
   return (
     <article>
+      {/* Actions anchored at the TOP of the message (#626): a compact toolbar — icon-only on
+          phone (labels appear from sm: up). */}
+      {onActed && message.message_id && message.actions.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5 border-b border-edge pb-3">
+          {message.actions.map((action) => (
+            <MailActionButton
+              key={action.tool}
+              module={message.module}
+              action={action}
+              onActed={onActed}
+            />
+          ))}
+        </div>
+      )}
       {showSubject && <h3 className="font-serif text-lg text-ink">{message.subject}</h3>}
       <div className="mt-1 flex flex-wrap items-center gap-x-1.5 text-xs text-ink-faint">
         {message.from && <span>{message.from}</span>}
@@ -158,18 +178,6 @@ export function MailMessageView({
               key={att.id}
               href={attachmentUrl(message.message_id, att.id)}
               attachment={att}
-            />
-          ))}
-        </div>
-      )}
-      {onActed && message.message_id && message.actions.length > 0 && (
-        <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-edge pt-4">
-          {message.actions.map((action) => (
-            <MailActionButton
-              key={action.tool}
-              module={message.module}
-              action={action}
-              onActed={onActed}
             />
           ))}
         </div>

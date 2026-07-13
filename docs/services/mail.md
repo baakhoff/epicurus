@@ -112,7 +112,9 @@ data over the page proxy:
 - **Browse.** `GET /pages/mailbox?label=&q=&cursor=` returns the rail (folders with unread counts
   for the active label + Inbox) and one **cursor-paginated** page of thread summaries. Browsing is
   folder-scoped; a search (`q`, Gmail syntax) spans the whole mailbox. Page size is capped so one
-  fetch can't scan an unbounded mailbox (#539).
+  fetch can't scan an unbounded mailbox (#539). The shell renders the **Newer/Older** controls as a
+  footer pinned to the bottom of the list (#624), and each message's action row at the **top**,
+  icon-only on a narrow viewport (#626).
 - **Read.** `GET /pages/mailbox?thread_id=` returns the full conversation — every message through
   the **same renderer** as the panel `email-reader` (not forked) — plus each message's attachments
   and a server-derived reply prefill. **HTML rendering (ADR-0097, #627):** a message's `body_html`

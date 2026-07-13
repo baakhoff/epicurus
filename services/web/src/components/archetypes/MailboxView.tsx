@@ -432,7 +432,9 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
           </Button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* Each view owns its own scroll so a list can pin its Newer/Older bar to the bottom
+            (#624) instead of scrolling it away with the rows. */}
+        <div className="min-h-0 flex-1 overflow-hidden">
           {composing ? (
             <ComposeForm
               module={module}
@@ -519,13 +521,15 @@ function ThreadList({
 }) {
   return (
     <div className="flex h-full flex-col">
-      <div className="min-h-0 flex-1">
+      {/* the rows scroll… */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {list.threads.map((thread) => (
           <ThreadRow key={thread.id} thread={thread} onOpen={() => onOpen(thread.id)} />
         ))}
       </div>
+      {/* …while the Newer/Older bar stays pinned to the bottom of the list (#624). */}
       {(hasPrev || list.next_cursor) && (
-        <div className="flex items-center justify-between border-t border-edge px-4 py-2">
+        <div className="flex shrink-0 items-center justify-between border-t border-edge bg-surface px-4 py-2">
           <Button variant="ghost" size="sm" disabled={!hasPrev} onClick={onPrev}>
             <ChevronLeft size={15} /> Newer
           </Button>
@@ -578,40 +582,42 @@ function ThreadPane({
   }
 
   return (
-    <div className="mx-auto max-w-3xl p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <button
-          onClick={onBack}
-          className="rounded-md p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          aria-label="Back to list"
-        >
-          <ArrowLeft size={16} />
-        </button>
-        <h2 className="min-w-0 flex-1 truncate font-serif text-lg text-ink">{thread.subject}</h2>
-        {loading && <Spinner />}
-      </div>
-      <div className="flex flex-col gap-4">
-        {thread.messages.map((message, i) => (
-          <div
-            key={message.message_id || i}
-            className="rounded-(--radius-card) border border-edge bg-surface p-4"
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-3xl p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <button
+            onClick={onBack}
+            className="rounded-md p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
+            aria-label="Back to list"
           >
-            <MailMessageView
-              message={message}
-              showSubject={false}
-              attachmentUrl={attachmentUrl}
-              onActed={onActed}
-            />
-          </div>
-        ))}
-      </div>
-      {thread.reply && (
-        <div className="mt-4">
-          <Button variant="primary" onClick={() => setReplying(true)}>
-            <Mail size={15} /> Reply
-          </Button>
+            <ArrowLeft size={16} />
+          </button>
+          <h2 className="min-w-0 flex-1 truncate font-serif text-lg text-ink">{thread.subject}</h2>
+          {loading && <Spinner />}
         </div>
-      )}
+        <div className="flex flex-col gap-4">
+          {thread.messages.map((message, i) => (
+            <div
+              key={message.message_id || i}
+              className="rounded-(--radius-card) border border-edge bg-surface p-4"
+            >
+              <MailMessageView
+                message={message}
+                showSubject={false}
+                attachmentUrl={attachmentUrl}
+                onActed={onActed}
+              />
+            </div>
+          ))}
+        </div>
+        {thread.reply && (
+          <div className="mt-4">
+            <Button variant="primary" onClick={() => setReplying(true)}>
+              <Mail size={15} /> Reply
+            </Button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

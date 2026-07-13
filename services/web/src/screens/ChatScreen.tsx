@@ -12,6 +12,7 @@ import {
   CircleHelp,
   CloudMoon,
   Copy,
+  Eye,
   History,
   Paperclip,
   Pencil,
@@ -869,19 +870,23 @@ export function ChatScreen() {
   // this query, so the cache is warm.
   const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
 
-  // The model this chat will actually use (the per-chat choice, else the core default). If it's
-  // a local one, check whether it can call tools so we can warn that it's chat-only.
+  // The model this chat will actually use (the per-chat choice, else the core default). Check
+  // its capabilities so we can warn when it can't use tools (local only) or can't see images
+  // (local or hosted — #633: the gateway reports hosted capabilities too, via LiteLLM).
   const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
   const effectiveIsLocal = Boolean(effectiveModel) && !isHostedModelId(effectiveModel!);
   const modelDetails = useQuery({
     queryKey: ["modelDetails", effectiveModel],
     queryFn: () => api.modelDetails(effectiveModel!),
-    enabled: effectiveIsLocal,
+    enabled: Boolean(effectiveModel),
   });
   const caps = modelDetails.data?.capabilities ?? [];
-  // Only warn when the runtime actually reported capabilities and tools isn't among them —
-  // an empty list means "unknown", not "no tools".
-  const toolless = effectiveIsLocal && caps.length > 0 && !caps.includes("tools");
+  // Only warn when the runtime/gateway actually reported capabilities and the one we're
+  // checking isn't among them — an empty list means "unknown", not "unsupported".
+  const capsKnown = caps.length > 0;
+  const toolless = effectiveIsLocal && capsKnown && !caps.includes("tools");
+  const hasImageAttachment = attachments.some((a) => a.kind.startsWith("image/"));
+  const visionUnsupported = hasImageAttachment && capsKnown && !caps.includes("vision");
 
   const hasAnyBrain =
     (models.data?.length ?? 0) > 0 ||
@@ -1410,6 +1415,15 @@ export function ChatScreen() {
             <span>
               <span className="font-medium text-ink">{effectiveModel}</span> can't use tools — it
               can only chat (no calendar, files, or other actions).
+            </span>
+          </div>
+        )}
+        {visionUnsupported && (
+          <div className="mx-auto mb-2 flex max-w-2xl items-center gap-1.5 rounded-full border border-edge bg-surface-2 px-3 py-1 text-[11px] text-ink-dim">
+            <Eye size={12} className="shrink-0 text-ink-faint" />
+            <span>
+              <span className="font-medium text-ink">{effectiveModel}</span> can't see images —
+              switch to a vision-capable model to use the attached image.
             </span>
           </div>
         )}

@@ -14,6 +14,17 @@ images to GHCR.
 
 ### Added
 
+- **Calendar: tap a month day to open its week; slim event lines on phone** (#630, #632) — in the
+  month view, tapping a day **navigated into a half-started create**; it now **opens that day's
+  week view** (with the day highlighted), making the month a navigator and putting legible detail
+  one tap away in the hourly grid. Event **creation** moves to the explicit affordances — the
+  toolbar **New event** and the week grid's **empty-slot tap** (the #473 slot-seed create,
+  relocated from the month cell to the grid where Google-style calendars put it). On a **phone**,
+  a busy day showed a few blank-looking chips plus a `+2 more`; it now renders **every** event as a
+  **slim textless colour line** (density over labels — the tap-through carries the detail),
+  collapsing to a `+N` marker only past what genuinely fits. **Desktop** keeps the labelled chips.
+  `web` 0.101.0→0.102.0.
+
 - **Calendar: week view is now an hourly day-grid with drag-to-move** (#631) — the week view was a
   plain per-day list of event cards; it is now a Google-Calendar-like **hourly grid**: one column
   per day over hour rows, timed events **placed and sized by start/duration**, overlapping events

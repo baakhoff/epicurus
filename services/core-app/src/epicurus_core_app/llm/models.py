@@ -54,6 +54,9 @@ class ModelInfo(BaseModel):
     # /api/show. Only populated when explicitly requested (it costs one /api/show per model);
     # empty otherwise — and an empty list also means "the runtime reported none/unknown".
     capabilities: list[str] = []
+    # The model's trained maximum context (#618). Same opt-in as `capabilities` — `None` means
+    # not requested or not reported, never a fake default.
+    context_length: int | None = None
 
 
 class ModelDetails(BaseModel):

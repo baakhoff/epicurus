@@ -14,6 +14,9 @@ services:
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PLATFORM_URL: http://core-app:8080
+      # Tenant-scoped local mail cache (ADR-0096, #623): the module owns its own tables in the
+      # shared Postgres — no shared database, just a shared server (constraint #2).
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-epicurus}:${POSTGRES_PASSWORD:-epicurus-dev}@postgres:5432/${POSTGRES_DB:-epicurus}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${MAIL_PORT:-8090}:8080"
     depends_on:
@@ -21,6 +24,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 10s

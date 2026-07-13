@@ -97,6 +97,33 @@ it("renders the labels rail and a thread row", async () => {
   expect(screen.getByText("alice@example.com")).toBeInTheDocument();
 });
 
+it("reconciles the landing in the background and swaps in fresh data (#623)", async () => {
+  // The plain landing view paints from the cache, then a second read with reconcile=1 pulls
+  // the provider delta; a message that arrived after the cached read appears without a refresh.
+  const RECONCILED = {
+    ...LIST,
+    threads: [
+      { ...LIST.threads[0], id: "t2", subject: "Just arrived", sender: "bob@example.com" },
+      ...LIST.threads,
+    ],
+  };
+  mockModulePage.mockImplementation(
+    (_m: string, _p: string, params?: Record<string, string>) => {
+      if (params?.thread_id) return Promise.resolve(THREAD);
+      if (params?.reconcile) return Promise.resolve(RECONCILED);
+      return Promise.resolve(LIST);
+    },
+  );
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  // The cached row paints first…
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  // …then the reconcile read runs and its newly-arrived thread appears.
+  expect(await screen.findByText("Just arrived")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { reconcile: "1" }),
+  );
+});
+
 it("opens a thread and renders its message + attachment", async () => {
   render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
   fireEvent.click(await screen.findByText("Project kickoff"));

@@ -167,6 +167,15 @@ it("opens a thread and renders its message + attachment", async () => {
   expect(link.closest("a")).toHaveAttribute("download", "agenda.pdf");
 });
 
+it("renders message actions with accessible names (icon-only on mobile keeps aria-labels, #626)", async () => {
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  fireEvent.click(await screen.findByText("Project kickoff"));
+  // The action buttons are addressable by their label even when the text is visually hidden on
+  // a narrow viewport — the aria-label/tooltip keep them named.
+  expect(await screen.findByRole("button", { name: "Mark as unread" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Archive" })).toBeInTheDocument();
+});
+
 it("searches via the module page with a q param", async () => {
   render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
   await screen.findByText("Project kickoff");

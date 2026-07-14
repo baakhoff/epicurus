@@ -12,6 +12,16 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mail: paging pinned to the bottom, action row at the top + icon-only on phone** (#624, #626) —
+  two mailbox UX fixes. The **Newer/Older** paging controls scrolled away with the message rows
+  (attached mid-content); each mailbox view now owns its scroll, so the paging bar is a stable
+  footer pinned to the bottom of the list (#624). The per-message **action row** (mark read/unread,
+  archive, trash) sat at the bottom of the message and is now anchored at the **top**, and on a
+  narrow viewport the buttons are **icon-only** — labels hidden from `sm:` down, with the
+  aria-label + tooltip preserved so they stay named and accessible (#626). `web` 0.107.0→0.108.0.
+
 ### Added
 
 - **Mail: mark message read on open** (#625) — a message stayed unread until acted on explicitly.
@@ -21,7 +31,7 @@ images to GHCR.
   provider (`set_unread`, the #277 seam) and **writes the read state through to the local cache**
   (ADR-0096) so the row converges immediately — no reconcile-race flicker — and reverts on a
   provider failure. Marking a whole thread read is the one case where a thread-level cache
-  write-through is unambiguous (this also retires the write-through primitives #623 added). `mail`
+  write-through is unambiguous (this gives #623's write-through primitive its first caller). `mail`
   0.12.0→0.13.0; `core-app` 0.77.0→0.78.0; `web` 0.106.0→0.107.0.
 
 - **Core: maintenance schedule controls — on/off, cadence, time of day** (#621, ADR-0098) — the

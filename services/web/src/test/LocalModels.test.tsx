@@ -196,6 +196,21 @@ describe("LocalModels", () => {
     expect(cap).toBeInTheDocument();
   });
 
+  it("shows a compact context-window chip when the runtime reports one (#618)", async () => {
+    mockModels.mockResolvedValue([{ ...MODELS[0], context_length: 131072 }]);
+    render(<LocalModels />, { wrapper });
+
+    expect(await screen.findByText("131.1k")).toBeInTheDocument();
+  });
+
+  it("omits the context-window chip when the runtime doesn't report one (#618)", async () => {
+    mockModels.mockResolvedValue([{ ...MODELS[0], context_length: null }]);
+    render(<LocalModels />, { wrapper });
+
+    await screen.findByText("llama3.2:latest"); // the row rendered
+    expect(screen.queryByText(/^\d.*[kM]$/)).not.toBeInTheDocument(); // never a fake default
+  });
+
   it("deletes a model after the confirm dialog", async () => {
     render(<LocalModels />, { wrapper });
 

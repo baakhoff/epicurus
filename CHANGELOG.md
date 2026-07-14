@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Models: show the max context window with the other model info** (#618) — the Models page
+  badged each model's capabilities (tools/vision/…) but never its trained context window, so
+  choosing between two similarly-named variants meant guessing. Local models now carry a compact
+  "128k"/"1M"-style chip alongside the existing capability badges, sourced from the same
+  `/api/show` call the capabilities already come from (opt-in, one call per model — the chat
+  picker stays light). Hosted (saved) models get the same chip, sourced from LiteLLM's own
+  model-cost map — the identical lookup #633 added for hosted vision/tool capabilities — always
+  included since it's a static lookup, not a network call. Omitted, never a fake default, when
+  the runtime/map doesn't report a length. `core-app` 0.75.0→0.76.0, `web` 0.104.0→0.105.0.
+
 - **Chat: image input — vision models see the picture, end-to-end** (#633, ADR-0095) — attaching
   an image was silently mangled regardless of model: every `file` attachment was blindly
   `decode("utf-8")`'d into a text preamble, so a vision-capable model never received real pixel
@@ -1056,7 +1066,7 @@ images to GHCR.
   — a control could end up separated from its sibling, or an action stranded alone on a mostly
   empty second line. The controls now share their own flex cluster, sibling to the actions
   cluster, matching the calendar toolbar's nav-cluster/actions-cluster split — each group wraps
-  and reflows as a whole. `web` 0.104.0→0.104.1.
+  and reflows as a whole. `web` 0.105.0→0.105.1.
 
 - **Board/calendar actions no longer fail with a raw `NetworkError` when a module is down** (#472) —
   every manifest-declared UI action runs through one dispatch, `McpHost.call`, and it alone among the

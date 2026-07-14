@@ -45,6 +45,17 @@ describe("SavedHostedModels", () => {
     expect(screen.getByText("OpenAI")).toBeInTheDocument();
   });
 
+  it("shows a compact context-window chip when the model reports one (#618)", async () => {
+    mockSavedModels.mockResolvedValue([
+      { model: "claude/claude-3-7-sonnet-20250219", provider: "claude", context_length: 200000 },
+      { model: "gpt/some-unlisted-model", provider: "gpt", context_length: null },
+    ]);
+    render(<SavedHostedModels />, { wrapper });
+    expect(await screen.findByText("200k")).toBeInTheDocument();
+    await screen.findByText("gpt/some-unlisted-model"); // the row rendered
+    expect(screen.queryByText(/^\d.*[kM]$/)).toHaveTextContent("200k"); // the only chip present
+  });
+
   it("marks the current global default and lets another be starred", async () => {
     render(<SavedHostedModels />, { wrapper });
     // gpt/gpt-4o is the stored default → its row carries the badge.

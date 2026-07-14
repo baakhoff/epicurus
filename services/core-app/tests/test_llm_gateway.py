@@ -1455,15 +1455,24 @@ async def test_models_with_capabilities_enriches_each(monkeypatch: pytest.Monkey
 
         async def post(self, path: str, json: dict[str, Any]) -> _Resp:
             caps = {"a:1": ["tools"], "b:1": ["vision"]}.get(json["model"], [])
-            return _Resp({"capabilities": caps})
+            # "a:1" reports a trained context length (#618); "b:1" has no model_info at all
+            # (an older runtime) — context_length must stay None, never a fake default.
+            info = (
+                {"general.architecture": "llama", "llama.context_length": 8192}
+                if json["model"] == "a:1"
+                else {}
+            )
+            return _Resp({"capabilities": caps, "model_info": info})
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", _Client)
     enriched = {m.name: m for m in await _gateway().models(with_capabilities=True)}
     assert enriched["a:1"].capabilities == ["tools"]
+    assert enriched["a:1"].context_length == 8192
     assert enriched["b:1"].capabilities == ["vision"]
-    # Without the flag there are no per-model /api/show calls; capabilities stay empty.
+    assert enriched["b:1"].context_length is None
+    # Without the flag there are no per-model /api/show calls; capabilities/context stay empty.
     plain = await _gateway().models()
-    assert all(m.capabilities == [] for m in plain)
+    assert all(m.capabilities == [] and m.context_length is None for m in plain)
 
 
 # ── per-model device → Ollama num_gpu (GPU/CPU choice, #293) ──────────────────────

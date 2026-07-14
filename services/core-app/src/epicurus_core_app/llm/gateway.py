@@ -743,9 +743,10 @@ class LlmGateway:
         """List the local runtime's models, marking the ones loaded in memory or hidden.
 
         ``with_capabilities`` additionally fills each model's ``capabilities`` (e.g. ``tools``,
-        ``vision``) by querying ``/api/show`` per model, concurrently. It costs one extra call
-        per model, so it is **opt-in** — the chat picker lists without it; the Models page asks
-        for it to badge what each model can do.
+        ``vision``) and its trained ``context_length`` (#618) by querying ``/api/show`` per
+        model, concurrently. It costs one extra call per model, so it is **opt-in** — the chat
+        picker lists without it; the Models page asks for it to badge what each model can do
+        and show its context window.
         """
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
             response = await client.get("/api/tags")
@@ -771,9 +772,10 @@ class LlmGateway:
             for m in payload.get("models", [])
         ]
         if with_capabilities and infos:
-            caps = await asyncio.gather(*(self._capabilities(info.name) for info in infos))
-            for info, info_caps in zip(infos, caps, strict=True):
-                info.capabilities = info_caps
+            details = await asyncio.gather(*(self.show(info.name) for info in infos))
+            for info, detail in zip(infos, details, strict=True):
+                info.capabilities = detail.capabilities
+                info.context_length = detail.context_length
         return infos
 
     async def _capabilities(self, model: str) -> list[str]:

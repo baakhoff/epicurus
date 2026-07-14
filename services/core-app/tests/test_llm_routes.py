@@ -615,9 +615,47 @@ async def test_saved_models_add_persists_with_provider() -> None:
         )
         assert post.status_code == 200
         get = await client.get("/platform/v1/llm/saved-models")
+    # context_length/capabilities (#618) come from gateway.show() per saved model —
+    # _StubGateway.show() always returns the same fixed ModelDetails regardless of input.
     assert get.json() == {
-        "models": [{"model": "claude/claude-3-5-sonnet-latest", "provider": "claude"}]
+        "models": [
+            {
+                "model": "claude/claude-3-5-sonnet-latest",
+                "provider": "claude",
+                "context_length": 131072,
+                "capabilities": [],
+            }
+        ]
     }
+
+
+async def test_saved_models_enriches_each_from_its_own_show_call() -> None:
+    """Each saved model gets *its own* details, not one blob reused for every row (#618)."""
+
+    class _PerModelGateway(_StubGateway):
+        async def show(self, model: str) -> ModelDetails:
+            return {
+                "claude/claude-3-7-sonnet-20250219": ModelDetails(
+                    context_length=200000, capabilities=["tools", "vision"]
+                ),
+                "gpt/gpt-4o-mini": ModelDetails(context_length=None, capabilities=["tools"]),
+            }[model]
+
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gateway=_PerModelGateway(), saved_models=store)),
+        base_url="http://test",
+    ) as client:
+        await client.post(
+            "/platform/v1/llm/saved-models", json={"model": "claude/claude-3-7-sonnet-20250219"}
+        )
+        await client.post("/platform/v1/llm/saved-models", json={"model": "gpt/gpt-4o-mini"})
+        get = await client.get("/platform/v1/llm/saved-models")
+    by_model = {m["model"]: m for m in get.json()["models"]}
+    assert by_model["claude/claude-3-7-sonnet-20250219"]["context_length"] == 200000
+    assert by_model["claude/claude-3-7-sonnet-20250219"]["capabilities"] == ["tools", "vision"]
+    assert by_model["gpt/gpt-4o-mini"]["context_length"] is None  # never a fake default
+    assert by_model["gpt/gpt-4o-mini"]["capabilities"] == ["tools"]
 
 
 async def test_saved_models_rejects_local_id() -> None:

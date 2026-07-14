@@ -8,7 +8,7 @@
  * module), so the calendar scrolls arbitrarily far without loading every event up
  * front. Times are read in the viewer's local zone, as a calendar should be.
  */
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
   ChevronLeft,
@@ -21,7 +21,17 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 
 import { isExternalHref } from "@/components/CardLink";
 import type { FormValues } from "@/components/SchemaForm";
@@ -38,6 +48,20 @@ import {
 import { usePanel } from "@/stores/panel";
 
 import { ActionControl } from "./ActionControl";
+import {
+  applyDrag,
+  DAY_MINUTES,
+  eventDayBounds,
+  findMoveAction,
+  formatHour,
+  HOUR_HEIGHT,
+  isSameLocalDay,
+  layoutDayColumns,
+  minutesOfDay,
+  pxToSnappedMinutes,
+  serializeTimed,
+  type DragMode,
+} from "./calendarGrid";
 
 type ViewMode = "month" | "week" | "agenda";
 
@@ -275,6 +299,16 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
   // Clicking an empty day/time slot opens the page's own create-event form, pre-filled
   // (#473) — no new module contract, just seed values fed into the existing action below.
   const [slotSeed, setSlotSeed] = useState<FormValues | null>(null);
+  // The day a month-cell tap jumped to (#630) — highlighted in the week view it lands on.
+  const [focusedDay, setFocusedDay] = useState<Date | null>(null);
+  // Optimistic overlay for a week-grid drag (#631): the new times for an event whose move is
+  // in flight, applied over the fetched events so the drag lands instantly and stays put while
+  // the write persists — cleared once the refetch confirms it (or rolls back on failure).
+  const [pendingMoves, setPendingMoves] = useState<Map<string, { start: Date; end: Date }>>(
+    () => new Map(),
+  );
+  const [moveError, setMoveError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const range = useMemo(() => visibleRange(view, cursor), [view, cursor]);
   const startISO = range.start.toISOString();
@@ -366,11 +400,76 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
     [meta],
   );
 
+  // Apply any in-flight drag (#631) over the fetched events before grouping, so the moved
+  // event renders at its new time immediately and the layout (overlap lanes) reflects it.
+  const overlaidEvents = useMemo(() => {
+    const base = data?.events ?? [];
+    if (pendingMoves.size === 0) return base;
+    return base.map((ev) => {
+      const moved = pendingMoves.get(ev.id);
+      return moved ? { ...ev, start: moved.start, end: moved.end } : ev;
+    });
+  }, [data, pendingMoves]);
+
   const visibleEvents = useMemo(
-    () => (data?.events ?? []).filter((e) => !(e.calendar_id && hidden.has(e.calendar_id))),
-    [data, hidden],
+    () => overlaidEvents.filter((e) => !(e.calendar_id && hidden.has(e.calendar_id))),
+    [overlaidEvents, hidden],
   );
   const byDay = useMemo(() => groupByDay(visibleEvents), [visibleEvents]);
+
+  // Persist a week-grid drag through the event's own editable-calendar action (#208/ADR-0034):
+  // find the "Edit" action that can set start/end and invoke it with the new times — the same
+  // write the Edit form does, minus the form. Optimistic: the overlay above shows the new time
+  // at once; on success we await the refetch (so real data has caught up before the overlay is
+  // dropped — no flicker), on failure the overlay is dropped (the event snaps back) and the
+  // error is surfaced. The module contract is untouched — the shell just drives it (#631).
+  const moveEvent = useCallback(
+    async (ev: CalendarEvent, start: Date, end: Date) => {
+      const action = findMoveAction(ev);
+      if (!action) {
+        setMoveError("This event can’t be moved — its calendar is read-only.");
+        return;
+      }
+      setMoveError(null);
+      setPendingMoves((prev) => new Map(prev).set(ev.id, { start, end }));
+      try {
+        await api.invokeModuleTool(module, action.tool, {
+          ...action.args,
+          start: serializeTimed(start),
+          end: serializeTimed(end),
+        });
+        await queryClient.invalidateQueries({ queryKey: ["module-page", module, pageId] });
+      } catch (e) {
+        setMoveError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setPendingMoves((prev) => {
+          const next = new Map(prev);
+          next.delete(ev.id);
+          return next;
+        });
+      }
+    },
+    [module, pageId, queryClient],
+  );
+
+  // A month-cell tap now navigates into that day's week (#630) instead of starting a create;
+  // creation moves to the explicit affordances (the toolbar "New event", and the week grid's
+  // empty-slot tap below). The tapped day is remembered so the week view highlights it.
+  const openDay = (day: Date) => {
+    setCursor(day);
+    setFocusedDay(day);
+    setView("week");
+  };
+
+  // Tapping an empty slot in the week grid seeds the page's own create form (#473) with a
+  // timed start at that slot — the same one create surface, now reachable from the grid where
+  // Google-style calendars put it. A no-op when the page declares no create action.
+  const createSlot = (day: Date, minutes: number) => {
+    if (!createAction) return;
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, minutes, 0, 0);
+    const end = new Date(start.getTime() + 60 * 60_000);
+    setSlotSeed({ all_day: false, start: start.toISOString(), end: end.toISOString() });
+  };
 
   const toggleCalendar = (id: string) =>
     setHidden((prev) => {
@@ -382,7 +481,7 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
     });
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
       <Toolbar
         view={view}
         label={periodLabel(view, cursor)}
@@ -418,14 +517,18 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
             colorFor={colorFor}
             onSelect={setSelected}
             onOpenFeedItem={openFeedItem}
-            onCreateDay={
-              createAction
-                ? (day) => setSlotSeed({ all_day: true, start: ymd(day), end: ymd(addDays(day, 1)) })
-                : undefined
-            }
+            onOpenDay={openDay}
           />
         ) : view === "week" ? (
-          <WeekView cursor={cursor} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
+          <WeekView
+            cursor={cursor}
+            byDay={byDay}
+            colorFor={colorFor}
+            onSelect={setSelected}
+            onMoveEvent={moveEvent}
+            focusedDay={focusedDay}
+            onCreateSlot={createAction ? createSlot : undefined}
+          />
         ) : (
           <AgendaView range={range} byDay={byDay} colorFor={colorFor} onSelect={setSelected} />
         )}
@@ -438,6 +541,26 @@ export function CalendarView({ module, pageId }: { module: string; pageId: strin
           pageId={pageId}
           onClose={() => setSelected(null)}
         />
+      )}
+
+      {/* A dragged move that the provider rejected (#631): the event has already snapped back
+          (its overlay was dropped); this says why, and dismisses itself on the next action. */}
+      {moveError && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 z-40 flex justify-center px-4">
+          <div
+            role="alert"
+            className="pointer-events-auto flex max-w-md items-start gap-2 rounded-(--radius-card) border border-danger/40 bg-surface px-3 py-2 text-sm text-ink shadow-(--ep-shadow)"
+          >
+            <span className="flex-1">{moveError}</span>
+            <button
+              aria-label="Dismiss"
+              onClick={() => setMoveError(null)}
+              className="shrink-0 text-ink-faint hover:text-ink"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
       )}
 
       {/* No visible button — a slot click seeds this and opens it directly (#473). Reuses
@@ -489,40 +612,45 @@ function Toolbar({
   onNext: () => void;
   onToday: () => void;
 }) {
+  // One deliberate control row, laid out to the shell's toolbar convention (the board's
+  // `gap-x-3 gap-y-2` bar, #628): the navigation cluster (Today · ‹ › · period) sits left,
+  // the actions + calendars + view switch are pushed right by `ml-auto` so the row stretches
+  // the full width. It wraps — with gap-y breathing room, not a ragged clip — only on the
+  // narrowest phones, where the icon-only "New event"/Calendars keep it to one line far more often.
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge px-3 py-2">
-      <div className="flex items-center gap-2">
-        <div className="flex items-center">
-          <button
-            aria-label="Previous"
-            onClick={onPrev}
-            className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <button
-            aria-label="Next"
-            onClick={onNext}
-            className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
-          >
-            <ChevronRight size={18} />
-          </button>
-        </div>
-        <h2 className="font-serif text-base text-ink">
-          <span className="hidden sm:inline">{label.full}</span>
-          <span className="sm:hidden">{label.short}</span>
-        </h2>
-        {fetching && <Spinner className="size-3.5 text-ink-faint" />}
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge px-3 py-2.5">
+      <div className="flex items-center gap-1">
+        <button
+          onClick={onToday}
+          className="rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs text-ink-dim hover:border-accent hover:text-accent-strong"
+        >
+          Today
+        </button>
+        <button
+          aria-label="Previous"
+          onClick={onPrev}
+          className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
+        >
+          <ChevronLeft size={18} />
+        </button>
+        <button
+          aria-label="Next"
+          onClick={onNext}
+          className="rounded-(--radius-field) p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
+        >
+          <ChevronRight size={18} />
+        </button>
       </div>
+      <h2 className="font-serif text-base whitespace-nowrap text-ink">
+        <span className="hidden sm:inline">{label.full}</span>
+        <span className="sm:hidden">{label.short}</span>
+      </h2>
+      {fetching && <Spinner className="size-3.5 text-ink-faint" />}
 
-      {/* flex-wrap is the last-resort fallback (#562) — icon-only "New event" plus the
-          tighter narrow gap should fit this group on one line at ~380px, but a phone
-          with several writable calendars (the Calendars menu adds real width) may still
-          need the second line rather than clip. */}
-      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         {/* Page-level actions (e.g. "New event") — core-rendered from the page data (#208).
-            size="sm" matches the Today/view-switcher controls in this toolbar (#427);
-            iconOnlyNarrow drops the label below `sm`, keeping just the icon (#562). */}
+            size="sm" matches the view-switcher controls (#427); iconOnlyNarrow drops the label
+            below `sm`, keeping just the icon (#562). */}
         {actions.map((action) => (
           <ActionControl
             key={action.tool + action.label}
@@ -537,12 +665,6 @@ function Toolbar({
         {calendars.length >= 2 && (
           <CalendarsMenu calendars={calendars} hidden={hidden} onToggle={onToggleCalendar} />
         )}
-        <button
-          onClick={onToday}
-          className="rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs text-ink-dim hover:border-accent hover:text-accent-strong"
-        >
-          Today
-        </button>
         <div className="flex rounded-(--radius-field) border border-edge p-0.5">
           {VIEWS.map((v) => (
             <button
@@ -581,20 +703,70 @@ function CalendarsMenu({
   onToggle: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>();
   const shown = calendars.length - calendars.filter((c) => hidden.has(c.id)).length;
+  const filtered = shown < calendars.length;
+
+  // Clamp the dropdown to the viewport (#629). The old `absolute right-0` ran partly off a
+  // phone screen; this positions it `fixed` from the trigger's rect, **shifts** it horizontally
+  // to stay on-screen, **flips** above when there's more room up than down, and caps its height
+  // with a scroll — so every entry is reachable no matter where the trigger sits or how narrow
+  // the viewport is. `useLayoutEffect` places it before paint (no flash); it re-places on
+  // open and on resize/scroll while open.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const el = triggerRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const M = 8; // viewport margin
+      const GAP = 4; // gap between trigger and menu
+      const W = 224; // menu width (was `w-56`)
+      const left = Math.min(Math.max(r.right - W, M), Math.max(M, window.innerWidth - W - M));
+      const spaceBelow = window.innerHeight - r.bottom - GAP - M;
+      const spaceAbove = r.top - GAP - M;
+      const flipUp = spaceBelow < 180 && spaceAbove > spaceBelow;
+      setMenuStyle({
+        position: "fixed",
+        left,
+        width: W,
+        ...(flipUp
+          ? { bottom: window.innerHeight - r.top + GAP, maxHeight: spaceAbove }
+          : { top: r.bottom + GAP, maxHeight: spaceBelow }),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
         aria-label="Choose visible calendars"
         aria-expanded={open}
         className={cn(
           "flex items-center gap-1.5 rounded-(--radius-field) border border-edge-strong px-2.5 py-1 text-xs transition-colors hover:border-accent hover:text-accent-strong",
-          shown < calendars.length ? "text-accent-strong" : "text-ink-dim",
+          filtered ? "text-accent-strong" : "text-ink-dim",
         )}
       >
         <Layers size={14} />
-        <span>Calendars{shown < calendars.length ? ` (${shown}/${calendars.length})` : ""}</span>
+        {/* Below `sm` the icon (+ count when filtered) stands in for the word, keeping the
+            toolbar to one row on a phone (#628). */}
+        <span className="hidden sm:inline">Calendars</span>
+        {filtered && (
+          <span className="tabular-nums">
+            <span className="hidden sm:inline"> </span>
+            {shown}/{calendars.length}
+          </span>
+        )}
       </button>
       {open && (
         <>
@@ -602,10 +774,13 @@ function CalendarsMenu({
             type="button"
             aria-hidden
             tabIndex={-1}
-            className="fixed inset-0 z-10 cursor-default"
+            className="fixed inset-0 z-40 cursor-default"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute right-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)">
+          <div
+            style={menuStyle}
+            className="z-50 overflow-y-auto overflow-x-hidden rounded-(--radius-card) border border-edge bg-surface py-1 shadow-(--ep-shadow)"
+          >
             {calendars.map((c) => {
               const visible = !hidden.has(c.id);
               return (
@@ -648,7 +823,7 @@ function MonthView({
   colorFor,
   onSelect,
   onOpenFeedItem,
-  onCreateDay,
+  onOpenDay,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
@@ -657,15 +832,16 @@ function MonthView({
   colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
   onOpenFeedItem: (item: CalendarFeedItem) => void;
-  /** Clicking empty space in a day cell seeds + opens the create form (#473); omitted
-   *  when the page has no create action (no-op cells, same as before). */
-  onCreateDay?: (day: Date) => void;
+  /** Tapping a day cell opens that day's week view (#630) — creation moved to the toolbar
+   *  "New event" and the week grid's empty slots. */
+  onOpenDay: (day: Date) => void;
 }) {
   const gridStart = startOfWeek(startOfMonth(cursor));
   const days = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
   const today = new Date();
-  const MAX_CHIPS = 3;
+  const MAX_CHIPS = 3; // desktop: labelled chips, then "+N more"
   const MAX_FEED_CHIPS = 3;
+  const MOBILE_LINES = 10; // phone (#632): slim textless lines, "+N" only past what fits
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -682,16 +858,23 @@ function MonthView({
           const feedItems = feedByDay.get(dayKey(day)) ?? [];
           const inMonth = day.getMonth() === cursor.getMonth();
           const today_ = isSameDay(day, today);
+          // Phone density (#632): every event + feed item as a slim textless line; detail
+          // lives one tap away in the week view now, so the cell trades labels for density.
+          const lines = [
+            ...evs.map((ev) => ({ key: ev.id, color: colorFor(ev.calendar_id) as string | null })),
+            ...feedItems.map((it) => ({ key: `${it.module}:${it.id}`, color: null })),
+          ];
+          const shownLines = lines.slice(0, MOBILE_LINES);
+          const overflowLines = lines.length - shownLines.length;
           return (
             <div
               key={day.toISOString()}
-              // Event chips / "+more" stop propagation on their own click (they open
-              // detail, not create) — only genuinely empty space reaches this (#473).
-              onClick={onCreateDay && (() => onCreateDay(day))}
+              // Chips / "+more" stopPropagation (they open detail); slim lines bubble — either
+              // way a tap on the cell opens that day's week (#630).
+              onClick={() => onOpenDay(day)}
               className={cn(
-                "flex min-h-0 flex-col gap-0.5 overflow-hidden border-b border-r border-edge p-1",
+                "flex min-h-0 cursor-pointer flex-col gap-0.5 overflow-hidden border-b border-r border-edge p-1 hover:bg-surface-2/60",
                 !inMonth && "bg-surface-2/40",
-                onCreateDay && "cursor-pointer hover:bg-surface-2/60",
               )}
             >
               <div className="flex justify-end">
@@ -708,7 +891,8 @@ function MonthView({
                   {day.getDate()}
                 </span>
               </div>
-              <div className="flex min-h-0 flex-col gap-0.5 overflow-hidden">
+              {/* Desktop: labelled chips + "+N more". */}
+              <div className="hidden min-h-0 flex-col gap-0.5 overflow-hidden sm:flex">
                 {evs.slice(0, MAX_CHIPS).map((ev) => (
                   <EventChip key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
                 ))}
@@ -736,6 +920,19 @@ function MonthView({
                   >
                     +{feedItems.length - MAX_FEED_CHIPS} more
                   </button>
+                )}
+              </div>
+              {/* Phone: slim textless lines, one per event/feed item (#632). */}
+              <div className="flex min-h-0 flex-col gap-px overflow-hidden sm:hidden">
+                {shownLines.map((line) => (
+                  <div
+                    key={line.key}
+                    className={cn("h-1 shrink-0 rounded-full", line.color === null && "bg-ink-faint/40")}
+                    style={line.color ? { background: line.color } : undefined}
+                  />
+                ))}
+                {overflowLines > 0 && (
+                  <span className="text-[9px] leading-none text-ink-faint">+{overflowLines}</span>
                 )}
               </div>
             </div>
@@ -803,59 +1000,411 @@ function FeedItemChip({
   );
 }
 
-/* ── week ────────────────────────────────────────────────────────────────── */
+/* ── week (hourly day-grid, #631) ──────────────────────────────────────────── */
 
+const HOURS = Array.from({ length: 24 }, (_, h) => h);
+
+/**
+ * The week view as a Google-Calendar-like hourly grid: one column per day, hour rows, timed
+ * events placed and sized by start/duration, a pinned all-day strip on top, a current-time
+ * line, and drag-to-move / resize that persists through the event's own editable-calendar
+ * action (#208/ADR-0034). The whole week is one `overflow-auto` grid — the day headers stay
+ * sticky-top, the all-day strip pins below them, and the time gutter stays sticky-left, so on
+ * a phone the grid pans horizontally without losing its axes.
+ */
 function WeekView({
   cursor,
   byDay,
   colorFor,
   onSelect,
+  onMoveEvent,
+  focusedDay,
+  onCreateSlot,
 }: {
   cursor: Date;
   byDay: Map<string, CalendarEvent[]>;
   colorFor: ColorFor;
   onSelect: (ev: CalendarEvent) => void;
+  /** Persist a dragged event's new times (optimistic + rollback lives in the parent). */
+  onMoveEvent: (ev: CalendarEvent, start: Date, end: Date) => void;
+  /** The day a month-cell tap jumped to (#630) — its column is highlighted; null otherwise. */
+  focusedDay?: Date | null;
+  /** Tapping an empty slot seeds the create form at that time (#473, relocated here); omitted
+   *  when the page has no create action. */
+  onCreateSlot?: (day: Date, minutes: number) => void;
 }) {
   const wkStart = startOfWeek(cursor);
-  const days = Array.from({ length: 7 }, (_, i) => addDays(wkStart, i));
-  const today = new Date();
+  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(wkStart, i)), [wkStart]);
+  const hasAllDay = days.some((d) => (byDay.get(dayKey(d)) ?? []).some((e) => e.all_day));
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // A click that concludes a real drag must not also open the event's detail. Set on a moved
+  // pointer-up, read (and cleared) by the following click.
+  const suppressClickRef = useRef(false);
+  // The live drag, kept in a ref so the window pointer handlers read the latest without
+  // re-subscribing on every move; `preview`/`dragging` are the render-facing mirror.
+  const dragRef = useRef<{
+    ev: CalendarEvent;
+    mode: DragMode;
+    startClientY: number;
+    origStart: Date;
+    origEnd: Date;
+    moved: boolean;
+    curStart: Date;
+    curEnd: Date;
+  } | null>(null);
+  const [preview, setPreview] = useState<{ id: string; start: Date; end: Date } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [nowTick, setNowTick] = useState(() => new Date());
+
+  const beginDrag = (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => {
+    if (!findMoveAction(ev)) return; // read-only event → not draggable
+    if (e.pointerType === "mouse" && e.button !== 0) return; // primary button only
+    dragRef.current = {
+      ev,
+      mode,
+      startClientY: e.clientY,
+      origStart: ev.start,
+      origEnd: ev.end,
+      moved: false,
+      curStart: ev.start,
+      curEnd: ev.end,
+    };
+    setPreview({ id: ev.id, start: ev.start, end: ev.end });
+    setDragging(true);
+  };
+
+  // Window-level pointer handlers while a drag is live — one subscription per drag, reading the
+  // mutable ref so a fast drag doesn't thrash React subscriptions.
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const deltaMin = pxToSnappedMinutes(e.clientY - d.startClientY);
+      if (deltaMin !== 0) d.moved = true;
+      const next = applyDrag(d.origStart, d.origEnd, d.mode, deltaMin);
+      d.curStart = next.start;
+      d.curEnd = next.end;
+      setPreview({ id: d.ev.id, start: next.start, end: next.end });
+    };
+    const onUp = () => {
+      const d = dragRef.current;
+      dragRef.current = null;
+      // Commit the move (parent applies its own overlay) and drop the preview in the same tick,
+      // so the handoff to the optimistic overlay is batched — no snap-back flicker.
+      if (d && d.moved) {
+        suppressClickRef.current = true;
+        onMoveEvent(d.ev, d.curStart, d.curEnd);
+      }
+      setPreview(null);
+      setDragging(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, onMoveEvent]);
+
+  // Tick the current-time line each minute.
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(new Date()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Open at a sensible scroll position once (morning, or the current time when this week holds
+  // today) — mount-only so the operator's scroll survives week-to-week navigation.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const todayInWeek = days.some((d) => isSameLocalDay(d, new Date()));
+    const focusMin = todayInWeek ? minutesOfDay(new Date()) : 8 * 60;
+    el.scrollTop = Math.max(0, (focusMin / 60) * HOUR_HEIGHT - el.clientHeight / 3);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: position once on mount
+  }, []);
+
+  const onEventClick = (ev: CalendarEvent) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    onSelect(ev);
+  };
+
+  const nowMin = minutesOfDay(nowTick);
 
   return (
-    <div className="flex h-full min-h-0 overflow-x-auto">
-      {days.map((day) => {
-        const evs = byDay.get(dayKey(day)) ?? [];
-        const today_ = isSameDay(day, today);
-        return (
-          <div
-            key={day.toISOString()}
-            className="flex min-w-[8.5rem] flex-1 flex-col border-r border-edge last:border-r-0"
-          >
-            <div className="sticky top-0 border-b border-edge bg-surface px-2 py-1.5 text-center">
+    <div ref={scrollRef} className="h-full min-h-0 overflow-auto">
+      <div
+        className="grid"
+        style={{ gridTemplateColumns: `3.5rem repeat(7, minmax(6rem, 1fr))` }}
+      >
+        {/* ── header row: corner + day headers (sticky top) ── */}
+        <div className="sticky left-0 top-0 z-40 h-14 border-b border-r border-edge bg-surface" />
+        {days.map((day) => {
+          const isToday = isSameDay(day, nowTick);
+          const isFocused = focusedDay ? isSameDay(day, focusedDay) : false;
+          return (
+            <div
+              key={`h-${dayKey(day)}`}
+              className={cn(
+                "sticky top-0 z-30 flex h-14 flex-col items-center justify-center border-b border-r border-edge bg-surface last:border-r-0",
+                isFocused && !isToday && "bg-accent-dim",
+              )}
+            >
               <div className="text-[11px] uppercase tracking-wide text-ink-faint">
                 {day.toLocaleDateString(undefined, { weekday: "short" })}
               </div>
               <div
                 className={cn(
-                  "mx-auto mt-0.5 flex size-6 items-center justify-center rounded-full text-sm",
-                  today_ ? "bg-accent font-medium text-on-accent" : "text-ink",
+                  "mt-0.5 flex size-6 items-center justify-center rounded-full text-sm",
+                  isToday
+                    ? "bg-accent font-medium text-on-accent"
+                    : isFocused
+                      ? "font-medium text-accent-strong ring-1 ring-accent"
+                      : "text-ink",
                 )}
               >
                 {day.getDate()}
               </div>
             </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1.5">
-              {evs.length === 0 ? (
-                <span className="px-1 pt-1 text-[11px] text-ink-faint">—</span>
-              ) : (
-                evs.map((ev) => (
-                  <EventRow key={ev.id} ev={ev} color={colorFor(ev.calendar_id)} onSelect={onSelect} />
-                ))
+          );
+        })}
+
+        {/* ── all-day strip (pinned below the header, ADR-0037) — only when there are any ── */}
+        {hasAllDay && (
+          <>
+            <div className="sticky left-0 top-14 z-30 border-b border-r border-edge bg-surface px-1 py-1 text-right text-[10px] uppercase tracking-wide text-ink-faint">
+              All-day
+            </div>
+            {days.map((day) => {
+              const allDay = (byDay.get(dayKey(day)) ?? []).filter((e) => e.all_day);
+              return (
+                <div
+                  key={`ad-${dayKey(day)}`}
+                  className="sticky top-14 z-20 flex min-h-[1.75rem] flex-col gap-0.5 border-b border-r border-edge bg-surface p-1 last:border-r-0"
+                >
+                  {allDay.map((ev) => (
+                    <WeekAllDayChip
+                      key={ev.id}
+                      ev={ev}
+                      color={colorFor(ev.calendar_id)}
+                      onSelect={onSelect}
+                    />
+                  ))}
+                </div>
+              );
+            })}
+          </>
+        )}
+
+        {/* ── body: time gutter (sticky left) + day columns ── */}
+        <div className="sticky left-0 z-10 bg-surface">
+          {HOURS.map((h) => (
+            <div key={h} style={{ height: HOUR_HEIGHT }} className="relative border-r border-edge">
+              {h > 0 && (
+                <span className="absolute -top-2 right-1 text-[10px] tabular-nums text-ink-faint">
+                  {formatHour(h)}
+                </span>
               )}
             </div>
-          </div>
-        );
-      })}
+          ))}
+        </div>
+        {days.map((day) => (
+          <WeekDayColumn
+            key={`c-${dayKey(day)}`}
+            day={day}
+            events={(byDay.get(dayKey(day)) ?? []).filter((e) => !e.all_day)}
+            colorFor={colorFor}
+            onEventClick={onEventClick}
+            onBeginDrag={beginDrag}
+            isToday={isSameDay(day, nowTick)}
+            isFocused={focusedDay ? isSameDay(day, focusedDay) : false}
+            nowMin={nowMin}
+            preview={preview}
+            onCreateSlot={onCreateSlot}
+          />
+        ))}
+      </div>
     </div>
+  );
+}
+
+/** One day's timed column: hour gridlines + absolutely-placed event boxes (lane-packed for
+ *  overlaps) + the current-time line when it's today. */
+function WeekDayColumn({
+  day,
+  events,
+  colorFor,
+  onEventClick,
+  onBeginDrag,
+  isToday,
+  isFocused,
+  nowMin,
+  preview,
+  onCreateSlot,
+}: {
+  day: Date;
+  events: CalendarEvent[];
+  colorFor: ColorFor;
+  onEventClick: (ev: CalendarEvent) => void;
+  onBeginDrag: (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => void;
+  isToday: boolean;
+  isFocused: boolean;
+  nowMin: number;
+  preview: { id: string; start: Date; end: Date } | null;
+  onCreateSlot?: (day: Date, minutes: number) => void;
+}) {
+  // Position boxes, mapping the live-dragged event to its preview times so it tracks the pointer.
+  const boxes = useMemo(() => {
+    const laid = layoutDayColumns(
+      events.map((ev) => {
+        const t = preview && preview.id === ev.id ? preview : ev;
+        const { startMin, endMin } = eventDayBounds({ start: t.start, end: t.end }, day);
+        return { id: ev.id, startMin, endMin };
+      }),
+    );
+    return new Map(laid.map((b) => [b.id, b]));
+  }, [events, preview, day]);
+
+  // Click empty grid space to create at that half-hour (#473, relocated to the grid). Event
+  // boxes stopPropagation, so only genuinely empty space reaches this.
+  const onBackgroundClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!onCreateSlot) return;
+    const offsetY = e.clientY - e.currentTarget.getBoundingClientRect().top;
+    const raw = (offsetY / HOUR_HEIGHT) * 60;
+    const minutes = Math.max(0, Math.min(DAY_MINUTES - 30, Math.floor(raw / 30) * 30));
+    onCreateSlot(day, minutes);
+  };
+
+  return (
+    <div
+      onClick={onCreateSlot ? onBackgroundClick : undefined}
+      className={cn(
+        "relative border-r border-edge last:border-r-0",
+        isFocused && !isToday && "bg-accent-dim/25",
+        onCreateSlot && "cursor-pointer",
+      )}
+    >
+      {HOURS.map((h) => (
+        <div key={h} style={{ height: HOUR_HEIGHT }} className="border-b border-edge/50" />
+      ))}
+      <div className="absolute inset-0">
+        {events.map((ev) => {
+          const box = boxes.get(ev.id);
+          if (!box) return null;
+          return (
+            <TimedEventBox
+              key={ev.id}
+              ev={ev}
+              box={box}
+              color={colorFor(ev.calendar_id)}
+              movable={Boolean(findMoveAction(ev))}
+              onBeginDrag={onBeginDrag}
+              onClick={onEventClick}
+            />
+          );
+        })}
+      </div>
+      {isToday && (
+        <div
+          className="pointer-events-none absolute inset-x-0 z-[2]"
+          style={{ top: (nowMin / 60) * HOUR_HEIGHT }}
+          aria-hidden
+        >
+          <div className="-mt-px h-0.5 bg-danger" />
+          <div className="absolute -left-0.5 -top-[3px] size-2 rounded-full bg-danger" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A timed event, absolutely placed in its day column and (when its calendar is writable)
+ *  drag-to-move by its body / resize by its bottom edge. */
+function TimedEventBox({
+  ev,
+  box,
+  color,
+  movable,
+  onBeginDrag,
+  onClick,
+}: {
+  ev: CalendarEvent;
+  box: { startMin: number; endMin: number; lane: number; lanes: number };
+  color: string;
+  movable: boolean;
+  onBeginDrag: (ev: CalendarEvent, mode: DragMode, e: ReactPointerEvent) => void;
+  onClick: (ev: CalendarEvent) => void;
+}) {
+  const top = (box.startMin / 60) * HOUR_HEIGHT;
+  const height = ((box.endMin - box.startMin) / 60) * HOUR_HEIGHT;
+  return (
+    <button
+      type="button"
+      onPointerDown={movable ? (e) => onBeginDrag(ev, "move", e) : undefined}
+      onClick={(e) => {
+        e.stopPropagation(); // the column behind opens a create slot on empty-space clicks
+        onClick(ev);
+      }}
+      title={ev.title}
+      style={
+        {
+          top,
+          height,
+          left: `calc(${(box.lane / box.lanes) * 100}% + 1px)`,
+          width: `calc(${100 / box.lanes}% - 3px)`,
+          "--cal": color,
+        } as CSSProperties
+      }
+      className={cn(
+        "absolute z-[1] flex flex-col overflow-hidden rounded-sm border border-l-2 px-1 py-0.5 text-left leading-tight select-none",
+        "border-[color-mix(in_srgb,var(--cal)_40%,transparent)] border-l-(--cal) bg-[color-mix(in_srgb,var(--cal)_20%,var(--color-surface))]",
+        movable ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-pointer",
+      )}
+    >
+      <span className="truncate text-[11px] font-medium text-ink">{ev.title}</span>
+      {height >= 32 && (
+        <span className="truncate text-[10px] tabular-nums text-ink-dim">{fmtTime(ev.start)}</span>
+      )}
+      {movable && (
+        <span
+          onPointerDown={(e) => {
+            e.stopPropagation(); // resize, not move
+            onBeginDrag(ev, "resize-end", e);
+          }}
+          className="absolute inset-x-0 bottom-0 h-2 cursor-ns-resize touch-none"
+          aria-hidden
+        />
+      )}
+    </button>
+  );
+}
+
+/** A compact all-day / multi-day chip in the pinned strip, tinted with its calendar's colour. */
+function WeekAllDayChip({
+  ev,
+  color,
+  onSelect,
+}: {
+  ev: CalendarEvent;
+  color: string;
+  onSelect: (ev: CalendarEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(ev)}
+      title={ev.title}
+      style={{ "--cal": color } as CSSProperties}
+      className="truncate rounded-sm border-l-2 border-(--cal) bg-[color-mix(in_srgb,var(--cal)_18%,var(--color-surface))] px-1 py-0.5 text-left text-[11px] leading-tight text-ink"
+    >
+      {ev.title}
+    </button>
   );
 }
 

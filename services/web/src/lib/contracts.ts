@@ -17,6 +17,9 @@ export const ModelInfo = z.object({
   // What the runtime reports the model can do (e.g. "tools", "vision"); only populated when
   // the list is fetched with `?capabilities=true`, empty otherwise.
   capabilities: z.array(z.string()).default([]),
+  // The model's trained maximum context (#618); same opt-in as `capabilities` — null when not
+  // requested or not reported, never a fake default.
+  context_length: z.number().nullish(),
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
@@ -100,7 +103,13 @@ export const ScheduledTurn = z.object({
 export type ScheduledTurn = z.infer<typeof ScheduledTurn>;
 
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
-export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
+export const SavedHostedModel = z.object({
+  model: z.string(),
+  provider: z.string(),
+  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map.
+  context_length: z.number().nullish(),
+  capabilities: z.array(z.string()).default([]),
+});
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 
 /** The tenant's saved hosted-model ids, most-recently-saved first (#496). */
@@ -1007,6 +1016,12 @@ export const MailAttachment = z.object({
   filename: z.string(),
   mime_type: z.string().default(""),
   size: z.number().default(0),
+  /** An inline image's `Content-ID` (no angle brackets) — the HTML body's `cid:<id>` targets
+   *  (ADR-0097, #627). Null for an ordinary attachment. */
+  content_id: z.string().nullish(),
+  /** Inline part (dispositioned inline or carrying a `Content-ID`): resolved for the HTML body,
+   *  hidden from the download row. */
+  inline: z.boolean().default(false),
 });
 export type MailAttachment = z.infer<typeof MailAttachment>;
 
@@ -1016,6 +1031,10 @@ export const EmailMessage = z.object({
   from: z.string().nullish(),
   date: z.string().nullish(),
   body: z.string().default(""),
+  /** The HTML body when the message has one (ADR-0097, #627) — rendered in a sandboxed iframe
+   *  with inline images resolved through the module and remote images blocked by default; `body`
+   *  (plain text) is the fallback. */
+  body_html: z.string().nullish(),
   /** Owning module + id, so the reader can invoke this message's actions and re-fetch itself. */
   module: z.string().default("mail"),
   message_id: z.string().default(""),
@@ -1049,6 +1068,8 @@ export const MailThreadSummary = z.object({
   date: z.string().default(""),
   unread: z.boolean().default(false),
   message_count: z.number().default(1),
+  /** The thread's last-message epoch ms — the local cache's ordering key (ADR-0096, #623). */
+  sort_ts: z.number().default(0),
 });
 export type MailThreadSummary = z.infer<typeof MailThreadSummary>;
 

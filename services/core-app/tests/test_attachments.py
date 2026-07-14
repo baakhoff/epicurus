@@ -7,6 +7,7 @@ exercised both as a fake (route behaviour) and for real over an in-process ASGI 
 
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -18,7 +19,7 @@ from sqlalchemy.pool import StaticPool
 from epicurus_core import Attachment
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
-from epicurus_core_app.agent.attachments import AttachmentExpander
+from epicurus_core_app.agent.attachments import AttachmentExpander, ImagePart
 from epicurus_core_app.agent.routes import _content_type_allowed, create_agent_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, MessageRecord
@@ -69,8 +70,9 @@ async def test_expand_file_attachment_includes_its_text() -> None:
     out = await _expander(store).expand(
         [Attachment(att_id=att_id, source="file", title="notes.txt")], tenant="t"
     )
-    assert "buy milk" in out
-    assert "notes.txt" in out
+    assert "buy milk" in out.text
+    assert "notes.txt" in out.text
+    assert out.images == []
 
 
 async def test_expand_chat_attachment_includes_the_transcript() -> None:
@@ -83,8 +85,8 @@ async def test_expand_chat_attachment_includes_the_transcript() -> None:
     out = await _expander(store, memory=_FakeMemory(history)).expand(
         [Attachment(att_id="x", source="chat", ref_id="s1", title="earlier chat")], tenant="t"
     )
-    assert "hello" in out
-    assert "hi there" in out
+    assert "hello" in out.text
+    assert "hi there" in out.text
 
 
 async def test_expand_module_attachment_uses_the_resolver_excerpt() -> None:
@@ -93,7 +95,7 @@ async def test_expand_module_attachment_uses_the_resolver_excerpt() -> None:
         [Attachment(att_id="x", source="module", module="notes", ref_id="n1", title="Groceries")],
         tenant="t",
     )
-    assert "milk, eggs" in out
+    assert "milk, eggs" in out.text
 
 
 async def test_expand_skips_a_failing_attachment() -> None:
@@ -107,7 +109,8 @@ async def test_expand_skips_a_failing_attachment() -> None:
         [Attachment(att_id="x", source="module", module="notes", ref_id="n1", title="X")],
         tenant="t",
     )
-    assert out == ""
+    assert out.text == ""
+    assert out.images == []
 
 
 async def test_expand_missing_file_is_empty() -> None:
@@ -115,7 +118,43 @@ async def test_expand_missing_file_is_empty() -> None:
     out = await _expander(store).expand(
         [Attachment(att_id="gone", source="file", title="gone")], tenant="t"
     )
-    assert out == ""
+    assert out.text == ""
+    assert out.images == []
+
+
+async def test_expand_image_attachment_resolves_to_an_image_part_not_text() -> None:
+    """An image never decodes to text (#633) — it resolves to an ImagePart instead."""
+    store = await _attachment_store()
+    png_bytes = b"\x89PNG\r\n\x1a\nnot a real png but bytes are bytes"
+    att_id = await store.save(tenant="t", kind="image/png", title="photo.png", content=png_bytes)
+    out = await _expander(store).expand(
+        [Attachment(att_id=att_id, source="file", title="photo.png")], tenant="t"
+    )
+    assert out.text == ""
+    assert out.images == [
+        ImagePart(
+            mime="image/png",
+            data_b64=base64.b64encode(png_bytes).decode("ascii"),
+            title="photo.png",
+        )
+    ]
+
+
+async def test_expand_mixes_text_files_and_images_in_one_turn() -> None:
+    store = await _attachment_store()
+    text_id = await store.save(tenant="t", kind="text/plain", title="notes.txt", content=b"hi")
+    image_id = await store.save(tenant="t", kind="image/jpeg", title="pic.jpg", content=b"\xff\xd8")
+    out = await _expander(store).expand(
+        [
+            Attachment(att_id=text_id, source="file", title="notes.txt"),
+            Attachment(att_id=image_id, source="file", title="pic.jpg"),
+        ],
+        tenant="t",
+    )
+    assert "hi" in out.text
+    assert "pic.jpg" not in out.text  # the image never pollutes the text preamble
+    assert len(out.images) == 1
+    assert out.images[0].mime == "image/jpeg"
 
 
 async def test_upload_route_stores_the_file_and_returns_a_handle() -> None:

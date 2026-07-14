@@ -159,8 +159,11 @@ The operator's saved hosted-model ids (#496) — a tenant-scoped, durable home f
 model strings entered in the chat picker, so they survive restarts / a PWA reinstall and follow
 the tenant across devices (unlike the browser's per-origin `recentModels` localStorage cache).
 
-- **`GET`** → `{models: [{model, provider}]}`, most-recently-saved first. `provider` is the id's
-  `<provider>/` prefix (for grouping on the Models page).
+- **`GET`** → `{models: [{model, provider, context_length, capabilities}]}`, most-recently-saved
+  first. `provider` is the id's `<provider>/` prefix (for grouping on the Models page).
+  `context_length`/`capabilities` (#618) come from LiteLLM's own model-cost map — the same source
+  `/models/details` uses for a hosted id — always included (a static lookup, never a network
+  call); `null`/empty when the model isn't in that map, never a fake default.
 - **`POST {model}`** persists one id, idempotent — an **atomic upsert** (a re-save bumps it to the
   front; two concurrent first-saves of the same id can't race between the read and the write to a
   500). **400**s anything that isn't a *hosted* id — a known `<provider>/` prefix followed by a

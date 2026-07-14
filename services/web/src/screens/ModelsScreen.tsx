@@ -41,7 +41,7 @@ import {
 import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag } from "@/data/catalog";
 import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
-import type { ProviderInfo, SystemInfo } from "@/lib/contracts";
+import type { ProviderInfo, SavedHostedModel, SystemInfo } from "@/lib/contracts";
 import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit, fitFilterOf, type FitFilter } from "@/lib/modelFit";
 import { recommendKvCache } from "@/lib/kvCacheFit";
@@ -526,7 +526,11 @@ export function LocalModels() {
                     sizeMb={model.size ? Math.round(model.size / (1024 * 1024)) : null}
                   />
                   <CapabilityIcons capabilities={model.capabilities} />
-
+                  {model.context_length != null && (
+                    <Tooltip label={`${model.context_length.toLocaleString()} token context`}>
+                      <Badge tone="dim">{formatContextLength(model.context_length)}</Badge>
+                    </Tooltip>
+                  )}
                 </div>
                 <span className="shrink-0 text-xs text-ink-faint">{formatBytes(model.size)}</span>
               </button>
@@ -595,6 +599,15 @@ export function LocalModels() {
 function formatMb(mb: number | null | undefined): string {
   if (mb == null || mb <= 0) return "—";
   return `${(mb / 1024).toFixed(mb < 10 * 1024 ? 1 : 0)} GB`;
+}
+
+/** Render a token count as a compact "128k"/"200k"/"1M" chip (#618) — decimal-based (a
+ *  provider's advertised "128k" context is conventionally 128,000, not the binary 131,072). */
+function formatContextLength(n: number): string {
+  if (n < 1_000) return String(n);
+  const unit = n >= 1_000_000 ? 1_000_000 : 1_000;
+  const value = Math.round((n / unit) * 10) / 10;
+  return `${value}${unit === 1_000_000 ? "M" : "k"}`;
 }
 
 const CTX_FLOOR = 2048;
@@ -1589,9 +1602,9 @@ export function SavedHostedModels() {
   });
 
   // Group by provider alias, preserving the server's most-recent-first order within each group.
-  const groups = new Map<string, string[]>();
+  const groups = new Map<string, SavedHostedModel[]>();
   for (const m of saved.data ?? []) {
-    groups.set(m.provider, [...(groups.get(m.provider) ?? []), m.model]);
+    groups.set(m.provider, [...(groups.get(m.provider) ?? []), m]);
   }
 
   return (
@@ -1611,13 +1624,14 @@ export function SavedHostedModels() {
         </p>
       ) : (
         <div className="flex flex-col gap-3">
-          {[...groups.entries()].map(([provider, ids]) => (
+          {[...groups.entries()].map(([provider, models]) => (
             <div key={provider}>
               <p className="mb-1 text-[11px] uppercase tracking-wide text-ink-faint">
                 {PROVIDER_LABELS[provider] ?? provider}
               </p>
               <div className="flex flex-col gap-1">
-                {ids.map((id) => {
+                {models.map((m) => {
+                  const id = m.model;
                   const isDefault = globalDefault === id;
                   return (
                     <div
@@ -1628,6 +1642,11 @@ export function SavedHostedModels() {
                         {id}
                       </span>
                       {isDefault && <Badge tone="accent">default</Badge>}
+                      {m.context_length != null && (
+                        <Tooltip label={`${m.context_length.toLocaleString()} token context`}>
+                          <Badge tone="dim">{formatContextLength(m.context_length)}</Badge>
+                        </Tooltip>
+                      )}
                       <Tooltip label="Context budget">
                         <Button
                           variant="ghost"

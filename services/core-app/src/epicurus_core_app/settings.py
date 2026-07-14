@@ -160,15 +160,23 @@ class CoreAppSettings(CoreSettings):
     # deployment sets its own in the Settings screen (persisted) or via this env.
     default_timezone: str = "UTC"
 
-    # ── Maintenance orchestrator (ADR-0060) ─────────────────────────────────────
+    # ── Maintenance orchestrator (ADR-0060/#621) ────────────────────────────────
     # The "run all background maintenance" trigger (memory extraction, module re-index) is always
     # available manually. Its nightly *schedule* is opt-in: the per-runner schedules already cover
-    # the unattended case, so this defaults off to avoid redundant nightly work — turn it on to run
-    # one coordinated light batch (consolidating the per-runner schedules onto it is the follow-up).
+    # the unattended case, so this defaults off to avoid redundant nightly work — turn it on (here,
+    # or per-tenant at runtime in Settings, #621) to run one coordinated light batch (consolidating
+    # the per-runner schedules onto it is the follow-up). These two env vars are only the *default*
+    # a tenant inherits until it sets its own schedule via PUT /platform/v1/maintenance/schedule.
     maintenance_schedule_enabled: bool = False
     # Local hour (0-23) of the scheduled nightly batch, in the operator's timezone. 4 = 4 AM, an
-    # hour after the extraction drain's default so the two never overlap when both are on.
+    # hour after the extraction drain's default so the two never overlap when both are on. Only
+    # meaningful for the default daily cadence — a tenant's own weekly/hourly override supplies
+    # its own hour/weekday.
     maintenance_hour: int = 4
+    # How often the schedule is checked for due-ness (#621) — a plain poll, like scheduled turns,
+    # since the schedule is now runtime-editable and a fixed sleep-until-hour can't react to a
+    # change made while it's sleeping. 60s keeps the worst-case delivery lag under a minute.
+    maintenance_poll_interval_s: int = 60
 
     # ── Scheduled turns (ADR-0092) ────────────────────────────────────────────────
     # How often the scheduler checks for a due row (a plain poll, not one sleep-until-hour task

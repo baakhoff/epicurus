@@ -16,9 +16,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.maintenance import JobStatus, MaintenanceJob, MaintenanceOrchestrator
 from epicurus_core_app.maintenance_routes import create_maintenance_router
+from epicurus_core_app.maintenance_schedule_prefs import MaintenanceScheduleStore
 
 TENANT = "local"
 
@@ -52,17 +55,29 @@ def _gated_job(key: str, gate: asyncio.Event, *, nightly: bool = True) -> Mainte
 
 
 @contextlib.asynccontextmanager
-async def _client_for(jobs: list[MaintenanceJob]) -> AsyncIterator[AsyncClient]:
+async def _client_for(
+    jobs: list[MaintenanceJob], *, default_enabled: bool = False, default_hour: int = 4
+) -> AsyncIterator[AsyncClient]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    schedule_store = MaintenanceScheduleStore(
+        engine, default_enabled=default_enabled, default_hour=default_hour
+    )
+    await schedule_store.init()
     orch = MaintenanceOrchestrator(
         jobs,
         bus=_FakeBus(),  # type: ignore[arg-type]
         default_tenant=TENANT,
         timezone=_tz,
-        hour=4,
-        schedule_enabled=False,
+        schedule=lambda: schedule_store.get(TENANT),
     )
     app = FastAPI()
-    app.include_router(create_maintenance_router(orch, default_tenant=TENANT))
+    app.include_router(
+        create_maintenance_router(
+            orch, schedule_store=schedule_store, timezone=_tz, default_tenant=TENANT
+        )
+    )
     async with AsyncClient(
         transport=ASGITransport(app=app),  # type: ignore[arg-type]
         base_url="http://test",
@@ -90,11 +105,74 @@ async def test_status_lists_jobs_and_schedule(client: AsyncClient) -> None:
     resp = await client.get("/platform/v1/maintenance")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["schedule_enabled"] is False and body["schedule_hour"] == 4
+    assert body["schedule_enabled"] is False
+    assert body["schedule_cadence"] == "daily" and body["schedule_hour"] == 4
+    assert body["schedule_weekday"] is None
+    assert body["next_run_at"] is None  # disabled — no next run to report
     assert [j["key"] for j in body["jobs"]] == ["memory-extraction", "module-reindex"]
     assert body["jobs"][1]["nightly"] is False
     assert body["last_run"] is None
     assert body["current_run"] is None
+
+
+# ── schedule GET/PUT (#621) ──────────────────────────────────────────────────────
+
+
+async def test_put_schedule_persists_and_get_reflects_it(client: AsyncClient) -> None:
+    resp = await client.put(
+        "/platform/v1/maintenance/schedule",
+        json={"enabled": True, "cadence": "weekly", "hour": 3, "weekday": 5},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["schedule_enabled"] is True
+    assert body["schedule_cadence"] == "weekly"
+    assert body["schedule_hour"] == 3
+    assert body["schedule_weekday"] == 5
+    assert body["next_run_at"] is not None  # enabled — a next run is estimated
+
+    status = (await client.get("/platform/v1/maintenance")).json()
+    assert status["schedule_enabled"] is True
+    assert status["schedule_cadence"] == "weekly"
+    assert status["schedule_hour"] == 3
+    assert status["schedule_weekday"] == 5
+
+
+async def test_put_schedule_rejects_an_unknown_cadence(client: AsyncClient) -> None:
+    resp = await client.put(
+        "/platform/v1/maintenance/schedule",
+        json={"enabled": True, "cadence": "monthly", "hour": 4},
+    )
+    assert resp.status_code == 400
+    # A rejected PUT must not have persisted — the default is untouched.
+    status = (await client.get("/platform/v1/maintenance")).json()
+    assert status["schedule_enabled"] is False
+
+
+async def test_put_schedule_rejects_weekly_without_a_weekday(client: AsyncClient) -> None:
+    resp = await client.put(
+        "/platform/v1/maintenance/schedule",
+        json={"enabled": True, "cadence": "weekly", "hour": 4},
+    )
+    assert resp.status_code == 400
+
+
+async def test_put_schedule_rejects_an_out_of_range_hour(client: AsyncClient) -> None:
+    resp = await client.put(
+        "/platform/v1/maintenance/schedule",
+        json={"enabled": True, "cadence": "daily", "hour": 24},
+    )
+    assert resp.status_code == 400
+
+
+async def test_get_reflects_the_env_configured_default_when_never_set() -> None:
+    async with _client_for(
+        [_job("a")], default_enabled=True, default_hour=7
+    ) as client_with_default:
+        status = (await client_with_default.get("/platform/v1/maintenance")).json()
+        assert status["schedule_enabled"] is True
+        assert status["schedule_cadence"] == "daily" and status["schedule_hour"] == 7
+        assert status["next_run_at"] is not None
 
 
 async def test_run_returns_202_with_pending_progress_then_completion_updates_last_run(

@@ -534,8 +534,9 @@ deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light,
 ADR-0094), the **module re-index** fan-out (heavy, manual-only — the same `reembed` fan-out as
 above), and **memory facts re-embed** (heavy, manual-only — calls `UserFactStore.reembed_all` for
 the default tenant, #436). Jobs run **sequenced** (gentle on a single GPU) and each is contained:
-one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs are opt-in
-(`MAINTENANCE_SCHEDULE_ENABLED`); the manual "run everything" trigger is always available.
+one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs follow a
+runtime-editable **schedule** (below, #621); the manual "run everything" trigger is always
+available regardless of it.
 
 A batch runs as a **detached background task**, decoupled from the request that started it (#561)
 — the same shape as chat turns (`agent/live_runs.py`, #376). `POST /run` starts it and returns
@@ -549,17 +550,33 @@ infra that's about to close.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the schedule, the last *completed* run (or `null`), and the in-flight run (or `null`) with its live per-job progress. |
+| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_cadence, schedule_hour, schedule_weekday, next_run_at, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the *effective* schedule (the tenant's own override, else the env-configured default), an ISO `next_run_at` estimate (`null` when disabled — a display estimate only; the scheduler's own due-check additionally avoids re-firing within an already-run window), the last *completed* run (or `null`), and the in-flight run (or `null`) with its live per-job progress. |
+| `PUT /platform/v1/maintenance/schedule` | Set the tenant's schedule — body `{enabled, cadence: "hourly"\|"daily"\|"weekly", hour: 0-23, weekday: 0-6\|null}` (#621). Validated as a whole (**400** on an invalid shape — an unknown cadence, an out-of-range hour, a `weekly` with no/bad weekday, or a weekday given for a non-weekly cadence) before it persists; returns the full refreshed `GET` shape. |
 | `POST /platform/v1/maintenance/run` | **202** — starts every job now (`scope: "all"`) as a background task and returns its live progress immediately: `MaintenanceCurrentRun` `{started_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `pending`/`running`/`ok`/`skipped`/`error`). **409** if a batch is already running — the body is a plain `{detail}` message; re-`GET` for the in-flight run. |
 
 The **manual** trigger (the web **Settings → Maintenance** card) is always available and runs all
-jobs; the card rehydrates onto `current_run` on mount and polls a few seconds apart while one is
-live, so a page refresh mid-batch lands back on the same run instead of losing it. The **nightly
-schedule** (`run_periodic`, at `MAINTENANCE_HOUR`) runs only the `nightly` jobs and is **off by
-default** (`MAINTENANCE_SCHEDULE_ENABLED`) — the per-runner schedules already cover the unattended
-case, so this avoids redundant nightly work; consolidating those schedules onto the orchestrator is
-the named follow-up. Every *completed* run publishes a tenant-scoped `maintenance.completed`; a run
-interrupted by shutdown is discarded, not published.
+jobs regardless of the schedule; the card rehydrates onto `current_run` on mount and polls a few
+seconds apart while one is live, so a page refresh mid-batch lands back on the same run instead of
+losing it.
+
+**The nightly schedule is a real, per-tenant, runtime-editable trigger (#621, ADR-0098)** —
+enable/disable, an `hourly`/`daily`/`weekly` cadence, an hour, and (weekly only) a weekday,
+interpreted in the tenant's timezone (ADR-0039). It governs the orchestrator **as a whole**
+(every `nightly=True` job runs together, never a per-job schedule — the job registry above stays
+untouched and additive-only, so #615's incoming reflection job keeps riding this one shared hour
+per ADR-0093). Persisted per tenant in `maintenance_schedule_prefs` (`MaintenanceScheduleStore`,
+the same settings-primitives shape as `timezone_prefs`/`page_order_prefs`); a tenant that has
+never `PUT` one falls back to the env-configured default (`MAINTENANCE_SCHEDULE_ENABLED`/
+`MAINTENANCE_HOUR`, `cadence="daily"`) — a fresh install behaves exactly as it did before this
+existed. `run_periodic` is a plain poll (`MAINTENANCE_POLL_INTERVAL_S`, default 60s) that re-reads
+the current schedule fresh every tick — not a single `sleep_until_hour` computed once at wake,
+since a schedule editable at runtime could change while that sleep was in progress. Due-ness
+(`is_due`) and the panel's next-run estimate (`next_run_at`) are pure functions of the schedule
+and the current local time; the "last fired" bookkeeping that dedupes a window is in-memory only
+(a restart re-evaluates fresh against the wall clock, same as before). Consolidating the
+per-runner nightly schedules onto this orchestrator remains the named follow-up. Every *completed*
+run publishes a tenant-scoped `maintenance.completed`; a run interrupted by shutdown is discarded,
+not published.
 
 ### Scheduled turns (ADR-0092)
 
@@ -718,6 +735,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `order_json` (a JSON list of page paths, most-preferred-first). A missing row (or null)
   falls back to the manifest-declared default order; opaque storage only — merge semantics
   live client-side (ADR-0018), not in this table.
+- **Postgres `maintenance_schedule_prefs`** — per-tenant maintenance-orchestrator schedule
+  (#621, ADR-0098): `tenant`, `enabled`, `cadence` (`hourly`/`daily`/`weekly`), `hour` (0-23),
+  `weekday` (0=Monday..6=Sunday, nullable — weekly only). A missing row falls back to the
+  env-configured default (`MAINTENANCE_SCHEDULE_ENABLED`/`MAINTENANCE_HOUR`, `cadence="daily"`);
+  once set, the row is authoritative for every field at once. See **Maintenance orchestrator**
+  above.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):
   `tenant`, `instructions` (nullable). A NULL/blank row falls back to the shipped
   `DEFAULT_AGENT_INSTRUCTIONS`; resolved per turn and injected first in `Agent._assemble`.

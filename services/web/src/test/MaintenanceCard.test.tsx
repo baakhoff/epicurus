@@ -8,6 +8,7 @@ import { MaintenanceCard } from "@/screens/SettingsScreen";
 
 const mockStatus = vi.fn();
 const mockRun = vi.fn();
+const mockSetSchedule = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -16,6 +17,7 @@ vi.mock("@/lib/api", async () => {
     api: {
       maintenanceStatus: () => mockStatus(),
       runMaintenance: () => mockRun(),
+      setMaintenanceSchedule: (update: unknown) => mockSetSchedule(update),
     },
   };
 });
@@ -29,7 +31,10 @@ type JobProgress = { key: string; label: string; status: string; detail: string 
 type CurrentRun = { started_at: string; scope: string; jobs: JobProgress[] };
 type Status = {
   schedule_enabled: boolean;
+  schedule_cadence: string;
   schedule_hour: number;
+  schedule_weekday: number | null;
+  next_run_at: string | null;
   jobs: { key: string; label: string; nightly: boolean }[];
   last_run: unknown;
   current_run: CurrentRun | null;
@@ -37,7 +42,10 @@ type Status = {
 
 const STATUS = (over: Partial<Status> = {}): Status => ({
   schedule_enabled: false,
+  schedule_cadence: "daily",
   schedule_hour: 4,
+  schedule_weekday: null,
+  next_run_at: null,
   jobs: [
     { key: "memory-extraction", label: "Memory fact extraction", nightly: true },
     { key: "module-reindex", label: "Module re-index / re-embed", nightly: false },
@@ -60,6 +68,7 @@ const CURRENT_RUN = (over: Partial<CurrentRun> = {}): CurrentRun => ({
 beforeEach(() => {
   mockStatus.mockReset();
   mockRun.mockReset();
+  mockSetSchedule.mockReset();
 });
 
 describe("MaintenanceCard", () => {
@@ -69,10 +78,113 @@ describe("MaintenanceCard", () => {
     expect(await screen.findByText(/manual only/i)).toBeInTheDocument();
   });
 
-  it("shows the nightly schedule when enabled", async () => {
-    mockStatus.mockResolvedValue(STATUS({ schedule_enabled: true, schedule_hour: 4 }));
+  it("shows the daily schedule summary when enabled", async () => {
+    mockStatus.mockResolvedValue(
+      STATUS({ schedule_enabled: true, schedule_cadence: "daily", schedule_hour: 4 }),
+    );
     render(<MaintenanceCard />, { wrapper });
-    expect(await screen.findByText(/scheduled nightly at 04:00/i)).toBeInTheDocument();
+    expect(await screen.findByText(/runs daily at 04:00/i)).toBeInTheDocument();
+  });
+
+  it("shows the hourly schedule summary", async () => {
+    mockStatus.mockResolvedValue(STATUS({ schedule_enabled: true, schedule_cadence: "hourly" }));
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/runs every hour/i)).toBeInTheDocument();
+  });
+
+  it("shows the weekly schedule summary with the weekday name", async () => {
+    mockStatus.mockResolvedValue(
+      STATUS({
+        schedule_enabled: true,
+        schedule_cadence: "weekly",
+        schedule_hour: 3,
+        schedule_weekday: 0,
+      }),
+    );
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/runs weekly on monday at 03:00/i)).toBeInTheDocument();
+  });
+
+  it("shows the estimated next run time when enabled", async () => {
+    mockStatus.mockResolvedValue(
+      STATUS({ schedule_enabled: true, next_run_at: "2026-07-14T04:00:00+00:00" }),
+    );
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/next run/i)).toBeInTheDocument();
+  });
+
+  it("hides the next-run estimate when the schedule is disabled", async () => {
+    mockStatus.mockResolvedValue(STATUS({ schedule_enabled: false, next_run_at: null }));
+    render(<MaintenanceCard />, { wrapper });
+    await screen.findByText(/manual only/i);
+    expect(screen.queryByText(/next run/i)).not.toBeInTheDocument();
+  });
+
+  it("the Save button starts disabled until the draft actually changes", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByRole("button", { name: /save schedule/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("switch", { name: /enable scheduled maintenance/i }));
+    expect(screen.getByRole("button", { name: /save schedule/i })).toBeEnabled();
+  });
+
+  it("saves the enabled toggle and cadence/hour as a whole", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockSetSchedule.mockResolvedValue(STATUS({ schedule_enabled: true }));
+    render(<MaintenanceCard />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("switch", { name: /enable scheduled maintenance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save schedule/i }));
+
+    await waitFor(() =>
+      expect(mockSetSchedule).toHaveBeenCalledWith({
+        enabled: true,
+        cadence: "daily",
+        hour: 4,
+        weekday: null,
+      }),
+    );
+  });
+
+  it("switching to weekly reveals a weekday picker and saves it", async () => {
+    mockStatus.mockResolvedValue(STATUS({ schedule_enabled: true }));
+    mockSetSchedule.mockResolvedValue(STATUS({ schedule_enabled: true, schedule_cadence: "weekly" }));
+    render(<MaintenanceCard />, { wrapper });
+
+    fireEvent.change(await screen.findByLabelText(/cadence/i), { target: { value: "weekly" } });
+    expect(screen.getByLabelText(/^on$/i)).toBeInTheDocument(); // the weekday select appeared
+    fireEvent.change(screen.getByLabelText(/^on$/i), { target: { value: "2" } }); // Wednesday
+    fireEvent.click(screen.getByRole("button", { name: /save schedule/i }));
+
+    await waitFor(() =>
+      expect(mockSetSchedule).toHaveBeenCalledWith({
+        enabled: true,
+        cadence: "weekly",
+        hour: 4,
+        weekday: 2,
+      }),
+    );
+  });
+
+  it("hides the hour and weekday pickers for an hourly cadence", async () => {
+    mockStatus.mockResolvedValue(STATUS({ schedule_enabled: true }));
+    render(<MaintenanceCard />, { wrapper });
+    fireEvent.change(await screen.findByLabelText(/cadence/i), { target: { value: "hourly" } });
+    expect(screen.queryByLabelText(/^at$/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^on$/i)).not.toBeInTheDocument();
+  });
+
+  it("shows an error and does not update the summary when the save is rejected", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockSetSchedule.mockRejectedValue(new ApiError(400, "hour must be 0-23"));
+    render(<MaintenanceCard />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("switch", { name: /enable scheduled maintenance/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save schedule/i }));
+
+    expect(await screen.findByText(/could not save the schedule/i)).toBeInTheDocument();
+    expect(screen.getByText(/manual only/i)).toBeInTheDocument(); // unchanged — the PUT failed
   });
 
   it("renders the last run's per-job result when idle (#383)", async () => {

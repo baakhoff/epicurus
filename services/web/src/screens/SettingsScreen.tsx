@@ -13,14 +13,16 @@ import {
   Card,
   Dot,
   NumberInput,
+  Select,
   Spinner,
+  Switch,
   TextArea,
   TextInput,
   Tooltip,
   cn,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import type { ModuleSnapshot } from "@/lib/contracts";
+import type { MaintenanceStatus, ModuleSnapshot } from "@/lib/contracts";
 import { usePrefs } from "@/stores/prefs";
 
 /** Union of the OAuth API scopes every installed module declares for *provider* (#241). */
@@ -474,6 +476,144 @@ export function AssistantInstructionsCard() {
  * (the PowerOrb/ChatScreen poll pattern), and — since `current_run` comes from the same GET
  * this card already fetches on mount — a page refresh mid-batch rehydrates onto it for free.
  */
+const WEEKDAY_LABELS = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+];
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => h);
+
+function formatHour(hour: number): string {
+  return `${String(hour).padStart(2, "0")}:00`;
+}
+
+/** A compact "Jul 12, 07:00" for the next-run estimate (falls back to the raw ISO). */
+function formatWhen(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** "Runs hourly" / "Runs daily at 04:00" / "Runs weekly on Monday at 03:00" / off. */
+function scheduleSummary(status: MaintenanceStatus): string {
+  if (!status.schedule_enabled) return "Manual only — nightly schedule off";
+  if (status.schedule_cadence === "hourly") return "Runs every hour";
+  if (status.schedule_cadence === "weekly") {
+    const day =
+      status.schedule_weekday != null ? WEEKDAY_LABELS[status.schedule_weekday] : "?";
+    return `Runs weekly on ${day} at ${formatHour(status.schedule_hour)}`;
+  }
+  return `Runs daily at ${formatHour(status.schedule_hour)}`;
+}
+
+/** Enable/disable + cadence/hour/weekday (#621) — a draft the operator edits, saved explicitly
+ *  (a multi-field form: auto-saving per keystroke/select would fire an invalid PUT mid-edit,
+ *  e.g. switching to "weekly" a beat before picking a weekday). The parent remounts this via
+ *  `key` whenever the server's schedule fields actually change (another tab saved, or our own
+ *  save just landed) — no reset effect (react-hooks/set-state-in-effect; mirrors
+ *  CommandPalette's "each open mounts fresh state" convention). */
+function ScheduleControls({ status }: { status: MaintenanceStatus }) {
+  const qc = useQueryClient();
+  const [enabled, setEnabled] = useState(status.schedule_enabled);
+  const [cadence, setCadence] = useState(status.schedule_cadence);
+  const [hour, setHour] = useState(status.schedule_hour);
+  const [weekday, setWeekday] = useState(status.schedule_weekday ?? 0);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.setMaintenanceSchedule({
+        enabled,
+        cadence,
+        hour,
+        weekday: cadence === "weekly" ? weekday : null,
+      }),
+    onSuccess: (fresh) => qc.setQueryData(["maintenance"], fresh),
+  });
+
+  const dirty =
+    enabled !== status.schedule_enabled ||
+    cadence !== status.schedule_cadence ||
+    hour !== status.schedule_hour ||
+    (cadence === "weekly" && weekday !== (status.schedule_weekday ?? 0));
+
+  return (
+    <div className="flex flex-col gap-2 rounded-(--radius-card) border border-edge bg-surface-2 p-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <Switch checked={enabled} onChange={setEnabled} label="Enable scheduled maintenance" />
+        <div>
+          <label className="mb-1 block text-xs text-ink-dim" htmlFor="maintenance-cadence">
+            Cadence
+          </label>
+          <Select
+            id="maintenance-cadence"
+            value={cadence}
+            onChange={(e) => setCadence(e.target.value)}
+          >
+            <option value="hourly">Hourly</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </Select>
+        </div>
+        {cadence !== "hourly" && (
+          <div>
+            <label className="mb-1 block text-xs text-ink-dim" htmlFor="maintenance-hour">
+              At
+            </label>
+            <Select
+              id="maintenance-hour"
+              value={hour}
+              onChange={(e) => setHour(Number(e.target.value))}
+            >
+              {HOUR_OPTIONS.map((h) => (
+                <option key={h} value={h}>
+                  {formatHour(h)}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+        {cadence === "weekly" && (
+          <div>
+            <label className="mb-1 block text-xs text-ink-dim" htmlFor="maintenance-weekday">
+              On
+            </label>
+            <Select
+              id="maintenance-weekday"
+              value={weekday}
+              onChange={(e) => setWeekday(Number(e.target.value))}
+            >
+              {WEEKDAY_LABELS.map((label, i) => (
+                <option key={label} value={i}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+        <Button variant="outline" busy={save.isPending} disabled={!dirty} onClick={() => save.mutate()}>
+          Save schedule
+        </Button>
+      </div>
+      {save.isError && <p className="text-xs text-danger">Could not save the schedule.</p>}
+      <p className="text-xs text-ink-faint">
+        {scheduleSummary(status)}
+        {status.schedule_enabled &&
+          status.next_run_at &&
+          ` · Next run ${formatWhen(status.next_run_at)}`}
+      </p>
+    </div>
+  );
+}
+
 export function MaintenanceCard() {
   const qc = useQueryClient();
   const status = useQuery({
@@ -505,10 +645,14 @@ export function MaintenanceCard() {
         Run the background jobs — distil pending memories into facts and re-index modules — as one
         batch. Re-indexing rebuilds embeddings and can take a while; it runs in the background.
       </p>
-      {status.isLoading ? (
+      {status.isLoading || !status.data ? (
         <Spinner />
       ) : (
         <div className="flex flex-col gap-3">
+          <ScheduleControls
+            key={`${status.data.schedule_enabled}-${status.data.schedule_cadence}-${status.data.schedule_hour}-${status.data.schedule_weekday}`}
+            status={status.data}
+          />
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
@@ -519,11 +663,6 @@ export function MaintenanceCard() {
               <RefreshCw size={14} />
               {current ? "Running…" : "Run maintenance now"}
             </Button>
-            <span className="text-xs text-ink-faint">
-              {status.data?.schedule_enabled
-                ? `Scheduled nightly at ${String(status.data.schedule_hour).padStart(2, "0")}:00`
-                : "Manual only — nightly schedule off"}
-            </span>
           </div>
           {run.isError && !conflict && (
             <p className="text-sm text-danger">{(run.error as Error).message}</p>

@@ -17,6 +17,9 @@ export const ModelInfo = z.object({
   // What the runtime reports the model can do (e.g. "tools", "vision"); only populated when
   // the list is fetched with `?capabilities=true`, empty otherwise.
   capabilities: z.array(z.string()).default([]),
+  // The model's trained maximum context (#618); same opt-in as `capabilities` — null when not
+  // requested or not reported, never a fake default.
+  context_length: z.number().nullish(),
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
@@ -100,7 +103,13 @@ export const ScheduledTurn = z.object({
 export type ScheduledTurn = z.infer<typeof ScheduledTurn>;
 
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
-export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
+export const SavedHostedModel = z.object({
+  model: z.string(),
+  provider: z.string(),
+  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map.
+  context_length: z.number().nullish(),
+  capabilities: z.array(z.string()).default([]),
+});
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 
 /** The tenant's saved hosted-model ids, most-recently-saved first (#496). */

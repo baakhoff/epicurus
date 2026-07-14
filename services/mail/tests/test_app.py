@@ -456,6 +456,79 @@ class TestMailboxSendRoute:
         assert resp.status_code == 404
 
 
+class TestMailboxMarkReadRoute:
+    """Mark-thread-read-on-open (#625): provider marks + local-cache write-through."""
+
+    @staticmethod
+    def _provider_with_unread_thread() -> AsyncMock:
+        provider = AsyncMock(spec=MailProvider)
+        provider.current_cursor = AsyncMock(return_value=MailCursor(history_id=1))
+        provider.list_labels = AsyncMock(
+            return_value=[MailLabel(id="INBOX", title="Inbox", unread=1)]
+        )
+        provider.list_threads = AsyncMock(
+            return_value=ThreadPage(
+                threads=[
+                    MailThreadSummary(
+                        id="t1", subject="Hi", sender="a@x.com", snippet="", date="", unread=True
+                    )
+                ],
+                next_cursor=None,
+            )
+        )
+        provider.set_unread = AsyncMock(return_value=None)
+        return provider
+
+    def test_marks_provider_and_converges_cache(self) -> None:
+        provider = self._provider_with_unread_thread()
+        with _client_with_provider(provider) as client:
+            # Cold landing populates the cache with an unread thread row.
+            assert client.get("/pages/mailbox").json()["threads"][0]["unread"] is True
+            resp = client.post(
+                "/pages/mailbox/mark-read",
+                json={"thread_id": "t1", "message_ids": ["m1", "m2"]},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"thread_id": "t1", "marked": 2}
+            # The landing now serves the row read from cache — no reconcile needed.
+            assert client.get("/pages/mailbox").json()["threads"][0]["unread"] is False
+        # Each message was cleared at the provider (the #277 seam).
+        assert provider.set_unread.await_count == 2
+        provider.set_unread.assert_any_await("m1", unread=False)
+        provider.set_unread.assert_any_await("m2", unread=False)
+
+    def test_empty_message_ids_is_a_noop(self) -> None:
+        provider = self._provider_with_unread_thread()
+        with _client_with_provider(provider) as client:
+            resp = client.post(
+                "/pages/mailbox/mark-read", json={"thread_id": "t1", "message_ids": []}
+            )
+        assert resp.status_code == 200
+        assert resp.json()["marked"] == 0
+        provider.set_unread.assert_not_awaited()
+
+    def test_relays_gmail_scope_error(self) -> None:
+        provider = self._provider_with_unread_thread()
+        request = httpx.Request("POST", "https://gmail.googleapis.com")
+        response = httpx.Response(403, request=request, json={"error": {"message": "no scope"}})
+        provider.set_unread = AsyncMock(
+            side_effect=httpx.HTTPStatusError("403", request=request, response=response)
+        )
+        with _client_with_provider(provider) as client:
+            resp = client.post(
+                "/pages/mailbox/mark-read", json={"thread_id": "t1", "message_ids": ["m1"]}
+            )
+        assert resp.status_code == 403
+        assert "Reconnect Google" in resp.json()["detail"]
+
+    def test_unknown_page_is_404(self) -> None:
+        provider = self._provider_with_unread_thread()
+        resp = _client_with_provider(provider).post(
+            "/pages/nope/mark-read", json={"thread_id": "t1", "message_ids": ["m1"]}
+        )
+        assert resp.status_code == 404
+
+
 class TestMailboxAttachmentRoute:
     def test_streams_bytes_with_disposition(self) -> None:
         provider = AsyncMock(spec=MailProvider)

@@ -120,6 +120,39 @@ async def test_send_page_message_404_for_unknown_module() -> None:
     assert err.value.status_code == 404
 
 
+# ── mark_page_thread_read ──────────────────────────────────────────────────────
+
+
+async def test_mark_page_thread_read_forwards_to_module() -> None:
+    registry = _registry(_mailbox_manifest())
+    ctx, client = _post_ctx({"thread_id": "t1", "marked": 2})
+    payload = {"thread_id": "t1", "message_ids": ["m1", "m2"]}
+
+    with patch("epicurus_core_app.modules.httpx.AsyncClient", return_value=ctx):
+        result = await registry.mark_page_thread_read("mail", "mailbox", payload)
+
+    assert result == {"thread_id": "t1", "marked": 2}
+    client.post.assert_called_once_with("/pages/mailbox/mark-read", json=payload)
+
+
+async def test_mark_page_thread_read_404_for_non_mailbox() -> None:
+    registry = _registry(_browser_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.mark_page_thread_read(
+            "files", "browse", {"thread_id": "t1", "message_ids": []}
+        )
+    assert err.value.status_code == 404
+
+
+async def test_mark_page_thread_read_404_for_unknown_module() -> None:
+    registry = _registry(_mailbox_manifest())
+    with pytest.raises(HTTPException) as err:
+        await registry.mark_page_thread_read(
+            "ghost", "mailbox", {"thread_id": "t1", "message_ids": []}
+        )
+    assert err.value.status_code == 404
+
+
 # ── download_page_attachment ─────────────────────────────────────────────────────
 
 

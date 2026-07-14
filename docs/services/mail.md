@@ -121,7 +121,9 @@ data over the page proxy:
   resolved through the module's attachment proxy and **remote images blocked by default** (a
   per-message "Load images" reveals them — a remote `<img>` is a tracking pixel). `body` (plain
   text, `_html_to_text` for HTML-only mail) stays the fallback for a text-only message and for the
-  `mail_read` agent tool.
+  `mail_read` agent tool. **Opening a conversation marks its unread messages read (#625):** the
+  shell flips the list row optimistically and calls `POST /pages/mailbox/mark-read` in the
+  background, which clears the flag at the provider and writes the read state through to the cache.
 - **Triage.** Two new message-level tools, `mail_archive` (drop the `INBOX` label) and `mail_trash`
   (move to Trash — recoverable, not a permanent delete), both inside the already-granted
   `gmail.modify` scope (no reconnect). They join `mail_mark_read`/`mail_mark_unread` as per-message
@@ -200,6 +202,7 @@ proxies them to the web shell (the shell never calls the module directly).
 | `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
 | `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?cursor=`). The plain landing view (no `q`/`cursor`) serves from the **local cache** instantly (ADR-0096, #623); `?reconcile=1` first pulls the provider delta into the cache. Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. |
 | `POST` | `/pages/mailbox/send` | body: `MailboxSend` → `{"id": str}` | **Human-initiated compose/reply from the page (ADR-0087).** With `reply_to_message_id` re-derives threading via `compose_reply`, else composes from `to`/`subject`/`body`/`cc`; then transmits and publishes `mail.sent`. Operator-only via the gated core proxy — never an MCP tool, so the agent still cannot send (ADR-0085). |
+| `POST` | `/pages/mailbox/mark-read` | body: `{thread_id, message_ids}` → `{"thread_id": str, "marked": int}` | **Mark a thread's messages read on open (#625).** Clears the unread flag on each `message_ids` at the provider (`set_unread`, #277) then writes the thread's read state through to the local cache (ADR-0096) so the list row converges at once. Operator-only via the gated proxy; a Gmail scope/rate-limit error relays its hint; empty `message_ids` is a no-op. |
 | `GET` | `/pages/mailbox/attachment` | `?message_id=&attachment_id=` → bytes | Streams one attachment's bytes (with content-type + download disposition) for the core proxy to relay; nothing is stored (ADR-0087). |
 
 The core exposes these via:
@@ -210,6 +213,7 @@ GET  /platform/v1/modules/mail/messages/{ref_id}               → EmailMessage
 GET  /platform/v1/modules/mail/status                          → status JSON
 GET  /platform/v1/modules/mail/pages/mailbox[?thread_id|label|q|cursor|reconcile]  → MailboxList | {thread}
 POST /platform/v1/modules/mail/pages/mailbox/send              → {"id": str}   (mailbox-gated)
+POST /platform/v1/modules/mail/pages/mailbox/mark-read         → {"thread_id","marked"} (mailbox-gated)
 GET  /platform/v1/modules/mail/pages/mailbox/attachment        → streamed bytes (mailbox-gated)
 ```
 

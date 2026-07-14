@@ -602,6 +602,18 @@ export const api = {
       `/platform/v1/modules/${encodeURIComponent(module)}/pages/${encodeURIComponent(pageId)}/send`,
       { method: "POST", body: JSON.stringify(payload) },
     ),
+  // Mark a thread's messages read on open (#625) — provider + local-cache write-through. The
+  // shell flips the list row optimistically and calls this in the background (operator-only).
+  markMailboxThreadRead: (
+    module: string,
+    pageId: string,
+    payload: { thread_id: string; message_ids: string[] },
+  ) =>
+    request(
+      z.object({ thread_id: z.string(), marked: z.number() }),
+      `/platform/v1/modules/${encodeURIComponent(module)}/pages/${encodeURIComponent(pageId)}/mark-read`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
   // The same-origin URL for one attachment's download (ADR-0087). Used as an `<a href download>`;
   // the core streams the bytes provider → module → browser (nothing stored).
   mailboxAttachmentUrl: (

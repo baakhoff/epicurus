@@ -27,6 +27,7 @@ from epicurus_mail.db import MailCache
 from epicurus_mail.gmail import GmailProvider
 from epicurus_mail.provider import ComposedMessage
 from epicurus_mail.service import (
+    _SCOPE_HINT,
     _SCOPE_HINT_READ,
     _SCOPE_HINT_SEND,
     MAILBOX_PAGE_ID,
@@ -64,6 +65,20 @@ class MailboxSendRequest(BaseModel):
     subject: str | None = None
     cc: str | None = None
     reply_to_message_id: str | None = None
+
+
+class MarkThreadReadRequest(BaseModel):
+    """The mailbox page's mark-read-on-open request (#625).
+
+    Opening a conversation marks its unread messages read — ``message_ids`` are the ones to
+    clear (the shell passes only those already unread). ``thread_id`` lets the module write the
+    read state through to the local cache (ADR-0096) so the list row converges at once, not only
+    on the next reconcile. Marking a whole thread read is the one case where a thread-level cache
+    write-through is unambiguous (every message is being cleared).
+    """
+
+    thread_id: str
+    message_ids: list[str]
 
 
 def _content_disposition(filename: str) -> str:
@@ -299,6 +314,35 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
             raise
         await _publish_sent(sent_id, message.to, message.subject)
         return {"id": sent_id}
+
+    @app.post("/pages/{page_id}/mark-read")
+    async def mark_thread_read(page_id: str, req: MarkThreadReadRequest) -> dict[str, Any]:
+        """Mark a thread's messages read on open (#625) — provider + local-cache write-through.
+
+        Wires the reader's *open* event to the existing mark-read seam (`provider.set_unread`,
+        #277): clears the unread flag on each of ``message_ids`` at the provider, then writes the
+        thread's read state through to the local cache (ADR-0096) so the list row is already read
+        without waiting for the next reconcile. The shell flips the row optimistically and calls
+        this in the background, reverting (via a refetch) only if it fails. A Gmail scope /
+        rate-limit error is relayed with its hint, as with the mark tools. Operator-only via the
+        gated core proxy (never an MCP tool). An empty ``message_ids`` is a no-op.
+        """
+        if page_id != MAILBOX_PAGE_ID:
+            raise HTTPException(status_code=404, detail=f"no such page {page_id!r}")
+        try:
+            for message_id in req.message_ids:
+                await provider.set_unread(message_id, unread=False)
+        except httpx.HTTPStatusError as exc:
+            hint = _describe_gmail_error(exc, _SCOPE_HINT)
+            if hint is not None:
+                raise HTTPException(status_code=exc.response.status_code, detail=hint) from exc
+            raise
+        # Only after every provider mark succeeds: converge the cache so the row reads correctly
+        # even against a reconcile that races the open (a partial failure above leaves the cache
+        # untouched and lets the next reconcile settle it).
+        if req.message_ids:
+            await mailbox.mark_thread_read(req.thread_id, unread=False)
+        return {"thread_id": req.thread_id, "marked": len(req.message_ids)}
 
     @app.get("/pages/{page_id}/attachment")
     async def get_mailbox_attachment(

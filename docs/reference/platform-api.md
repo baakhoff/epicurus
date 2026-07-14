@@ -450,6 +450,15 @@ the agent can never reach it (the draft-first guarantee of ADR-0085 still holds)
 module's own hint on a Gmail scope/rate-limit error (**403**/**429**). It shares the module's
 transmit endpoint (`POST /send`) but never the agent draft pane.
 
+### `POST /platform/v1/modules/{name}/pages/{page_id}/mark-read`
+
+**Mailbox-only (#625, ADR-0087).** Marks a thread's unread messages read when the reader opens it.
+Body `{thread_id, message_ids}` → `{"thread_id": …, "marked": <count>}`. The core proxies to the
+module's `POST /pages/{page_id}/mark-read`, which flips unread at the provider (the `set_unread`
+seam, #277) and writes the read state through to the local cache (ADR-0096). Gated on the `mailbox`
+archetype (a non-mailbox page **404**s), and **operator-only** — not an MCP tool, so the agent can
+never mutate read-state. Relays the module's own hint on a provider error.
+
 ### `GET /platform/v1/modules/{name}/pages/{page_id}/attachment?message_id=…&attachment_id=…`
 
 **Mailbox-only (ADR-0087).** Streams one message attachment's bytes (with its content type and a

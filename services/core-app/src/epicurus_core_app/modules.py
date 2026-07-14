@@ -140,6 +140,18 @@ class MailboxSend(BaseModel):
     reply_to_message_id: str | None = None
 
 
+class MailboxMarkRead(BaseModel):
+    """The body of a mailbox page's mark-read-on-open request (#625, ADR-0087).
+
+    Forwarded verbatim to the module's ``POST /pages/{id}/mark-read``: the opened thread and its
+    (unread) message ids. Operator-only (shell -> core -> module) — never an MCP tool, so the
+    agent can't mutate read-state (ADR-0085 holds).
+    """
+
+    thread_id: str
+    message_ids: list[str]
+
+
 class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
@@ -1188,6 +1200,25 @@ class ModuleRegistry:
         )
         return data
 
+    async def mark_page_thread_read(
+        self, name: str, page_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Proxy a mailbox page's mark-read-on-open to the module (#625, ADR-0087).
+
+        The shell posts here when the reader opens a thread; it POSTs to the module's
+        ``POST /pages/{page_id}/mark-read`` (which flips unread via the ``set_unread`` provider
+        seam, #277, and writes through to the cache). Gated on the ``mailbox`` archetype and
+        reachable only from the shell — never an MCP tool, so the agent still cannot mutate
+        read-state (ADR-0085 holds). A module 4xx is relayed with its own ``detail`` via
+        ``_post_json``.
+        """
+        _safe_segment(page_id, label="page_id")
+        base = await self._resolve_mailbox_page(name, page_id)
+        data: dict[str, Any] = await self._post_json(
+            base, f"/pages/{page_id}/mark-read", json=payload, op=f"{name} mailbox mark-read"
+        )
+        return data
+
     async def download_page_attachment(
         self, name: str, page_id: str, message_id: str, attachment_id: str
     ) -> httpx.Response:
@@ -1515,6 +1546,18 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         module's own hint on a Gmail scope/rate-limit error.
         """
         return await registry.send_page_message(name, page_id, body.model_dump())
+
+    @router.post("/{name}/pages/{page_id}/mark-read")
+    async def mark_mailbox_thread_read(
+        name: str, page_id: str, body: MailboxMarkRead
+    ) -> dict[str, Any]:
+        """Mark a mailbox thread read when the reader opens it (#625, ADR-0087).
+
+        The shell posts here on thread-open; gated on the ``mailbox`` archetype and reachable
+        only from the shell (never an MCP tool -> never the agent). Relays the module's own hint
+        on a provider error.
+        """
+        return await registry.mark_page_thread_read(name, page_id, body.model_dump())
 
     @router.get("/{name}/pages/{page_id}/attachment")
     async def download_mailbox_attachment(

@@ -14,6 +14,16 @@ images to GHCR.
 
 ### Added
 
+- **Mail: mark message read on open** (#625) — a message stayed unread until acted on explicitly.
+  Opening a conversation now marks its unread messages read at once: the shell flips the list row
+  (and the messages' badges) **optimistically**, then calls a new operator-gated
+  `POST /pages/mailbox/mark-read` in the background, which clears each message's flag at the
+  provider (`set_unread`, the #277 seam) and **writes the read state through to the local cache**
+  (ADR-0096) so the row converges immediately — no reconcile-race flicker — and reverts on a
+  provider failure. Marking a whole thread read is the one case where a thread-level cache
+  write-through is unambiguous (this also retires the write-through primitives #623 added). `mail`
+  0.12.0→0.13.0; `core-app` 0.77.0→0.78.0; `web` 0.106.0→0.107.0.
+
 - **Core: maintenance schedule controls — on/off, cadence, time of day** (#621, ADR-0098) — the
   maintenance panel read "manual only — nightly schedule off" with no way to change it: the
   nightly trigger was a code-level default (`MAINTENANCE_SCHEDULE_ENABLED`/`MAINTENANCE_HOUR`),

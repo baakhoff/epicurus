@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -18,10 +18,13 @@ from epicurus_core_app.agent.agent import (
     _REPEAT_NUDGE,
     _STOPPED_REPEAT_CALL,
     _STOPPED_TOOL_ERRORS,
+    _STOPPED_UNSUPPORTED_MEDIA,
+    _VISION_UNSUPPORTED_MESSAGE,
     Agent,
     _canonical_calls,
     _LoopGuard,
 )
+from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
     AgentInstructionsStore,
@@ -55,11 +58,18 @@ async def _fresh_prefs() -> LlmPrefsStore:
 
 
 class _FakeGateway:
-    def __init__(self, results: list[ChatResult], *, supports_tools: bool = True) -> None:
+    def __init__(
+        self,
+        results: list[ChatResult],
+        *,
+        supports_tools: bool = True,
+        supports_vision: bool = True,
+    ) -> None:
         self._results = list(results)
         self.calls: list[list[ChatMessage]] = []
         self.tools_seen: list[Any] = []
         self._supports_tools = supports_tools
+        self._supports_vision = supports_vision
 
     async def chat(
         self,
@@ -75,6 +85,9 @@ class _FakeGateway:
 
     async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
         return self._supports_tools
+
+    async def supports_vision(self, *_a: Any, **_k: Any) -> bool:
+        return self._supports_vision
 
 
 class _FakeMcp:
@@ -574,13 +587,16 @@ async def test_agent_persists_entity_refs_with_the_answer() -> None:
 
 
 class _FakeExpander:
-    def __init__(self, text: str = "the attached notes") -> None:
+    def __init__(
+        self, text: str = "the attached notes", images: list[ImagePart] | None = None
+    ) -> None:
         self._text = text
+        self._images = images or []
         self.calls: list[list[Attachment]] = []
 
-    async def expand(self, attachments: list[Attachment], *, tenant: str) -> str:
+    async def expand(self, attachments: list[Attachment], *, tenant: str) -> ExpandedAttachments:
         self.calls.append(attachments)
-        return self._text
+        return ExpandedAttachments(text=self._text, images=self._images)
 
 
 async def test_agent_injects_attachment_context() -> None:
@@ -612,7 +628,9 @@ async def test_agent_without_attachments_skips_expansion() -> None:
 
 async def test_agent_attachment_failure_degrades_to_plain_turn() -> None:
     class _BoomExpander:
-        async def expand(self, attachments: list[Attachment], *, tenant: str) -> str:
+        async def expand(
+            self, attachments: list[Attachment], *, tenant: str
+        ) -> ExpandedAttachments:
             raise RuntimeError("storage down")
 
     gw = _FakeGateway([ChatResult(model="m", content="still works")])
@@ -625,6 +643,110 @@ async def test_agent_attachment_failure_degrades_to_plain_turn() -> None:
     assert turn.content == "still works"
     # no system context was injected — the model just saw the user message
     assert [m.content for m in gw.calls[0]] == ["summarize"]
+
+
+# ── image attachments, gated on model vision support (#633) ─────────────────────────
+
+
+def _image_part() -> ImagePart:
+    return ImagePart(mime="image/png", data_b64="aGVsbG8=", title="photo.png")
+
+
+async def test_agent_attaches_image_content_when_model_supports_vision() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="I see a cat")], supports_vision=True)
+    expander = _FakeExpander(text="", images=[_image_part()])
+    msg = ChatMessage(
+        role="user",
+        content="what is this?",
+        attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run([msg])
+
+    assert turn.content == "I see a cat"
+    assert turn.stopped == "completed"
+    # the provider call *was* made, with the user message rewritten into content parts
+    [sent] = [m for m in gw.calls[0] if m.role == "user"]
+    assert sent.content == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+    ]
+
+
+async def test_agent_blocks_image_before_any_provider_call_when_model_lacks_vision() -> None:
+    gw = _FakeGateway(
+        [ChatResult(model="m", content="should never be used")], supports_vision=False
+    )
+    expander = _FakeExpander(text="", images=[_image_part()])
+    msg = ChatMessage(
+        role="user",
+        content="what is this?",
+        attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run([msg])
+
+    assert turn.content == _VISION_UNSUPPORTED_MESSAGE
+    assert turn.stopped == _STOPPED_UNSUPPORTED_MEDIA
+    assert gw.calls == []  # no provider call at all
+
+
+async def test_agent_image_turn_is_persisted_with_plain_text_not_the_image_payload() -> None:
+    """The user's turn still lands in history — but never the base64 payload (#633)."""
+    gw = _FakeGateway([ChatResult(model="m", content="I see a cat")], supports_vision=True)
+    expander = _FakeExpander(text="", images=[_image_part()])
+    memory = _FakeMemory()
+    msg = ChatMessage(
+        role="user",
+        content="what is this?",
+        attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
+    )
+    await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander, memory=memory).run(
+        [msg], session_id="s1"
+    )
+    assert memory.remembered == [
+        ("user", "what is this?"),
+        ("assistant", "I see a cat"),
+    ]
+
+
+async def test_agent_blocked_vision_turn_is_persisted_but_skips_fact_extraction() -> None:
+    gw = _FakeGateway([], supports_vision=False)
+    expander = _FakeExpander(text="", images=[_image_part()])
+    memory = _FakeMemory()
+
+    class _RecordingQueue:
+        def __init__(self) -> None:
+            self.enqueued: list[tuple[str, str]] = []
+
+        async def enqueue(self, *, tenant: str, user_text: str, assistant_text: str) -> None:
+            self.enqueued.append((user_text, assistant_text))
+
+    queue = _RecordingQueue()
+    msg = ChatMessage(
+        role="user",
+        content="what is this?",
+        attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
+    )
+    await Agent(
+        gateway=gw, mcp=_FakeMcp(), attachments=expander, memory=memory, queue=cast(Any, queue)
+    ).run([msg], session_id="s1")
+    assert memory.remembered == [
+        ("user", "what is this?"),
+        ("assistant", _VISION_UNSUPPORTED_MESSAGE),
+    ]
+    await asyncio.sleep(0)  # let the (would-be) fire-and-forget extraction task run
+    assert queue.enqueued == []  # a canned rejection is nothing to learn facts from
+
+
+async def test_agent_without_images_never_calls_supports_vision() -> None:
+    """A turn with no image attachments must not pay the vision-capability lookup at all."""
+
+    class _NoVisionCheckGateway(_FakeGateway):
+        async def supports_vision(self, *_a: Any, **_k: Any) -> bool:
+            raise AssertionError("supports_vision should not be called without an image")
+
+    gw = _NoVisionCheckGateway([ChatResult(model="m", content="ok")])
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    assert turn.content == "ok"
 
 
 # ── background fact extraction (ADR-0045) ────────────────────────────────────────

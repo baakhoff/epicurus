@@ -28,6 +28,7 @@ from epicurus_core_app.agent.activity import (
     append_thinking,
     append_tool,
 )
+from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
@@ -66,6 +67,55 @@ _ANSWER_NUDGE = "Please continue and give your final answer to my last message."
 _EMPTY_ANSWER_FALLBACK = (
     "I wasn't able to produce an answer that time — please try again or rephrase your request."
 )
+
+# Vision gating (#633): an image attachment is only ever sent to a model that declares vision
+# support (model-caps) — a non-vision model gets this canned explanation instead, before any
+# provider call, rather than a mangled attempt or a raw provider 400.
+_STOPPED_UNSUPPORTED_MEDIA = "unsupported_media"
+_VISION_UNSUPPORTED_MESSAGE = (
+    "I can't see images with this model — switch to a vision-capable model to use image "
+    "attachments."
+)
+
+
+def _vision_unsupported_turn() -> AgentTurn:
+    return AgentTurn(content=_VISION_UNSUPPORTED_MESSAGE, stopped=_STOPPED_UNSUPPORTED_MEDIA)
+
+
+def _text_only(content: str | list[dict[str, Any]] | None) -> str | None:
+    """``content`` as plain text, or ``None`` for the transient multimodal-parts shape.
+
+    Recall, fact extraction, and history persistence only ever run against messages
+    *before* :func:`_attach_images` mutates a turn (it operates on a copy of the assembled
+    convo, never the persisted/pre-assembly messages) — so this should never actually see a
+    list in practice, but the type is now a union and callers narrow explicitly rather than
+    assume.
+    """
+    return content if isinstance(content, str) else None
+
+
+def _attach_images(convo: list[ChatMessage], images: list[ImagePart]) -> list[ChatMessage]:
+    """Rewrite the last user message's content into multimodal parts carrying ``images``.
+
+    Applied to the assembled convo just before the provider call — never to what gets
+    persisted (:meth:`Agent._expand_attachments` already kept the persisted messages
+    text-only), so a stored turn never balloons with base64 image data. LiteLLM's own
+    provider adapters translate this OpenAI-style content-parts shape for us — a local
+    ``ollama_chat`` call becomes Ollama's ``images`` field, a hosted call keeps the array —
+    so no per-provider branching is needed here.
+    """
+    for i in range(len(convo) - 1, -1, -1):
+        if convo[i].role != "user":
+            continue
+        text = _text_only(convo[i].content)
+        parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+        parts.extend(
+            {"type": "image_url", "image_url": {"url": f"data:{img.mime};base64,{img.data_b64}"}}
+            for img in images
+        )
+        return [*convo[:i], convo[i].model_copy(update={"content": parts}), *convo[i + 1 :]]
+    return convo
+
 
 # Mid-stream failure handling (#453). When a streaming turn dies part-way — most often the local
 # model stopping mid-answer as it loads another model / evaluates a long prompt and the socket
@@ -262,9 +312,11 @@ class _RefCollector:
 
 
 class AttachmentExpander(Protocol):
-    """Resolves a turn's attachments into a text block the agent injects (ADR-0019)."""
+    """Resolves a turn's attachments into text + images the agent injects (ADR-0019, #633)."""
 
-    async def expand(self, attachments: list[Attachment], *, tenant: str) -> str: ...
+    async def expand(
+        self, attachments: list[Attachment], *, tenant: str
+    ) -> ExpandedAttachments: ...
 
 
 class AgentEvent(BaseModel):
@@ -482,11 +534,18 @@ class Agent:
         new user input and the answer are persisted for future turns.
         """
         tenant = tenant_id or self._default_tenant
-        messages = await self._expand_attachments(messages, tenant=tenant)
+        messages, images = await self._expand_attachments(messages, tenant=tenant)
         convo = await self._assemble(messages, tenant=tenant, session_id=session_id)
-        turn = await self._loop(convo, model=model, tenant_id=tenant_id)
+        blocked = bool(images) and not await self._gateway.supports_vision(model, tenant_id)
+        if blocked:
+            turn = _vision_unsupported_turn()
+        else:
+            if images:
+                convo = _attach_images(convo, images)
+            turn = await self._loop(convo, model=model, tenant_id=tenant_id)
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
-        self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
+        if not blocked:
+            self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
         return turn
 
     async def run_stream(
@@ -514,13 +573,25 @@ class Agent:
         """
         tenant = tenant_id or self._default_tenant
         max_steps = await self._effective_max_steps(tenant)
+        images: list[ImagePart] = []
         if resume_convo is not None:
             convo = resume_convo
         else:
-            messages = await self._expand_attachments(messages, tenant=tenant)
+            messages, images = await self._expand_attachments(messages, tenant=tenant)
             convo = await self._assemble(
                 messages, tenant=tenant, session_id=session_id, persist_input=persist_input
             )
+        if images and not await self._gateway.supports_vision(model, tenant_id):
+            # Gate before any provider call (#633): a non-vision model would either mangle
+            # the image or have the provider itself reject it — explain the limitation as a
+            # normal turn instead (same shape as the mid-stream failure path below).
+            turn = _vision_unsupported_turn()
+            yield AgentEvent(type="delta", text=turn.content)
+            await asyncio.shield(self._persist_answer(turn, tenant=tenant, session_id=session_id))
+            yield AgentEvent(type="done", turn=turn)
+            return
+        if images:
+            convo = _attach_images(convo, images)
         parts: list[str] = []
         timeline: list[ActivityItem] = []
         tools_used: list[str] = []
@@ -784,7 +855,12 @@ class Agent:
         if not answer or answer == _EMPTY_ANSWER_FALLBACK:
             return
         user_text = next(
-            (m.content for m in reversed(messages) if m.role == "user" and m.content), None
+            (
+                text
+                for m in reversed(messages)
+                if m.role == "user" and (text := _text_only(m.content))
+            ),
+            None,
         )
         if not user_text:
             return
@@ -920,27 +996,32 @@ class Agent:
 
     async def _expand_attachments(
         self, messages: list[ChatMessage], *, tenant: str
-    ) -> list[ChatMessage]:
+    ) -> tuple[list[ChatMessage], list[ImagePart]]:
         """Resolve any attachments on the user's message into a leading system message.
 
         Best-effort (ADR-0019): an expander failure or empty result leaves the turn
         untouched. The attachments themselves stay on the user message (persisted +
         stripped before any provider call); only their resolved content is injected here.
+
+        Image attachments are returned separately, never through the text preamble (#633):
+        the caller checks the selected model's vision capability before deciding whether to
+        attach them to the assembled convo — and never to what gets persisted, so a stored
+        turn never balloons with base64 image data.
         """
         if self._attachments is None:
-            return messages
+            return messages, []
         attached = [a for m in messages if m.role == "user" for a in (m.attachments or [])]
         if not attached:
-            return messages
+            return messages, []
         try:
-            context = await self._attachments.expand(attached, tenant=tenant)
+            resolved = await self._attachments.expand(attached, tenant=tenant)
         except Exception as exc:  # attachments are an enhancement, never a hard dependency
             log.warning("attachment expansion failed; proceeding without it", error=str(exc))
-            return messages
-        if not context:
-            return messages
-        preamble = ChatMessage(role="system", content=f"Attached context:\n{context}")
-        return [preamble, *messages]
+            return messages, []
+        if resolved.text:
+            preamble = ChatMessage(role="system", content=f"Attached context:\n{resolved.text}")
+            messages = [preamble, *messages]
+        return messages, resolved.images
 
     async def _recall_within_budget(self, *, tenant: str, query: str) -> list[str]:
         """Recall the facts relevant to ``query``, bounded by ``recall_timeout_s`` (ADR-0051).
@@ -1055,9 +1136,19 @@ class Agent:
             history = await self._memory.history(tenant=tenant, session_id=session_id)
             # Recall off the new user input, else (re-answer) the last user turn in history.
             last_user = next(
-                (m.content for m in reversed(messages) if m.role == "user" and m.content), None
+                (
+                    text
+                    for m in reversed(messages)
+                    if m.role == "user" and (text := _text_only(m.content))
+                ),
+                None,
             ) or next(
-                (m.content for m in reversed(history) if m.role == "user" and m.content), None
+                (
+                    text
+                    for m in reversed(history)
+                    if m.role == "user" and (text := _text_only(m.content))
+                ),
+                None,
             )
             if last_user:
                 recalled = await self._recall_within_budget(tenant=tenant, query=last_user)
@@ -1076,12 +1167,13 @@ class Agent:
             convo.extend(messages)
             if persist_input:
                 for message in messages:
-                    if message.role == "user" and message.content:
+                    text = _text_only(message.content)
+                    if message.role == "user" and text:
                         await self._memory.remember(
                             tenant=tenant,
                             session_id=session_id,
                             role="user",
-                            content=message.content,
+                            content=text,
                             attachments=(
                                 [a.model_dump() for a in message.attachments]
                                 if message.attachments

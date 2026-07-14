@@ -9,6 +9,9 @@ The crux of the #561 coverage is :func:`test_start_run_is_nonblocking_with_pendi
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -24,12 +27,11 @@ from epicurus_core_app.maintenance import (
     module_reindex_job,
     profile_synthesis_job,
 )
+from epicurus_core_app.maintenance_schedule_prefs import MaintenanceSchedule
 
 TENANT = "local"
 
-
-class _StopLoop(Exception):
-    """Breaks a `run_periodic` test out of its `while True` deterministically."""
+_DISABLED = MaintenanceSchedule(enabled=False, cadence="daily", hour=4)
 
 
 class _FakeBus:
@@ -65,13 +67,21 @@ def _job(
 
 
 def _orch(
-    jobs: list[MaintenanceJob], *, bus: _FakeBus | None = None, **kw: Any
+    jobs: list[MaintenanceJob],
+    *,
+    bus: _FakeBus | None = None,
+    schedule: MaintenanceSchedule = _DISABLED,
+    **kw: Any,
 ) -> MaintenanceOrchestrator:
+    async def _schedule() -> MaintenanceSchedule:
+        return schedule
+
     return MaintenanceOrchestrator(
         jobs,
         bus=bus or _FakeBus(),  # type: ignore[arg-type]
         default_tenant=TENANT,
         timezone=_tz,
+        schedule=_schedule,
         **kw,
     )
 
@@ -145,15 +155,109 @@ async def test_descriptors_advertise_jobs() -> None:
     ]
 
 
-async def test_schedule_metadata() -> None:
-    orch = _orch([_job("a")], hour=5, schedule_enabled=True)
-    assert orch.schedule_enabled is True and orch.schedule_hour == 5
+# ── schedule tick (#621) ───────────────────────────────────────────────────────
 
 
-async def test_run_periodic_is_a_noop_when_disabled() -> None:
-    orch = _orch([_job("a")], schedule_enabled=False)
-    # Returns immediately rather than entering the sleep loop; wrap to fail loudly on a hang.
-    await asyncio.wait_for(orch.run_periodic(), timeout=2)
+@contextlib.contextmanager
+def _frozen_at(when: datetime) -> Iterator[None]:
+    """Patch ``maintenance.datetime.now()`` to always return *when* (tz-aware, any zone).
+
+    ``_tick`` computes "local now" via ``datetime.now(tz)`` (and stamps ``_last_scheduled_fire``
+    the same way) — freezing it is what makes cadence/window tests deterministic without a real
+    clock or a real sleep.
+    """
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return when if tz is None else when.astimezone(tz)
+
+    real = maintenance_module.datetime
+    maintenance_module.datetime = _Frozen  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        maintenance_module.datetime = real
+
+
+async def test_tick_is_a_noop_when_disabled() -> None:
+    orch = _orch([_job("a")], schedule=MaintenanceSchedule(enabled=False, cadence="daily", hour=4))
+    with _frozen_at(datetime(2026, 1, 1, 4, 0, tzinfo=UTC)):  # exactly the target hour
+        await orch._tick()
+    assert orch.last_run() is None
+
+
+async def test_tick_runs_the_nightly_batch_when_due() -> None:
+    orch = _orch(
+        [_job("light", nightly=True), _job("heavy", nightly=False)],
+        schedule=MaintenanceSchedule(enabled=True, cadence="daily", hour=4),
+    )
+    with _frozen_at(datetime(2026, 1, 1, 4, 30, tzinfo=UTC)):
+        await orch._tick()
+    run = orch.last_run()
+    assert run is not None
+    assert [r.key for r in run.jobs] == ["light"]  # nightly scope — heavy job excluded
+    assert run.scope == "nightly"
+
+
+async def test_tick_is_a_noop_outside_the_scheduled_hour() -> None:
+    orch = _orch([_job("a")], schedule=MaintenanceSchedule(enabled=True, cadence="daily", hour=4))
+    with _frozen_at(datetime(2026, 1, 1, 9, 0, tzinfo=UTC)):
+        await orch._tick()
+    assert orch.last_run() is None
+
+
+async def test_tick_does_not_double_fire_within_the_same_window() -> None:
+    orch = _orch([_job("a")], schedule=MaintenanceSchedule(enabled=True, cadence="daily", hour=4))
+    with _frozen_at(datetime(2026, 1, 1, 4, 5, tzinfo=UTC)):
+        await orch._tick()
+    first_run = orch.last_run()
+    assert first_run is not None
+    with _frozen_at(datetime(2026, 1, 1, 4, 45, tzinfo=UTC)):  # a later poll, same 4am window
+        await orch._tick()
+    assert orch.last_run() is first_run  # unchanged — no second run this window
+
+
+async def test_tick_hourly_cadence_fires_once_per_hour() -> None:
+    orch = _orch([_job("a")], schedule=MaintenanceSchedule(enabled=True, cadence="hourly", hour=0))
+    with _frozen_at(datetime(2026, 1, 1, 9, 5, tzinfo=UTC)):
+        await orch._tick()
+    first_run = orch.last_run()
+    assert first_run is not None
+    with _frozen_at(datetime(2026, 1, 1, 9, 50, tzinfo=UTC)):  # still the 9am hour
+        await orch._tick()
+    assert orch.last_run() is first_run
+    with _frozen_at(datetime(2026, 1, 1, 10, 5, tzinfo=UTC)):  # the next hour
+        await orch._tick()
+    assert orch.last_run() is not first_run
+
+
+async def test_tick_weekly_cadence_only_fires_on_the_configured_weekday() -> None:
+    # 2026-01-01 is a Thursday (weekday()==3); the schedule targets Monday (0).
+    orch = _orch(
+        [_job("a")],
+        schedule=MaintenanceSchedule(enabled=True, cadence="weekly", hour=4, weekday=0),
+    )
+    with _frozen_at(datetime(2026, 1, 1, 4, 30, tzinfo=UTC)):
+        await orch._tick()
+    assert orch.last_run() is None  # Thursday — not the configured Monday
+    with _frozen_at(datetime(2026, 1, 5, 4, 30, tzinfo=UTC)):  # the following Monday
+        await orch._tick()
+    assert orch.last_run() is not None
+
+
+async def test_tick_swallows_conflict_when_a_manual_run_is_in_flight() -> None:
+    gate = asyncio.Event()
+    orch = _orch(
+        [_gated_job("a", gate)],
+        schedule=MaintenanceSchedule(enabled=True, cadence="daily", hour=4),
+    )
+    orch.start_run()  # a manual run already in flight when the nightly window hits
+    with _frozen_at(datetime(2026, 1, 1, 4, 0, tzinfo=UTC)):
+        await orch._tick()  # must not raise
+    assert orch.current_run() is not None  # the original in-flight run, untouched
+    gate.set()
+    await _until_idle(orch)
 
 
 # ── in-flight tracking, background start, concurrent-run guard (#561) ──────────
@@ -212,32 +316,6 @@ async def test_run_raises_conflict_while_a_batch_is_in_flight() -> None:
         await orch.run()
     assert excinfo.value.current is current
 
-    gate.set()
-    await _until_idle(orch)
-
-
-async def test_run_periodic_skips_and_logs_when_a_manual_run_is_in_flight(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-
-    async def _fake_sleep(hour: int, timezone: Any) -> None:
-        nonlocal calls
-        calls += 1
-        if calls > 1:  # break the `while True` deterministically after one skipped attempt
-            raise _StopLoop
-
-    monkeypatch.setattr(maintenance_module, "sleep_until_hour", _fake_sleep)
-
-    gate = asyncio.Event()
-    orch = _orch([_gated_job("a", gate)], schedule_enabled=True)
-    orch.start_run()  # a manual run already in flight when the nightly window hits
-
-    with pytest.raises(_StopLoop):
-        await asyncio.wait_for(orch.run_periodic(), timeout=2)
-
-    # Skipped, not double-run: still the same original in-flight run, untouched.
-    assert orch.current_run() is not None
     gate.set()
     await _until_idle(orch)
 

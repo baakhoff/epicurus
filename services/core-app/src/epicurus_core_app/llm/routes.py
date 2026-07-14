@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 
@@ -124,6 +125,10 @@ class SavedModel(BaseModel):
 
     model: str
     provider: str
+    # From LiteLLM's model-cost map (#618, same source as `GET .../models/details` for a
+    # hosted id) — `None`/empty when the model isn't in that map, never a fake default.
+    context_length: int | None = None
+    capabilities: list[str] = []
 
 
 class SavedModelsResponse(BaseModel):
@@ -364,13 +369,24 @@ def create_llm_router(
 
         This is the source of truth the chat picker renders and the Models page lists — the
         browser's ``recentModels`` cache is only a warm fallback. Each entry carries the
-        provider alias (the id's ``<provider>/`` prefix) so the UI can group by provider.
+        provider alias (the id's ``<provider>/`` prefix) plus its context length + capabilities
+        (#618) — a static LiteLLM lookup, not a network call, so unlike the local list this is
+        never gated behind an opt-in query param.
         """
         if saved_models is None:
             return SavedModelsResponse(models=[])
         ids = await saved_models.list(default_tenant)
+        details = await asyncio.gather(*(gateway.show(m) for m in ids))
         return SavedModelsResponse(
-            models=[SavedModel(model=m, provider=m.split("/", 1)[0]) for m in ids]
+            models=[
+                SavedModel(
+                    model=m,
+                    provider=m.split("/", 1)[0],
+                    context_length=d.context_length,
+                    capabilities=d.capabilities,
+                )
+                for m, d in zip(ids, details, strict=True)
+            ]
         )
 
     @router.post("/saved-models")

@@ -78,6 +78,7 @@ from epicurus_core_app.maintenance import (
     profile_synthesis_job,
 )
 from epicurus_core_app.maintenance_routes import create_maintenance_router
+from epicurus_core_app.maintenance_schedule_prefs import MaintenanceScheduleStore
 from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
@@ -211,6 +212,14 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # The maintenance orchestrator's schedule (#621): one row per tenant, falling back to the env
+    # defaults until an operator sets their own via PUT. Read by both the orchestrator's poll loop
+    # (below) and the maintenance routes; written only by the routes.
+    maintenance_schedule_prefs = MaintenanceScheduleStore(
+        engine,
+        default_enabled=settings.maintenance_schedule_enabled,
+        default_hour=settings.maintenance_hour,
+    )
     # The operator's drag-and-drop left-nav page order (#543): one row per tenant, syncing
     # across devices. Resolved/merged client-side (ADR-0018) — this store is opaque storage.
     page_order_prefs = PageOrderStore(engine)
@@ -402,8 +411,8 @@ def create_app() -> FastAPI:
         bus=bus,
         default_tenant=settings.default_tenant_id,
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
-        hour=settings.maintenance_hour,
-        schedule_enabled=settings.maintenance_schedule_enabled,
+        schedule=lambda: maintenance_schedule_prefs.get(settings.default_tenant_id),
+        poll_interval_s=settings.maintenance_poll_interval_s,
     )
 
     @asynccontextmanager
@@ -429,6 +438,13 @@ def create_app() -> FastAPI:
             await timezone_prefs.init()
         except Exception as exc:
             log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
+        try:
+            await maintenance_schedule_prefs.init()
+        except Exception as exc:
+            log.error(
+                "maintenance schedule prefs init failed; schedule falls back to env config",
+                error=str(exc),
+            )
         try:
             await page_order_prefs.init()
         except Exception as exc:
@@ -573,7 +589,12 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(
-        create_maintenance_router(maintenance, default_tenant=settings.default_tenant_id)
+        create_maintenance_router(
+            maintenance,
+            schedule_store=maintenance_schedule_prefs,
+            timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+            default_tenant=settings.default_tenant_id,
+        )
     )
     app.include_router(
         create_llm_router(

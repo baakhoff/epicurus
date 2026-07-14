@@ -173,10 +173,16 @@ class ChatMessage(BaseModel):
     content, and a ``tool`` result carries ``tool_call_id`` + ``name``. ``entity_refs``
     (assistant-emitted, ADR-0019) is UI metadata — it rides alongside the message but is
     stripped before the message reaches a provider (see :meth:`provider_dump`).
+
+    ``content`` is plain text for every message the agent builds itself; it only takes the
+    OpenAI-style content-parts array (``[{"type": "text", ...}, {"type": "image_url", ...}]``)
+    transiently, on the assembled turn sent to the gateway, when an image attachment resolves
+    for a vision-capable model (#633) — never on a persisted message (history/memory stay
+    text-only, so a stored turn never balloons with base64 image data).
     """
 
     role: Role
-    content: str | None = None
+    content: str | list[dict[str, Any]] | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     name: str | None = None

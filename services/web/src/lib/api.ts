@@ -25,6 +25,7 @@ import {
   LlmPrefs,
   LogEntry,
   MaintenanceCurrentRun,
+  type MaintenanceScheduleUpdate,
   MaintenanceStatus,
   MemoryListing,
   MessageRecord,
@@ -136,6 +137,13 @@ export const api = {
   maintenanceStatus: () => request(MaintenanceStatus, "/platform/v1/maintenance"),
   runMaintenance: () =>
     request(MaintenanceCurrentRun, "/platform/v1/maintenance/run", { method: "POST" }),
+  // Enable/disable + cadence/hour/weekday (#621); validated server-side (400 on an invalid
+  // shape, e.g. weekly with no weekday) — returns the full refreshed status.
+  setMaintenanceSchedule: (update: MaintenanceScheduleUpdate) =>
+    request(MaintenanceStatus, "/platform/v1/maintenance/schedule", {
+      method: "PUT",
+      body: JSON.stringify(update),
+    }),
   setContextWindow: (value: number | null) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
       method: "PUT",

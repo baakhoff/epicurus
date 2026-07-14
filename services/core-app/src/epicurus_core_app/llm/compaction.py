@@ -39,6 +39,12 @@ _PER_MESSAGE_OVERHEAD = 4
 _MIN_REPLY_RESERVE = 512
 _MAX_REPLY_RESERVE = 4096
 
+# A flat per-image token estimate (#633). Real providers price an image by resolution (roughly
+# 85-1500+ tokens), and we have no cheap way to know dimensions without decoding the bytes — so,
+# matching this module's "no tokenizer dependency, err toward over-counting" policy, a single
+# conservative constant stands in rather than a per-image calculation.
+_IMAGE_TOKEN_ESTIMATE = 1200
+
 
 def estimate_tokens(text: str) -> int:
     """A conservative token estimate for ``text`` (characters over a fixed divisor)."""
@@ -47,9 +53,24 @@ def estimate_tokens(text: str) -> int:
     return ceil(len(text) / _CHARS_PER_TOKEN)
 
 
+def _content_tokens(content: str | list[dict[str, object]] | None) -> int:
+    """Estimated tokens for a message's content — plain text, or multimodal parts (#633)."""
+    if content is None:
+        return 0
+    if isinstance(content, str):
+        return estimate_tokens(content)
+    total = 0
+    for part in content:
+        if part.get("type") == "image_url":
+            total += _IMAGE_TOKEN_ESTIMATE
+        else:
+            total += estimate_tokens(str(part.get("text") or ""))
+    return total
+
+
 def message_tokens(message: ChatMessage) -> int:
     """Estimated tokens for one message: content + any tool-call payload + flat overhead."""
-    total = _PER_MESSAGE_OVERHEAD + estimate_tokens(message.content or "")
+    total = _PER_MESSAGE_OVERHEAD + _content_tokens(message.content)
     if message.tool_calls:
         total += estimate_tokens(json.dumps(message.tool_calls, ensure_ascii=False, default=str))
     return total

@@ -227,18 +227,22 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
   return (
     <div className="flex h-full min-h-0 flex-col">
       {hasToolbar && (
-        // A wrapping toolbar: view controls on the left, board actions on the right. It wraps
-        // (gap-y) so on a narrow phone the controls and the Add button get their own lines and
-        // breathing room rather than a lone button glued to the top-right corner.
+        // Follows the shell's toolbar convention (the calendar toolbar, #628/#641): the view
+        // controls are grouped into their own cluster (like the calendar's Today/‹/› group) so
+        // "Group by" and "Show" wrap and reflow as one cohesive unit rather than splitting
+        // independently, and the actions are a second cluster pushed right by `ml-auto` — one
+        // coherent line on desktop, a clean stack (never a lone stranded button) on phone (#634).
         <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge px-3 py-2.5">
-          {data.controls.map((control) => (
-            <ControlSelect
-              key={control.id}
-              control={control}
-              value={params[control.id] ?? control.value}
-              onChange={(value) => setParams((prev) => ({ ...prev, [control.id]: value }))}
-            />
-          ))}
+          <div className="flex flex-wrap items-center gap-3">
+            {data.controls.map((control) => (
+              <ControlSelect
+                key={control.id}
+                control={control}
+                value={params[control.id] ?? control.value}
+                onChange={(value) => setParams((prev) => ({ ...prev, [control.id]: value }))}
+              />
+            ))}
+          </div>
           {(query.isFetching || move.isPending) && <Spinner className="size-3.5 text-ink-faint" />}
           {data.actions.length > 0 && (
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">

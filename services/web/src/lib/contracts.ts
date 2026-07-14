@@ -17,6 +17,9 @@ export const ModelInfo = z.object({
   // What the runtime reports the model can do (e.g. "tools", "vision"); only populated when
   // the list is fetched with `?capabilities=true`, empty otherwise.
   capabilities: z.array(z.string()).default([]),
+  // The model's trained maximum context (#618); same opt-in as `capabilities` — null when not
+  // requested or not reported, never a fake default.
+  context_length: z.number().nullish(),
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
@@ -100,7 +103,13 @@ export const ScheduledTurn = z.object({
 export type ScheduledTurn = z.infer<typeof ScheduledTurn>;
 
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
-export const SavedHostedModel = z.object({ model: z.string(), provider: z.string() });
+export const SavedHostedModel = z.object({
+  model: z.string(),
+  provider: z.string(),
+  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map.
+  context_length: z.number().nullish(),
+  capabilities: z.array(z.string()).default([]),
+});
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 
 /** The tenant's saved hosted-model ids, most-recently-saved first (#496). */
@@ -1220,9 +1229,26 @@ export type MaintenanceCurrentRun = z.infer<typeof MaintenanceCurrentRun>;
 /** The maintenance surface: the schedule, the registered jobs, the last run, and any live run. */
 export const MaintenanceStatus = z.object({
   schedule_enabled: z.boolean(),
+  // "hourly" | "daily" | "weekly" — kept as a plain string so an older/newer core's cadence
+  // this build doesn't know about still round-trips (the Select just shows it verbatim).
+  schedule_cadence: z.string(),
   schedule_hour: z.number(),
+  // 0=Monday..6=Sunday; only meaningful (non-null) for a "weekly" cadence.
+  schedule_weekday: z.number().nullish(),
+  // ISO 8601 in the tenant's timezone; null when the schedule is disabled — an estimate for
+  // display, not a guarantee (the scheduler's own due-check additionally dedupes a window).
+  next_run_at: z.string().nullish(),
   jobs: z.array(MaintenanceJob).default([]),
   last_run: MaintenanceRun.nullish(),
   current_run: MaintenanceCurrentRun.nullish(),
 });
 export type MaintenanceStatus = z.infer<typeof MaintenanceStatus>;
+
+/** A ``PUT /maintenance/schedule`` body (#621) — validated server-side as a whole. */
+export const MaintenanceScheduleUpdate = z.object({
+  enabled: z.boolean(),
+  cadence: z.string(),
+  hour: z.number(),
+  weekday: z.number().nullish(),
+});
+export type MaintenanceScheduleUpdate = z.infer<typeof MaintenanceScheduleUpdate>;

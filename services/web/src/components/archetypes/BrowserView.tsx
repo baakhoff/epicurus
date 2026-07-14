@@ -175,6 +175,8 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   const cameraRef = useRef<HTMLInputElement>(null);
   const documentRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  // The directory a search interrupted, restored when the search is cleared (#619).
+  const preSearchPathRef = useRef("");
   // Guards a folder tap against a double-fired click (touchend + click on Android
   // PWA, #428) — a real second tap on a *different* row is never this close together.
   const lastNavRef = useRef(0);
@@ -266,6 +268,10 @@ export function BrowserView({ source }: { source: BrowserSource }) {
 
   function submitSearch(e: React.FormEvent) {
     e.preventDefault();
+    // Remember the directory search interrupted, so clearing returns to it (#619) — only on
+    // the *first* submit of a session (guarded by !activeQuery): refining an already-active
+    // query must not overwrite the remembered path with "" (search already zeroed it).
+    if (!activeQuery) preSearchPathRef.current = currentPath;
     setActiveQuery(searchInput.trim());
     setCurrentPath("");
   }
@@ -273,6 +279,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   function clearSearch() {
     setSearchInput("");
     setActiveQuery("");
+    setCurrentPath(preSearchPathRef.current);
     searchRef.current?.focus();
   }
 
@@ -503,17 +510,20 @@ export function BrowserView({ source }: { source: BrowserSource }) {
             </form>
           )}
 
-          {/* upload into the current directory (#479) */}
+          {/* upload into the current directory (#479); icon-only on phone (#620) */}
           {source.upload && (
             <>
-              <Button
-                size="sm"
-                onClick={requestUpload}
-                className={cn("shrink-0", !data.search_enabled && "ml-auto")}
-                aria-label="Upload"
-              >
-                <Upload size={13} /> Upload
-              </Button>
+              <Tooltip label="Upload" side="bottom">
+                <Button
+                  size="sm"
+                  onClick={requestUpload}
+                  className={cn("shrink-0", !data.search_enabled && "ml-auto")}
+                  aria-label="Upload"
+                >
+                  <Upload size={13} />
+                  <span className="hidden sm:inline">Upload</span>
+                </Button>
+              </Tooltip>
               {/* eslint-disable-next-line no-restricted-syntax -- hidden file input (#394 carve-out): the gallery picker behind the Upload affordance */}
               <input
                 ref={galleryRef}

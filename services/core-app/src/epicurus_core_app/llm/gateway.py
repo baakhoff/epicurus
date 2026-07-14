@@ -743,9 +743,10 @@ class LlmGateway:
         """List the local runtime's models, marking the ones loaded in memory or hidden.
 
         ``with_capabilities`` additionally fills each model's ``capabilities`` (e.g. ``tools``,
-        ``vision``) by querying ``/api/show`` per model, concurrently. It costs one extra call
-        per model, so it is **opt-in** — the chat picker lists without it; the Models page asks
-        for it to badge what each model can do.
+        ``vision``) and its trained ``context_length`` (#618) by querying ``/api/show`` per
+        model, concurrently. It costs one extra call per model, so it is **opt-in** — the chat
+        picker lists without it; the Models page asks for it to badge what each model can do
+        and show its context window.
         """
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
             response = await client.get("/api/tags")
@@ -771,9 +772,10 @@ class LlmGateway:
             for m in payload.get("models", [])
         ]
         if with_capabilities and infos:
-            caps = await asyncio.gather(*(self._capabilities(info.name) for info in infos))
-            for info, info_caps in zip(infos, caps, strict=True):
-                info.capabilities = info_caps
+            details = await asyncio.gather(*(self.show(info.name) for info in infos))
+            for info, detail in zip(infos, details, strict=True):
+                info.capabilities = detail.capabilities
+                info.context_length = detail.context_length
         return infos
 
     async def _capabilities(self, model: str) -> list[str]:
@@ -796,14 +798,45 @@ class LlmGateway:
         caps = await self._capabilities(resolved)
         return "tools" in caps if caps else True
 
-    async def show(self, model: str) -> ModelDetails:
-        """Read-only facts about a local model from the runtime's ``/api/show``.
+    async def supports_vision(self, model: str | None = None, tenant_id: str | None = None) -> bool:
+        """Whether ``model`` can take image input — gates an image attachment (#633).
 
-        Returns empty details (all ``None``) rather than raising when the model isn't local or
-        the runtime is unreachable, so the model-settings sheet degrades to "unknown". The
-        trained context length lives under ``model_info`` keyed by the architecture (e.g.
-        ``llama.context_length``); fall back to any ``*.context_length`` if the arch is absent.
+        Deliberately stricter than :meth:`supports_tools` in two ways, because the failure
+        mode is worse: offering tools to a model that can't use them degrades to a plain text
+        answer, but sending an image to a model that can't see it either gets silently ignored
+        or draws a provider 400 — the exact outcome this gate exists to prevent. So: (1) hosted
+        providers are **not** assumed capable — LiteLLM already curates accurate per-model
+        vision support (its cost/context map), so we ask it rather than guess; (2) a local
+        model with no reported capabilities (older Ollama) defaults to **not** vision-capable —
+        the opposite of ``supports_tools``'s "empty means don't restrict" — only an explicit
+        ``vision`` entry says yes.
         """
+        resolved = model or await self.effective_default(tenant_id)
+        litellm_model, provider = registry.resolve(resolved)
+        if provider.is_local:
+            caps = await self._capabilities(resolved)
+            return "vision" in caps
+        try:
+            return bool(litellm.supports_vision(model=litellm_model))
+        except Exception:  # litellm raises a bare Exception for a model outside its cost map
+            log.warning("litellm supports_vision lookup failed", model=litellm_model)
+            return False
+
+    async def show(self, model: str) -> ModelDetails:
+        """Read-only facts about ``model`` — from the runtime's ``/api/show`` when local, from
+        LiteLLM's model-cost map when hosted (#633/#618).
+
+        Local: returns empty details (all ``None``) rather than raising when the runtime is
+        unreachable, so the model-settings sheet degrades to "unknown". The trained context
+        length lives under ``model_info`` keyed by the architecture (e.g.
+        ``llama.context_length``); fall back to any ``*.context_length`` if the arch is absent.
+
+        Hosted: LiteLLM's cost/context map is the source of truth for both capabilities and
+        context length — no provider call, and no fake default when the model isn't in the map.
+        """
+        _, provider = registry.resolve(model)
+        if not provider.is_local:
+            return await self._hosted_details(model)
         try:
             async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
                 response = await client.post("/api/show", json={"model": model})
@@ -838,6 +871,31 @@ class LlmGateway:
             parameter_size=details.get("parameter_size") or None,
             context_length=context_length,
             family=family if isinstance(family, str) else None,
+            capabilities=capabilities,
+        )
+
+    async def _hosted_details(self, model: str) -> ModelDetails:
+        """A hosted model's facts from LiteLLM's own model-cost/context map (#633/#618).
+
+        No network call — this is a static lookup LiteLLM ships and updates independently.
+        Empty/``None`` (never a fake default) when the model isn't in that map, e.g. a fresh
+        or unlisted hosted id — the caller (Models page, capability gating) treats that the
+        same as "unknown" it already does for a local model the runtime can't describe.
+        Hosted providers are assumed tool-capable (:meth:`supports_tools`); vision is not
+        assumed — it is exactly what LiteLLM's map reports.
+        """
+        litellm_model, _ = registry.resolve(model)
+        try:
+            info = litellm.get_model_info(model=litellm_model)
+        except Exception:  # litellm raises a bare Exception for a model outside its cost map
+            log.warning("litellm get_model_info lookup failed", model=litellm_model)
+            return ModelDetails(capabilities=["tools"])
+        context_length = info.get("max_input_tokens") or info.get("max_tokens")
+        capabilities = ["tools"]
+        if info.get("supports_vision"):
+            capabilities.append("vision")
+        return ModelDetails(
+            context_length=context_length if isinstance(context_length, int) else None,
             capabilities=capabilities,
         )
 

@@ -159,8 +159,11 @@ The operator's saved hosted-model ids (#496) — a tenant-scoped, durable home f
 model strings entered in the chat picker, so they survive restarts / a PWA reinstall and follow
 the tenant across devices (unlike the browser's per-origin `recentModels` localStorage cache).
 
-- **`GET`** → `{models: [{model, provider}]}`, most-recently-saved first. `provider` is the id's
-  `<provider>/` prefix (for grouping on the Models page).
+- **`GET`** → `{models: [{model, provider, context_length, capabilities}]}`, most-recently-saved
+  first. `provider` is the id's `<provider>/` prefix (for grouping on the Models page).
+  `context_length`/`capabilities` (#618) come from LiteLLM's own model-cost map — the same source
+  `/models/details` uses for a hosted id — always included (a static lookup, never a network
+  call); `null`/empty when the model isn't in that map, never a fake default.
 - **`POST {model}`** persists one id, idempotent — an **atomic upsert** (a re-save bumps it to the
   front; two concurrent first-saves of the same id can't race between the read and the write to a
   500). **400**s anything that isn't a *hosted* id — a known `<provider>/` prefix followed by a
@@ -217,13 +220,22 @@ takes effect on the next message with no restart. Edited in the web
 
 ---
 
-## `GET /platform/v1/maintenance` · `POST /platform/v1/maintenance/run`
+## `GET /platform/v1/maintenance` · `PUT .../schedule` · `POST .../run`
 
 The maintenance orchestrator (ADR-0060) — one coordinated batch over the core's background jobs
 (memory fact-extraction drain, module re-index fan-out). `GET` returns
-`{schedule_enabled, schedule_hour, jobs:[{key,label,nightly}], last_run, current_run}` — the
-registered jobs, the opt-in nightly schedule, the last *completed* run (or `null`), and any run
-**in flight** (or `null`).
+`{schedule_enabled, schedule_cadence, schedule_hour, schedule_weekday, next_run_at,
+jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the tenant's
+*effective* schedule (its own override, else the env-configured default), an ISO `next_run_at`
+estimate (`null` when disabled), the last *completed* run (or `null`), and any run **in flight**
+(or `null`).
+
+`PUT /schedule` sets the tenant's schedule (#621, ADR-0098) — body
+`{enabled: bool, cadence: "hourly"|"daily"|"weekly", hour: 0-23, weekday: 0-6|null}`. Validated as
+a whole before it persists: **400** on an unknown cadence, an out-of-range hour, a `"weekly"`
+cadence with no/invalid `weekday`, or a `weekday` given for a non-weekly cadence. On success
+returns the full refreshed `GET` shape. The schedule governs the orchestrator's `nightly` jobs
+**collectively** — there is no per-job schedule.
 
 `POST /run` **starts** every job now (`scope: "all"`) as a background task and returns
 **immediately** — it does not wait for the batch, which can take minutes (#561). On success it's
@@ -234,14 +246,16 @@ a *completed* run's jobs — `last_run`, and the `maintenance.completed` event �
 `ok`/`skipped`/`error`). If a batch is **already running**, `POST /run` responds **409** instead of
 starting a second one — the body is a plain `{detail}` message, not a run; the caller re-`GET`s
 `/platform/v1/maintenance` to observe/join the in-flight run via `current_run`. This also covers an
-overlapping nightly window: the scheduled run is skipped (logged, not an error) rather than racing
-the manual trigger.
+overlapping scheduled window: the scheduled run is skipped (logged, not an error) rather than
+racing the manual trigger.
 
 A tenant-scoped `maintenance.completed` NATS event carries the completed run's summary — a batch
 interrupted by app shutdown is discarded, not published. Driven by the web **Settings →
 Maintenance** card: it rehydrates onto `current_run` on mount (a refresh mid-batch lands back on
-the same run) and polls a few seconds apart while one is live. The nightly schedule runs only
-`nightly` jobs and is off unless `MAINTENANCE_SCHEDULE_ENABLED` is set.
+the same run) and polls a few seconds apart while one is live. The schedule (enable/disable +
+cadence + hour/weekday) is a poll loop (`MAINTENANCE_POLL_INTERVAL_S`, default 60s) that re-reads
+the tenant's current schedule every tick — not a single sleep computed once, since the schedule is
+now editable at runtime via `PUT`.
 
 ---
 
@@ -435,6 +449,15 @@ never handles RFC-2822 headers); otherwise it composes from `to`/`subject`/`body
 the agent can never reach it (the draft-first guarantee of ADR-0085 still holds). Relays the
 module's own hint on a Gmail scope/rate-limit error (**403**/**429**). It shares the module's
 transmit endpoint (`POST /send`) but never the agent draft pane.
+
+### `POST /platform/v1/modules/{name}/pages/{page_id}/mark-read`
+
+**Mailbox-only (#625, ADR-0087).** Marks a thread's unread messages read when the reader opens it.
+Body `{thread_id, message_ids}` → `{"thread_id": …, "marked": <count>}`. The core proxies to the
+module's `POST /pages/{page_id}/mark-read`, which flips unread at the provider (the `set_unread`
+seam, #277) and writes the read state through to the local cache (ADR-0096). Gated on the `mailbox`
+archetype (a non-mailbox page **404**s), and **operator-only** — not an MCP tool, so the agent can
+never mutate read-state. Relays the module's own hint on a provider error.
 
 ### `GET /platform/v1/modules/{name}/pages/{page_id}/attachment?message_id=…&attachment_id=…`
 

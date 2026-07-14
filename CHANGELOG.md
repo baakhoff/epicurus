@@ -20,7 +20,7 @@ images to GHCR.
   footer pinned to the bottom of the list (#624). The per-message **action row** (mark read/unread,
   archive, trash) sat at the bottom of the message and is now anchored at the **top**, and on a
   narrow viewport the buttons are **icon-only** — labels hidden from `sm:` down, with the
-  aria-label + tooltip preserved so they stay named and accessible (#626). `web` 0.101.0→0.102.0.
+  aria-label + tooltip preserved so they stay named and accessible (#626). `web` 0.107.0→0.108.0.
 
 ### Added
 
@@ -31,8 +31,94 @@ images to GHCR.
   provider (`set_unread`, the #277 seam) and **writes the read state through to the local cache**
   (ADR-0096) so the row converges immediately — no reconcile-race flicker — and reverts on a
   provider failure. Marking a whole thread read is the one case where a thread-level cache
-  write-through is unambiguous (this also retires the write-through primitives #623 added). `mail`
-  0.12.0→0.13.0; `web` 0.100.0→0.101.0.
+  write-through is unambiguous (this gives #623's write-through primitive its first caller). `mail`
+  0.12.0→0.13.0; `core-app` 0.77.0→0.78.0; `web` 0.106.0→0.107.0.
+
+- **Core: maintenance schedule controls — on/off, cadence, time of day** (#621, ADR-0098) — the
+  maintenance panel read "manual only — nightly schedule off" with no way to change it: the
+  nightly trigger was a code-level default (`MAINTENANCE_SCHEDULE_ENABLED`/`MAINTENANCE_HOUR`),
+  fixed for the process's whole lifetime, with no endpoint to edit it. Now a real, per-tenant,
+  runtime-editable schedule — enable/disable, an hourly/daily/weekly cadence, an hour (+weekday
+  for weekly), read in the tenant's timezone (ADR-0039) — governs the orchestrator's nightly
+  batch as a whole (the job registry itself stays untouched and additive-only, so the incoming
+  reflection job, #615, still rides this one shared hour per ADR-0093). Persisted per tenant
+  (`maintenance_schedule_prefs`, the same settings-primitives shape as `timezone_prefs`/
+  `page_order_prefs`); a missing row falls back to the env-configured default, so a fresh
+  install behaves exactly as before. The orchestrator now **polls** every
+  `MAINTENANCE_POLL_INTERVAL_S` (default 60s) and re-reads the schedule fresh each tick — a
+  fixed `sleep_until_hour` computed once at wake couldn't react to a schedule changed while it
+  slept. `GET /platform/v1/maintenance` gains `schedule_cadence`/`schedule_weekday`/
+  `next_run_at` (an estimate for display); a new `PUT .../schedule` validates and persists the
+  whole schedule at once (400 on an invalid shape, e.g. weekly with no weekday). The Settings
+  panel grows enable/cadence/hour/weekday controls plus an effective-schedule + next-planned-run
+  summary — a multi-field draft the operator edits and explicitly saves (auto-saving per field
+  would fire invalid combinations mid-edit). `core-app` 0.76.0→0.77.0, `web` 0.105.1→0.106.0.
+
+- **Models: show the max context window with the other model info** (#618) — the Models page
+  badged each model's capabilities (tools/vision/…) but never its trained context window, so
+  choosing between two similarly-named variants meant guessing. Local models now carry a compact
+  "128k"/"1M"-style chip alongside the existing capability badges, sourced from the same
+  `/api/show` call the capabilities already come from (opt-in, one call per model — the chat
+  picker stays light). Hosted (saved) models get the same chip, sourced from LiteLLM's own
+  model-cost map — the identical lookup #633 added for hosted vision/tool capabilities — always
+  included since it's a static lookup, not a network call. Omitted, never a fake default, when
+  the runtime/map doesn't report a length. `core-app` 0.75.0→0.76.0, `web` 0.104.0→0.105.0.
+
+- **Chat: image input — vision models see the picture, end-to-end** (#633, ADR-0095) — attaching
+  an image was silently mangled regardless of model: every `file` attachment was blindly
+  `decode("utf-8")`'d into a text preamble, so a vision-capable model never received real pixel
+  data, hosted or local. Now an image resolves separately (checked against the **stored**
+  upload's real content-type) into multimodal content parts (`image_url`) spliced into the
+  assembled turn just before the provider call — never into what gets persisted, so a stored
+  turn never balloons with base64. Gated on the selected model's **actual** vision support
+  (`gateway.supports_vision`) — stricter than the existing tool-capability check, since a
+  mis-sent image either gets ignored or draws a provider 400: hosted models are checked against
+  LiteLLM's own model-cost map (never assumed capable), and a local model with unreported
+  capabilities defaults to **not** vision-capable. A non-vision model gets a clear explanation
+  before any provider call, same shape as a normal answer, not a raw error. The same LiteLLM
+  lookup also fills in **hosted-model context length + capabilities** for
+  `GET /llm/models/details` (previously local-only), so the composer's "can't use tools"-style
+  hint now works for hosted models too, alongside a new "can't see images" hint (advisory —
+  Send still works; the server's own gate is the real enforcement). Web: the upload picker's
+  accepted types now align with the server's #175 allowlist. `epicurus-core` 0.26.0→0.27.0,
+  `core-app` 0.74.0→0.75.0, `web` 0.103.0→0.104.0.
+
+- **Calendar: toolbar reworked into one stretched row; calendars picker clamped on mobile**
+  (#628, #629) — the control row read as cramped and unbalanced; it now follows the shell's toolbar
+  convention (the board's `gap-x-3 gap-y-2` bar) — a **Today · ‹ › · period** navigation cluster on
+  the left, the page actions + **Calendars** picker + view switch pushed right by `ml-auto` so the
+  row stretches the full width; icon-only "New event"/Calendars keep it to one line on all but the
+  narrowest phones (where it wraps to a tidy second line). The **Calendars** visibility popover
+  opened **partly off a phone screen**; it is now **clamped to the viewport** — positioned `fixed`
+  from its trigger, shifted horizontally to stay on-screen, flipped above when there's more room up
+  than down, and height-capped with a scroll — so every calendar is reachable regardless of trigger
+  position. Calendar-local components only; no shared shell component changed. `web`
+  0.102.0→0.103.0.
+
+- **Calendar: tap a month day to open its week; slim event lines on phone** (#630, #632) — in the
+  month view, tapping a day **navigated into a half-started create**; it now **opens that day's
+  week view** (with the day highlighted), making the month a navigator and putting legible detail
+  one tap away in the hourly grid. Event **creation** moves to the explicit affordances — the
+  toolbar **New event** and the week grid's **empty-slot tap** (the #473 slot-seed create,
+  relocated from the month cell to the grid where Google-style calendars put it). On a **phone**,
+  a busy day showed a few blank-looking chips plus a `+2 more`; it now renders **every** event as a
+  **slim textless colour line** (density over labels — the tap-through carries the detail),
+  collapsing to a `+N` marker only past what genuinely fits. **Desktop** keeps the labelled chips.
+  `web` 0.101.0→0.102.0.
+
+- **Calendar: week view is now an hourly day-grid with drag-to-move** (#631) — the week view was a
+  plain per-day list of event cards; it is now a Google-Calendar-like **hourly grid**: one column
+  per day over hour rows, timed events **placed and sized by start/duration**, overlapping events
+  **split into side-by-side lanes**, a **pinned all-day strip** (ADR-0037) that stays put while the
+  hours scroll, a **current-time line**, and a default scroll to the morning. A timed event on a
+  writable calendar is **dragged to move** (or its bottom edge dragged to **resize**), snapped to the
+  quarter-hour and applied **optimistically**; the write goes through the event's *own* editable-
+  calendar **Edit** action (`calendar_update_event`, #208/ADR-0034) — the same tool the Edit form
+  calls, so **no module contract changes** (the module supplies data, the shell renders, ADR-0018) —
+  and rolls back with a dismissible message on provider failure. A read-only event stays
+  click-to-open. On a phone the grid **pans horizontally** with the time gutter and day headers
+  pinned. Placement and drag maths are framework-free and unit-tested
+  (`services/web/src/components/archetypes/calendarGrid.ts`). `web` 0.100.0→0.101.0.
 
 - **Mail: render HTML email properly (images, styling)** (#627, ADR-0097) — HTML mail rendered
   badly: the shell decoded every message to plain text (no images, no layout), because rendering
@@ -1004,6 +1090,23 @@ images to GHCR.
   endpoints and never enable the profile. Infra-only; no component version change.
 
 ### Fixed
+
+- **Files: search no longer strands you at the root; Upload icon-only on phone. Tasks: view
+  controls no longer wrap awkwardly** (#619, #620, #634) — three dogfood UX findings on the
+  shell's toolbars. **Files search (#619)** is a global, non-path-scoped lookup (server-side),
+  so submitting one clears the visible directory — but clearing the search used to leave the
+  reader stranded at the root instead of returning to where they were; the client now remembers
+  the pre-search directory and restores it. **Files Upload (#620)** always carried the "Upload"
+  text label even on a phone, crowding the row alongside breadcrumbs + search; it now collapses
+  to icon-only below the `sm` breakpoint via the shell's existing `hidden sm:inline` convention
+  (the same one `ActionControl`'s `iconOnlyNarrow` and the calendar toolbar use) — `aria-label` +
+  `Tooltip` keep it discoverable, desktop unaffected. **Tasks board toolbar (#634)** rendered
+  "Group by"/"Show" as independent flex items sharing a row with the (`ml-auto`-pushed) actions
+  cluster, so at common widths the two controls and the actions button(s) wrapped unpredictably
+  — a control could end up separated from its sibling, or an action stranded alone on a mostly
+  empty second line. The controls now share their own flex cluster, sibling to the actions
+  cluster, matching the calendar toolbar's nav-cluster/actions-cluster split — each group wraps
+  and reflows as a whole. `web` 0.105.0→0.105.1.
 
 - **Board/calendar actions no longer fail with a raw `NetworkError` when a module is down** (#472) —
   every manifest-declared UI action runs through one dispatch, `McpHost.call`, and it alone among the

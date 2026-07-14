@@ -10,17 +10,20 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import draft_review
+from epicurus_core import Attachment, draft_review
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
     _EMPTY_ANSWER_FALLBACK,
     _REPEAT_NUDGE,
     _STOPPED_REPEAT_CALL,
     _STOPPED_TOOL_ERRORS,
+    _STOPPED_UNSUPPORTED_MEDIA,
     _STREAM_STALLED_MESSAGE,
+    _VISION_UNSUPPORTED_MESSAGE,
     Agent,
     AgentEvent,
 )
+from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
@@ -30,9 +33,12 @@ from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
 class _FakeStreamGateway:
     """Replays scripted rounds: each round is (deltas, result)."""
 
-    def __init__(self, rounds: list[tuple[list[str], ChatResult]]) -> None:
+    def __init__(
+        self, rounds: list[tuple[list[str], ChatResult]], *, supports_vision: bool = True
+    ) -> None:
         self._rounds = list(rounds)
         self.calls: list[list[ChatMessage]] = []
+        self._supports_vision = supports_vision
 
     async def stream_chat(
         self,
@@ -50,6 +56,9 @@ class _FakeStreamGateway:
 
     async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
         return True
+
+    async def supports_vision(self, *_a: Any, **_k: Any) -> bool:
+        return self._supports_vision
 
 
 class _FakeMcp:
@@ -838,4 +847,63 @@ async def test_stream_distinct_args_repeats_pass_untouched() -> None:
     assert done.turn is not None and done.turn.stopped == "completed"
     assert done.turn.content == "all read"
     assert len(mcp.calls_made) == 2  # both distinct calls ran
+
+
+# ── image attachments, gated on model vision support (#633) ─────────────────────────
+
+
+class _FakeExpander:
+    def __init__(self, images: list[ImagePart]) -> None:
+        self._images = images
+
+    async def expand(self, attachments: list[Attachment], *, tenant: str) -> ExpandedAttachments:
+        return ExpandedAttachments(images=self._images)
+
+
+def _image_part() -> ImagePart:
+    return ImagePart(mime="image/png", data_b64="aGVsbG8=", title="photo.png")
+
+
+def _image_message() -> ChatMessage:
+    return ChatMessage(
+        role="user",
+        content="what is this?",
+        attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
+    )
+
+
+async def test_stream_attaches_image_content_when_model_supports_vision() -> None:
+    gw = _FakeStreamGateway([(["I see ", "a cat"], ChatResult(model="m", content="I see a cat"))])
+    expander = _FakeExpander([_image_part()])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([_image_message()])]
+
+    assert [e.type for e in events] == ["delta", "delta", "done"]
+    done = events[-1]
+    assert done.turn is not None
+    assert done.turn.content == "I see a cat"
+    assert done.turn.stopped == "completed"
+    [sent] = [m for m in gw.calls[0] if m.role == "user"]
+    assert sent.content == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+    ]
+
+
+async def test_stream_blocks_image_before_any_provider_call_when_model_lacks_vision() -> None:
+    gw = _FakeStreamGateway(
+        [(["should never stream"], ChatResult(model="m", content="should never stream"))],
+        supports_vision=False,
+    )
+    expander = _FakeExpander([_image_part()])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([_image_message()])]
+
+    assert [e.type for e in events] == ["delta", "done"]
+    assert events[0].text == _VISION_UNSUPPORTED_MESSAGE
+    done = events[-1]
+    assert done.turn is not None
+    assert done.turn.content == _VISION_UNSUPPORTED_MESSAGE
+    assert done.turn.stopped == _STOPPED_UNSUPPORTED_MEDIA
+    assert gw.calls == []  # no provider call at all
     assert not any(m.role == "user" and m.content == _REPEAT_NUDGE for c in gw.calls for m in c)

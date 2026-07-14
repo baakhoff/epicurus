@@ -8,6 +8,7 @@ the per-message estimate so the intent is clear.
 from __future__ import annotations
 
 from epicurus_core_app.llm.compaction import (
+    _IMAGE_TOKEN_ESTIMATE,
     compact_messages,
     estimate_tokens,
     estimate_tools_tokens,
@@ -46,6 +47,23 @@ def test_message_tokens_counts_content_and_tool_calls() -> None:
         tool_calls=[{"id": "1", "function": {"name": "f", "arguments": "{}"}}],
     )
     assert message_tokens(with_calls) > 4  # the tool-call JSON adds to the estimate
+
+
+def test_message_tokens_counts_multimodal_image_parts() -> None:
+    # A message whose content is multimodal parts (#633) must not be estimated via len() on the
+    # list itself (that would count *parts*, e.g. 2, not the actual — much larger — payload).
+    text_only = ChatMessage(role="user", content="describe this")
+    with_image = ChatMessage(
+        role="user",
+        content=[
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 5000}},
+        ],
+    )
+    assert message_tokens(with_image) == message_tokens(text_only) + _IMAGE_TOKEN_ESTIMATE
+    # A large base64 payload must not itself inflate the estimate beyond the flat constant —
+    # image tokens are priced by resolution, not by how many base64 characters they encode.
+    assert message_tokens(with_image) < 2 * _IMAGE_TOKEN_ESTIMATE
 
 
 def test_estimate_tools_tokens_zero_when_no_tools() -> None:
@@ -95,6 +113,33 @@ def test_compact_always_keeps_at_least_the_final_message() -> None:
     tags = [c.split(" ", 1)[0] for c in _contents(out) if c]
     assert "LAST" in tags  # the user's actual question is never dropped
     assert tags[0] == "S"
+
+
+def test_compact_budgets_an_image_message_as_real_weight_not_two_parts() -> None:
+    # The newest turn carries an image (#633) — its cost must count against the budget for real,
+    # not as if `content` (a 2-item list) were estimated the way a 2-character string would be.
+    image_msg = ChatMessage(
+        role="user",
+        content=[
+            {"type": "text", "text": "LAST"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 5000}},
+        ],
+    )
+    messages = [_msg("system", "S"), _msg("user", "U1"), _msg("assistant", "A1"), image_msg]
+    sys = message_tokens(messages[0])
+    per_old_turn = message_tokens(messages[1])
+    image_cost = message_tokens(image_msg)
+    assert image_cost > per_old_turn * 10  # the image dwarfs an ordinary text turn, as expected
+
+    # Enough for the system prefix + the image turn + exactly one old turn.
+    out = compact_messages(messages, budget=sys + image_cost + per_old_turn)
+    tags = [c.split(" ", 1)[0] for c in _contents(out) if isinstance(c, str)]
+    assert out[-1].content == image_msg.content  # the image turn always survives (newest)
+    assert tags == ["S", "A1"]  # exactly one old turn fits alongside it
+
+    # Only enough for the system prefix + the image turn — no room for any old turn at all.
+    tight = compact_messages(messages, budget=sys + image_cost)
+    assert [m.content for m in tight] == [messages[0].content, image_msg.content]
 
 
 def test_compact_never_orphans_a_tool_result() -> None:

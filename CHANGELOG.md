@@ -1051,6 +1051,23 @@ images to GHCR.
 
 ### Fixed
 
+- **Files: search no longer strands you at the root; Upload icon-only on phone. Tasks: view
+  controls no longer wrap awkwardly** (#619, #620, #634) — three dogfood UX findings on the
+  shell's toolbars. **Files search (#619)** is a global, non-path-scoped lookup (server-side),
+  so submitting one clears the visible directory — but clearing the search used to leave the
+  reader stranded at the root instead of returning to where they were; the client now remembers
+  the pre-search directory and restores it. **Files Upload (#620)** always carried the "Upload"
+  text label even on a phone, crowding the row alongside breadcrumbs + search; it now collapses
+  to icon-only below the `sm` breakpoint via the shell's existing `hidden sm:inline` convention
+  (the same one `ActionControl`'s `iconOnlyNarrow` and the calendar toolbar use) — `aria-label` +
+  `Tooltip` keep it discoverable, desktop unaffected. **Tasks board toolbar (#634)** rendered
+  "Group by"/"Show" as independent flex items sharing a row with the (`ml-auto`-pushed) actions
+  cluster, so at common widths the two controls and the actions button(s) wrapped unpredictably
+  — a control could end up separated from its sibling, or an action stranded alone on a mostly
+  empty second line. The controls now share their own flex cluster, sibling to the actions
+  cluster, matching the calendar toolbar's nav-cluster/actions-cluster split — each group wraps
+  and reflows as a whole. `web` 0.105.0→0.105.1.
+
 - **Board/calendar actions no longer fail with a raw `NetworkError` when a module is down** (#472) —
   every manifest-declared UI action runs through one dispatch, `McpHost.call`, and it alone among the
   core's outbound module calls had **no timeout and no transport-failure mapping** — unlike the sibling

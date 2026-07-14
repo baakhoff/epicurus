@@ -257,6 +257,28 @@ describe("BoardView", () => {
     expect(group.value).toBe("status"); // optimistically reflected while refetching
   });
 
+  it("groups view controls and page actions into separate toolbar clusters (#634)", async () => {
+    // "Group by"/"Show" must wrap and reflow as one cohesive unit, distinct from the actions
+    // cluster — never splitting a control from its sibling or stranding an action alone.
+    mockModulePage.mockResolvedValue({
+      ...BOARD,
+      controls: [
+        { id: "group", label: "Group by", value: "due", options: [{ value: "due", label: "Due date" }] },
+        { id: "show", label: "Show", value: "open", options: [{ value: "open", label: "Open" }] },
+      ],
+    });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+    await screen.findByText("Buy milk");
+
+    const groupLabel = screen.getByLabelText("Group by").closest("label");
+    const showLabel = screen.getByLabelText("Show").closest("label");
+    const addButton = await screen.findByRole("button", { name: /add task/i });
+    const controlsCluster = groupLabel?.parentElement;
+
+    expect(controlsCluster).toContainElement(showLabel);
+    expect(controlsCluster).not.toContainElement(addButton);
+  });
+
   // ── drag-and-drop move (#380) ──────────────────────────────────────────────
 
   // A list-grouped board: two list columns, the card's Edit action carries the `to_list_id`

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { api } from "@/lib/api";
 import { ChatScreen } from "@/screens/ChatScreen";
@@ -132,11 +132,13 @@ describe("Chat tail controls while unreachable (#530)", () => {
 // things that matter: every user message is editable, the *named* message is the one revised,
 // and nothing is discarded before the user has seen the count and agreed.
 describe("Editing any user message in history (#552)", () => {
-  let editAndRerun: ReturnType<typeof vi.fn>;
+  // Typed to the store's own action, so a change to `editAndRerun`'s signature fails here
+  // rather than silently letting the mock drift from what it stands in for.
+  let editAndRerun: Mock<typeof realEditAndRerun>;
 
   beforeEach(() => {
     vi.mocked(api.sessionMessages).mockResolvedValue(TWO_EXCHANGES as never);
-    editAndRerun = vi.fn().mockResolvedValue(undefined);
+    editAndRerun = vi.fn<typeof realEditAndRerun>().mockResolvedValue(undefined);
     useChat.setState({ editAndRerun });
   });
 

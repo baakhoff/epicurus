@@ -90,7 +90,50 @@ app = module.http_app()
 | `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054) |
 
 ### `ToolSpec`
-`name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema).
+`name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema) ·
+`writes_document: WritesDocument | None = None` (below).
+
+### `WritesDocument` — opt a tool into the live document pane (#541, ADR-0100)
+
+Marks a tool as *writing a document* and names the arguments the document travels in. When the
+agent calls an annotated tool, the shell opens the document beside the chat — the `editor`
+archetype hosted in a pane — so the artifact is visible while it is written and editable the
+moment it lands. Generic by design: the shell reads the annotation, never the module's name
+(ADR-0018/0019).
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `content_arg` | `str` | — | **required** — the argument holding the document body |
+| `title_arg` | `str \| None` | `None` | the argument holding a human title, for the pane header |
+| `target_arg` | `str \| None` | `None` | the argument naming the document the write lands in (a path or id) |
+
+It is an **annotation, not a capability**: the tool keeps its own name, schema, and behavior,
+and gains no endpoint or obligation. Omit it and nothing changes — an un-annotated write still
+degrades to the entity refs the envelope already carries (ADR-0019).
+
+The named arguments are **validated against the tool's own `input_schema`** when the manifest is
+built, so a typo fails there instead of surfacing later as a pane that silently never fills.
+(Skipped when the tool publishes no `properties` — `input_schema` is optional.)
+
+Additive on the wire: a core predating the field parses the manifest and ignores it, and
+`CONTRACT_VERSION` does not move — so a module can adopt it independently of the core that
+reads it.
+
+```python
+ToolSpec(
+    name="knowledge_create_doc",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "required": ["path", "content"],
+    },
+    writes_document=WritesDocument(content_arg="content", title_arg="title", target_arg="path"),
+)
+```
 
 ### `EventSpec`
 `subject: str` · `description: str = ""`. `subject` is the **base** subject;

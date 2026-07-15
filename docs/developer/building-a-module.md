@@ -25,6 +25,27 @@ def greet(name: str) -> str:
     return f"Hello, {name}!"
 ```
 
+### Tools that write a document
+
+If a tool writes a document the user should watch take shape, annotate it with
+`writes_document` (#541, [ADR-0100](../reference/modules.md#writesdocument--opt-a-tool-into-the-live-document-pane-541-adr-0100)).
+Name the arguments the document travels in, and the shell opens it in a pane beside the chat
+when the agent makes the call — then hands the user the normal editor once the write lands:
+
+```python
+from epicurus_core import WritesDocument
+
+@module.tool(writes_document=WritesDocument(content_arg="content", title_arg="title", target_arg="path"))
+def create_doc(path: str, title: str, content: str) -> str:
+    """Create a document."""
+    ...
+```
+
+The module ships **no UI** for this — it declares which arguments carry the document, the shell
+renders it (ADR-0018/0019). The names are checked against the tool's generated input schema when
+the manifest is built, so a typo fails immediately. Omit the annotation and nothing changes: the
+write still surfaces through the entity refs on the turn's envelope.
+
 ## Declare events
 
 Declare the event subjects the module publishes or subscribes to. Subjects are

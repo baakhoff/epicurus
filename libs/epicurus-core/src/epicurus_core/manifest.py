@@ -27,6 +27,7 @@ __all__ = [
     "ToolSpec",
     "UiAction",
     "UiSection",
+    "WritesDocument",
 ]
 
 PageArchetype = Literal["browser", "calendar", "editor", "board", "review", "mailbox"]
@@ -40,12 +41,61 @@ cannot invent a new shape — the vocabulary extends only in core.
 """
 
 
+class WritesDocument(BaseModel):
+    """Marks a tool as *writing a document*, and says which arguments carry it (ADR-0100).
+
+    The seam behind the shell's live document pane (#541): a module declares that a tool
+    produces a document and names the arguments it travels in, and the shell opens the pane
+    beside chat when the agent calls it — for **any** module, with no per-module code in the
+    web (ADR-0018/0019: the module supplies data, the shell renders).
+
+    It is an annotation, not a capability: the tool keeps its own name, schema, and behavior,
+    and a core that doesn't understand this field simply ignores it. Only ``content_arg`` is
+    required — it names the argument holding the document body. ``title_arg`` names a human
+    title for the pane header, ``target_arg`` the document the write lands in (a path or id),
+    so the pane can show what is being written before the tool returns; either may be omitted
+    when the tool has no such argument, and the shell falls back to what the result carries.
+    """
+
+    content_arg: str = Field(min_length=1)
+    title_arg: str | None = None
+    target_arg: str | None = None
+
+    def named_args(self) -> list[str]:
+        """The tool arguments this annotation points at (``content_arg`` first)."""
+        return [a for a in (self.content_arg, self.title_arg, self.target_arg) if a is not None]
+
+
 class ToolSpec(BaseModel):
     """A tool the module exposes to the agent over MCP."""
 
     name: str
     description: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    # Opt in to the shell's live document pane by naming the args the document travels in
+    # (#541, ADR-0100). Absent on the vast majority of tools — a tool that writes no document
+    # simply omits it, and its calls render as they always have.
+    writes_document: WritesDocument | None = None
+
+    @model_validator(mode="after")
+    def _writes_document_names_real_args(self) -> ToolSpec:
+        # The annotation is only useful if it points at arguments the tool actually takes; a
+        # typo would otherwise surface as a pane that silently never fills. Checked here so a
+        # module fails at manifest-build time — the same "enforced, not just documented"
+        # posture as UiAction's danger/confirm rule. Skipped when the tool declares no
+        # properties to check against (input_schema is optional).
+        if self.writes_document is None:
+            return self
+        properties = self.input_schema.get("properties")
+        if not isinstance(properties, dict):
+            return self
+        unknown = [arg for arg in self.writes_document.named_args() if arg not in properties]
+        if unknown:
+            raise ValueError(
+                f"tool {self.name!r}: writes_document names {unknown}, "
+                f"which are not arguments of its input_schema"
+            )
+        return self
 
 
 class EventSpec(BaseModel):

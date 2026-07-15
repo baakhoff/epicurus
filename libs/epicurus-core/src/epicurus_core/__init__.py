@@ -56,6 +56,7 @@ from epicurus_core.manifest import (
     ToolSpec,
     UiAction,
     UiSection,
+    WritesDocument,
 )
 from epicurus_core.messaging import (
     MESSAGING_INBOUND,
@@ -154,6 +155,7 @@ __all__ = [
     "ToolSpec",
     "UiAction",
     "UiSection",
+    "WritesDocument",
     "__version__",
     "add_manifest_route",
     "add_ops_routes",

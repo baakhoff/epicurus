@@ -24,6 +24,20 @@ images to GHCR.
 
 ### Added
 
+- **Modules: a `writes_document` tool annotation** (part of #541, ADR-0100) — the groundwork for
+  the live document pane. A module declares, per tool, that it *writes a document* and names the
+  arguments the document travels in — `writes_document: {content_arg, title_arg?, target_arg?}` on
+  `ToolSpec`, declared through the usual decorator (`@module.tool(writes_document=…)`). The shell
+  will use it to open the document beside the chat while the agent writes it, for **any** module,
+  with no per-module web code (ADR-0018/0019) and no name-sniffing. It is an annotation, not a
+  capability: the tool keeps its own name, schema, and behavior, gains no endpoint, and a tool that
+  writes no document simply omits it. The named arguments are **validated against the tool's own
+  input schema** at manifest-build time — a typo fails there instead of surfacing later as a pane
+  that silently never fills — and declaring one for a tool that never registered is an error rather
+  than a silent drop. Additive on the wire (`CONTRACT_VERSION` unmoved): a core predating the field
+  ignores it, so a module can adopt it independently. No consumer yet — the pane, and knowledge +
+  notes declaring the annotation, follow. `epicurus-core` 0.27.0→0.28.0.
+
 - **Chat: edit any user message in history, regenerating from that point** (#552) — editing was
   limited to the **last** user message (#302), so fixing a typo three turns back meant retyping the
   conversation. Every user message now carries the same inline **Edit** affordance (revealed on

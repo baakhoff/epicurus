@@ -288,6 +288,9 @@ export const MessageActivity = z.object({
 export type MessageActivity = z.infer<typeof MessageActivity>;
 
 export const MessageRecord = z.object({
+  /** The message's stable id — what `editAndRerun` names to edit a turn other than the
+   *  last one (#552). Opaque: it addresses a row the session already scopes. */
+  id: z.number(),
   role: z.string(),
   content: z.string(),
   created_at: z.coerce.date(),

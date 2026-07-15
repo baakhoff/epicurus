@@ -66,10 +66,15 @@ class RegenerateRequest(BaseModel):
 
 
 class EditRequest(BaseModel):
-    """Body for POST /sessions/{id}/edit — replace the last user message, then re-answer."""
+    """Body for POST /sessions/{id}/edit — replace a user message, then re-answer.
+
+    ``message_id`` names the turn to revise (#552); omitted, it defaults to the session's last
+    user message — the only turn #302 could edit, so callers predating this field are unchanged.
+    """
 
     content: str
     model: str | None = None
+    message_id: int | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -344,19 +349,52 @@ def create_agent_router(
 
     @router.post("/sessions/{session_id}/edit")
     async def edit(session_id: str, request: EditRequest) -> StreamingResponse:
-        """Replace the last user message with ``content`` and re-answer it, streamed (#302).
+        """Replace a user message with ``content`` and re-answer from there, streamed (#302, #552).
 
-        Edits in place (not a branch): the last user turn's text is updated and re-indexed,
-        everything after it is truncated, then a fresh — and durable (#376) — turn streams.
-        Emits an ``error`` event if there's no user turn or the new content is empty."""
+        Edits in place (not a branch): the named turn's text is updated, everything after it is
+        truncated, then a fresh — and durable (#376) — turn streams. ``message_id`` selects the
+        turn and defaults to the last user message (#302's only target); editing further back
+        discards the real turns behind it, which is why the client confirms first.
+
+        Every check runs *before* anything is written, so a rejected edit leaves history exactly
+        as it was — a bad anchor must never cost the user the tail of their conversation. Emits
+        an ``error`` event when the content is empty, the session has no user turn, the anchor
+        isn't a user message of *this* conversation, or a turn is already running (revising under
+        a live run would truncate history the run is mid-way through answering).
+        """
         content = request.content.strip()
-        last_user = await memory.last_user_message_id(tenant=tenant, session_id=session_id)
-        if last_user is None or not content:
+        if not content:
             return _one_off(AgentEvent(type="error", detail="nothing to edit"))
+        # Ordered ahead of the write: the one-run guard lives in ``runs.start`` (a 409 from
+        # ``_start_turn_response``), which today's flow only reaches *after* revising and
+        # truncating — leaving the history cut and unanswered. Checking here keeps the reject
+        # side-effect-free. A run starting in the gap still 409s there, unchanged.
+        if runs.active_for_session(tenant=tenant, session_id=session_id) is not None:
+            return _one_off(
+                AgentEvent(type="error", detail="wait for this turn to finish before editing")
+            )
+        anchor = request.message_id
+        if anchor is None:
+            anchor = await memory.last_user_message_id(tenant=tenant, session_id=session_id)
+            if anchor is None:
+                return _one_off(AgentEvent(type="error", detail="nothing to edit"))
+        else:
+            # Scoped to this session, so an id from another conversation reads as absent.
+            role = await memory.message_role(
+                tenant=tenant, session_id=session_id, message_id=anchor
+            )
+            if role is None:
+                return _one_off(
+                    AgentEvent(type="error", detail="that message is not in this conversation")
+                )
+            if role != "user":
+                return _one_off(
+                    AgentEvent(type="error", detail="only your own messages can be edited")
+                )
         await memory.revise_message(
-            tenant=tenant, session_id=session_id, message_id=last_user, content=content
+            tenant=tenant, session_id=session_id, message_id=anchor, content=content
         )
-        await memory.truncate_after(tenant=tenant, session_id=session_id, after_id=last_user)
+        await memory.truncate_after(tenant=tenant, session_id=session_id, after_id=anchor)
         return await _start_turn_response(
             lambda: agent.run_stream(
                 [], model=request.model, session_id=session_id, persist_input=False

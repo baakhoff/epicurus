@@ -830,9 +830,14 @@ export function ChatScreen() {
   const [dragActive, setDragActive] = useState(false);
   const uploadSeq = useRef(0);
   const dragDepth = useRef(0);
-  // Inline edit of the last user message (#302): the index being edited + its draft text.
+  // Inline edit of a user message (#302, #552): the index being edited + its draft text.
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
+  // A mid-history edit awaiting confirmation (#552) — held here until the user accepts losing
+  // the turns after it, since applying it is what discards them.
+  const [confirmingEdit, setConfirmingEdit] = useState<{ idx: number; content: string } | null>(
+    null,
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
@@ -1002,6 +1007,10 @@ export function ChatScreen() {
     chat.awaiting === null &&
     chat.awaitingDraft === null;
 
+  // What a pending mid-history edit would discard: every message after the edited one — the
+  // answer to it and every turn since (#552).
+  const discardedByEdit = confirmingEdit === null ? 0 : messages.length - confirmingEdit.idx - 1;
+
   const onTurnDone = async () => {
     await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
     void queryClient.invalidateQueries({ queryKey: ["sessions"] });
@@ -1023,20 +1032,36 @@ export function ChatScreen() {
     setEditText("");
   };
 
-  // Save an edited last user message: optimistically show the corrected text (and drop the
-  // old answer), then stream the new answer. The server edits + truncates server-side.
-  const saveEdit = () => {
-    const content = editText.trim();
-    if (!content || chat.streaming || lastUserIdx < 0 || connectionLost) return;
+  // Apply an edit to the user message at `idx`: optimistically show the corrected text and
+  // drop everything after it, then stream the new answer. The server revises + truncates the
+  // same tail, keyed by the message's own id rather than its position (#552).
+  const applyEdit = (idx: number, content: string) => {
+    const target = messages[idx];
+    if (!target) return;
     setEditingIdx(null);
+    setEditText("");
     queryClient.setQueryData<MessageRecord[]>(["session", chat.sessionId], (old) => {
-      const trimmed = (old ?? []).slice(0, lastUserIdx + 1);
+      const trimmed = (old ?? []).slice(0, idx + 1);
       const last = trimmed[trimmed.length - 1];
       if (last) trimmed[trimmed.length - 1] = { ...last, content };
       return trimmed;
     });
     pin();
-    void chat.editAndRerun(content, model, onTurnDone);
+    void chat.editAndRerun(content, model, onTurnDone, target.id);
+  };
+
+  // Save an edited user message. Editing the last one only replaces the answer that is about
+  // to be regenerated, so it goes straight through (#302's behavior, unchanged). Editing
+  // further back discards real turns — confirm with the count before any of it is lost (#552).
+  const saveEdit = () => {
+    const content = editText.trim();
+    const idx = editingIdx;
+    if (!content || idx === null || chat.streaming || connectionLost) return;
+    if (idx < lastUserIdx) {
+      setConfirmingEdit({ idx, content });
+      return;
+    }
+    applyEdit(idx, content);
   };
 
   // A starter chip fills the composer and hands over the caret — it never sends on the
@@ -1260,7 +1285,7 @@ export function ChatScreen() {
                   </div>
                 </div>
               ) : (
-                <div key={i} className="flex flex-col items-end gap-1">
+                <div key={i} className="group/msg flex flex-col items-end gap-1">
                   <div className="max-w-[85%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">
                     {message.content}
                   </div>
@@ -1271,14 +1296,20 @@ export function ChatScreen() {
                       ))}
                     </div>
                   )}
-                  {i === lastUserIdx && turnControlsVisible && (
+                  {turnControlsVisible && (
                     <button
                       aria-label="Edit message"
                       onClick={() => {
                         setEditingIdx(i);
                         setEditText(message.content);
                       }}
-                      className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink"
+                      // Always at hand on the latest ask; earlier turns reveal it on hover or
+                      // keyboard focus, to keep the transcript quiet (#480's Copy pattern).
+                      className={cn(
+                        "flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink",
+                        i !== lastUserIdx &&
+                          "opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100",
+                      )}
                     >
                       <Pencil size={12} /> Edit
                     </button>
@@ -1496,6 +1527,21 @@ export function ChatScreen() {
       </div>
 
       <SessionsSheet open={sessionsOpen} onClose={() => setSessionsOpen(false)} />
+      {/* Editing back in the history rewrites the conversation from there — say how much of it
+          goes before anything is lost (#552). Cancelling leaves the composer open, draft intact. */}
+      <Confirm
+        open={confirmingEdit !== null}
+        message={discardedByEdit === 1
+          ? "Resending this message removes the 1 later message in this conversation."
+          : `Resending this message removes the ${discardedByEdit} later messages in this conversation.`}
+        confirmLabel="Resend"
+        danger
+        onConfirm={() => {
+          if (confirmingEdit) applyEdit(confirmingEdit.idx, confirmingEdit.content);
+          setConfirmingEdit(null);
+        }}
+        onCancel={() => setConfirmingEdit(null)}
+      />
     </div>
   );
 }

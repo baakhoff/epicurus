@@ -79,8 +79,8 @@ async def test_expand_chat_attachment_includes_the_transcript() -> None:
     store = await _attachment_store()
     when = datetime(2026, 1, 1, tzinfo=UTC)
     history = [
-        MessageRecord(role="user", content="hello", created_at=when),
-        MessageRecord(role="assistant", content="hi there", created_at=when),
+        MessageRecord(id=1, role="user", content="hello", created_at=when),
+        MessageRecord(id=2, role="assistant", content="hi there", created_at=when),
     ]
     out = await _expander(store, memory=_FakeMemory(history)).expand(
         [Attachment(att_id="x", source="chat", ref_id="s1", title="earlier chat")], tenant="t"

@@ -24,6 +24,26 @@ images to GHCR.
 
 ### Added
 
+- **Chat: edit any user message in history, regenerating from that point** (#552) — editing was
+  limited to the **last** user message (#302), so fixing a typo three turns back meant retyping the
+  conversation. Every user message now carries the same inline **Edit** affordance (revealed on
+  hover/focus on earlier turns, the #480 per-turn pattern), opening #302's in-place composer.
+  Editing keeps #302's decision — revise in place and truncate, never branch — so editing turn *k*
+  discards turns *k+1..n* and streams a fresh answer under it. Because that throws away **real**
+  content, a mid-history edit now **confirms with the count** ("removes the N later messages");
+  editing the last message is unchanged and confirms nothing. `POST /sessions/{id}/edit` gains an
+  optional `message_id` (absent ⇒ the last user message, so existing callers are untouched), and
+  the transcript (`GET /sessions/{id}`) now carries each message's `id` as the anchor to name.
+  Validation runs **before** any write — the anchor must be a **user** message of **this** session,
+  and no turn may be running — so a rejected edit can never leave the conversation truncated. That
+  ordering also fixes a latent bug inherited from #302: `/edit` revised and truncated *before*
+  reaching the one-run 409, which for a mid-history edit would have destroyed real turns and then
+  refused to re-answer. Nothing re-indexes the revised text — messages are not a recall corpus
+  (ADR-0045), so `memory_search` reads the new text (and none of the discarded turns) straight from
+  the store; the extraction queue (#326) is likewise unaffected, holding a **text snapshot** rather
+  than a reference to a message that may no longer exist. `core-app` 0.78.0→0.79.0; `web`
+  0.108.0→0.109.0.
+
 - **Mail: mark message read on open** (#625) — a message stayed unread until acted on explicitly.
   Opening a conversation now marks its unread messages read at once: the shell flips the list row
   (and the messages' badges) **optimistically**, then calls a new operator-gated

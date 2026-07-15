@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { api } from "@/lib/api";
 import { ChatScreen } from "@/screens/ChatScreen";
 import { useChat } from "@/stores/chat";
 import { useConnection } from "@/stores/connection";
@@ -13,10 +14,7 @@ vi.mock("@/lib/api", () => ({
     models: vi.fn().mockResolvedValue([{ name: "llama3.2", loaded: true, hidden: false }]),
     providers: vi.fn().mockResolvedValue([]),
     sessions: vi.fn().mockResolvedValue([]),
-    sessionMessages: vi.fn().mockResolvedValue([
-      { role: "user", content: "first question", created_at: new Date(), entity_refs: [], attachments: [] },
-      { role: "assistant", content: "an answer", created_at: new Date(), entity_refs: [], attachments: [] },
-    ]),
+    sessionMessages: vi.fn(),
     deleteSession: vi.fn().mockResolvedValue({ deleted: 0 }),
     activeRun: vi.fn().mockResolvedValue(null), // no in-flight run to recover (#376)
     cancelActiveRun: vi.fn().mockResolvedValue({ cancelled: false }),
@@ -46,7 +44,30 @@ function wrapper({ children }: { children: ReactNode }) {
   );
 }
 
+const msg = (id: number, role: string, content: string) => ({
+  id,
+  role,
+  content,
+  created_at: new Date(),
+  entity_refs: [],
+  attachments: [],
+});
+
+/** One exchange — the last user message is the only one there is. */
+const ONE_EXCHANGE = [msg(1, "user", "first question"), msg(2, "assistant", "an answer")];
+/** Two exchanges, so there is history *behind* the last user message to edit into (#552). */
+const TWO_EXCHANGES = [
+  ...ONE_EXCHANGE,
+  msg(3, "user", "second question"),
+  msg(4, "assistant", "another answer"),
+];
+
+// The chat store is a module-level singleton, so a test that swaps an action has to put the
+// real one back or it leaks into every test after it.
+const realEditAndRerun = useChat.getState().editAndRerun;
+
 beforeEach(() => {
+  vi.mocked(api.sessionMessages).mockResolvedValue(ONE_EXCHANGE as never);
   useChat.setState({
     draft: "",
     streaming: false,
@@ -56,6 +77,7 @@ beforeEach(() => {
     error: null,
     paused: false,
     abort: null,
+    editAndRerun: realEditAndRerun,
   });
   useConnection.setState({ online: true, coreDown: false });
 });
@@ -103,5 +125,89 @@ describe("Chat tail controls while unreachable (#530)", () => {
     // inside saveEdit() must catch it too, or the editor would close on a failed resend.
     fireEvent.keyDown(editor, { key: "Enter" });
     expect(screen.getByRole("button", { name: "Resend" })).toBeInTheDocument();
+  });
+});
+
+// Editing back in the history rewrites the conversation from that point (#552). The three
+// things that matter: every user message is editable, the *named* message is the one revised,
+// and nothing is discarded before the user has seen the count and agreed.
+describe("Editing any user message in history (#552)", () => {
+  let editAndRerun: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.mocked(api.sessionMessages).mockResolvedValue(TWO_EXCHANGES as never);
+    editAndRerun = vi.fn().mockResolvedValue(undefined);
+    useChat.setState({ editAndRerun });
+  });
+
+  /** Open the inline editor on the user message at `idx` (0-based over user messages). */
+  async function openEditor(idx: number) {
+    const buttons = await screen.findAllByRole("button", { name: "Edit message" });
+    fireEvent.click(buttons[idx]);
+    return (await screen.findByLabelText("Edit message")) as HTMLTextAreaElement;
+  }
+
+  it("offers Edit on every user message, not just the last", async () => {
+    render(<ChatScreen />, { wrapper });
+    expect(await screen.findByText("second question")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Edit message" })).toHaveLength(2);
+  });
+
+  it("seeds the editor from the message that was clicked, not the last one", async () => {
+    render(<ChatScreen />, { wrapper });
+    expect((await openEditor(0)).value).toBe("first question");
+  });
+
+  it("confirms with the count of what a mid-history edit discards", async () => {
+    render(<ChatScreen />, { wrapper });
+    const editor = await openEditor(0);
+    fireEvent.change(editor, { target: { value: "reworded" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resend" }));
+
+    // The answer, the follow-up ask, and its answer — 3 messages after the edited one.
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(
+      "removes the 3 later messages",
+    );
+    expect(editAndRerun).not.toHaveBeenCalled(); // nothing sent until it's agreed to
+  });
+
+  it("cancelling the confirm discards nothing and keeps the draft", async () => {
+    render(<ChatScreen />, { wrapper });
+    const editor = await openEditor(0);
+    fireEvent.change(editor, { target: { value: "reworded" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resend" }));
+    // The dialog's Cancel, not the inline editor's (both are on screen).
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(editAndRerun).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect((await screen.findByLabelText("Edit message")) as HTMLTextAreaElement).toHaveValue(
+      "reworded",
+    );
+  });
+
+  it("confirming sends the edit against the clicked message's own id", async () => {
+    render(<ChatScreen />, { wrapper });
+    const editor = await openEditor(0);
+    fireEvent.change(editor, { target: { value: "reworded" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resend" }));
+    // The dialog's own Resend — the inline editor's is gone once the confirm is up.
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resend" }));
+
+    // id 1 — the message actually clicked, not id 3 (the last user turn #302 would have hit).
+    expect(editAndRerun).toHaveBeenCalledWith("reworded", null, expect.any(Function), 1);
+  });
+
+  it("edits the last user message with no confirm, exactly as before (#302)", async () => {
+    render(<ChatScreen />, { wrapper });
+    const editor = await openEditor(1);
+    fireEvent.change(editor, { target: { value: "corrected" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resend" }));
+
+    // Nothing real is lost — only the answer being regenerated — so it goes straight through.
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(editAndRerun).toHaveBeenCalledWith("corrected", null, expect.any(Function), 3);
   });
 });

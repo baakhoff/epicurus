@@ -14,13 +14,21 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from epicurus_core import LIST_CAP, Attachment, DraftReview, EntityRef, ToolEnvelope, get_logger
+from epicurus_core import (
+    LIST_CAP,
+    Attachment,
+    DraftReview,
+    EntityRef,
+    ToolEnvelope,
+    WritesDocument,
+    get_logger,
+)
 from epicurus_core_app.agent.activity import (
     ActivityItem,
     MessageActivity,
@@ -164,6 +172,37 @@ def _tool_detail(arguments: dict[str, Any]) -> str | None:
     except (TypeError, ValueError):
         return None
     return rendered[:_TOOL_DETAIL_CAP]
+
+
+#: Resolves a tool name to ``(module_name, annotation)`` when the tool declares
+#: ``writes_document``, else ``None`` (#541, ADR-0100). Backed by the module registry's
+#: manifests; injected so the agent loop needn't know the registry exists.
+DocumentToolLookup = Callable[[str], Awaitable[tuple[str, WritesDocument] | None]]
+
+
+def _document_payload(
+    module: str, spec: WritesDocument, arguments: dict[str, Any]
+) -> dict[str, Any] | None:
+    """What an annotated call is writing, for the shell's document pane (#541, ADR-0101).
+
+    ``None`` when the call carries no usable body — the annotation promises the argument
+    exists (the manifest validates that), not that the model filled it with a string. A pane
+    with nothing to show is worse than no pane, and this is best-effort either way.
+    """
+    content = arguments.get(spec.content_arg)
+    if not isinstance(content, str) or not content:
+        return None
+
+    def named(arg: str | None) -> str | None:
+        value = arguments.get(arg) if arg else None
+        return value if isinstance(value, str) and value else None
+
+    return {
+        "module": module,
+        "content": content,
+        "target": named(spec.target_arg),
+        "title": named(spec.title_arg),
+    }
 
 
 class AgentTurn(BaseModel):
@@ -349,6 +388,13 @@ class AgentEvent(BaseModel):
     # shell renders in the split-pane for Confirm/Decline. Absent for an ``ask_user`` pause.
     awaiting_kind: str | None = None
     draft: dict[str, Any] | None = None
+    # ``tool`` events only, and only for a tool the module annotated ``writes_document``
+    # (#541, ADR-0100/0101): what the call is writing — ``{module, content, target, title}`` —
+    # so the shell can open the document pane beside the chat. Rides both the ``running`` and
+    # the terminal frame (the pane opens on one and unlocks on the other). Deliberately kept
+    # off the persisted ``ToolStep``: a document body is unbounded, and ADR-0041's activity
+    # caps are not the place to store one.
+    document: dict[str, Any] | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -475,9 +521,16 @@ class Agent:
         pending_drafts: PendingDraftStore | None = None,
         instructions: AgentInstructionsStore | None = None,
         profile: StandingProfileStore | None = None,
+        documents: DocumentToolLookup | None = None,
     ) -> None:
         self._gateway = gateway
         self._mcp = mcp
+        # Resolves a tool name to its module + ``writes_document`` annotation (#541, ADR-0100),
+        # so a document-writing call can tell the shell what it is writing. The annotation lives
+        # only in the module manifest — MCP's ``list_tools`` drops it — so this is the registry's
+        # read-only view, injected rather than imported to keep the loop free of the registry.
+        # None disables the document pane; the turn is otherwise identical.
+        self._documents = documents
         self._memory = memory
         self._max_steps = max_steps
         self._default_tenant = default_tenant
@@ -691,7 +744,10 @@ class Agent:
                         continue
                     tools_used.append(name)
                     detail = _tool_detail(arguments)
-                    yield AgentEvent(type="tool", tool=name, status="running", detail=detail)
+                    document = await self._document_written_by(name, arguments)
+                    yield AgentEvent(
+                        type="tool", tool=name, status="running", detail=detail, document=document
+                    )
                     output, is_error = await self._invoke(name, arguments, route, tenant=tenant)
                     text, found = _extract_entities(output, tenant_id=tenant)
                     refs.add(found)
@@ -721,7 +777,11 @@ class Agent:
                         continue
                     status = "error" if is_error else "ok"
                     errored.append(is_error)
-                    yield AgentEvent(type="tool", tool=name, status=status, detail=detail)
+                    yield AgentEvent(
+                        type="tool", tool=name, status=status, detail=detail, document=document
+                    )
+                    # `document` is deliberately absent here: the timeline is persisted per
+                    # message (ADR-0041) and a document body has no place in those caps.
                     append_tool(timeline, name, status, detail)
                     convo.append(
                         ChatMessage(role="tool", tool_call_id=call_id, name=name, content=text)
@@ -1305,6 +1365,27 @@ class Agent:
             entity_refs=refs.refs,
             activity=activity(),
         )
+
+    async def _document_written_by(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """What this call is writing, if its module annotated it (#541, ADR-0100/0101).
+
+        Strictly best-effort and never fatal: the document pane is an affordance beside the
+        answer, so a slow, broken, or un-annotated lookup costs the user a pane, never the
+        turn. Returns ``None`` whenever there is nothing trustworthy to show.
+        """
+        if self._documents is None:
+            return None
+        try:
+            found = await self._documents(name)
+        except Exception as exc:  # a registry hiccup must not take the turn down with it
+            log.debug("document annotation lookup failed", tool=name, error=str(exc))
+            return None
+        if found is None:
+            return None
+        module, spec = found
+        return _document_payload(module, spec, arguments)
 
     async def _invoke(
         self, name: str, arguments: dict[str, Any], route: dict[str, str], *, tenant: str

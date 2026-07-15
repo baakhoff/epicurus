@@ -26,6 +26,7 @@ from epicurus_core import (
     ModuleManifest,
     SecretError,
     SecretStore,
+    WritesDocument,
     get_logger,
 )
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
@@ -338,6 +339,23 @@ class ModuleRegistry:
             for snap, base in zip(snaps, self._bases, strict=True)
             if snap.status.healthy and snap.enabled and not snap.removed
         ]
+
+    async def document_tool(self, tool: str) -> tuple[str, WritesDocument] | None:
+        """The module and annotation for a document-writing tool, or ``None`` (#541, ADR-0100).
+
+        The manifest is the only place the ``writes_document`` annotation exists — MCP's own
+        ``list_tools`` doesn't carry it — so the agent loop resolves it here to decide whether a
+        call should open the shell's document pane. Read-only over the TTL-cached snapshot
+        (#478), and gated exactly like ``enabled_mcp_urls``: a disabled or removed module's
+        tools aren't offered to the model, so they can't open a pane either.
+        """
+        for snap in await self.snapshot():
+            if not snap.enabled or snap.removed:
+                continue
+            for spec in snap.manifest.tools:
+                if spec.name == tool and spec.writes_document is not None:
+                    return snap.manifest.name, spec.writes_document
+        return None
 
     async def _post_reindex(self, base: str) -> None:
         """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``)."""

@@ -4,17 +4,18 @@
  * core-defined** set of views (`entity-detail`, `email-reader`) from the data a
  * caller passes through the panel store — no module markup ever runs here.
  */
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, WifiOff, X } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 
 import { CardLink } from "@/components/CardLink";
+import { EditorView } from "@/components/archetypes/EditorView";
 import { MailMessageView } from "@/components/MailMessageView";
 import { Markdown } from "@/components/Markdown";
 import { Button, Sheet } from "@/components/ui";
 import { api } from "@/lib/api";
 import { EmailDraft, EmailMessage, FileText, HoverCard } from "@/lib/contracts";
-import { useChat } from "@/stores/chat";
+import { useChat, type LiveDocument } from "@/stores/chat";
 import { useConnection } from "@/stores/connection";
 import { usePanel, usePanelCurrent, usePanelDepth, type PanelEntry } from "@/stores/panel";
 
@@ -192,6 +193,108 @@ function DocReaderView({ payload }: { payload: unknown }) {
   );
 }
 
+/**
+ * The `document` view (#541, ADR-0101): the document the agent is writing, live beside the
+ * chat. Generic — it renders whatever the module's `writes_document` annotation named, and
+ * finds that module's pages from its manifest, so no module is special-cased here
+ * (ADR-0018/0019).
+ *
+ * Three states, decided by what the write actually did:
+ *
+ * - **In flight** — the body so far, read-only. A user edit can't race the agent's write.
+ * - **Applied** (the module's review is off) — the write landed, so the pane hands over to the
+ *   real {@link EditorView}: the same editor, auto-save (ADR-0042) and version history
+ *   (ADR-0046) as the module's own page, through the same document APIs. No second write path.
+ * - **Staged** (review on — the default) — nothing was written. The tools that write documents
+ *   *propose* them (ADR-0033); the change waits in the module's review queue. Showing an editor
+ *   would be a lie, so the pane shows the proposal and points at the queue, where the operator
+ *   can already edit before approving (ADR-0090).
+ */
+function DocumentView({ payload }: { payload: unknown }) {
+  const doc = payload as LiveDocument;
+  // Which module page hosts the document, and which reviews it — from the module's own
+  // manifest, never a name check. Warm: the Shell already holds this query.
+  const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
+  const manifest = modules.data?.find((m) => m.manifest.name === doc.module)?.manifest;
+  const editorPage = manifest?.pages.find((p) => p.archetype === "editor");
+  const reviewPage = manifest?.pages.find((p) => p.archetype === "review");
+
+  // Did the write land, or is it waiting for review? The module asked the core this same
+  // question to decide (ADR-0033), so the core's answer is what actually happened. Only
+  // resolved once the call settles — mid-write the pane is read-only either way.
+  const review = useQuery({
+    queryKey: ["suggestionsEnabled", doc.module],
+    queryFn: () => api.suggestionsEnabled(doc.module),
+    enabled: !doc.writing && !doc.failed,
+  });
+
+  if (doc.failed)
+    return (
+      <article>
+        <DocumentHeading doc={doc} />
+        <p className="mt-3 text-sm text-ink-dim">
+          The write failed, so nothing was saved. The draft below is what the assistant tried to
+          write.
+        </p>
+        <DocumentBody content={doc.content} />
+      </article>
+    );
+
+  // Applied and hosted by an editor page → the real editor, opened at the written document.
+  if (review.data?.enabled === false && editorPage && doc.target)
+    return <EditorView module={doc.module} pageId={editorPage.id} doc={doc.target} />;
+
+  return (
+    <article>
+      <DocumentHeading doc={doc} />
+      {doc.writing && <p className="mt-2 text-xs text-ink-dim">writing…</p>}
+      {!doc.writing && review.data?.enabled && (
+        <p className="mt-2 text-xs text-ink-dim">
+          Waiting for your review — nothing is written until you approve it.
+        </p>
+      )}
+      <DocumentBody content={doc.content} />
+      {!doc.writing && review.data?.enabled && reviewPage && (
+        <div className="mt-5 border-t border-edge pt-4">
+          <Button
+            variant="primary"
+            onClick={() => {
+              usePanel.getState().close();
+              window.location.assign(`/m/${encodeURIComponent(doc.module)}/${encodeURIComponent(reviewPage.id)}`);
+            }}
+          >
+            Review &amp; approve
+          </Button>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function DocumentHeading({ doc }: { doc: LiveDocument }) {
+  return (
+    <>
+      <p className="text-[11px] font-medium tracking-wide text-ink-faint uppercase">
+        {doc.module}
+      </p>
+      {doc.title && <h3 className="mt-2 font-serif text-lg text-ink">{doc.title}</h3>}
+      {doc.target && (
+        <p className="mt-1 truncate font-mono text-xs text-ink-faint" title={doc.target}>
+          {doc.target}
+        </p>
+      )}
+    </>
+  );
+}
+
+function DocumentBody({ content }: { content: string }) {
+  return (
+    <div className="mt-4">
+      <Markdown>{content}</Markdown>
+    </div>
+  );
+}
+
 function PanelBody({ entry }: { entry: PanelEntry }) {
   switch (entry.view) {
     case "entity-detail":
@@ -202,6 +305,8 @@ function PanelBody({ entry }: { entry: PanelEntry }) {
       return <EmailDraftView payload={entry.payload} />;
     case "doc-reader":
       return <DocReaderView payload={entry.payload} />;
+    case "document":
+      return <DocumentView payload={entry.payload} />;
     default:
       return null;
   }
@@ -212,11 +317,27 @@ function PanelBody({ entry }: { entry: PanelEntry }) {
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 640;
 
+/**
+ * Close the panel — and *dismiss* the document pane when that's what's on screen (#541).
+ *
+ * The chat re-opens the document pane for as long as the turn is writing one, so a plain
+ * close would be undone on the next render. Telling the chat the user is done is what makes
+ * the close stick; the tool chip re-opens it.
+ */
+function useClosePanel(): () => void {
+  const close = usePanel((s) => s.close);
+  const view = usePanel((s) => s.stack[s.stack.length - 1]?.view ?? null);
+  return useCallback(() => {
+    if (view === "document") useChat.getState().dismissDocument();
+    close();
+  }, [close, view]);
+}
+
 function DesktopPanel() {
   const current = usePanelCurrent();
   const depth = usePanelDepth();
   const back = usePanel((s) => s.back);
-  const close = usePanel((s) => s.close);
+  const close = useClosePanel();
   const [width, setWidth] = useState(384);
   const dragging = useRef(false);
 
@@ -283,7 +404,7 @@ function MobilePanel() {
   const current = usePanelCurrent();
   const depth = usePanelDepth();
   const back = usePanel((s) => s.back);
-  const close = usePanel((s) => s.close);
+  const close = useClosePanel();
   return (
     <Sheet open={current !== null} onClose={close} title={current?.title || "Details"}>
       {current && (

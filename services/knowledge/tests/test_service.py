@@ -118,6 +118,32 @@ async def test_manifest_declares_embedding_model_slot() -> None:
     assert slots["embedding"].label  # non-empty — shown on the Modules page
 
 
+async def test_full_body_writes_open_the_document_pane() -> None:
+    """The two tools whose `content` is the document's whole body carry the annotation (#541)."""
+    tools = {t.name: t for t in (await _module([], []).manifest()).tools}
+
+    for name in ("knowledge_create_document", "knowledge_propose_edit"):
+        annotation = tools[name].writes_document
+        assert annotation is not None, name
+        assert annotation.content_arg == "content"
+        assert annotation.target_arg == "path"
+        # The body is the title's source (the module derives it), so there is no title arg.
+        assert annotation.title_arg is None
+
+
+async def test_structural_and_read_tools_do_not_open_the_document_pane() -> None:
+    """Only a call carrying a document body should open a document pane — nothing else has one."""
+    tools = {t.name: t for t in (await _module([], []).manifest()).tools}
+    for name in (
+        "knowledge_propose_move",
+        "knowledge_propose_rename",
+        "knowledge_propose_folder",
+        "knowledge_propose_project",
+        "knowledge_search",
+    ):
+        assert tools[name].writes_document is None, name
+
+
 # ── navigation tools over a real vault (#KB-refactor) ─────────────────────────
 
 

@@ -24,6 +24,32 @@ images to GHCR.
 
 ### Added
 
+- **Chat: a live document pane — watch the agent write, then edit or review it in place** (#541,
+  ADR-0101) — the agent writing a document showed only a `knowledge_create_doc ✓` chip; the
+  artifact, usually the whole point of the turn, was invisible until you navigated to the module
+  afterwards. Now an annotated call (the `writes_document` seam below) opens a **split pane beside
+  the chat** — a resizable column on desktop, a sheet on phones — showing the document as it is
+  written, read-only while the call is in flight so a user edit can't race the agent's.
+  **What the pane becomes depends on what the write actually did.** Knowledge and notes *propose*
+  documents rather than writing them (ADR-0033), and review defaults **on** — so with review on
+  nothing was written, and the pane shows the proposal with **Review & approve** into that
+  module's review page (where the draft is already editable, ADR-0090). With review **off** the
+  change was applied, and the pane hands over to the **real editor archetype**: auto-save
+  (ADR-0042), version history (ADR-0046), the same module document APIs, no second write path.
+  The outcome is read from the core's own review setting — the same one the module consulted —
+  rather than guessed, so the pane never claims a write landed when it didn't. Generic
+  throughout: the module names the arguments and the shell reads the annotation (no module is
+  named in web code, ADR-0018/0019), and the pane finds that module's editor/review pages from
+  its own manifest, so a future adopter needs no web change. Best-effort by construction — a
+  failed or slow lookup costs a pane, never the turn — and the body rides SSE only, never the
+  persisted activity, so ADR-0041's caps are unchanged (the pane is a live-turn affordance; after
+  a reload the turn's entity-ref chip is the way back, as it already is for un-annotated writes).
+  `knowledge` and `notes` are the first adopters, on their four **full-body** write tools;
+  `notes_append` is deliberately left out (its `text` is a fragment the server concatenates on
+  approval, not a document). Also brings both modules' manifest versions back in line with their
+  packages — they had drifted a minor behind, under-reporting on the Modules page. `core-app`
+  0.79.0→0.80.0; `web` 0.109.0→0.110.0; `knowledge` 0.22.0→0.23.0; `notes` 0.7.0→0.8.0.
+
 - **Modules: a `writes_document` tool annotation** (part of #541, ADR-0100) — the groundwork for
   the live document pane. A module declares, per tool, that it *writes a document* and names the
   arguments the document travels in — `writes_document: {content_arg, title_arg?, target_arg?}` on

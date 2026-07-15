@@ -38,7 +38,7 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.6.0"
+    assert manifest.version == "0.8.0"
 
 
 async def test_exposes_write_and_list_tools_but_no_read() -> None:
@@ -74,3 +74,28 @@ async def test_has_ui_and_emits_saved_event() -> None:
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     assert any(e.subject == SAVED_SUBJECT for e in manifest.events_emitted)
+
+
+async def test_full_body_writes_open_the_document_pane() -> None:
+    """The two tools whose `content` is the note's whole body carry the annotation (#541)."""
+    tools = {t.name: t for t in (await _module().manifest()).tools}
+
+    for name in ("notes_create", "notes_propose_edit"):
+        annotation = tools[name].writes_document
+        assert annotation is not None, name
+        assert annotation.content_arg == "content"
+        assert annotation.target_arg == "slug"
+        # The body is the title's source (the module derives it), so there is no title arg.
+        assert annotation.title_arg is None
+
+
+async def test_append_and_delete_do_not_open_the_document_pane() -> None:
+    """`notes_append`'s `text` is a fragment, not a document — showing it as one would lie.
+
+    The agent cannot read a note (they're private), so append supplies only what to add and the
+    server concatenates it on approval. `notes_delete` has no body at all.
+    """
+    tools = {t.name: t for t in (await _module().manifest()).tools}
+    assert tools["notes_append"].writes_document is None
+    assert tools["notes_delete"].writes_document is None
+    assert tools["notes_list"].writes_document is None

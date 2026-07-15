@@ -15,7 +15,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { api } from "@/lib/api";
-import { AgentEvent, type Attachment, EmailDraft, type Readiness } from "@/lib/contracts";
+import {
+  AgentEvent,
+  type Attachment,
+  EmailDraft,
+  type Readiness,
+  type WrittenDocument,
+} from "@/lib/contracts";
 import { sse, sseRequest, type SseMessage } from "@/lib/sse";
 
 export interface ToolRun {
@@ -28,6 +34,19 @@ export type ChatSegment =
   | { kind: "text"; text: string }
   | { kind: "tool"; run: ToolRun }
   | { kind: "thinking"; text: string };
+
+/** A document an annotated tool call is writing, as the pane sees it (#541, ADR-0101).
+ *
+ *  `writing` is true while the call is in flight — the pane stays read-only until the write
+ *  settles, so a user edit can't race the agent's own. `failed` means the call errored and
+ *  nothing was written. `tool` names the call, so the pane can be re-opened from its chip. */
+export interface LiveDocument extends WrittenDocument {
+  tool: string;
+  writing: boolean;
+  failed: boolean;
+  /** The user closed the pane; a further write to the same document must not reopen it. */
+  dismissed: boolean;
+}
 
 /** One entry on the activity timeline (the turn's *process*): a run of thinking or a tool
  *  step, in chronological order (#300). Built from the live `segments` or a message's
@@ -130,6 +149,15 @@ interface ChatState {
    *  is pending. Persisted like `awaiting` so a reload mid-review keeps the pane and the pending
    *  draft — the suspended run stays durable server-side (24h). Mutually exclusive with `awaiting`. */
   awaitingDraft: { runId: string; draft: EmailDraft } | null;
+  /** The document the turn is writing, for the pane beside the chat (#541, ADR-0101). Set from
+   *  a `tool` event whose module annotated the tool; null when this turn writes none. Not
+   *  persisted: the body rides the SSE stream and never reaches the transcript (ADR-0041's caps
+   *  are unchanged), so a reload has nothing to restore it from — the turn's entity-ref chip is
+   *  the durable way back to the document (ADR-0019). `dismissed` survives further writes to the
+   *  same document, so closing the pane stays closed. */
+  liveDocument: LiveDocument | null;
+  /** Close the document pane. It reopens only when a *new* document is written (#541). */
+  dismissDocument: () => void;
   /** Sessions that finished a turn while this wasn't the open one (#492) — a background turn
    *  the operator hasn't seen the answer to yet. One boolean marker per session (no counts,
    *  no push notifications); cleared the moment the session opens. Not persisted: a reload
@@ -254,6 +282,28 @@ export const useChat = create<ChatState>()(
         }
         push({ kind: "tool", run });
       };
+      // Track the document a write tool is producing, for the pane (#541). The `running` frame
+      // opens it and the terminal frame settles it. A dismissal sticks while the *same*
+      // document keeps being written — the user said no to this pane, and the agent finishing
+      // the write it already had open isn't a reason to overrule them; a write to a different
+      // document is a new event and opens afresh.
+      const setLiveDocument = (
+        tool: string,
+        status: "running" | "ok" | "error",
+        document: WrittenDocument,
+      ): void => {
+        const open = get().liveDocument;
+        const same = open?.module === document.module && open?.target === document.target;
+        set({
+          liveDocument: {
+            ...document,
+            tool,
+            writing: status === "running",
+            failed: status === "error",
+            dismissed: same ? open.dismissed : false,
+          },
+        });
+      };
 
       // Consume one SSE stream into the live segments; report how it ended. Re-throws only a
       // non-OK *HTTP* error (the stream never began) so the caller can branch (409 → re-attach,
@@ -269,8 +319,10 @@ export const useChat = create<ChatState>()(
             if (event.type === "readiness" && event.readiness) set({ readiness: event.readiness });
             else if (event.type === "delta" && event.text) appendText(event.text);
             else if (event.type === "thinking" && event.text) appendThinking(event.text);
-            else if (event.type === "tool" && event.tool && event.status)
+            else if (event.type === "tool" && event.tool && event.status) {
               setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
+              if (event.document) setLiveDocument(event.tool, event.status, event.document);
+            }
             else if (event.type === "error") {
               const detail = event.detail ?? "the stream failed";
               set({ error: detail, paused: /paused/i.test(detail), reconnectable: false });
@@ -497,9 +549,13 @@ export const useChat = create<ChatState>()(
         lastSeq: 0,
         awaiting: null,
         awaitingDraft: null,
+        liveDocument: null,
         unseenFinished: new Set(),
 
         setDraft: (text) => set({ draft: text }),
+
+        dismissDocument: () =>
+          set((s) => (s.liveDocument ? { liveDocument: { ...s.liveDocument, dismissed: true } } : s)),
 
         markUnseenFinished: (id) =>
           set((s) => (s.unseenFinished.has(id) ? s : { unseenFinished: new Set(s.unseenFinished).add(id) })),
@@ -518,6 +574,8 @@ export const useChat = create<ChatState>()(
             sessionId: freshId(),
             awaiting: null,
             awaitingDraft: null,
+            // A different conversation: whatever the last one was writing isn't this one's.
+            liveDocument: null,
             pendingUser: null,
             pendingAttachments: [],
             segments: [],
@@ -545,6 +603,8 @@ export const useChat = create<ChatState>()(
               sessionId: id,
               awaiting: null,
               awaitingDraft: null,
+              // A different conversation: whatever the last one was writing isn't this one's.
+              liveDocument: null,
               pendingUser: null,
               pendingAttachments: [],
               segments: [],

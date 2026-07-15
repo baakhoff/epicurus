@@ -479,7 +479,18 @@ function ScopeSwitcher({
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
-export function EditorView({ module, pageId }: { module: string; pageId: string }) {
+export function EditorView({
+  module,
+  pageId,
+  doc: docProp,
+}: {
+  module: string;
+  pageId: string;
+  /** Open this document instead of reading `?doc=` — for hosts with no URL of their own, like
+   *  the chat's document pane (#541, ADR-0101). Same root-relative `<project>/<path>` shape and
+   *  the same one-shot latch as the param; the pane simply names it directly. */
+  doc?: string;
+}) {
   const qc = useQueryClient();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   // True while the selected slug is a not-yet-saved new note: skip the doc fetch
@@ -539,7 +550,9 @@ export function EditorView({ module, pageId }: { module: string; pageId: string 
   // Knowledge" link, #143). The link carries a root-relative `<project>/<path>`; split the
   // leading scope so we select the right knowledge base. Adjust state during render.
   const [searchParams, setSearchParams] = useSearchParams();
-  const docParam = searchParams.get("doc");
+  // A host that names the document wins over the URL: the pane shares the chat's route and has
+  // no `?doc=` of its own to read (#541).
+  const docParam = docProp ?? searchParams.get("doc");
   const [appliedDoc, setAppliedDoc] = useState<string | null>(null);
   if (docParam && docParam !== appliedDoc) {
     setAppliedDoc(docParam);

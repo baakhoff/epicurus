@@ -24,6 +24,7 @@ from epicurus_core import (
     ToolSpec,
     UiAction,
     UiSection,
+    WritesDocument,
 )
 from epicurus_core_app.agent.mcp_host import ModuleUnreachableError, ToolCallError
 from epicurus_core_app.docker_control import DockerError
@@ -663,6 +664,56 @@ async def test_enabled_mcp_urls_excludes_disabled_module() -> None:
 async def test_enabled_mcp_urls_excludes_unhealthy_module() -> None:
     registry, _, _ = _registry(healthy=False)
     assert await registry.enabled_mcp_urls() == []
+
+
+# ── document-writing tools: the document pane's lookup (#541, ADR-0100) ──────
+
+
+def _scribe_manifest() -> ModuleManifest:
+    """A module with one annotated write tool and one plain tool."""
+    return ModuleManifest(
+        name="scribe",
+        version="1.0.0",
+        tools=[
+            ToolSpec(
+                name="write_doc",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                },
+                writes_document=WritesDocument(content_arg="content", target_arg="path"),
+            ),
+            ToolSpec(name="echo", input_schema={"type": "object"}),
+        ],
+    )
+
+
+async def test_document_tool_returns_the_module_and_annotation() -> None:
+    registry, _, _ = _registry(manifest=_scribe_manifest())
+    found = await registry.document_tool("write_doc")
+    assert found is not None
+    module, annotation = found
+    assert module == "scribe"
+    assert annotation.content_arg == "content"
+    assert annotation.target_arg == "path"
+
+
+async def test_document_tool_is_none_for_an_unannotated_tool() -> None:
+    registry, _, _ = _registry(manifest=_scribe_manifest())
+    assert await registry.document_tool("echo") is None
+
+
+async def test_document_tool_is_none_for_an_unknown_tool() -> None:
+    registry, _, _ = _registry(manifest=_scribe_manifest())
+    assert await registry.document_tool("nonesuch") is None
+
+
+async def test_document_tool_ignores_a_disabled_module() -> None:
+    # A disabled module's tools never reach the model (enabled_mcp_urls), so a stale annotation
+    # must not open a pane for a call that can't happen.
+    registry, _, _ = _registry(manifest=_scribe_manifest())
+    await registry.set_enabled("scribe", False)
+    assert await registry.document_tool("write_doc") is None
 
 
 async def test_invoke_disabled_module_is_403() -> None:

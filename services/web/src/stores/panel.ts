@@ -7,7 +7,13 @@
 import { create } from "zustand";
 
 /** The bounded set of views the panel can host. Extends only in core. */
-export type PanelView = "entity-detail" | "email-reader" | "doc-reader" | "email-draft";
+export type PanelView =
+  | "entity-detail"
+  | "email-reader"
+  | "doc-reader"
+  | "email-draft"
+  /** A document the agent is writing, live beside the chat (#541, ADR-0101). */
+  | "document";
 
 export interface PanelEntry {
   view: PanelView;

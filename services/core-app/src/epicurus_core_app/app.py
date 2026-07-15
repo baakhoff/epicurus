@@ -321,6 +321,10 @@ def create_app() -> FastAPI:
         # The standing profile (#527), injected statically after the base prompt with no embed —
         # so both chat and the headless bridge carry the same durable picture of the user.
         profile=profile_store,
+        # The registry's read-only view of which tools write a document (#541, ADR-0100): the
+        # annotation lives only in module manifests, which the registry alone fetches. Passing
+        # the bound lookup rather than the registry keeps the loop unaware it exists.
+        documents=registry.document_tool,
     )
     # Inbound messaging consumer (ADR-0058) — the first inbound NATS subscriber in core. It
     # turns a bridge message (``messaging.inbound``) into a headless agent turn and routes the

@@ -36,6 +36,7 @@ from epicurus_core import (
     PlatformClient,
     UiAction,
     UiSection,
+    WritesDocument,
     tool_envelope,
 )
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
@@ -250,7 +251,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.21.0",
+        version="0.23.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -457,7 +458,10 @@ def build_module(
             " your review in Knowledge → Suggestions; nothing changes until you approve it.",
         )
 
-    @module.tool()
+    # `content` is the document's whole body, so the shell can show it in the document pane as
+    # the note being written (#541, ADR-0100). The structural tools below (move / rename /
+    # folder / project) carry no body and stay un-annotated.
+    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="path"))
     async def knowledge_create_document(path: str, content: str, note: str = "") -> str:
         """Create a NEW document in the knowledge base.
 
@@ -478,7 +482,7 @@ def build_module(
         """
         return await _stage_doc_write("create", path, content, note, reject_existing=True)
 
-    @module.tool()
+    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="path"))
     async def knowledge_propose_edit(
         path: str,
         content: str = "",

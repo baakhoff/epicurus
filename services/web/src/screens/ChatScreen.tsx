@@ -938,6 +938,28 @@ export function ChatScreen() {
     }
   }, [chat.awaitingDraft, panelTop]);
 
+  // The document pane (#541, ADR-0101): when the turn writes a document, show it beside the
+  // chat. Unlike the draft review above, this one is **dismissible** — a document is an
+  // artifact to watch, not a decision that must be resolved — so a close sets `dismissed`
+  // rather than being re-opened, and only a write to a *different* document opens it again.
+  // Best-effort throughout: the pane never gates the turn. A draft review outranks it (that
+  // pane is waiting on the user), so it yields while one is up.
+  const liveDocument = chat.liveDocument;
+  useEffect(() => {
+    const panel = usePanel.getState();
+    const show = liveDocument !== null && !liveDocument.dismissed && !chat.awaitingDraft;
+    if (show) {
+      if (panelTop !== "document") {
+        panel.close();
+        panel.open("document", liveDocument, liveDocument.title || "Document");
+      } else {
+        panel.replace(liveDocument); // same pane, later frame of the same write
+      }
+    } else if (panelTop === "document") {
+      panel.back();
+    }
+  }, [liveDocument, chat.awaitingDraft, panelTop]);
+
   // Re-attach to an in-flight turn after a reload / reconnect / app-resume (#376): the turn
   // keeps running server-side, so recover it instead of leaving a stale spinner or showing a
   // network error. Fires on mount, when the tab becomes visible again, and when the network

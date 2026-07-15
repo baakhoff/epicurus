@@ -32,6 +32,10 @@ log = get_logger("epicurus_core_app.docker_control")
 PROTECTED: frozenset[str] = frozenset(
     {
         "core-app",
+        # The reserved in-process pseudo-module name (ADR-0093 §2) — the core answering its own
+        # ``review`` page. It has no container at all, so this entry is purely belt-and-braces:
+        # ``ModuleRegistry`` already refuses every management write addressed to this name.
+        "core",
         "web",
         "postgres",
         "valkey",

@@ -19,7 +19,13 @@ import { Badge, Button, EmptyState, Spinner, Switch } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { PendingSuggestion } from "@/lib/contracts";
 import { moduleIcon } from "@/lib/icons";
-import { formatWhen, moduleLabel, operationTone, suggestionTarget } from "@/lib/suggestions";
+import {
+  formatWhen,
+  moduleLabel,
+  operationTone,
+  reviewIsMandatory,
+  suggestionTarget,
+} from "@/lib/suggestions";
 
 function SuggestionRow({
   suggestion: s,
@@ -68,15 +74,19 @@ function ModuleGroup({
   onReview: (s: PendingSuggestion) => void;
 }) {
   const qc = useQueryClient();
+  // The core's own guidance is always reviewed (ADR-0093), so there is no flag to read and
+  // none to write — skip the query entirely rather than render a control the server refuses.
+  const mandatory = reviewIsMandatory(module);
   const enabledQuery = useQuery({
     queryKey: ["suggestions-enabled", module],
     queryFn: () => api.suggestionsEnabled(module),
+    enabled: !mandatory,
   });
   const toggle = useMutation({
     mutationFn: (next: boolean) => api.setSuggestionsEnabled(module, next),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["suggestions-enabled", module] }),
   });
-  const reviewOn = enabledQuery.data?.enabled ?? true;
+  const reviewOn = mandatory || (enabledQuery.data?.enabled ?? true);
 
   return (
     <section>
@@ -86,12 +96,16 @@ function ModuleGroup({
           <h2 className="truncate font-serif text-base text-ink">{moduleLabel(module)}</h2>
           {items.length > 0 && <Badge tone="accent">{items.length}</Badge>}
         </div>
-        <Switch
-          checked={reviewOn}
-          onChange={(next) => toggle.mutate(next)}
-          disabled={toggle.isPending || enabledQuery.isLoading}
-          label={`Review ${moduleLabel(module)} changes before applying`}
-        />
+        {mandatory ? (
+          <span className="shrink-0 text-xs text-ink-faint">Always reviewed</span>
+        ) : (
+          <Switch
+            checked={reviewOn}
+            onChange={(next) => toggle.mutate(next)}
+            disabled={toggle.isPending || enabledQuery.isLoading}
+            label={`Review ${moduleLabel(module)} changes before applying`}
+          />
+        )}
       </div>
       {items.length === 0 ? (
         <p className="px-1 py-3 text-sm text-ink-faint">

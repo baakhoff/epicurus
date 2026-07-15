@@ -401,13 +401,24 @@ operator is the approver. Knowledge is the first user (ADR-0033); see
 **The wire contract lives in `epicurus_core.review`** (ADR-0090): `ReviewSuggestion` /
 `ReviewData` / `ApplyResult` / `ApproveBody` / `ReviewDecision` / `ReviewAuditData` are shared
 Pydantic models every `review`-page module imports, rather than each redefining an identical
-shape — so a new adopter (e.g. governed playbooks, #525) gets edit-before-approve and the
+shape — so a new adopter (governed playbooks, #525/#616) gets edit-before-approve and the
 audit trail for free. Persistence stays per-module (each owns its own `*_suggestions` and
 `*_suggestion_decisions` tables), mirroring the editor version-history precedent (ADR-0046):
 shared code for the wire shape, per-module tables for storage. The audit table is
 append-only and capped per tenant (newest `MAX_DECISIONS` rows, currently 200), pruned on
 each insert — the pending queue drops a row on resolution (ADR-0033: "the queue *is* the set
 of rows"), so the audit table is what actually survives to be reviewed later.
+
+**Not every `review`-page implementer is a module.** Governed playbooks (ADR-0093) made the core
+itself one: it serves its own queue — the agent's proposed edits to its base instructions and
+named playbooks — as a reserved **pseudo-module** named `core` that `ModuleRegistry` answers
+**in-process**, rather than through the HTTP probe every real module is reached by (standing up a
+loopback module for it was rejected as needless indirection). It implements the same surface — a
+manifest declaring one `review` page, `GET /pages/{id}`, the approve/reject, the audit trail —
+and owns its rows in the core's `agent_playbook_proposals` / `agent_playbook_decisions`, so the
+per-implementer-storage rule holds. It is deliberately **not** a configured base, so it
+contributes no MCP tools and joins no base-driven fan-out: it is a page implementer and nothing
+more. See [core-app](../services/core-app.md).
 
 The `calendar` archetype's data shape is a window of events (the shell renders the month /
 week / agenda views and re-fetches as the user navigates). Like the `board`, it is

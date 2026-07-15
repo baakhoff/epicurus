@@ -26,6 +26,24 @@ export function operationTone(op: ReviewSuggestion["operation"]): "ok" | "accent
   return "accent";
 }
 
+/**
+ * The reserved pseudo-module the core answers in-process (ADR-0093 §2) — its own base
+ * instructions and playbooks. It rides the modules list so its `review` page renders through
+ * the same components as any module's, but it is the platform, not something installed.
+ */
+export const CORE_MODULE = "core";
+
+/**
+ * Whether review is **mandatory** for `module`, i.e. its per-module review toggle must not be
+ * offered. True only for the core: ADR-0093's hard non-goal is that the agent's own guidance
+ * never self-applies and no path bypasses the operator's Approve. A toggle reading "review off —
+ * the agent's changes apply automatically" would advertise a bypass that does not exist (the
+ * core refuses the write with a 403), so it isn't rendered.
+ */
+export function reviewIsMandatory(module: string): boolean {
+  return module === CORE_MODULE;
+}
+
 /** Title-case a module's technical name for display ("knowledge" → "Knowledge"). */
 export function moduleLabel(name: string): string {
   return name ? name[0].toUpperCase() + name.slice(1) : name;

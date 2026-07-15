@@ -312,6 +312,13 @@ from anywhere. This spans **all** such modules — the knowledge base (`module: 
 surface here, with no special-casing. Best-effort — a down, disabled, or erroring module is
 skipped, not fatal.
 
+The feed also carries the core's **own** queue — the agent's proposed edits to its base
+instructions and playbooks (`module: "core"`, `page_id: "playbooks"`, ADR-0093). That is the
+reserved **pseudo-module** the registry answers in-process rather than probing over HTTP, so it
+is composed into this feed explicitly (it has no base URL to fan out to), with the same
+best-effort tolerance. To every consumer it is just another entry — the point of conforming to
+the existing contract rather than inventing a second one.
+
 ```json
 [
   {
@@ -376,6 +383,12 @@ The per-module **review on/off** toggle (#KB-refactor) — `{ "enabled": true }`
 through the normal apply path). The review-page header reads `GET` and writes `PUT`; `PUT`
 **404**s an unknown module. Persisted in `module_prefs`. Generic across any module with a
 `review` page — today knowledge and notes.
+
+**Except `core`**, where `PUT` is a **403**: review of the agent's own instructions and playbooks
+is mandatory (ADR-0093's hard rule — agent-proposed guidance never self-applies and no path
+bypasses the operator's Approve). Turning it off would advertise a bypass the reflection job
+does not implement and must never implement, so the write is refused at the layer that owns the
+policy, and the shell renders *Always reviewed* in place of the switch.
 
 ### Files read / download moved to the core (ADR-0063)
 

@@ -182,6 +182,32 @@ indirection), `ModuleRegistry` accepts one **reserved entry named `core`** that 
 **in-process** — see *Module registry* below. It rides `GET /platform/v1/modules` so the shell
 discovers its page like any module's, with no new endpoint and no new frontend contract.
 
+**Where proposals come from.** A `playbook-reflection` job on the nightly maintenance batch (see
+*Maintenance orchestrator* below — registered `nightly=True`, so it rides the orchestrator's one
+schedule rather than a knob of its own). Per tenant it scans the sessions active since its last
+run and makes **one** gateway call over them, asking for candidate edits; each is staged for
+review. It is metered under **the tenant whose sessions it scanned** — never a synthetic
+background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details that matter:
+
+- **It cannot apply anything.** It is handed a proposal sink and a *read-only* playbook lookup,
+  never the stores that own the documents — the ADR's hard rule is enforced by construction, not
+  by discipline.
+- **The operation is derived, not trusted.** A playbook the tenant already has is an `update`,
+  otherwise a `create` — decided from what exists, because a mislabelled `create` would render an
+  empty *current* side and hide from the operator exactly what their approval would overwrite.
+- **Rejections feed back.** Recently rejected proposals are digested into the prompt as explicit
+  negative context (from the `agent_playbook_decisions` trail, ADR-0093 §6), so a declined idea
+  isn't re-proposed unchanged.
+- **It doesn't stack drafts.** A document with a proposal still awaiting the operator is skipped,
+  so the queue can't grow while they're away.
+- **A watermark bounds the scan** (`agent_reflection_state`, durable — an in-memory marker would
+  reset on restart and re-propose the whole history). It is snapshotted *before* the scan and
+  advanced only on a completed pass, so a session written mid-pass is re-read next time rather
+  than lost; re-reading is harmless (a duplicate is suppressed), losing one is not.
+- **Junk costs nothing.** A non-JSON reply, an unknown target, a nameless playbook, or a runaway
+  generation stages nothing rather than raising. Nothing new since the last pass? No gateway call
+  at all.
+
 **Storage and undo.** An approved edit to the *base* prompt writes through the **existing**
 `AgentInstructionsStore` — the same path the operator's own Settings edit uses, so an approved
 edit is indistinguishable from a hand-typed one. Both halves version ADR-0046-style
@@ -591,13 +617,16 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Four
+registers by being added to the list; the run / route / schedule machinery is unchanged. Five
 ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
 deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light, nightly-eligible
 — `ProfileSynthesizer.run` distils each tenant's facts into its statically-injected profile,
-ADR-0094), the **module re-index** fan-out (heavy, manual-only — the same `reembed` fan-out as
-above), and **memory facts re-embed** (heavy, manual-only — calls `UserFactStore.reembed_all` for
-the default tenant, #436). Jobs run **sequenced** (gentle on a single GPU) and each is contained:
+ADR-0094), the **playbook reflection** pass (light, nightly-eligible — `PlaybookReflector.run`
+proposes edits to the agent's own guidance for the operator to approve, ADR-0093; see *Governed
+playbooks* above), the **module re-index** fan-out (heavy, manual-only — the same `reembed`
+fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
+`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
+single GPU) and each is contained:
 one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs follow a
 runtime-editable **schedule** (below, #621); the manual "run everything" trigger is always
 available regardless of it.
@@ -733,6 +762,7 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
 | `MEMORY_RECALL_TIMEOUT_S` | `4.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). 4s (was 2s) fits a single-GPU embed-model swap. |
 | `MEMORY_PROFILE_MODEL` | `""` | Optional dedicated model for the nightly **standing-profile** synthesis (ADR-0094); blank = the operator's default chat model. A small model keeps the pass cheap. |
+| `PLAYBOOK_REFLECTION_MODEL` | `""` | Optional dedicated model for the nightly **playbook-reflection** pass (ADR-0093); blank = the operator's default chat model. A small model keeps the pass cheap. No reflection *hour* knob exists — the pass rides the maintenance schedule. |
 | `MEMORY_PROFILE_MAX_VERSIONS` | `5` | How many past standing-profile versions to retain per tenant (the newest is injected). |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
@@ -836,6 +866,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   leaves an audited decision and a re-resolvable queue row rather than a silently vanished
   proposal. The `rejected` rows are what the reflection pass reads back as negative context
   (ADR-0093 §6).
+- **Postgres `agent_reflection_state`** — the nightly reflection pass's per-tenant watermark
+  (ADR-0093 §1): `tenant`, `last_run_at`. Durable rather than in-memory (constraint #2): an
+  in-process marker would reset on every restart and re-scan the whole history, re-proposing
+  lessons the operator has already seen. Snapshotted before a scan and advanced only on a
+  completed pass. Read back as **aware UTC** regardless of backend — Postgres returns an aware
+  datetime, SQLite a naive one, and comparing the two raises.
 - **Postgres `agent_suspended_runs`** — a turn paused by `ask_user` (ADR-0053): `id` (run_id),
   `tenant`, `session_id`, `model`, `pending_call_id`, `question`, `conversation` (JSON),
   `created_at`. Written on suspend, **consumed** on resume, reaped after `ASK_USER_TTL_HOURS`.

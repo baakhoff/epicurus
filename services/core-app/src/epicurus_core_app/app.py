@@ -54,6 +54,7 @@ from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.playbook_review import CoreReviewPage, PlaybookProposalStore
 from epicurus_core_app.agent.playbooks import PlaybookStore
+from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.docker_control import DockerController
@@ -77,6 +78,7 @@ from epicurus_core_app.maintenance import (
     extraction_drain_job,
     facts_reembed_job,
     module_reindex_job,
+    playbook_reflection_job,
     profile_synthesis_job,
 )
 from epicurus_core_app.maintenance_routes import create_maintenance_router
@@ -239,6 +241,20 @@ def create_app() -> FastAPI:
     # The staged, not-yet-approved edits to the two stores above (ADR-0093 §2) plus the durable
     # resolved-decision trail (ADR-0090) the reflection pass reads back as negative context.
     playbook_proposals = PlaybookProposalStore(engine)
+    # The nightly pass that *proposes* those edits (ADR-0093 §1): one gateway call per active
+    # tenant over the sessions it saw since its last run, metered under that tenant (§5). It is
+    # handed the proposal sink and a read-only playbook lookup — never the stores that own the
+    # documents — so it is structurally incapable of applying anything itself.
+    playbook_reflection_state = ReflectionStateStore(engine)
+    playbook_reflector = PlaybookReflector(
+        gateway,
+        conversation_store,
+        playbook_proposals,
+        agent_playbooks,
+        playbook_reflection_state,
+        tenants=conversation_store.distinct_tenants,
+        model=settings.playbook_reflection_model or None,
+    )
     # The reserved ``core`` pseudo-module: the core's own ``review`` page, answered in-process by
     # the registry rather than probed over HTTP (ADR-0093 §2). Approving here is the *only* path
     # that writes agent instructions/playbooks on the agent's behalf — nothing self-applies.
@@ -426,6 +442,7 @@ def create_app() -> FastAPI:
         [
             extraction_drain_job(extraction_runner.drain_once),
             profile_synthesis_job(profile_synthesizer.run),
+            playbook_reflection_job(playbook_reflector.run),
             module_reindex_job(registry.reembed),
             facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
         ],
@@ -486,6 +503,14 @@ def create_app() -> FastAPI:
             log.error(
                 "playbook proposal store init failed; the core review page is empty",
                 error=str(exc),
+            )
+        try:
+            await playbook_reflection_state.init()
+        except Exception as exc:
+            # Without its watermark the nightly pass can't tell new sessions from old, so it
+            # errors as a contained job result rather than re-proposing the whole history.
+            log.error(
+                "playbook reflection state init failed; nightly reflection off", error=str(exc)
             )
         try:
             await suspended_runs.init()

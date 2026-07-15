@@ -27,7 +27,7 @@ from epicurus_core import (
 )
 from epicurus_core_app.agent.mcp_host import ModuleUnreachableError, ToolCallError
 from epicurus_core_app.docker_control import DockerError
-from epicurus_core_app.modules import ModuleRegistry, ModuleSnapshot, ModuleStatus
+from epicurus_core_app.modules import DockerStatus, ModuleRegistry, ModuleSnapshot, ModuleStatus
 
 
 @pytest.fixture(autouse=True)
@@ -223,6 +223,7 @@ def _registry(
     healthy: bool = True,
     manifest: ModuleManifest | None = None,
     docker: _FakeDocker | None = None,
+    docker_reason: str | None = None,
 ) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
     mcp, secrets = _FakeMcp(), _FakeSecrets()
     registry = _StubRegistry(  # type: ignore[arg-type]
@@ -233,6 +234,7 @@ def _registry(
         tenant="local",
         prefs=_FakeModulePrefs(),
         docker=docker,
+        docker_unavailable_reason=docker_reason,
     )
     return registry, mcp, secrets
 
@@ -775,6 +777,25 @@ async def test_reconcile_tombstones_logs_repr_of_bare_exception() -> None:
     failures = [entry for entry in logs if entry["event"] == "tombstone reconcile failed"]
     assert len(failures) == 1
     assert failures[0]["error"] == "TimeoutError()"
+
+
+# ── Docker status (#622): proactive, accurate reporting — never "removal disabled" ─
+
+
+def test_docker_status_available_has_no_reason() -> None:
+    registry, _, _ = _registry(docker=_FakeDocker())
+    assert registry.docker_status() == DockerStatus(available=True, reason=None)
+
+
+def test_docker_status_unavailable_reports_the_captured_reason() -> None:
+    registry, _, _ = _registry(docker=None, docker_reason="permission denied")
+    assert registry.docker_status() == DockerStatus(available=False, reason="permission denied")
+
+
+def test_docker_status_unavailable_with_no_reason_captured() -> None:
+    # docker=None with no reason (e.g. a caller that never probed) still reports unavailable.
+    registry, _, _ = _registry(docker=None)
+    assert registry.docker_status() == DockerStatus(available=False, reason=None)
 
 
 # ── Path-segment hardening (#175): reject '/', '\', '..' in interpolated segments ──

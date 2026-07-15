@@ -41,13 +41,15 @@ services:
       # Scopes confirmed module removal (#127) to this stack's containers only, so a
       # co-located stack (e.g. the CI smoke run beside a dev stack) is never touched.
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-epicurus}
-    # Confirmed module removal (#127, ADR-0028): the core stops/removes a *module's own*
-    # container through the Docker socket. Read-write socket access is privileged — the
-    # DockerController is the only code path that uses it, and it refuses anything but a
-    # known module's container (never core-app / web / a data-plane service). Remove this
-    # mount to disable removal entirely (the endpoint then returns 503).
+    # Confirmed module removal (#127, ADR-0028) and the Ollama KV-cache restart (#307) can use
+    # the Docker socket, but it is NOT mounted here by default (#622, ADR-0099) — it is
+    # root-equivalent on the host, and mounting it unconditionally bought nothing real anyway:
+    # the app drops to an unprivileged uid (ADR-0069) that, without a host-matched group, can't
+    # reach it regardless. Without it, module removal still fully works (ADR-0056/#382
+    # decoupled the two) — only the container teardown + KV-cache restart defer to the next
+    # restart, and the Modules page says so plainly. To opt in (immediate teardown), layer
+    # compose.docker-socket.yaml on top — see docs/DEPLOYMENT.md.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       # KV-cache apply (#307): the core writes ollama.env here; Ollama mounts it read-only and
       # sources it on (re)start. A named volume, so the choice persists across reconciles.
       - ollama-runtime:/etc/epicurus

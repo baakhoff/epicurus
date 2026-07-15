@@ -72,6 +72,19 @@ class ModuleSnapshot(BaseModel):
     disabled_tools: list[str] = Field(default_factory=list)
 
 
+class DockerStatus(BaseModel):
+    """Whether the core can reach Docker right now (#622) — the Modules page's proactive,
+    at-a-glance status, so an operator never has to attempt a removal (or read the logs) to
+    find out. ``available=False`` does **not** mean removal is disabled (ADR-0056/#382
+    decoupled the two) — only that container teardown on removal, and an Ollama KV-cache
+    restart (#307), defer until Docker is reachable again.
+    """
+
+    available: bool
+    # The probe's own exception text (``DockerAvailability.reason``); ``None`` when available.
+    reason: str | None = None
+
+
 class EnabledUpdate(BaseModel):
     """The body of an enable/disable toggle (#126)."""
 
@@ -169,6 +182,7 @@ class ModuleRegistry:
         tenant: str,
         prefs: ModulePrefsStore,
         docker: DockerController | None = None,
+        docker_unavailable_reason: str | None = None,
     ) -> None:
         self._bases = list(base_urls)
         self._mcp = mcp
@@ -176,6 +190,9 @@ class ModuleRegistry:
         self._tenant = tenant
         self._prefs = prefs
         self._docker = docker
+        # Why ``docker`` is None, for the Modules page's proactive status card (#622) — never
+        # set when ``docker`` isn't, and vice versa (see ``DockerAvailability``).
+        self._docker_reason = docker_unavailable_reason
         # Per-base probe cache (#478), 1:1 with ``self._bases``: each base refreshes
         # independently and single-flight, so one hung module can never delay a call
         # routed to a different, healthy one.
@@ -426,6 +443,17 @@ class ModuleRegistry:
             container_teardown_deferred=deferred,
         )
         return {"removed": name, "containers": containers, "container_teardown_deferred": deferred}
+
+    def docker_status(self) -> DockerStatus:
+        """Whether Docker is reachable right now, and why not (#622) — a pure read, no probe.
+
+        The probe already ran once at startup (:meth:`DockerController.from_env`); this just
+        reports its outcome so the Modules page can show an accurate, proactive status instead
+        of an operator only finding out by attempting a removal or reading the logs.
+        """
+        if self._docker is not None:
+            return DockerStatus(available=True)
+        return DockerStatus(available=False, reason=self._docker_reason)
 
     async def reconcile_tombstones(self) -> None:
         """Re-remove any tombstoned module whose container is still up (#127, #382).
@@ -1353,6 +1381,13 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         after the embedding model changes. Fans out to each module's ``/reindex`` and returns a
         per-module status. A literal route, so it's declared before the ``/{name}/…`` paths."""
         return {"modules": await registry.reembed()}
+
+    @router.get("/docker-status", response_model=DockerStatus)
+    async def get_docker_status() -> DockerStatus:
+        """Whether the core can reach Docker right now, and why not (#622). A literal route,
+        so it's declared before the ``/{name}/…`` paths — "docker-status" is never a module
+        name, but this keeps the same convention as ``/reembed`` above."""
+        return registry.docker_status()
 
     @router.get("/{name}/config")
     async def get_config(name: str) -> dict[str, Any]:

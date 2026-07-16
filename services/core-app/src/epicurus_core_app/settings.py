@@ -155,6 +155,11 @@ class CoreAppSettings(CoreSettings):
     # How many past profile versions to retain per tenant (the newest is injected). Mirrors the
     # editor's MAX_VERSIONS idiom (ADR-0046) — enough to browse/restore, bounded so it can't grow.
     memory_profile_max_versions: int = 5
+    # Optional dedicated model for the nightly playbook-reflection call (ADR-0093 §1; blank = the
+    # operator's default chat model). Mirrors `memory_profile_model` — a small model keeps the
+    # nightly pass cheap. There is deliberately no reflection *hour* knob: the pass rides the
+    # maintenance orchestrator's single schedule (ADR-0093 §1, ADR-0098), never one of its own.
+    playbook_reflection_model: str = ""
     # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
     # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
     # deployment sets its own in the Settings screen (persisted) or via this env.

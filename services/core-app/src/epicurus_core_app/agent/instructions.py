@@ -10,16 +10,32 @@ A NULL/absent row falls back to the shipped :data:`DEFAULT_AGENT_INSTRUCTIONS`. 
 ``TimezonePrefsStore`` pattern (ADR-0039): auto-created and column-healed on ``init()``, resolved
 per turn so an edit takes effect on the next turn with no restart. The memory-extraction prompt
 (``memory/extraction.py``) is a separate pipeline and out of scope.
+
+Since ADR-0093 this store composes rather than merely reads: :meth:`AgentInstructionsStore.
+get_instructions` returns the base prompt **plus every enabled named playbook**
+(``playbooks.py``), each under its own heading, as one opaque string. ``Agent._assemble``'s call
+site is unchanged — the composition happens *below* the accessor, which is precisely why the ADR
+needed no ``_assemble`` change. It also gained ADR-0046 snapshot-on-save versioning, which it
+never needed while the operator was the only author: an *agent-proposed* edit the operator later
+regrets needs an undo.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import String, Text
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+
+from sqlalchemy import DateTime, String, Text, delete, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from epicurus_core import get_logger
 from epicurus_core.db import ensure_columns
+from epicurus_core_app.agent.playbooks import MAX_VERSIONS, PlaybookStore
+
+log = get_logger("epicurus_core_app.agent.instructions")
 
 # The built-in default prompt shipped when a tenant hasn't set its own (#497). It establishes who
 # epicurus is (a private, self-hosted, single-operator assistant), a concise and candid voice, and
@@ -46,6 +62,20 @@ Boundaries: everything here belongs to the operator and stays on their machine. 
 what you can and cannot do, don't claim capabilities you lack, and if you don't know, say so."""
 
 
+@dataclass(frozen=True)
+class InstructionsVersion:
+    """One snapshot of the base prompt's prior content (ADR-0046).
+
+    ``content`` is ``None`` for list rows and populated for a single fetched version; ``size`` is
+    the snapshot's character count. Mirrors ``playbooks.PlaybookVersion``.
+    """
+
+    version_id: str
+    created_at: datetime
+    size: int
+    content: str | None = None
+
+
 class _InstrBase(DeclarativeBase):
     pass
 
@@ -60,12 +90,42 @@ class _AgentInstructionsRow(_InstrBase):
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class AgentInstructionsStore:
-    """Read/write the operator's base system prompt for a tenant (#497)."""
+class _AgentInstructionsVersionRow(_InstrBase):
+    """One snapshot of a tenant's base prompt (ADR-0046's shape, per tenant).
 
-    def __init__(self, engine: AsyncEngine, *, default: str = DEFAULT_AGENT_INSTRUCTIONS) -> None:
+    A parallel table to ``agent_playbook_versions`` rather than one shared version stream: the
+    base prompt is a per-tenant singleton and a playbook is one of N named documents, so mixing
+    them would turn "roll back *this* playbook" into "figure out which interleaved version
+    belongs to which document" (ADR-0093's own rejected alternative).
+    """
+
+    __tablename__ = "agent_instructions_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vid: Mapped[str] = mapped_column(String(32), index=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentInstructionsStore:
+    """Read/write the operator's base system prompt for a tenant (#497).
+
+    Given a *playbooks* store, :meth:`get_instructions` composes the base prompt with every
+    enabled playbook (ADR-0093 §4); without one it behaves exactly as it did before playbooks
+    existed, which is what the store's own unit tests and any minimal wiring rely on.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        default: str = DEFAULT_AGENT_INSTRUCTIONS,
+        playbooks: PlaybookStore | None = None,
+    ) -> None:
         self._engine = engine
         self._default = default
+        self._playbooks = playbooks
         self._session: async_sessionmaker[AsyncSession] = async_sessionmaker(
             engine, expire_on_commit=False
         )
@@ -87,9 +147,35 @@ class AgentInstructionsStore:
         ensure_columns(sync_conn, _AgentInstructionsRow.__table__, ("instructions",))
 
     async def get_instructions(self, tenant: str) -> str:
-        """The effective prompt: the stored value if set (non-blank), else the shipped default.
+        """The **composed** prompt: the base instructions plus every enabled playbook (ADR-0093 §4).
 
-        Called by ``Agent._assemble`` per turn, so an edit takes effect on the next turn.
+        Called by ``Agent._assemble`` per turn, so an edit takes effect on the next turn. The
+        composition happens here rather than at the call site, so ``_assemble`` still leads the
+        turn with one opaque string and never learned that playbooks exist.
+
+        A playbook read that fails degrades to the base prompt alone rather than breaking the
+        turn — the same best-effort rule the standing profile follows (ADR-0094). The base
+        prompt is the thing the agent cannot run sensibly without; an enabled playbook is
+        enrichment.
+        """
+        base = await self.get_base(tenant)
+        if self._playbooks is None:
+            return base
+        try:
+            extra = await self._playbooks.compose(tenant)
+        except Exception as exc:  # enrichment must never cost the operator a turn
+            log.warning("playbook composition failed; using base instructions", error=str(exc))
+            return base
+        return f"{base}\n\n{extra}" if extra else base
+
+    async def get_base(self, tenant: str) -> str:
+        """The effective **base** prompt alone: the stored value if set, else the shipped default.
+
+        The pre-playbooks meaning of :meth:`get_instructions`, kept as its own accessor because
+        two callers genuinely want the base without the playbooks composed in: this method's own
+        composition step, and the review surface, which diffs a proposed base-instructions edit
+        against what is actually stored (never against base+playbooks, which is not a document
+        anyone can edit).
         """
         async with self._session() as session:
             row = await session.get(_AgentInstructionsRow, tenant)
@@ -106,8 +192,20 @@ class AgentInstructionsStore:
             return row.instructions
 
     async def set_instructions(self, tenant: str, value: str | None) -> None:
-        """Set the operator's prompt, or clear it (blank/``None`` → back to the default)."""
+        """Set the operator's prompt, or clear it (blank/``None`` → back to the default).
+
+        Snapshots the **previous** effective base prompt first (ADR-0046), so an approved
+        agent-proposed edit — or an operator's own overwrite — is always undoable. Snapshotting
+        the *effective* value (not the raw row) means the very first edit records the shipped
+        default, so "put it back how it was" works even for a tenant that had never customized
+        it. See ``PlaybookStore.save`` for why this snapshots the replaced body rather than the
+        saved one, the single deliberate departure from the editor's version store.
+
+        A write that leaves the effective prompt unchanged records no version — the editor's
+        "a save that changed nothing must not pile up duplicates" rule.
+        """
         cleaned = value.strip() if value else ""
+        previous = await self.get_base(tenant)
         async with self._session() as session:
             row = await session.get(_AgentInstructionsRow, tenant)
             if not cleaned:
@@ -119,3 +217,73 @@ class AgentInstructionsStore:
                     session.add(row)
                 row.instructions = cleaned
             await session.commit()
+        if (cleaned or self._default) != previous:
+            await self._snapshot(tenant, previous)
+
+    async def _snapshot(self, tenant: str, content: str) -> None:
+        """Record one snapshot of the base prompt, deduplicated, pruned to :data:`MAX_VERSIONS`.
+
+        The ADR-0046 shape verbatim, sharing ``playbooks.MAX_VERSIONS`` so the two halves of
+        ADR-0093 §3's "capped at the same MAX_VERSIONS" cannot drift apart.
+        """
+        async with self._session() as session:
+            newest = await session.scalar(
+                select(_AgentInstructionsVersionRow.content)
+                .where(_AgentInstructionsVersionRow.tenant == tenant)
+                .order_by(_AgentInstructionsVersionRow.id.desc())
+                .limit(1)
+            )
+            if newest == content:
+                return
+            session.add(
+                _AgentInstructionsVersionRow(vid=uuid.uuid4().hex, tenant=tenant, content=content)
+            )
+            await session.commit()
+            keep_ids = (
+                await session.scalars(
+                    select(_AgentInstructionsVersionRow.id)
+                    .where(_AgentInstructionsVersionRow.tenant == tenant)
+                    .order_by(_AgentInstructionsVersionRow.id.desc())
+                    .limit(MAX_VERSIONS)
+                )
+            ).all()
+            await session.execute(
+                delete(_AgentInstructionsVersionRow).where(
+                    _AgentInstructionsVersionRow.tenant == tenant,
+                    _AgentInstructionsVersionRow.id.notin_(keep_ids),
+                )
+            )
+            await session.commit()
+
+    async def versions(self, tenant: str) -> list[InstructionsVersion]:
+        """The base prompt's snapshots, newest first — bodies omitted (ADR-0046's list shape)."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_AgentInstructionsVersionRow)
+                .where(_AgentInstructionsVersionRow.tenant == tenant)
+                .order_by(_AgentInstructionsVersionRow.id.desc())
+            )
+            return [
+                InstructionsVersion(
+                    version_id=row.vid, created_at=row.created_at, size=len(row.content)
+                )
+                for row in rows
+            ]
+
+    async def version(self, tenant: str, version_id: str) -> InstructionsVersion | None:
+        """One snapshot **with** its body, or ``None`` — what a rollback reads."""
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_AgentInstructionsVersionRow).where(
+                    _AgentInstructionsVersionRow.tenant == tenant,
+                    _AgentInstructionsVersionRow.vid == version_id,
+                )
+            )
+            if row is None:
+                return None
+            return InstructionsVersion(
+                version_id=row.vid,
+                created_at=row.created_at,
+                size=len(row.content),
+                content=row.content,
+            )

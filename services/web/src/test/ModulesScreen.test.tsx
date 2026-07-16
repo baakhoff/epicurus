@@ -9,12 +9,14 @@ import { ModulesScreen } from "@/screens/ModulesScreen";
 const mockModules = vi.fn();
 const mockModuleConfig = vi.fn();
 const mockRemoveModule = vi.fn();
+const mockDockerStatus = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     modules: (opts?: { refresh?: boolean }) => mockModules(opts),
     moduleConfig: (name: string) => mockModuleConfig(name),
     removeModule: (name: string) => mockRemoveModule(name),
+    dockerStatus: () => mockDockerStatus(),
   },
 }));
 
@@ -47,8 +49,10 @@ beforeEach(() => {
   mockModules.mockReset();
   mockModuleConfig.mockReset();
   mockRemoveModule.mockReset();
+  mockDockerStatus.mockReset();
   mockModules.mockResolvedValue([ECHO]);
   mockModuleConfig.mockResolvedValue({});
+  mockDockerStatus.mockResolvedValue({ available: true, reason: null });
 });
 
 describe("ModulesScreen removal", () => {
@@ -84,6 +88,40 @@ describe("ModulesScreen removal", () => {
     await waitFor(() =>
       expect(screen.queryByText(/its container is still running/i)).toBeNull(),
     );
+  });
+});
+
+describe("ModulesScreen Docker status (#622)", () => {
+  it("shows no status card when Docker is reachable", async () => {
+    render(<ModulesScreen />, { wrapper });
+    await screen.findByText("echo");
+    expect(screen.queryByText(/isn.t reachable from the core/i)).toBeNull();
+  });
+
+  it("shows an accurate, proactive card — never 'removal disabled' — when Docker is unreachable", async () => {
+    mockDockerStatus.mockResolvedValue({
+      available: false,
+      reason: "permission denied while trying to connect",
+    });
+    render(<ModulesScreen />, { wrapper });
+
+    // Query the plain-text portion (a sibling of the emphasized span) so the match bubbles
+    // up to the whole paragraph, which also carries the interpolated reason.
+    const paragraph = await screen.findByText(/module removal still works immediately/i);
+    expect(paragraph.textContent).toMatch(/isn.t reachable from the core/i);
+    expect(paragraph.textContent).toMatch(/permission denied while trying to connect/);
+    // Removal itself is never described as disabled (ADR-0056/#382 decoupled the two) —
+    // only container teardown / the KV-cache restart defer.
+    expect(screen.queryByText(/removal disabled/i)).toBeNull();
+    expect(await screen.findByText(/DOCKER_GID/)).toBeTruthy();
+  });
+
+  it("omits the parenthetical reason when the probe captured none", async () => {
+    mockDockerStatus.mockResolvedValue({ available: false, reason: null });
+    render(<ModulesScreen />, { wrapper });
+
+    const paragraph = await screen.findByText(/module removal still works immediately/i);
+    expect(paragraph.textContent).not.toMatch(/\(\)/);
   });
 });
 

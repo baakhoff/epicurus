@@ -398,6 +398,25 @@ def profile_synthesis_job(synthesize: Callable[[], Awaitable[int]]) -> Maintenan
     )
 
 
+def playbook_reflection_job(reflect: Callable[[], Awaitable[int]]) -> MaintenanceJob:
+    """Propose edits to the agent's own guidance from recent sessions (ADR-0093 §1) — nightly.
+
+    *reflect* is :meth:`PlaybookReflector.run`; it is best-effort per tenant, skips a paused
+    gateway, and only ever *stages* proposals for the operator's approval — it never writes the
+    agent's instructions or playbooks — so this job reports how many now await review. One gateway
+    call per active tenant over a night's conversations is light enough for the scheduled batch,
+    the same tier as the extraction drain and profile synthesis.
+    """
+
+    async def _run() -> tuple[JobStatus, str]:
+        count = await reflect()
+        return "ok", f"staged {count} proposal(s) for review"
+
+    return MaintenanceJob(
+        key="playbook-reflection", label="Agent playbook reflection", run=_run, nightly=True
+    )
+
+
 def facts_reembed_job(reembed: Callable[[], Awaitable[int]]) -> MaintenanceJob:
     """Re-embed the tenant's memory facts (#436) — heavy, so manual-only (``nightly=False``).
 

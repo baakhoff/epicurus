@@ -12,7 +12,66 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Added
+
+- **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
+  governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
+  job on the maintenance orchestrator's nightly batch (additive — one entry appended to the
+  registry, registered `nightly=True`, so it rides the orchestrator's existing schedule rather
+  than a knob of its own). Per tenant it scans the sessions active since its last run and makes
+  **one** gateway call over them, staging zero or more candidate edits — to the base instructions
+  or a named playbook — as review proposals. It **cannot apply anything**: it is handed a proposal
+  sink and a read-only playbook lookup, never the stores that own the documents, so ADR-0093's
+  "nothing self-applies" is enforced by construction. The call is metered under **the tenant whose
+  sessions it scanned**, never the default tenant (constraints #1/#8, the ADR-0051 drain's
+  precedent). Recently **rejected** proposals are digested into the prompt as negative context
+  from the ADR-0090 audit trail, so a declined idea isn't re-proposed unchanged; a document with a
+  proposal still pending is skipped, so the queue can't stack drafts while the operator is away.
+  The create-vs-update operation is derived from what exists rather than taken from the model — a
+  mislabelled create would render an empty *current* side and hide what an approval would
+  overwrite. A durable per-tenant watermark (`agent_reflection_state`) bounds the scan, snapshotted
+  before it and advanced only on a completed pass. Junk costs nothing: a non-JSON reply, an unknown
+  target, or a runaway generation stages nothing rather than raising, and a tenant with no new
+  activity spends no gateway call at all. New `PLAYBOOK_REFLECTION_MODEL` (blank = the default chat
+  model). Implements ADR-0093 §1/§5/§6. `core-app` 0.80.0→0.81.0 (MINOR).
+- **Agent: governed playbooks — storage + a core-hosted approval surface** (#616) — the agent's
+  behaviour improved only when the operator hand-edited the base prompt; nothing captured what the
+  system learns in use. **Playbooks** are named, independently enable-able blocks of guidance
+  stored beside that prompt (`agent_playbooks`) and composed into every turn — base first, then
+  each enabled playbook under its own heading. The composition happens **below**
+  `AgentInstructionsStore.get_instructions`, so `Agent._assemble` is untouched and still leads the
+  turn with one opaque string; a failed playbook read degrades to the base prompt rather than
+  costing the turn. Nothing self-applies: an edit arrives as a `ReviewSuggestion` (ADR-0090) and
+  only the operator's **Approve** writes it — through the existing instructions store for the base
+  prompt (the same path a manual Settings edit uses), or the playbook store for a named one. Both
+  halves gained ADR-0046 snapshot-on-save versioning (`agent_instructions_versions`,
+  `agent_playbook_versions`; capped at 50, oldest pruned), snapshotting the body each save
+  *replaced* so an approved agent-authored edit is always undoable. The approval UI is the
+  existing, unmodified `ReviewView`/`SuggestionReviewModal`: the core registers a reserved **`core`
+  pseudo-module** that `ModuleRegistry` answers **in-process** (no loopback HTTP), riding
+  `GET /platform/v1/modules` so the shell discovers its `review` page like any module's. It is
+  deliberately *not* a configured base, so it can never leak into the agent's MCP tool surface or
+  the re-embed fan-out; `enabled` / `DELETE` / `suggestions-enabled` all **403** for it — its
+  review is mandatory. Web-side, the Suggestions inbox shows *Always reviewed* instead of a toggle
+  for that group, and the Modules screen filters the reserved name out. Implements ADR-0093
+  §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
+
 ### Fixed
+
+- **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
+  mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
+  disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either
+  way, deferring only the container teardown — but the log line (surfaced via the Observability
+  console) still said "module removal disabled," and the socket mount in
+  `services/core-app/compose.yaml` was unconditional despite never being reachable on a real
+  deployment anyway (the core drops to an unprivileged uid at startup, ADR-0069, with no group
+  matching the host's docker-socket GID). Now: the message says what's actually deferred; a new
+  `GET /platform/v1/modules/docker-status` lets the Modules page state that proactively, with the
+  one-line enablement, instead of an operator finding out by attempting a removal; and the socket
+  mount is an explicit opt-in (`services/core-app/compose.docker-socket.yaml` + `DOCKER_GID`) —
+  losing no real capability (nothing worked by default before either) while closing a
+  root-equivalent attack surface that was pure liability. `core-app` 0.78.0→0.79.0; `web`
+  0.108.0→0.109.0.
 
 - **Mail: paging pinned to the bottom, action row at the top + icon-only on phone** (#624, #626) —
   two mailbox UX fixes. The **Newer/Older** paging controls scrolled away with the message rows
@@ -55,8 +114,8 @@ images to GHCR.
   refused to re-answer. Nothing re-indexes the revised text — messages are not a recall corpus
   (ADR-0045), so `memory_search` reads the new text (and none of the discarded turns) straight from
   the store; the extraction queue (#326) is likewise unaffected, holding a **text snapshot** rather
-  than a reference to a message that may no longer exist. `core-app` 0.78.0→0.79.0; `web`
-  0.108.0→0.109.0.
+  than a reference to a message that may no longer exist. `core-app` 0.81.0→0.82.0; `web`
+  0.109.1→0.110.0.
 
 - **Mail: mark message read on open** (#625) — a message stayed unread until acted on explicitly.
   Opening a conversation now marks its unread messages read at once: the shell flips the list row

@@ -947,7 +947,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.79.0"
+version = "0.82.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },

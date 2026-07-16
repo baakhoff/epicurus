@@ -103,6 +103,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `memory_extraction_batch_limit` | `MEMORY_EXTRACTION_BATCH_LIMIT` | `int` | `200` | Max exchanges distilled per nightly drain (a safety bound on one run's cost). |
 | `memory_recall_timeout_s` | `MEMORY_RECALL_TIMEOUT_S` | `float` | `4.0` | Seconds the inline recall embed may take before a turn proceeds without it — bounds the only memory step still on the response path (ADR-0051). 4s (was 2s) lets a single-GPU embed-model swap finish; on timeout the turn proceeds with no recall and logs `recall skipped: embed timed out`, while a backend failure logs `recall skipped: backend error` (with the exception type) so the two are distinguishable. |
 | `memory_profile_model` | `MEMORY_PROFILE_MODEL` | `str` | `""` | Optional dedicated model for the nightly **standing-profile** synthesis (ADR-0094) — a small model keeps the pass cheap. Blank = the operator's default chat model. |
+| `playbook_reflection_model` | `PLAYBOOK_REFLECTION_MODEL` | `str` | `""` | Optional dedicated model for the nightly **playbook-reflection** pass (ADR-0093 §1) — a small model keeps the pass cheap. Blank = the operator's default chat model. There is deliberately no reflection *hour* knob: the pass rides the maintenance orchestrator's single schedule (ADR-0098), never one of its own. |
 | `memory_profile_max_versions` | `MEMORY_PROFILE_MAX_VERSIONS` | `int` | `5` | How many past standing-profile versions to retain per tenant (the newest is injected each turn). |
 | `default_timezone` | `DEFAULT_TIMEZONE` | `str` | `UTC` | Fallback IANA timezone the agent's `now` tool reports when the operator hasn't set one in Settings (ADR-0039). |
 | `maintenance_schedule_enabled` | `MAINTENANCE_SCHEDULE_ENABLED` | `bool` | `false` | **Default only** (#621, ADR-0098) — a tenant inherits this until it sets its own schedule via `PUT /platform/v1/maintenance/schedule`. Off by default: the per-runner schedules already cover the unattended case; the manual "run everything" trigger is always available regardless. |
@@ -159,6 +160,16 @@ The on-disk file tree is **tenant-scoped** (constraint #1): the core indexes
 `KNOWLEDGE_HOST_VAULT` and `STORAGE_HOST_ROOT`. Move old vault contents into
 `<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default
 `local`; each project is a top-level folder) so they appear as knowledge bases.
+
+## Docker-socket opt-in (#622, ADR-0099)
+
+Not a `CoreAppSettings` field — read directly by `services/core-app/docker-entrypoint.py`
+(the container's root-run entrypoint) before the app process even starts, so it can't go
+through pydantic-settings like the rest of this page.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `DOCKER_GID` | unset | core-app entrypoint | The host's docker-socket group id. When set, the entrypoint joins it (via `setgroups`, while still root) before dropping to the unprivileged app uid — the missing half of the opt-in `services/core-app/compose.docker-socket.yaml` overlay, which mounts `/var/run/docker.sock` but cannot by itself make it reachable by a non-root process. Unset (the default): the socket, if mounted at all, stays unreachable — module removal and the Ollama KV-cache restart still work, just deferred to the next restart (see [modules](modules.md#removing-a-module--tombstone-now-tear-the-container-down-out-of-band-127-382-adr-0028)). Find your host's value with `getent group docker \| cut -d: -f3` or `stat -c '%g' /var/run/docker.sock`. |
 
 ## Type aliases
 

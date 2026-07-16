@@ -84,6 +84,36 @@ evaluated by Prometheus; Alertmanager routes notifications (edit
 `infra/observability/alertmanager/alertmanager.yml` to add a receiver).
 Details: [`infra/observability/README.md`](../../infra/observability/README.md).
 
+## Docker-socket access (opt-in, #622)
+
+`core-app` can tear down a removed module's container immediately, and restart Ollama to apply
+a KV-cache change (#307) — both need the Docker socket, which is **root-equivalent on the
+host**. The socket is **NOT mounted by default** (ADR-0099): without it, neither is broken —
+module removal always works (it tombstones the module at once regardless, ADR-0056/#382), and a
+KV-cache change still saves — only the container teardown / restart **defer to the next
+restart**, and the Modules page states that plainly (`GET /platform/v1/modules/docker-status`),
+never a mystery banner.
+
+Mounting the socket alone isn't sufficient anyway: `core-app` drops from root to an unprivileged
+uid after startup (see [Shared file space](#shared-file-space)), and the image defines no
+`docker` group to inherit — so an *unconditional* mount bought nothing real on a normal Linux
+host, while still exposing a root-equivalent surface by default. Opt in with both pieces
+together:
+
+```bash
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose \
+  -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
+# or: task docker-socket-up
+```
+
+`DOCKER_GID` is the host's docker-socket group id (`getent group docker | cut -d: -f3`, or the
+`stat` form above if you don't use a `docker` group) — the entrypoint joins it before dropping
+privileges. The core still only ever exercises one narrow, audited path over the socket
+(`DockerController`, ADR-0028): stop + remove a *configured module's own* container, scoped to
+this Compose project, never core-app / web / a data-plane service — that scoping mitigates the
+grant, it doesn't replace treating it as privileged. Full tradeoff and rationale in
+`services/core-app/compose.docker-socket.yaml`'s header comment.
+
 ## Ollama (local LLM runtime)
 
 Runs **as a container** (ADR-0011), CPU by default and GPU opt-in via an overlay

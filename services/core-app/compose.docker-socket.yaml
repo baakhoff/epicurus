@@ -1,0 +1,34 @@
+# Opt-in Docker-socket access for core-app (#622, ADR-0099). NOT auto-loaded — Compose only
+# auto-merges a `compose.override.yaml` sitting beside the file it overrides, and this one
+# lives here specifically so a plain `docker compose up` / `task up` never picks it up by
+# accident. Layer it on top of the default stack explicitly:
+#
+#   DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose \
+#     -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
+#   # or: task docker-socket-up
+#
+# What this buys you: module removal (#127, ADR-0028) tears its container down immediately
+# instead of deferring to the next restart, and an Ollama KV-cache change (#307) applies via
+# an immediate restart instead of needing a manual one. Neither is broken without this — see
+# the Modules page, which states the deferred behavior plainly when Docker isn't reachable.
+#
+# Security tradeoff (read before enabling): /var/run/docker.sock is ROOT-EQUIVALENT on the
+# host — anything that can reach it can control every container, image, and volume on the
+# machine. core-app only ever exercises one narrow, audited path over it (`DockerController`,
+# ADR-0028): stop + remove a *configured module's own* container, scoped to this Compose
+# project, never core-app / web / a data-plane service. That scoping is a mitigation, not a
+# substitute for treating this grant as privileged — enable it only if you want immediate
+# container teardown and accept that a core-app compromise becomes a host compromise.
+#
+# The mount alone is not enough: core-app drops from root to an unprivileged uid after startup
+# (ADR-0069), and the image defines no `docker` group to inherit — DOCKER_GID (the *host's*
+# docker-group id, or the socket's owning gid if you don't use a docker group) tells the
+# entrypoint which group to join before it drops privileges. Find it with:
+#   getent group docker | cut -d: -f3        # if your host has a docker group
+#   stat -c '%g' /var/run/docker.sock        # always works, group name or not
+services:
+  core-app:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DOCKER_GID: ${DOCKER_GID:?set DOCKER_GID to your host's docker-socket group id — see the comments in this file}

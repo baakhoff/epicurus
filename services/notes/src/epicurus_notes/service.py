@@ -19,7 +19,14 @@ the ``review`` archetype — both core-rendered (this module supplies data only)
 
 from __future__ import annotations
 
-from epicurus_core import EpicurusModule, PageSpec, PlatformClient, UiSection, tool_envelope
+from epicurus_core import (
+    EpicurusModule,
+    PageSpec,
+    PlatformClient,
+    UiSection,
+    WritesDocument,
+    tool_envelope,
+)
 from epicurus_notes.db import NotesStore
 from epicurus_notes.pages import NOTES_PAGE_ID
 from epicurus_notes.suggestions import (
@@ -60,7 +67,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.6.0",
+        version="0.8.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -170,7 +177,10 @@ def build_module(
             f"{verb.capitalize()} note '{clean}' applied directly — review is off.", []
         )
 
-    @module.tool()
+    # `content` is the note's whole body, so the shell can show it in the document pane as the
+    # note being written (#541, ADR-0100). `notes_append` is deliberately NOT annotated: its
+    # `text` is a fragment the server concatenates on approval, not a document.
+    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="slug"))
     async def notes_create(slug: str, content: str, note: str = "") -> str:
         """Propose creating a note at *slug* with *content*, for operator review (ADR-0033).
 
@@ -180,7 +190,7 @@ def build_module(
         """
         return await _stage(slug, "create", content, note)
 
-    @module.tool()
+    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="slug"))
     async def notes_propose_edit(slug: str, content: str, note: str = "") -> str:
         """Propose replacing note *slug*'s full body with *content*, for review (ADR-0033).
 

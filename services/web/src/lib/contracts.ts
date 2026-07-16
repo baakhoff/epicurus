@@ -364,6 +364,22 @@ export const Readiness = z.object({
 export type Readiness = z.infer<typeof Readiness>;
 
 /** One SSE event of a streaming agent turn (event name == `type`). */
+/** What a document-writing tool call is writing (#541, ADR-0100/0101).
+ *
+ *  The core reads the module's `writes_document` annotation and pulls the named arguments off
+ *  the call, so the pane can show the document *while* it is written — the module names the
+ *  arguments, the shell renders (ADR-0018/0019). `target` is the document the write lands in (a
+ *  path or id) and `title` a human label; either may be absent when the tool has no such
+ *  argument. `content` is the body, in full and un-truncated — it rides the SSE stream only and
+ *  is never persisted into the turn's activity (ADR-0041's caps are unchanged). */
+export const WrittenDocument = z.object({
+  module: z.string(),
+  content: z.string(),
+  target: z.string().nullish(),
+  title: z.string().nullish(),
+});
+export type WrittenDocument = z.infer<typeof WrittenDocument>;
+
 export const AgentEvent = z.object({
   // `thinking` carries a chain-of-thought token, shown in the activity timeline (ADR-0041).
   // `awaiting_input` ends the stream when the model asks a question (ADR-0053); `gone` is the
@@ -393,6 +409,10 @@ export const AgentEvent = z.object({
   // service-worker-cached PWA ignores the new fields and keeps parsing the stream (ADR-0055).
   awaiting_kind: z.string().nullish(),
   draft: z.record(z.string(), z.unknown()).nullish(),
+  // Present on a `tool` event whose module annotated the tool `writes_document` (#541,
+  // ADR-0100/0101): what the call is writing, so the shell can open the document pane. Rides
+  // both the `running` and terminal frames. Additive, like the draft fields above.
+  document: WrittenDocument.nullish(),
 });
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

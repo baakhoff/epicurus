@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import Attachment, draft_review
+from epicurus_core import Attachment, WritesDocument, draft_review
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
     _EMPTY_ANSWER_FALLBACK,
@@ -19,9 +19,11 @@ from epicurus_core_app.agent.agent import (
     _STOPPED_TOOL_ERRORS,
     _STOPPED_UNSUPPORTED_MEDIA,
     _STREAM_STALLED_MESSAGE,
+    _TOOL_DETAIL_CAP,
     _VISION_UNSUPPORTED_MESSAGE,
     Agent,
     AgentEvent,
+    DocumentToolLookup,
 )
 from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.mcp_host import ToolCallError
@@ -907,3 +909,134 @@ async def test_stream_blocks_image_before_any_provider_call_when_model_lacks_vis
     assert done.turn.stopped == _STOPPED_UNSUPPORTED_MEDIA
     assert gw.calls == []  # no provider call at all
     assert not any(m.role == "user" and m.content == _REPEAT_NUDGE for c in gw.calls for m in c)
+
+
+# ── the document pane's tool payload (#541, ADR-0100/0101) ───────────────────
+
+
+def _writes(content_arg: str = "content", target_arg: str | None = "path") -> WritesDocument:
+    return WritesDocument(content_arg=content_arg, target_arg=target_arg)
+
+
+def _doc_lookup(
+    annotation: WritesDocument | None = None, *, module: str = "knowledge", tool: str = "write_doc"
+) -> DocumentToolLookup:
+    """A registry stand-in: resolves exactly one tool, like the real manifest lookup."""
+
+    async def lookup(name: str) -> tuple[str, WritesDocument] | None:
+        if name != tool or annotation is None:
+            return None
+        return module, annotation
+
+    return lookup
+
+
+class _ScribeMcp(_FakeMcp):
+    """Routes `write_doc` — the base fake only knows `echo`, so a call would error out."""
+
+    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        specs = [{"type": "function", "function": {"name": "write_doc"}}]
+        return specs, {"write_doc": "http://knowledge:8080/mcp"}
+
+
+def _write_round(arguments: dict[str, Any]) -> list[tuple[list[str], ChatResult]]:
+    """One round that calls `write_doc`, then an answer."""
+    call = _tool_call("write_doc", json.dumps(arguments))
+    return [
+        ([], ChatResult(model="m", content="", tool_calls=[call])),
+        (["saved"], ChatResult(model="m", content="saved")),
+    ]
+
+
+_DOC_ARGS = {"path": "notes/goals.md", "content": "# Goals\nship it"}
+
+
+async def _write_events(
+    lookup: DocumentToolLookup, arguments: dict[str, Any] | None = None
+) -> list[AgentEvent]:
+    gw = _FakeStreamGateway(_write_round(_DOC_ARGS if arguments is None else arguments))
+    agent = Agent(gateway=gw, mcp=_ScribeMcp(), documents=lookup)  # type: ignore[arg-type]
+    return await _collect(agent, "write it down")
+
+
+async def test_an_annotated_call_says_what_it_is_writing() -> None:
+    events = await _write_events(_doc_lookup(_writes()))
+
+    tools = [e for e in events if e.type == "tool"]
+    assert [t.status for t in tools] == ["running", "ok"]
+    # On both frames: the pane opens on `running` and unlocks on the terminal one.
+    for frame in tools:
+        assert frame.document == {
+            "module": "knowledge",
+            "content": "# Goals\nship it",
+            "target": "notes/goals.md",
+            "title": None,
+        }
+
+
+async def test_an_unannotated_call_carries_no_document() -> None:
+    # Every other tool call must be untouched — this is opt-in per tool.
+    events = await _write_events(_doc_lookup(None))
+    assert all(e.document is None for e in events if e.type == "tool")
+
+
+async def test_no_lookup_configured_means_no_document() -> None:
+    gw = _FakeStreamGateway(_write_round({"path": "a.md", "content": "hi"}))
+    events = await _collect(Agent(gateway=gw, mcp=_ScribeMcp()), "go")  # type: ignore[arg-type]
+    assert all(e.document is None for e in events if e.type == "tool")
+
+
+async def test_a_call_with_no_body_opens_no_pane() -> None:
+    # The manifest guarantees the argument exists, not that the model filled it. A pane with
+    # nothing in it is worse than no pane.
+    events = await _write_events(_doc_lookup(_writes()), {"path": "a.md", "content": ""})
+    assert all(e.document is None for e in events if e.type == "tool")
+
+
+async def test_a_non_string_body_opens_no_pane() -> None:
+    events = await _write_events(_doc_lookup(_writes()), {"path": "a.md", "content": {"oops": 1}})
+    assert all(e.document is None for e in events if e.type == "tool")
+
+
+async def test_a_missing_target_is_reported_as_absent_not_invented() -> None:
+    events = await _write_events(_doc_lookup(_writes()), {"content": "body only"})
+    running = next(e for e in events if e.type == "tool")
+    assert running.document is not None
+    assert running.document["target"] is None
+    assert running.document["content"] == "body only"
+
+
+async def test_a_failing_lookup_never_fails_the_turn() -> None:
+    # The pane is an affordance beside the answer: a registry hiccup costs a pane, not the turn.
+    async def exploding(_name: str) -> tuple[str, WritesDocument] | None:
+        raise RuntimeError("registry down")
+
+    events = await _write_events(exploding)
+    assert [e.type for e in events] == ["tool", "tool", "delta", "done"]
+    assert events[-1].turn is not None and events[-1].turn.content == "saved"
+    assert all(e.document is None for e in events if e.type == "tool")
+
+
+async def test_the_pane_payload_adds_nothing_to_the_persisted_activity() -> None:
+    """The pane rides SSE only — ADR-0041's caps are unchanged by it.
+
+    A document body is unbounded, so it must not become a persisted timeline entry. (The
+    step's own `detail` already carries the call's arguments, truncated to the pre-existing
+    `_TOOL_DETAIL_CAP` — that bound is what keeps a long write out of the message row, and it
+    predates the pane.)
+    """
+    long_body = "# Goals\n" + ("ship it. " * 500)
+    events = await _write_events(_doc_lookup(_writes()), {"path": "a.md", "content": long_body})
+
+    running = next(e for e in events if e.type == "tool")
+    assert running.document is not None
+    assert running.document["content"] == long_body  # in full, over the wire
+
+    done = events[-1]
+    assert done.turn is not None and done.turn.activity is not None
+    step = done.turn.activity.steps[0]
+    assert step.tool == "write_doc"
+    # No `document` on the persisted step, and the body it does mention stays capped.
+    assert not hasattr(step, "document")
+    assert step.detail is not None and len(step.detail) <= _TOOL_DETAIL_CAP
+    assert len(json.dumps(done.turn.activity.model_dump())) < len(long_body)

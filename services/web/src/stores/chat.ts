@@ -158,11 +158,15 @@ interface ChatState {
   /** Re-answer the session's last user turn, dropping the previous answer (#302). The
    *  caller drops the stale answer from the displayed transcript before this streams. */
   regenerate: (model: string | null, onDone: () => Promise<void>) => Promise<void>;
-  /** Replace the last user message with `content` and re-answer it in place (#302). */
+  /** Replace a user message with `content` and re-answer it in place (#302, #552).
+   *  `messageId` names the turn to revise; omit it for the last user message. Editing further
+   *  back also discards the turns after it — the caller confirms that first, and trims the
+   *  displayed transcript to match before this streams. */
   editAndRerun: (
     content: string,
     model: string | null,
     onDone: () => Promise<void>,
+    messageId?: number,
   ) => Promise<void>;
   /** Re-attach to this session's in-flight turn if one exists (#376). Called on mount,
    *  `visibilitychange`→visible, and `online`; a no-op when a stream is already live.
@@ -589,13 +593,14 @@ export const useChat = create<ChatState>()(
           );
         },
 
-        editAndRerun: async (content, model, onDone) => {
+        editAndRerun: async (content, model, onDone, messageId) => {
           if (get().streaming) return;
           set({ pendingUser: null, pendingAttachments: [] });
           const sid = encodeURIComponent(get().sessionId);
           await runTurn(
             `/platform/v1/agent/sessions/${sid}/edit`,
-            { content, model: model ?? undefined },
+            // Omitted, the server falls back to the last user message — #302's behavior.
+            { content, model: model ?? undefined, message_id: messageId },
             onDone,
           );
         },

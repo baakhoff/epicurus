@@ -46,6 +46,9 @@ class SessionSummary(BaseModel):
 class MessageRecord(BaseModel):
     """A persisted message with its timestamp (the UI's transcript shape)."""
 
+    # The message's stable id — what the client names to edit a turn other than the last
+    # one (#552). Opaque to the UI: it addresses a row the tenant+session already scopes.
+    id: int
     role: str
     content: str
     created_at: datetime
@@ -234,6 +237,7 @@ class ConversationStore:
             )
             return [
                 MessageRecord(
+                    id=m.id,
                     role=m.role,
                     content=m.content,
                     created_at=m.created_at,
@@ -357,12 +361,43 @@ class ConversationStore:
                 "int | None", await session.scalar(stmt.order_by(StoredMessage.id.desc()).limit(1))
             )
 
-    async def update_content(self, *, tenant: str, message_id: int, content: str) -> None:
-        """Replace one message's content in place (tenant-scoped) — backs an edited turn."""
+    async def message_role(self, *, tenant: str, session_id: str, message_id: int) -> str | None:
+        """The role of one message, or ``None`` if it isn't in this tenant's session (#552).
+
+        The edit anchor's validation primitive: a client naming an arbitrary ``message_id``
+        (editing a turn other than the last) must be checked *before* anything is revised or
+        truncated, and the check has to prove the row is in **this** conversation — not merely
+        in this tenant, which would let one session's edit rewrite another's history.
+        """
+        async with self._session() as session:
+            return cast(
+                "str | None",
+                await session.scalar(
+                    select(StoredMessage.role).where(
+                        StoredMessage.tenant == tenant,
+                        StoredMessage.session_id == session_id,
+                        StoredMessage.id == message_id,
+                    )
+                ),
+            )
+
+    async def update_content(
+        self, *, tenant: str, session_id: str, message_id: int, content: str
+    ) -> None:
+        """Replace one message's content in place — backs an edited turn.
+
+        Scoped to tenant **and** session: ``message_id`` is client-supplied since #552, so the
+        session predicate keeps a stray id from rewriting another conversation even if a caller
+        skips the :meth:`message_role` check.
+        """
         async with self._session() as session:
             await session.execute(
                 update(StoredMessage)
-                .where(StoredMessage.tenant == tenant, StoredMessage.id == message_id)
+                .where(
+                    StoredMessage.tenant == tenant,
+                    StoredMessage.session_id == session_id,
+                    StoredMessage.id == message_id,
+                )
                 .values(content=content)
             )
             await session.commit()
@@ -371,8 +406,10 @@ class ConversationStore:
         """Delete the session's messages with ``id > after_id``; returns the removed ids.
 
         Drops everything inserted after the anchor message — the assistant answer (and any
-        trailing turns) when regenerating or editing. The caller drops the matching recall
-        points. Returns the ids so recall stays consistent with history.
+        trailing turns) when regenerating, or the whole tail behind an edited turn (#552).
+        Nothing else has to be reaped to keep recall consistent: messages are not a recall
+        corpus (ADR-0045), and ``memory_search`` reads these rows live, so a deleted row stops
+        being findable by construction. The removed ids are returned for the caller to report.
         """
         async with self._session() as session:
             ids = list(

@@ -260,8 +260,68 @@ async def test_last_message_id_with_and_without_role() -> None:
 async def test_update_content_replaces_in_place() -> None:
     store, _ = await _fresh_store()
     mid = await store.append(tenant="t1", session_id="s", role="user", content="oops")
-    await store.update_content(tenant="t1", message_id=mid, content="fixed")
+    await store.update_content(tenant="t1", session_id="s", message_id=mid, content="fixed")
     assert [m.content for m in await store.messages(tenant="t1", session_id="s")] == ["fixed"]
+
+
+async def test_update_content_is_tenant_and_session_scoped() -> None:
+    """A stray id must not rewrite another conversation — ``message_id`` is client-named (#552)."""
+    store, _ = await _fresh_store()
+    mine = await store.append(tenant="t1", session_id="s", role="user", content="mine")
+    other_session = await store.append(tenant="t1", session_id="other", role="user", content="keep")
+    other_tenant = await store.append(tenant="t2", session_id="s", role="user", content="keep too")
+    # Right id, wrong session / wrong tenant → no row matches, nothing is written.
+    await store.update_content(tenant="t1", session_id="s", message_id=other_session, content="X")
+    await store.update_content(tenant="t1", session_id="s", message_id=other_tenant, content="X")
+    await store.update_content(tenant="t2", session_id="s", message_id=mine, content="X")
+    assert [m.content for m in await store.messages(tenant="t1", session_id="other")] == ["keep"]
+    assert [m.content for m in await store.messages(tenant="t2", session_id="s")] == ["keep too"]
+    assert [m.content for m in await store.messages(tenant="t1", session_id="s")] == ["mine"]
+
+
+async def test_message_role_identifies_the_edit_anchor() -> None:
+    store, _ = await _fresh_store()
+    user = await store.append(tenant="t1", session_id="s", role="user", content="q")
+    assistant = await store.append(tenant="t1", session_id="s", role="assistant", content="a")
+    role = store.message_role
+    assert await role(tenant="t1", session_id="s", message_id=user) == "user"
+    assert await role(tenant="t1", session_id="s", message_id=assistant) == "assistant"
+    # Absent, other session, other tenant → None, so the route rejects rather than truncates.
+    assert await role(tenant="t1", session_id="s", message_id=999_999) is None
+    assert await role(tenant="t1", session_id="other", message_id=user) is None
+    assert await role(tenant="t2", session_id="s", message_id=user) is None
+
+
+async def test_messages_expose_their_ids_for_editing() -> None:
+    """The transcript carries the anchor the client names on ``/edit`` (#552)."""
+    store, _ = await _fresh_store()
+    first = await store.append(tenant="t1", session_id="s", role="user", content="q")
+    second = await store.append(tenant="t1", session_id="s", role="assistant", content="a")
+    assert [m.id for m in await store.messages(tenant="t1", session_id="s")] == [first, second]
+
+
+async def test_search_follows_an_edit_and_forgets_the_truncated_tail() -> None:
+    """After a mid-history edit, recall finds the new text and none of the discarded turns.
+
+    Nothing re-indexes it: messages are not a recall corpus (ADR-0045) — ``memory_search`` reads
+    these rows live, so revising a row and deleting its tail *is* the reindex.
+    """
+    store, _ = await _fresh_store()
+    anchor = await store.append(tenant="t1", session_id="s", role="user", content="tell me a joke")
+    await store.append(tenant="t1", session_id="s", role="assistant", content="a punchline")
+    await store.append(tenant="t1", session_id="s", role="user", content="explain quantum physics")
+
+    await store.update_content(
+        tenant="t1", session_id="s", message_id=anchor, content="tell me a limerick"
+    )
+    await store.truncate_after(tenant="t1", session_id="s", after_id=anchor)
+
+    assert [h.content for h in await store.search_messages(tenant="t1", query="limerick")] == [
+        "tell me a limerick"
+    ]  # the revised text is findable…
+    assert await store.search_messages(tenant="t1", query="joke") == []  # …the old text is not
+    assert await store.search_messages(tenant="t1", query="punchline") == []  # truncated answer
+    assert await store.search_messages(tenant="t1", query="quantum") == []  # truncated question
 
 
 async def test_truncate_after_drops_the_tail_and_returns_ids() -> None:

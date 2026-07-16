@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
+from epicurus_core_app.memory.store import ConversationStore
 
 
 async def _fresh_queue() -> ExtractionQueue:
@@ -71,3 +72,37 @@ async def test_count_and_pending_are_tenant_scoped() -> None:
     assert await queue.count() == 2  # every tenant
     t1 = await queue.pending(limit=10, tenant="t1")
     assert [p.user_text for p in t1] == ["t1 only"]
+
+
+async def test_a_queued_exchange_outlives_the_messages_it_came_from() -> None:
+    """Editing mid-history truncates turns that may still be queued for extraction (#552).
+
+    A queued row must survive that cleanly, and it does *by construction*: the queue copies the
+    exchange's text at enqueue time rather than referencing ``agent_messages``, so a truncated
+    turn leaves no dangling id for the nightly runner to resolve — there is nothing to skip.
+    The facts such an exchange yields are kept deliberately: a fact belongs to the user, not to
+    the turn that surfaced it (the same rule as ``Memory.forget``).
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = ConversationStore(engine)  # shares Base, so this creates the queue table too
+    await store.init()
+    queue = ExtractionQueue(engine)
+
+    anchor = await store.append(tenant="t1", session_id="s", role="user", content="first ask")
+    await store.append(tenant="t1", session_id="s", role="assistant", content="first answer")
+    later = await store.append(tenant="t1", session_id="s", role="user", content="later ask")
+    await store.append(tenant="t1", session_id="s", role="assistant", content="later answer")
+    await queue.enqueue(tenant="t1", user_text="later ask", assistant_text="later answer")
+
+    # The user edits the first message: everything after it — including the queued turn — goes.
+    removed = await store.truncate_after(tenant="t1", session_id="s", after_id=anchor)
+    assert later in removed
+
+    pending = await queue.pending(limit=10)
+    assert [(p.user_text, p.assistant_text) for p in pending] == [("later ask", "later answer")]
+    assert await queue.delete([p.id for p in pending]) == 1  # drains without touching messages
+    assert await queue.count() == 0

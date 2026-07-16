@@ -135,11 +135,26 @@ class Memory:
         )
         return len(removed)
 
+    async def message_role(self, *, tenant: str, session_id: str, message_id: int) -> str | None:
+        """The role of one message, or ``None`` if it isn't in this tenant's session (#552).
+
+        Lets the edit route vet a client-named anchor before it revises or truncates anything.
+        """
+        return await self._store.message_role(
+            tenant=tenant, session_id=session_id, message_id=message_id
+        )
+
     async def revise_message(
         self, *, tenant: str, session_id: str, message_id: int, content: str
     ) -> None:
-        """Replace a stored message's content in place — edit-and-re-answer (#302)."""
-        await self._store.update_content(tenant=tenant, message_id=message_id, content=content)
+        """Replace a stored message's content in place — edit-and-re-answer (#302, #552).
+
+        The revised text needs no re-indexing: messages are not a recall corpus (ADR-0045), and
+        ``memory_search`` reads the row live, so it surfaces the new text from here on.
+        """
+        await self._store.update_content(
+            tenant=tenant, session_id=session_id, message_id=message_id, content=content
+        )
 
     async def forget(self, *, tenant: str, session_id: str) -> int:
         """Erase a conversation's history rows.

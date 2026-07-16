@@ -52,6 +52,20 @@ describe("regenerate / edit the conversation tail (#302)", () => {
     expect(useChat.getState().pendingUser).toBeNull();
   });
 
+  it("editAndRerun names the message to revise when given one (#552)", async () => {
+    await useChat.getState().editAndRerun("reworded", null, async () => {}, 42);
+    expect(calls[0].body.content).toBe("reworded");
+    expect(calls[0].body.message_id).toBe(42);
+  });
+
+  it("editAndRerun sends no message_id for the last user message (#302's callers, #552)", async () => {
+    await useChat.getState().editAndRerun("corrected ask", null, async () => {});
+    expect(calls[0].body.message_id).toBeUndefined();
+    // Absent on the wire, not null: JSON.stringify drops undefined, and the server reads
+    // absence as "the last user message" — so a pre-#552 caller keeps working untouched.
+    expect(JSON.parse(JSON.stringify(calls[0].body))).not.toHaveProperty("message_id");
+  });
+
   it("refetches via onDone when the turn completes", async () => {
     const onDone = vi.fn().mockResolvedValue(undefined);
     await useChat.getState().regenerate(null, onDone);

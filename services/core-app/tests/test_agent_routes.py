@@ -168,15 +168,21 @@ async def test_readiness_endpoint_returns_a_snapshot() -> None:
 class _FakeMemory:
     """Stands in for the memory facade — records what the memory routes asked of it."""
 
-    def __init__(self, *, last_user: int | None = 1) -> None:
+    def __init__(self, *, last_user: int | None = 1, roles: dict[int, str] | None = None) -> None:
         self.searched: list[str] = []
         self.forgotten: list[str] = []
         self._last_user = last_user
+        # The session's messages by id — a lookup miss stands for "not in this conversation"
+        # (the real scoping is SQL, covered in test_memory_store.py).
+        self._roles = roles or {}
         self.truncated_after: list[int] = []
         self.revised: list[tuple[int, str]] = []
 
     async def last_user_message_id(self, *, tenant: str, session_id: str) -> int | None:
         return self._last_user
+
+    async def message_role(self, *, tenant: str, session_id: str, message_id: int) -> str | None:
+        return self._roles.get(message_id)
 
     async def truncate_after(self, *, tenant: str, session_id: str, after_id: int) -> int:
         self.truncated_after.append(after_id)
@@ -204,7 +210,7 @@ class _FakeMemory:
         return 1
 
 
-def _memory_app(memory: object) -> FastAPI:
+def _memory_app(memory: object, *, live_runs: LiveRunRegistry | None = None) -> FastAPI:
     app = FastAPI()
     app.include_router(
         create_agent_router(
@@ -212,6 +218,9 @@ def _memory_app(memory: object) -> FastAPI:
             memory,  # type: ignore[arg-type]
             "local",
             object(),  # attachment store — unused by the memory routes  # type: ignore[arg-type]
+            # Unset → the router builds a private, empty registry, so the edit route's
+            # active-run guard sees no live turn (what every non-#552 test here wants).
+            live_runs=live_runs,
         )
     )
     return app
@@ -394,6 +403,96 @@ async def test_edit_with_blank_content_errors_and_changes_nothing() -> None:
         resp = await client.post("/platform/v1/agent/sessions/s1/edit", json={"content": "   "})
     assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
     assert memory.revised == [] and memory.truncated_after == []
+
+
+# ── edit any user message in history (#552) ──────────────────────────────────
+
+
+async def _edit(
+    memory: object, body: dict[str, object], *, live_runs: LiveRunRegistry | None = None
+) -> str:
+    """POST /edit with ``body``; returns the response text for SSE parsing."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory, live_runs=live_runs)),
+        base_url="http://test",
+    ) as client:
+        resp = await client.post("/platform/v1/agent/sessions/s1/edit", json=body)
+    return resp.text
+
+
+async def test_edit_targets_the_named_message_and_truncates_exactly_after_it() -> None:
+    """Editing message k revises k and drops everything past it — the tail k+1..n goes."""
+    memory = _FakeMemory(last_user=9, roles={3: "user"})
+    text = await _edit(memory, {"content": "  reworded  ", "message_id": 3})
+    assert memory.revised == [(3, "reworded")]  # trimmed, applied to the *named* message
+    assert memory.truncated_after == [3]  # not the last user turn (9) — exactly after k
+    assert [event for event, _ in _parse_sse(text)] == ["delta", "done"]
+
+
+async def test_edit_without_message_id_still_targets_the_last_user_message() -> None:
+    """#302's callers send no ``message_id``; they must behave exactly as before."""
+    memory = _FakeMemory(last_user=5, roles={5: "user"})
+    text = await _edit(memory, {"content": "corrected ask"})
+    assert memory.revised == [(5, "corrected ask")]
+    assert memory.truncated_after == [5]
+    assert [event for event, _ in _parse_sse(text)] == ["delta", "done"]
+
+
+async def test_edit_rejects_an_assistant_message_without_truncating() -> None:
+    memory = _FakeMemory(last_user=9, roles={4: "assistant"})
+    text = await _edit(memory, {"content": "hi", "message_id": 4})
+    assert [event for event, _ in _parse_sse(text)] == ["error"]
+    assert memory.revised == [] and memory.truncated_after == []
+
+
+async def test_edit_rejects_an_id_from_another_session_without_truncating() -> None:
+    """An id the session doesn't hold reads as absent — never a truncation anchor."""
+    memory = _FakeMemory(last_user=9, roles={3: "user"})  # 77 belongs to some other conversation
+    text = await _edit(memory, {"content": "hi", "message_id": 77})
+    assert [event for event, _ in _parse_sse(text)] == ["error"]
+    assert memory.revised == [] and memory.truncated_after == []
+
+
+async def test_edit_rejects_a_garbage_id_without_truncating() -> None:
+    memory = _FakeMemory(last_user=9, roles={3: "user"})
+    text = await _edit(memory, {"content": "hi", "message_id": -1})
+    assert [event for event, _ in _parse_sse(text)] == ["error"]
+    assert memory.revised == [] and memory.truncated_after == []
+
+
+async def test_edit_with_a_non_integer_message_id_is_rejected_by_validation() -> None:
+    memory = _FakeMemory(last_user=9, roles={3: "user"})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/sessions/s1/edit", json={"content": "hi", "message_id": "three"}
+        )
+    assert resp.status_code == 422
+    assert memory.revised == [] and memory.truncated_after == []
+
+
+async def test_edit_during_an_active_run_is_rejected_before_anything_is_written() -> None:
+    """The guard must precede the write: a live run's history is not ours to cut (#552).
+
+    Without it the route revises + truncates and only *then* hits the one-run 409 in
+    ``runs.start`` — leaving the conversation cut short and unanswered.
+    """
+    registry = LiveRunRegistry()
+    gate = asyncio.Event()
+    run = await registry.start(
+        lambda: _ScriptAgent([AgentEvent(type="delta", text="…")], gate=gate).run_stream(),
+        tenant="local",
+        session_id="s1",
+    )
+    memory = _FakeMemory(last_user=9, roles={3: "user"})
+    try:
+        text = await _edit(memory, {"content": "hi", "message_id": 3}, live_runs=registry)
+        assert [event for event, _ in _parse_sse(text)] == ["error"]
+        assert memory.revised == [] and memory.truncated_after == []
+    finally:
+        gate.set()
+        await _settle(run)
 
 
 # ── durable, re-attachable turns (live runs, #376) ───────────────────────────

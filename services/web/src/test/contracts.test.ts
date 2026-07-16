@@ -213,6 +213,7 @@ describe("contracts", () => {
 
   it("parses entity references on a message and a turn (ADR-0019)", () => {
     const rec = MessageRecord.parse({
+      id: 1,
       role: "assistant",
       content: "see your standup",
       created_at: "2026-06-14T09:00:00Z",
@@ -231,6 +232,7 @@ describe("contracts", () => {
 
   it("defaults message entity_refs + attachments to empty (older transcripts stay valid)", () => {
     const rec = MessageRecord.parse({
+      id: 1,
       role: "user",
       content: "hi",
       created_at: "2026-06-14T09:00:00Z",
@@ -239,8 +241,18 @@ describe("contracts", () => {
     expect(rec.attachments).toEqual([]);
   });
 
+  it("requires a message id — the anchor an edit names (#552)", () => {
+    // Deliberately strict, unlike the columns above: every row has a primary key, so there is
+    // no older-transcript case to tolerate. Were `id` optional, an edit would quietly omit
+    // `message_id` and rewrite the *last* user turn instead of the one the user picked.
+    expect(() =>
+      MessageRecord.parse({ role: "user", content: "hi", created_at: "2026-06-14T09:00:00Z" }),
+    ).toThrow();
+  });
+
   it("parses message attachments (ADR-0019)", () => {
     const rec = MessageRecord.parse({
+      id: 2,
       role: "user",
       content: "summarize these",
       created_at: "2026-06-14T09:00:00Z",

@@ -12,6 +12,30 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Added
+
+- **Agent: governed playbooks — storage + a core-hosted approval surface** (#616) — the agent's
+  behaviour improved only when the operator hand-edited the base prompt; nothing captured what the
+  system learns in use. **Playbooks** are named, independently enable-able blocks of guidance
+  stored beside that prompt (`agent_playbooks`) and composed into every turn — base first, then
+  each enabled playbook under its own heading. The composition happens **below**
+  `AgentInstructionsStore.get_instructions`, so `Agent._assemble` is untouched and still leads the
+  turn with one opaque string; a failed playbook read degrades to the base prompt rather than
+  costing the turn. Nothing self-applies: an edit arrives as a `ReviewSuggestion` (ADR-0090) and
+  only the operator's **Approve** writes it — through the existing instructions store for the base
+  prompt (the same path a manual Settings edit uses), or the playbook store for a named one. Both
+  halves gained ADR-0046 snapshot-on-save versioning (`agent_instructions_versions`,
+  `agent_playbook_versions`; capped at 50, oldest pruned), snapshotting the body each save
+  *replaced* so an approved agent-authored edit is always undoable. The approval UI is the
+  existing, unmodified `ReviewView`/`SuggestionReviewModal`: the core registers a reserved **`core`
+  pseudo-module** that `ModuleRegistry` answers **in-process** (no loopback HTTP), riding
+  `GET /platform/v1/modules` so the shell discovers its `review` page like any module's. It is
+  deliberately *not* a configured base, so it can never leak into the agent's MCP tool surface or
+  the re-embed fan-out; `enabled` / `DELETE` / `suggestions-enabled` all **403** for it — its
+  review is mandatory. Web-side, the Suggestions inbox shows *Always reviewed* instead of a toggle
+  for that group, and the Modules screen filters the reserved name out. Implements ADR-0093
+  §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
+
 ### Fixed
 
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was

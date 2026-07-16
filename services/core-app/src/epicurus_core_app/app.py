@@ -52,6 +52,8 @@ from epicurus_core_app.agent.instructions_routes import create_instructions_rout
 from epicurus_core_app.agent.live_runs import LiveRunRegistry
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
+from epicurus_core_app.agent.playbook_review import CoreReviewPage, PlaybookProposalStore
+from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.docker_control import DockerController
@@ -226,9 +228,27 @@ def create_app() -> FastAPI:
     # Recurring prompts that run unattended and deliver into a session (ADR-0092): the
     # tenant-scoped row store; the scheduler poll loop is built below, once `agent` exists.
     scheduled_turns = ScheduledTurnStore(engine)
+    # Named playbooks (ADR-0093 §3): independent, enable-able blocks of guidance beside the base
+    # prompt, versioned ADR-0046-style. Composed into the prompt by the instructions store below.
+    agent_playbooks = PlaybookStore(engine)
     # The agent's editable base system prompt (#497, ADR-0083): one row per tenant, NULL = the
-    # shipped default. Resolved per turn in ``Agent._assemble``, edited in web Settings.
-    agent_instructions = AgentInstructionsStore(engine)
+    # shipped default. Resolved per turn in ``Agent._assemble``, edited in web Settings. Given the
+    # playbook store it returns base + every enabled playbook as one string (ADR-0093 §4), so the
+    # assembly call site never learned playbooks exist.
+    agent_instructions = AgentInstructionsStore(engine, playbooks=agent_playbooks)
+    # The staged, not-yet-approved edits to the two stores above (ADR-0093 §2) plus the durable
+    # resolved-decision trail (ADR-0090) the reflection pass reads back as negative context.
+    playbook_proposals = PlaybookProposalStore(engine)
+    # The reserved ``core`` pseudo-module: the core's own ``review`` page, answered in-process by
+    # the registry rather than probed over HTTP (ADR-0093 §2). Approving here is the *only* path
+    # that writes agent instructions/playbooks on the agent's behalf — nothing self-applies.
+    core_review = CoreReviewPage(
+        store=playbook_proposals,
+        instructions=agent_instructions,
+        playbooks=agent_playbooks,
+        tenant=settings.default_tenant_id,
+        version=_service_version(),
+    )
     # Durable state behind ask_user pause/resume (ADR-0053): a paused turn lives here until
     # the operator answers (or it expires).
     suspended_runs = SuspendedRunStore(engine, ttl_hours=settings.ask_user_ttl_hours)
@@ -255,6 +275,7 @@ def create_app() -> FastAPI:
         prefs=module_prefs,
         docker=docker,
         docker_unavailable_reason=docker_availability.reason,
+        core=core_review,
     )
     ollama_runtime = OllamaRuntime(
         docker,
@@ -457,6 +478,19 @@ def create_app() -> FastAPI:
             await agent_instructions.init()
         except Exception as exc:
             log.error("agent instructions init failed; using the default prompt", error=str(exc))
+        try:
+            await agent_playbooks.init()
+        except Exception as exc:
+            # The composed prompt degrades to the base instructions alone (ADR-0093 §4's
+            # best-effort read), so a failure here costs playbooks, never every turn.
+            log.error("agent playbooks init failed; playbooks disabled", error=str(exc))
+        try:
+            await playbook_proposals.init()
+        except Exception as exc:
+            log.error(
+                "playbook proposal store init failed; the core review page is empty",
+                error=str(exc),
+            )
         try:
             await suspended_runs.init()
         except Exception as exc:

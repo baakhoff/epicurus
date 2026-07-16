@@ -1596,3 +1596,190 @@ async def test_probe_unhealthy_status_without_exception_has_a_real_reason() -> N
     assert snap.status.version is None
     failures = [entry for entry in logs if entry["event"] == "module probe failed"]
     assert failures[0]["error"] == "health check returned 503"
+
+
+# ── the reserved "core" pseudo-module (ADR-0093 §2) ──────────────────────────
+
+
+class _FakeCore:
+    """A stand-in :class:`CorePseudoModule` — records dispatch, needs no DB and no HTTP."""
+
+    def __init__(self, *, name: str = "core", suggestions: list[dict[str, Any]] | None = None):
+        self._name = name
+        self._suggestions = suggestions if suggestions is not None else []
+        self.actions: list[tuple[str, str, str, str | None]] = []
+        self.audits: list[tuple[str, int]] = []
+
+    def manifest(self) -> ModuleManifest:
+        return ModuleManifest(
+            name=self._name,
+            version="9.9.9",
+            pages=[PageSpec(id="playbooks", title="Playbooks", archetype="review")],
+            ui=UiSection(icon="book-open"),
+        )
+
+    async def get_page(self, page_id: str) -> dict[str, Any]:
+        if page_id != "playbooks":
+            raise HTTPException(status_code=404, detail="no such page")
+        return {"title": "Playbooks", "suggestions": self._suggestions}
+
+    async def review_action(
+        self, page_id: str, suggestion_id: str, action: str, content: str | None = None
+    ) -> dict[str, Any]:
+        self.actions.append((page_id, suggestion_id, action, content))
+        return {"id": suggestion_id, "status": f"{action}d"}
+
+    async def review_audit(self, page_id: str, *, limit: int = 50) -> dict[str, Any]:
+        self.audits.append((page_id, limit))
+        return {"decisions": []}
+
+
+def _registry_with_core(
+    core: _FakeCore | None = None,
+) -> tuple[_StubRegistry, _FakeCore]:
+    the_core = core or _FakeCore()
+    mcp, secrets = _FakeMcp(), _FakeSecrets()
+    registry = _StubRegistry(  # type: ignore[arg-type]
+        mcp=mcp,
+        secrets=secrets,
+        tenant="local",
+        prefs=_FakeModulePrefs(),
+        core=the_core,
+    )
+    return registry, the_core
+
+
+async def test_core_snapshot_is_healthy_and_enabled() -> None:
+    """It *is* this process — a probe would ask whether the core is up while it answers."""
+    registry, _ = _registry_with_core()
+    snap = registry.core_snapshot()
+    assert snap is not None
+    assert snap.manifest.name == "core"
+    assert snap.status.healthy is True
+    assert snap.enabled is True
+    assert snap.removed is False
+
+
+async def test_core_snapshot_is_none_when_unwired() -> None:
+    registry, _, _ = _registry()
+    assert registry.core_snapshot() is None
+
+
+async def test_core_is_absent_from_snapshot_so_it_stays_1to1_with_bases() -> None:
+    """The invariant several callers zip against with strict=True must survive the pseudo-module."""
+    registry, _ = _registry_with_core()
+    snaps = await registry.snapshot()
+    assert len(snaps) == 1  # exactly the one configured base
+    assert [s.manifest.name for s in snaps] == ["echo"]
+
+
+async def test_core_never_reaches_the_mcp_tool_surface() -> None:
+    """A pseudo-module has no base, so it cannot leak into the agent's tool discovery."""
+    registry, _ = _registry_with_core()
+    urls = await registry.enabled_mcp_urls()
+    assert urls == ["http://echo:8080/mcp"]
+    assert not any("core" in u for u in urls)
+
+
+async def test_core_never_reaches_the_reembed_fanout() -> None:
+    registry, _ = _registry_with_core()
+    assert await registry.reembed() == []  # echo isn't reindexable; core isn't reachable at all
+
+
+async def test_get_page_dispatches_to_core_in_process() -> None:
+    registry, _ = _registry_with_core()
+    data = await registry.get_page("core", "playbooks")
+    assert data["title"] == "Playbooks"
+
+
+async def test_get_page_for_an_unknown_core_page_404s() -> None:
+    registry, _ = _registry_with_core()
+    with pytest.raises(HTTPException) as err:
+        await registry.get_page("core", "ghost")
+    assert err.value.status_code == 404
+
+
+async def test_review_action_dispatches_to_core_with_the_edited_content() -> None:
+    registry, core = _registry_with_core()
+    out = await registry.review_action("core", "playbooks", "sid1", "approve", "edited")
+    assert out["status"] == "approved"
+    assert core.actions == [("playbooks", "sid1", "approve", "edited")]
+
+
+async def test_review_audit_dispatches_to_core() -> None:
+    registry, core = _registry_with_core()
+    await registry.review_audit("core", "playbooks", limit=7)
+    assert core.audits == [("playbooks", 7)]
+
+
+async def test_all_suggestions_includes_the_core_queue() -> None:
+    registry, _ = _registry_with_core(
+        _FakeCore(suggestions=[{"id": "s1", "path": "instructions", "operation": "update"}])
+    )
+    items = await registry.all_suggestions()
+    assert items == [
+        {
+            "id": "s1",
+            "path": "instructions",
+            "operation": "update",
+            "module": "core",
+            "page_id": "playbooks",
+        }
+    ]
+
+
+async def test_all_suggestions_tolerates_a_broken_core_page() -> None:
+    """A failing core page must not empty the whole cross-module inbox."""
+
+    class _Broken(_FakeCore):
+        async def get_page(self, page_id: str) -> dict[str, Any]:
+            raise HTTPException(status_code=500, detail="boom")
+
+    registry, _ = _registry_with_core(_Broken())
+    assert await registry.all_suggestions() == []
+
+
+async def test_all_suggestions_without_a_core_is_unchanged() -> None:
+    registry, _, _ = _registry()
+    assert await registry.all_suggestions() == []
+
+
+async def test_core_cannot_be_disabled() -> None:
+    registry, _ = _registry_with_core()
+    with pytest.raises(HTTPException) as err:
+        await registry.set_enabled("core", False)
+    assert err.value.status_code == 403
+
+
+async def test_core_cannot_be_removed() -> None:
+    registry, _ = _registry_with_core()
+    with pytest.raises(HTTPException) as err:
+        await registry.remove("core")
+    assert err.value.status_code == 403
+
+
+async def test_core_review_cannot_be_switched_off() -> None:
+    """ADR-0093's hard invariant: nothing self-applies, so review is mandatory for core."""
+    registry, _ = _registry_with_core()
+    with pytest.raises(HTTPException) as err:
+        await registry.set_suggestions_enabled("core", False)
+    assert err.value.status_code == 403
+
+
+async def test_a_real_module_named_core_does_not_shadow_the_pseudo_module() -> None:
+    """The name is reserved: dispatch goes in-process, never to a module that claims it."""
+    mcp, secrets = _FakeMcp(), _FakeSecrets()
+    registry = _StubRegistry(  # type: ignore[arg-type]
+        manifest=ModuleManifest(
+            name="core",
+            version="0.0.1",
+            pages=[PageSpec(id="playbooks", title="Impostor", archetype="review")],
+        ),
+        mcp=mcp,
+        secrets=secrets,
+        tenant="local",
+        prefs=_FakeModulePrefs(),
+        core=_FakeCore(),
+    )
+    data = await registry.get_page("core", "playbooks")
+    assert data["title"] == "Playbooks"  # the in-process page, not the impostor's

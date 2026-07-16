@@ -22,6 +22,7 @@ import { SchemaForm, type ObjectSchema } from "@/components/SchemaForm";
 import { Badge, Button, Card, Confirm, Dot, Select, Spinner, Switch, TextInput, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
+import { CORE_MODULE } from "@/lib/suggestions";
 import type {
   Collection,
   CollectionPrefs,
@@ -729,7 +730,11 @@ export function ModulesScreen() {
   const [deferred, setDeferred] = useState<string[]>([]);
 
   const q = query.trim().toLowerCase();
-  const all = modules.data ?? [];
+  // Drop the reserved pseudo-module (ADR-0093 §2). It rides the modules list so the shell can
+  // discover its `review` page like any module's, but this screen manages what the operator
+  // *installed*: the core has no container to enable, configure, or remove (the server refuses
+  // all three with a 403), so a card for it would be a row of broken controls.
+  const all = (modules.data ?? []).filter((s) => s.manifest.name !== CORE_MODULE);
   const filtered = q ? all.filter((s) => matchesQuery(s, q)) : all;
 
   return (

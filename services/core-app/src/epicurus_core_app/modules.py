@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
@@ -165,6 +165,37 @@ class MailboxMarkRead(BaseModel):
     message_ids: list[str]
 
 
+class CorePseudoModule(Protocol):
+    """A page the **core itself** serves, answered in-process instead of over HTTP (ADR-0093 §2).
+
+    Every ordinary ``review``-page implementer is an external module the registry reaches through
+    its HTTP probe; core-app hosts no page of its own. Rather than bend core-app into a module
+    that calls itself over the network (rejected in the ADR as needless indirection), the registry
+    accepts one **reserved** entry that implements this protocol and dispatches to it directly.
+
+    The protocol is deliberately the same surface a real module serves over HTTP, so the
+    registry's branches stay thin calls rather than a parallel implementation — and the shell
+    cannot tell the two apart. The reserved name is read from ``manifest().name``: the registry
+    never hardcodes it, so this stays a generic seam rather than a playbooks special case.
+
+    A pseudo-module is **not** in ``self._bases``, and that is the point: it can never leak into
+    the MCP tool surface (:meth:`ModuleRegistry.enabled_mcp_urls`), the re-embed fan-out, or any
+    other base-driven fan-out. It opts in to each capability by being asked, never by default.
+    """
+
+    def manifest(self) -> ModuleManifest:
+        """The pseudo-module's manifest; its ``name`` is the reserved registry name."""
+        ...
+
+    async def get_page(self, page_id: str) -> dict[str, Any]: ...
+
+    async def review_action(
+        self, page_id: str, suggestion_id: str, action: str, content: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def review_audit(self, page_id: str, *, limit: int = 50) -> dict[str, Any]: ...
+
+
 class ModuleRegistry:
     """Fetches module manifests/health and routes UI actions to module tools."""
 
@@ -183,6 +214,7 @@ class ModuleRegistry:
         prefs: ModulePrefsStore,
         docker: DockerController | None = None,
         docker_unavailable_reason: str | None = None,
+        core: CorePseudoModule | None = None,
     ) -> None:
         self._bases = list(base_urls)
         self._mcp = mcp
@@ -193,6 +225,11 @@ class ModuleRegistry:
         # Why ``docker`` is None, for the Modules page's proactive status card (#622) — never
         # set when ``docker`` isn't, and vice versa (see ``DockerAvailability``).
         self._docker_reason = docker_unavailable_reason
+        # The reserved in-process pseudo-module (ADR-0093 §2), if wired. Deliberately kept out of
+        # ``self._bases`` so ``snapshot()`` stays 1:1 with it (several callers zip the two with
+        # ``strict=True``) and so no base-driven fan-out can ever reach a module that has no base.
+        self._core = core
+        self._core_name = core.manifest().name if core is not None else None
         # Per-base probe cache (#478), 1:1 with ``self._bases``: each base refreshes
         # independently and single-flight, so one hung module can never delay a call
         # routed to a different, healthy one.
@@ -233,6 +270,31 @@ class ModuleRegistry:
             )
             out.append(overlaid)
         return out
+
+    def core_snapshot(self) -> ModuleSnapshot | None:
+        """The reserved in-process pseudo-module's entry, or ``None`` when none is wired.
+
+        Kept **out** of :meth:`snapshot` on purpose: that list is contractually 1:1 with
+        ``self._bases`` (:meth:`enabled_mcp_urls`, :meth:`reembed`, :meth:`all_suggestions` and
+        the calendar feed all ``zip`` the two with ``strict=True``), and the pseudo-module has no
+        base. Callers that *should* see it — the module list the shell reads, and the pending
+        suggestions feed — compose it in explicitly; every base-driven fan-out therefore excludes
+        it by construction rather than by remembering to.
+
+        Always healthy and enabled: it is this process, so a probe would be asking whether the
+        core is up while the core is answering. It is likewise never ``removed`` — the management
+        writes reject the reserved name outright.
+        """
+        if self._core is None:
+            return None
+        return ModuleSnapshot(
+            manifest=self._core.manifest(),
+            status=ModuleStatus(healthy=True, version=self._core.manifest().version),
+        )
+
+    def _is_core(self, name: str) -> bool:
+        """Whether *name* addresses the reserved in-process pseudo-module (ADR-0093 §2)."""
+        return self._core is not None and name == self._core_name
 
     def _cache_fresh(self, index: int) -> bool:
         snap = self._probe_cache[index]
@@ -391,12 +453,27 @@ class ModuleRegistry:
         """Enable or disable a module, persisting the operator's choice (#126).
 
         The container is untouched — only the core-side flag changes. 404 for a name that
-        is not a configured module (reachable or not).
+        is not a configured module (reachable or not); 403 for the reserved pseudo-module,
+        which *is* this process and so cannot be switched off from within it.
         """
+        self._reject_core_management(name, "disabled or enabled")
         live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
         if name not in live:
             raise HTTPException(status_code=404, detail=f"no module named {name!r}")
         await self._prefs.set_enabled(self._tenant, name, enabled)
+
+    def _reject_core_management(self, name: str, action: str) -> None:
+        """403 when *name* is the reserved pseudo-module (ADR-0093 §2).
+
+        The pseudo-module is the core itself: it has no container to stop, no manifest the
+        operator installed, and no meaningful enabled/removed state. Rejecting here — rather
+        than relying on it being absent from :meth:`snapshot` and falling out as a confusing
+        404 "no module named 'core'" — states the actual reason.
+        """
+        if self._is_core(name):
+            raise HTTPException(
+                status_code=403, detail=f"{name!r} is the core itself and cannot be {action}"
+            )
 
     async def remove(self, name: str) -> dict[str, Any]:
         """Tombstone a module now, tearing its container down out-of-band (#127, #382, ADR-0028).
@@ -410,11 +487,12 @@ class ModuleRegistry:
         container is still up. Either way the module is gone for the operator at once.
 
         404 for an unknown module; 403 for a protected/core service (enforced here regardless
-        of the socket, *and* again in the Docker layer); otherwise 200. Idempotent: a module
-        whose container is already gone still tombstones. The result's
-        ``container_teardown_deferred`` is true when no socket was available, so the UI can say
-        the container keeps running until the next restart.
+        of the socket, *and* again in the Docker layer) or for the reserved pseudo-module;
+        otherwise 200. Idempotent: a module whose container is already gone still tombstones.
+        The result's ``container_teardown_deferred`` is true when no socket was available, so
+        the UI can say the container keeps running until the next restart.
         """
+        self._reject_core_management(name, "removed")
         live = {snap.manifest.name for snap in await self.snapshot() if not snap.removed}
         if name not in live:
             raise HTTPException(status_code=404, detail=f"no module named {name!r}")
@@ -512,7 +590,15 @@ class ModuleRegistry:
         return await self._prefs.get_suggestions_enabled(self._tenant, name)
 
     async def set_suggestions_enabled(self, name: str, enabled: bool) -> None:
-        """Persist whether *name*'s agent changes go through review. 404 if unknown (operator)."""
+        """Persist whether *name*'s agent changes go through review. 404 if unknown (operator).
+
+        403 for the reserved pseudo-module: review of the agent's own instructions/playbooks is
+        **mandatory** (ADR-0093's hard non-goal — nothing self-applies, ever, and no path
+        bypasses the operator's Approve). Turning it off would advertise a bypass that the
+        reflection job does not implement and must never implement, so the write is refused at
+        the layer that owns the policy rather than merely hidden in the shell.
+        """
+        self._reject_core_management(name, "exempted from review")
         await self._resolve(name)  # only known modules
         await self._prefs.set_suggestions_enabled(self._tenant, name, enabled)
 
@@ -824,8 +910,13 @@ class ModuleRegistry:
         ``start``/``end`` window) reads from the same proxied path. A module never serves
         UI markup. Returns 404 if the module is unreachable or declares no such page.
         Query params (e.g. ``path``, ``q``) are forwarded to the module as-is.
+
+        The reserved pseudo-module (ADR-0093 §2) is answered in-process — no probe, no HTTP.
+        It takes no query params: its only archetype, ``review``, is unparameterized.
         """
         _safe_segment(page_id, label="page_id")
+        if self._core is not None and self._is_core(name):
+            return await self._core.get_page(page_id)
         base, manifest = await self._resolve(name)
         if page_id not in {p.id for p in manifest.pages}:
             raise HTTPException(status_code=404, detail=f"module {name!r} has no page {page_id!r}")
@@ -1052,9 +1143,14 @@ class ModuleRegistry:
 
         On *approve*, *content* (optional) is the operator's edited result (ADR-0090) —
         forwarded so the module writes what was actually approved, not the raw proposal.
+
+        The reserved pseudo-module (ADR-0093 §2) applies in-process through its own stores; the
+        *content* semantics are identical, so an operator's edit is honoured either way.
         """
         _safe_segment(page_id, label="page_id")
         _safe_segment(suggestion_id, label="suggestion_id")
+        if self._core is not None and self._is_core(name):
+            return await self._core.review_action(page_id, suggestion_id, action, content)
         base = await self._resolve_review_page(name, page_id)
         kwargs: dict[str, Any] = {}
         if content is not None:
@@ -1072,9 +1168,12 @@ class ModuleRegistry:
 
         ``GET /pages/{page_id}/audit`` — what the module proposed vs. what the operator
         actually approved (including any edit), newest first. Only a ``review`` page
-        exposes this, same gate as :meth:`review_action`.
+        exposes this, same gate as :meth:`review_action`. The reserved pseudo-module
+        (ADR-0093 §2) answers from its own trail in-process.
         """
         _safe_segment(page_id, label="page_id")
+        if self._core is not None and self._is_core(name):
+            return await self._core.review_audit(page_id, limit=limit)
         base = await self._resolve_review_page(name, page_id)
         data: dict[str, Any] = await self._get_json(
             base,
@@ -1286,6 +1385,10 @@ class ModuleRegistry:
         chat composer's suggestion bubble and the Suggestions page both read this feed
         (#KB-refactor). Best-effort: a module that is down, disabled, removed, or erroring
         is skipped rather than failing the whole feed.
+
+        The reserved pseudo-module's queue (ADR-0093 §2) is composed in explicitly, with the
+        same best-effort tolerance — it is not in ``self._bases``, so the loop below cannot
+        reach it.
         """
         out: list[dict[str, Any]] = []
         for snap, base in zip(await self.snapshot(), self._bases, strict=True):
@@ -1302,6 +1405,25 @@ class ModuleRegistry:
                     continue
                 for item in data.get("suggestions", []):
                     out.append({**item, "module": snap.manifest.name, "page_id": page.id})
+        out.extend(await self._core_suggestions())
+        return out
+
+    async def _core_suggestions(self) -> list[dict[str, Any]]:
+        """The reserved pseudo-module's pending items, stamped like any module's (ADR-0093 §2)."""
+        core = self._core
+        if core is None:
+            return []
+        manifest = core.manifest()
+        out: list[dict[str, Any]] = []
+        for page in manifest.pages:
+            if page.archetype != "review":
+                continue
+            try:
+                data = await core.get_page(page.id)
+            except HTTPException:  # a broken core page must not empty the whole inbox
+                continue
+            for item in data.get("suggestions", []):
+                out.append({**item, "module": manifest.name, "page_id": page.id})
         return out
 
     async def calendar_feed_items(self, start: str, end: str) -> list[dict[str, Any]]:
@@ -1373,7 +1495,17 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
         # ``?refresh=true`` bypasses the probe cache for a fleet-wide re-probe — the
         # Modules page's manual refresh (#478); the default read serves from cache.
-        return [snap for snap in await registry.snapshot(force=refresh) if not snap.removed]
+        out = [snap for snap in await registry.snapshot(force=refresh) if not snap.removed]
+        # The reserved in-process pseudo-module rides this list so the shell discovers its
+        # ``review`` page exactly like a module's, with no new endpoint and no new frontend
+        # contract (ADR-0093 §2). It is composed in here rather than inside ``snapshot()``
+        # because that list is contractually 1:1 with the configured bases. The Modules
+        # management screen filters the reserved name back out — it lists things the operator
+        # installed, and this is the core itself.
+        core = registry.core_snapshot()
+        if core is not None:
+            out.append(core)
+        return out
 
     @router.post("/reembed")
     async def reembed() -> dict[str, Any]:

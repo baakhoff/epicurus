@@ -150,3 +150,41 @@ describe("Suggestions inbox", () => {
     expect(await screen.findByText(/nothing proposes changes yet/i)).toBeInTheDocument();
   });
 });
+
+describe("the reserved core pseudo-module (ADR-0093)", () => {
+  const CORE = mod("core", [{ id: "playbooks", title: "Playbooks", archetype: "review" }], "book-open");
+
+  it("renders the core group through the same inbox as any module", async () => {
+    mockModules.mockResolvedValue([CORE]);
+    mockSuggestions.mockResolvedValue([
+      sugg({ id: "p1", module: "core", page_id: "playbooks", path: "instructions" }),
+    ]);
+    render(<SuggestionsScreen />, { wrapper });
+
+    expect(await screen.findByText("Core")).toBeInTheDocument();
+    expect(await screen.findByText("instructions")).toBeInTheDocument();
+  });
+
+  it("offers no review toggle for core — its review is mandatory", async () => {
+    mockModules.mockResolvedValue([CORE]);
+    mockSuggestions.mockResolvedValue([]);
+    render(<SuggestionsScreen />, { wrapper });
+
+    expect(await screen.findByText("Always reviewed")).toBeInTheDocument();
+    // No switch to flip: the server refuses the write (403), so it is never rendered.
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    // And it never asks for a flag that cannot be set.
+    expect(mockEnabled).not.toHaveBeenCalled();
+  });
+
+  it("still offers the toggle for an ordinary module alongside core", async () => {
+    mockModules.mockResolvedValue([CORE, KNOWLEDGE]);
+    mockSuggestions.mockResolvedValue([]);
+    render(<SuggestionsScreen />, { wrapper });
+
+    await screen.findByText("Always reviewed");
+    await waitFor(() => expect(screen.getAllByRole("switch")).toHaveLength(1));
+    expect(mockEnabled).toHaveBeenCalledWith("knowledge");
+    expect(mockEnabled).not.toHaveBeenCalledWith("core");
+  });
+});

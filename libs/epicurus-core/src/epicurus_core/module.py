@@ -25,6 +25,7 @@ from epicurus_core.manifest import (
     PageSpec,
     ToolSpec,
     UiSection,
+    WritesDocument,
 )
 
 __all__ = ["EpicurusModule", "add_manifest_route"]
@@ -89,6 +90,9 @@ class EpicurusModule:
         )
         self._events_emitted: list[EventSpec] = []
         self._events_consumed: list[EventSpec] = []
+        # Document-pane annotations by tool name (#541, ADR-0100) — folded into the ToolSpecs
+        # in ``manifest()``, since FastMCP owns the tool registry and knows nothing of them.
+        self._writes_documents: dict[str, WritesDocument] = {}
 
     @property
     def name(self) -> str:
@@ -99,9 +103,31 @@ class EpicurusModule:
         """The underlying FastMCP server (for advanced use / testing)."""
         return self._mcp
 
-    def tool(self, name: str | None = None, description: str | None = None) -> Decorator:
-        """Register a tool (decorator). Delegates to FastMCP."""
-        return self._mcp.tool(name=name, description=description)
+    def tool(
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        *,
+        writes_document: WritesDocument | None = None,
+    ) -> Decorator:
+        """Register a tool (decorator). Delegates to FastMCP.
+
+        ``writes_document`` opts the tool into the shell's live document pane by naming the
+        arguments the document travels in (#541, ADR-0100) — declared here, beside the tool it
+        describes, and attached to its :class:`ToolSpec` when the manifest is built. The names
+        are checked against the tool's generated input schema then, so a typo fails at
+        manifest-build time rather than surfacing as a pane that never fills.
+        """
+        registered = self._mcp.tool(name=name, description=description)
+        if writes_document is None:
+            return registered
+
+        def annotate(fn: Callable[..., Any]) -> Callable[..., Any]:
+            # Key by the name FastMCP will publish: the explicit one, else the function's.
+            self._writes_documents[name or fn.__name__] = writes_document
+            return registered(fn)
+
+        return annotate
 
     def emits(self, subject: str, description: str = "") -> None:
         """Declare a base event subject this module publishes."""
@@ -122,9 +148,23 @@ class EpicurusModule:
         ``config``/``secrets`` override what was declared at construction.
         """
         tools = [
-            ToolSpec(name=t.name, description=t.description or "", input_schema=t.inputSchema)
+            ToolSpec(
+                name=t.name,
+                description=t.description or "",
+                input_schema=t.inputSchema,
+                writes_document=self._writes_documents.get(t.name),
+            )
             for t in await self._mcp.list_tools()
         ]
+        # An annotation whose tool never registered would be silently dropped here, leaving the
+        # pane mysteriously dead; say so instead. Catches a renamed tool that outran its
+        # annotation, or a name that didn't survive FastMCP's registration.
+        unregistered = sorted(self._writes_documents.keys() - {t.name for t in tools})
+        if unregistered:
+            raise ValueError(
+                f"module {self._name!r}: writes_document declared for unregistered tool(s) "
+                f"{unregistered}"
+            )
         return ModuleManifest(
             name=self._name,
             version=self._version,

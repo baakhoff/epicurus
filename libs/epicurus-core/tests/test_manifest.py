@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
@@ -15,7 +17,17 @@ from epicurus_core.manifest import (
     ToolSpec,
     UiAction,
     UiSection,
+    WritesDocument,
 )
+
+_DOC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string"},
+        "title": {"type": "string"},
+        "content": {"type": "string"},
+    },
+}
 
 
 def test_defaults() -> None:
@@ -163,6 +175,108 @@ def test_manifest_with_collections_roundtrips() -> None:
     assert restored.collections.noun == "calendar"
     assert restored.collections.multi is True
     assert restored.collections.providers == ["google"]
+
+
+# ── writes_document: the live document pane's seam (#541, ADR-0100) ──────────
+
+
+def test_tools_declare_no_writes_document_by_default() -> None:
+    # The annotation is opt-in: the overwhelming majority of tools write no document, and
+    # their calls must render exactly as before.
+    assert ToolSpec(name="greet").writes_document is None
+
+
+def test_writes_document_defaults_to_content_only() -> None:
+    ann = WritesDocument(content_arg="content")
+    assert ann.title_arg is None
+    assert ann.target_arg is None
+    assert ann.named_args() == ["content"]
+
+
+def test_writes_document_named_args_lists_what_is_set() -> None:
+    ann = WritesDocument(content_arg="content", title_arg="title", target_arg="path")
+    assert ann.named_args() == ["content", "title", "path"]
+
+
+def test_writes_document_requires_a_content_arg() -> None:
+    with pytest.raises(ValidationError):
+        WritesDocument(content_arg="")  # an empty name points at nothing
+
+
+def test_writes_document_must_name_real_tool_arguments() -> None:
+    # A typo'd arg would otherwise surface much later as a pane that never fills — fail at
+    # manifest-build time instead.
+    with pytest.raises(ValidationError, match="contents"):
+        ToolSpec(
+            name="create_doc",
+            input_schema=_DOC_SCHEMA,
+            writes_document=WritesDocument(content_arg="contents"),
+        )
+    with pytest.raises(ValidationError, match="heading"):
+        ToolSpec(
+            name="create_doc",
+            input_schema=_DOC_SCHEMA,
+            writes_document=WritesDocument(content_arg="content", title_arg="heading"),
+        )
+
+
+def test_writes_document_accepts_arguments_the_tool_declares() -> None:
+    spec = ToolSpec(
+        name="create_doc",
+        input_schema=_DOC_SCHEMA,
+        writes_document=WritesDocument(content_arg="content", title_arg="title", target_arg="path"),
+    )
+    assert spec.writes_document is not None
+    assert spec.writes_document.content_arg == "content"
+
+
+def test_writes_document_is_unchecked_when_the_tool_declares_no_properties() -> None:
+    # input_schema is optional, so there is nothing to check against — annotate and move on
+    # rather than reject a tool that simply didn't publish a schema.
+    spec = ToolSpec(name="create_doc", writes_document=WritesDocument(content_arg="content"))
+    assert spec.writes_document is not None
+
+
+def test_manifest_with_writes_document_roundtrips() -> None:
+    m = ModuleManifest(
+        name="knowledge",
+        version="0.22.0",
+        tools=[
+            ToolSpec(
+                name="knowledge_create_doc",
+                input_schema=_DOC_SCHEMA,
+                writes_document=WritesDocument(
+                    content_arg="content", title_arg="title", target_arg="path"
+                ),
+            ),
+            ToolSpec(name="knowledge_search", input_schema={"type": "object"}),
+        ],
+    )
+    restored = ModuleManifest.model_validate(m.model_dump())
+    assert restored == m
+    assert restored.tools[0].writes_document is not None
+    assert restored.tools[0].writes_document.content_arg == "content"
+    assert restored.tools[1].writes_document is None  # untouched by the annotation
+
+
+def test_writes_document_is_ignored_by_a_reader_that_does_not_know_it() -> None:
+    # Additive on the wire: a core predating the field parses the manifest fine and just drops
+    # it, so a module can ship the annotation without waiting on the core that reads it.
+    class OldToolSpec(BaseModel):
+        """ToolSpec as it stood before ADR-0100."""
+
+        name: str
+        description: str = ""
+        input_schema: dict[str, Any] = Field(default_factory=dict)
+
+    payload = ToolSpec(
+        name="create_doc",
+        input_schema=_DOC_SCHEMA,
+        writes_document=WritesDocument(content_arg="content"),
+    ).model_dump()
+    old = OldToolSpec.model_validate(payload)
+    assert old.name == "create_doc"
+    assert not hasattr(old, "writes_document")
 
 
 def test_manifest_with_pages_roundtrips() -> None:

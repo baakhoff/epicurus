@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot
+from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot, WritesDocument
 from epicurus_core.module import EpicurusModule, add_manifest_route
 
 
@@ -82,6 +84,73 @@ def test_mcp_is_reachable_for_clients() -> None:
     settings = _greeter().mcp.settings
     assert settings.streamable_http_path == "/"
     assert settings.transport_security.enable_dns_rebinding_protection is False
+
+
+# ── writes_document declared through the decorator (#541, ADR-0100) ──────────
+
+
+def _writer(*, tool_name: str | None = None, content_arg: str = "content") -> EpicurusModule:
+    module = EpicurusModule("scribe", version="1.0.0")
+
+    @module.tool(
+        tool_name,
+        writes_document=WritesDocument(
+            content_arg=content_arg, title_arg="title", target_arg="path"
+        ),
+    )
+    def write_doc(path: str, title: str, content: str) -> str:
+        """Write a document."""
+        return path
+
+    return module
+
+
+async def test_manifest_carries_a_tools_writes_document_annotation() -> None:
+    # The decorator is how every module declares a tool, so it has to be how the annotation is
+    # declared too — the model alone would be unreachable.
+    manifest = await _writer().manifest()
+
+    tool = next(t for t in manifest.tools if t.name == "write_doc")
+    assert tool.writes_document is not None
+    assert tool.writes_document.content_arg == "content"
+    assert tool.writes_document.title_arg == "title"
+    assert tool.writes_document.target_arg == "path"
+
+
+async def test_annotation_keys_off_an_explicit_tool_name() -> None:
+    # Naming the tool explicitly must not orphan the annotation from it.
+    manifest = await _writer(tool_name="knowledge_create_doc").manifest()
+
+    tool = next(t for t in manifest.tools if t.name == "knowledge_create_doc")
+    assert tool.writes_document is not None
+    assert tool.writes_document.content_arg == "content"
+
+
+async def test_unannotated_tools_stay_unannotated() -> None:
+    assert all(t.writes_document is None for t in (await _greeter().manifest()).tools)
+
+
+async def test_annotation_is_checked_against_the_generated_input_schema() -> None:
+    # The decorator derives input_schema from the signature, so a mis-named arg is catchable:
+    # `body` is not a parameter of write_doc(path, title, content).
+    with pytest.raises(ValidationError, match="body"):
+        await _writer(content_arg="body").manifest()
+
+
+async def test_annotating_a_tool_that_never_registered_is_an_error() -> None:
+    # Otherwise the annotation is silently dropped and the pane is mysteriously dead.
+    module = EpicurusModule("scribe")
+    module._writes_documents["ghost_tool"] = WritesDocument(content_arg="content")
+
+    with pytest.raises(ValueError, match="ghost_tool"):
+        await module.manifest()
+
+
+async def test_annotated_tools_still_run() -> None:
+    _content, structured = await _writer().mcp.call_tool(
+        "write_doc", {"path": "a.md", "title": "A", "content": "hi"}
+    )
+    assert structured == {"result": "a.md"}  # the annotation changes nothing about the call
 
 
 def test_manifest_route_serves_the_manifest() -> None:

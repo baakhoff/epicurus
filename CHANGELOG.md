@@ -34,9 +34,24 @@ images to GHCR.
   the re-embed fan-out; `enabled` / `DELETE` / `suggestions-enabled` all **403** for it — its
   review is mandatory. Web-side, the Suggestions inbox shows *Always reviewed* instead of a toggle
   for that group, and the Modules screen filters the reserved name out. Implements ADR-0093
-  §2/§3/§4. `core-app` 0.78.0→0.79.0 (MINOR), `web` 0.108.0→0.108.1 (PATCH).
+  §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
 
 ### Fixed
+
+- **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
+  mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
+  disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either
+  way, deferring only the container teardown — but the log line (surfaced via the Observability
+  console) still said "module removal disabled," and the socket mount in
+  `services/core-app/compose.yaml` was unconditional despite never being reachable on a real
+  deployment anyway (the core drops to an unprivileged uid at startup, ADR-0069, with no group
+  matching the host's docker-socket GID). Now: the message says what's actually deferred; a new
+  `GET /platform/v1/modules/docker-status` lets the Modules page state that proactively, with the
+  one-line enablement, instead of an operator finding out by attempting a removal; and the socket
+  mount is an explicit opt-in (`services/core-app/compose.docker-socket.yaml` + `DOCKER_GID`) —
+  losing no real capability (nothing worked by default before either) while closing a
+  root-equivalent attack surface that was pure liability. `core-app` 0.78.0→0.79.0; `web`
+  0.108.0→0.109.0.
 
 - **Mail: paging pinned to the bottom, action row at the top + icon-only on phone** (#624, #626) —
   two mailbox UX fixes. The **Newer/Older** paging controls scrolled away with the message rows

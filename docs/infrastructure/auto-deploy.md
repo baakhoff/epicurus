@@ -205,3 +205,9 @@ docker compose logs --tail 20 core-app   # no startup errors
 
 Check Grafana at `http://localhost:3000` → **Alerting → Alert rules** to confirm
 no alerts are firing.
+
+A fresh deploy's **Modules** page may show a status card saying Docker isn't reachable — that
+is the **expected default** (#622, ADR-0099), not a broken deploy: module removal still works
+immediately, only container teardown (and an Ollama KV-cache restart) defer to the next
+restart. See [Docker-socket access](index.md#docker-socket-access-opt-in-622) to opt into
+immediate teardown instead.

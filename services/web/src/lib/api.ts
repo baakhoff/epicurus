@@ -14,6 +14,7 @@ import {
   CalendarFeedItem,
   CatalogResponse,
   type CollectionPrefs,
+  DockerStatus,
   EditorDocContent,
   EditorSaveResult,
   EditorScope,
@@ -361,6 +362,10 @@ export const api = {
   // the Modules page's manual refresh (#478); the default read serves from cache.
   modules: (opts?: { refresh?: boolean }) =>
     request(z.array(ModuleSnapshot), `/platform/v1/modules${opts?.refresh ? "?refresh=true" : ""}`),
+  // Proactive Docker-reachability status (#622) — so the Modules page can say up front what's
+  // deferred (never "removal disabled": that always works, ADR-0056/#382), without the operator
+  // needing to attempt a removal or read the logs.
+  dockerStatus: () => request(DockerStatus, "/platform/v1/modules/docker-status"),
   moduleConfig: (name: string) =>
     request(z.record(z.string(), z.unknown()), `/platform/v1/modules/${encodeURIComponent(name)}/config`),
   saveModuleConfig: (name: string, values: Record<string, unknown>) =>

@@ -14,6 +14,26 @@ images to GHCR.
 
 ### Added
 
+- **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
+  governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
+  job on the maintenance orchestrator's nightly batch (additive — one entry appended to the
+  registry, registered `nightly=True`, so it rides the orchestrator's existing schedule rather
+  than a knob of its own). Per tenant it scans the sessions active since its last run and makes
+  **one** gateway call over them, staging zero or more candidate edits — to the base instructions
+  or a named playbook — as review proposals. It **cannot apply anything**: it is handed a proposal
+  sink and a read-only playbook lookup, never the stores that own the documents, so ADR-0093's
+  "nothing self-applies" is enforced by construction. The call is metered under **the tenant whose
+  sessions it scanned**, never the default tenant (constraints #1/#8, the ADR-0051 drain's
+  precedent). Recently **rejected** proposals are digested into the prompt as negative context
+  from the ADR-0090 audit trail, so a declined idea isn't re-proposed unchanged; a document with a
+  proposal still pending is skipped, so the queue can't stack drafts while the operator is away.
+  The create-vs-update operation is derived from what exists rather than taken from the model — a
+  mislabelled create would render an empty *current* side and hide what an approval would
+  overwrite. A durable per-tenant watermark (`agent_reflection_state`) bounds the scan, snapshotted
+  before it and advanced only on a completed pass. Junk costs nothing: a non-JSON reply, an unknown
+  target, or a runaway generation stages nothing rather than raising, and a tenant with no new
+  activity spends no gateway call at all. New `PLAYBOOK_REFLECTION_MODEL` (blank = the default chat
+  model). Implements ADR-0093 §1/§5/§6. `core-app` 0.80.0→0.81.0 (MINOR).
 - **Agent: governed playbooks — storage + a core-hosted approval surface** (#616) — the agent's
   behaviour improved only when the operator hand-edited the base prompt; nothing captured what the
   system learns in use. **Playbooks** are named, independently enable-able blocks of guidance

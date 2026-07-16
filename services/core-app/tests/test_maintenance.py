@@ -25,6 +25,7 @@ from epicurus_core_app.maintenance import (
     extraction_drain_job,
     facts_reembed_job,
     module_reindex_job,
+    playbook_reflection_job,
     profile_synthesis_job,
 )
 from epicurus_core_app.maintenance_schedule_prefs import MaintenanceSchedule
@@ -407,3 +408,24 @@ async def test_profile_synthesis_job_reports_count() -> None:
     job = profile_synthesis_job(synthesize)
     assert job.key == "memory-profile" and job.nightly is True  # light → runs on the nightly batch
     assert await job.run() == ("ok", "synthesized 2 standing profile(s)")
+
+
+async def test_playbook_reflection_job_reports_count() -> None:
+    async def reflect() -> int:
+        return 3
+
+    job = playbook_reflection_job(reflect)
+    # Light (one call per active tenant) → the nightly tier, beside extraction and profile.
+    assert job.key == "playbook-reflection" and job.nightly is True
+    assert await job.run() == ("ok", "staged 3 proposal(s) for review")
+
+
+async def test_playbook_reflection_job_failure_is_contained() -> None:
+    """The registry's containment rule: one job's failure is a result, never an aborted batch."""
+
+    async def reflect() -> int:
+        raise RuntimeError("the model exploded")
+
+    run = await _orch([playbook_reflection_job(reflect)]).run()
+    assert [j.status for j in run.jobs] == ["error"]
+    assert "the model exploded" in run.jobs[0].detail

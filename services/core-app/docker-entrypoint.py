@@ -12,6 +12,13 @@ bind-mount an existing tree (e.g. an Obsidian vault) at the file-space path; its
 be left untouched, so we touch only `<FILES_ROOT>/<DEFAULT_TENANT_ID>` and never `-R` into it.
 The module subtrees (`knowledge/`, `notes/`, …) are created by the core on first write — readers
 already tolerate a missing one — so they are deliberately not pre-created here.
+
+Optionally joins the host's Docker-socket group (`DOCKER_GID`, #622, ADR-0099): the opt-in
+`compose.docker-socket.yaml` overlay bind-mounts `/var/run/docker.sock`, but the mount alone
+does not make it *reachable* — the socket is host-owned (typically `root:docker`, mode 660),
+and dropping to uid 10001 leaves the app in no group the image defines (there is no `docker`
+group in this image; nothing to `initgroups()` into). `DOCKER_GID` names the *host's* group so
+we can join it explicitly, while still privileged enough to do so.
 """
 
 from __future__ import annotations
@@ -42,8 +49,17 @@ def _drop_privileges(pw: pwd.struct_passwd) -> None:
     resolves a path under ``$HOME`` (e.g. asyncpg's default ``~/.postgresql/postgresql.key``
     existence check during connect) would otherwise stat ``/root`` and raise ``PermissionError``
     as the unprivileged uid. The old ``USER epicurus`` set HOME via the passwd entry; we do too.
+
+    ``initgroups`` only grants groups *this image's* ``/etc/group`` defines for ``epicurus``
+    (none) — it cannot know a host's ``docker`` group GID, which varies per machine. When the
+    operator has opted into Docker-socket access (#622, ADR-0099) and set ``DOCKER_GID``, join
+    it explicitly here, while still privileged enough to (``setgroups`` needs the same
+    capability ``initgroups`` used, so this must happen before ``setuid`` drops it).
     """
     os.initgroups(pw.pw_name, pw.pw_gid)
+    docker_gid = os.environ.get("DOCKER_GID")
+    if docker_gid:
+        os.setgroups([*os.getgroups(), int(docker_gid)])
     os.setgid(pw.pw_gid)
     os.setuid(pw.pw_uid)
     os.environ["HOME"] = pw.pw_dir

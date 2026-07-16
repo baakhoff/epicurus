@@ -614,15 +614,26 @@ needs the Docker socket.
   its `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
   stack is never touched — and **never** core-app, web, or a data-plane / infra service (a hard
   denylist on top of the configured-module guard, also enforced in the registry before tombstoning).
-  The read-write socket is mounted on `core-app` only; dropping that mount no longer disables
-  removal — it only defers the container teardown to the next restart.
+- **The socket is opt-in, not mounted by default (#622, ADR-0099).** Mounting it unconditionally
+  never actually worked on a real deployment anyway — `core-app` drops to an unprivileged uid after
+  startup, and reaching a bind-mounted socket needs a host-matched group the image doesn't define —
+  so an always-on mount bought no real capability while still exposing a root-equivalent surface by
+  default. An operator opts in with `services/core-app/compose.docker-socket.yaml`, which mounts the
+  socket **and** forwards `DOCKER_GID` (the entrypoint joins that host group before dropping
+  privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
+  Dropping (or never adding) the mount never disables removal — it only defers the container
+  teardown to the next restart.
+- **Proactive status, not a mystery banner.** `GET /platform/v1/modules/docker-status` reports
+  `{available, reason}` — `reason` is the probe's own exception text — so the Modules page states
+  up front what's deferred and how to enable it, instead of an operator finding out only by
+  attempting a removal or reading the logs.
 - **It stays gone.** A removed module is dropped from the module list, agent tool discovery, and the
   nav. Because a `compose up` / Watchtower pull could recreate the container — and because a
   socket-less removal leaves the container up — the core **re-removes** any tombstoned module whose
   container is still present, on every startup. Bringing a module back means redeploying it and
   clearing its tombstone.
 
-See ADR-0028 (and its #382 amendment) for the full rationale and security posture.
+See ADR-0028 (and its #382 and ADR-0099 amendments) for the full rationale and security posture.
 
 ## Per-module model selection (#128, ADR-0029)
 

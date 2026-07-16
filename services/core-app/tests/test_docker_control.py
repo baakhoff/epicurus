@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from epicurus_core_app.docker_control import DockerController, DockerError
+from epicurus_core_app.docker_control import DockerAvailability, DockerController, DockerError
 
 _SERVICE = "com.docker.compose.service"
 _PROJECT = "com.docker.compose.project"
@@ -156,3 +156,37 @@ def test_restart_non_allowlisted_raises() -> None:
 
 def test_restart_service_with_no_container_is_false() -> None:
     assert _controller([]).restart_service("ollama") is False
+
+
+# ── from_env: probing at startup (#622) — reason and controller are never both set ────
+
+
+def test_from_env_reports_the_real_reason_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import docker as docker_sdk
+
+    def _boom() -> Any:
+        raise RuntimeError("permission denied while trying to connect to the Docker daemon")
+
+    monkeypatch.setattr(docker_sdk, "from_env", _boom)
+    result = DockerController.from_env()
+    assert result.controller is None
+    assert result.reason is not None
+    assert "permission denied" in result.reason
+
+
+def test_from_env_succeeds_when_the_socket_is_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import docker as docker_sdk
+
+    class _FakeSdkContainers:
+        def get(self, _id: str) -> Any:
+            raise RuntimeError("no such container")  # forces the COMPOSE_PROJECT_NAME fallback
+
+    class _FakeSdkClient:
+        containers = _FakeSdkContainers()
+
+    monkeypatch.setattr(docker_sdk, "from_env", lambda: _FakeSdkClient())
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "epicurus-test")
+    result = DockerController.from_env()
+    assert isinstance(result, DockerAvailability)
+    assert result.controller is not None
+    assert result.reason is None

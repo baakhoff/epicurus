@@ -1,9 +1,8 @@
-"""Tightly-scoped Docker control for confirmed module removal (#127, ADR-0028).
+"""Tightly-scoped Docker control for confirmed module removal (#127, ADR-0028, ADR-0099).
 
 Removing a module deletes its **container** — a privileged action the UI gates behind a
-confirm dialog. The core reaches the Docker socket (mounted read-write into the core
-container) **only** through this class, which refuses to touch anything but a *known
-module's own* container:
+confirm dialog. The core reaches the Docker socket **only** through this class, which
+refuses to touch anything but a *known module's own* container:
 
 * never ``core-app``, ``web``, or a data-plane / infra service (a hard denylist, on top of
   the registry only ever passing a *configured module* name here);
@@ -12,14 +11,18 @@ module's own* container:
 
 The Docker socket is root-equivalent on the host, so this is the single audited code path
 that uses it, and it is deliberately separate from the safe enable/disable flag (#126),
-which never touches Docker. If the socket is absent or forbidden, the controller is simply
-unavailable and removal returns ``503`` — it never breaks core startup.
+which never touches Docker. The socket mount is an explicit, documented **opt-in**
+(``services/core-app/compose.docker-socket.yaml``, ADR-0099) — absent it (the default), this
+module is simply unavailable. That does **not** disable removal (ADR-0056/#382 decoupled the
+two): the module is still tombstoned and hidden immediately; only *deleting its container* —
+and applying an Ollama KV-cache change (#307) — defers to the next restart.
 """
 
 from __future__ import annotations
 
 import os
 import socket
+from dataclasses import dataclass
 from typing import Any
 
 from epicurus_core import get_logger
@@ -66,6 +69,20 @@ class DockerError(RuntimeError):
     """Raised when a module's container cannot be removed (protected, or a Docker failure)."""
 
 
+@dataclass(frozen=True)
+class DockerAvailability:
+    """The result of probing for Docker access at startup (#622).
+
+    ``controller`` is ``None`` exactly when ``reason`` explains why — never both set, never
+    both empty. Kept as one value (not a bare ``DockerController | None``) so the *reason* an
+    operator sees on the Modules page is the real exception text, not a guess reconstructed
+    later from nothing.
+    """
+
+    controller: DockerController | None
+    reason: str | None = None
+
+
 class DockerController:
     """Stops + removes a *module's own* container, scoped to the core's Compose project."""
 
@@ -74,25 +91,29 @@ class DockerController:
         self._project = project
 
     @classmethod
-    def from_env(cls) -> DockerController | None:
-        """Connect to the Docker socket, or return ``None`` if it is unavailable.
+    def from_env(cls) -> DockerAvailability:
+        """Probe the Docker socket; never raises.
 
-        Best-effort: a missing or forbidden socket disables removal (the endpoint then
-        returns ``503``) rather than breaking core startup.
+        Best-effort: a missing or forbidden socket **defers container teardown on module
+        removal to the next restart** (ADR-0056/#382 decoupled removal itself from the live
+        socket — it always succeeds) and leaves an Ollama KV-cache change unapplied until a
+        manual restart (#307). It never blocks core startup either way.
         """
         try:
             import docker  # lazy import — the SDK is only needed when the socket is mounted
         except Exception as exc:  # pragma: no cover - import guard
-            log.warning("docker SDK unavailable; module removal disabled", error=str(exc))
-            return None
+            reason = str(exc)
+            log.warning("docker SDK unavailable; container teardown deferred", error=reason)
+            return DockerAvailability(controller=None, reason=reason)
         try:
             client = docker.from_env()
             project = cls._detect_project(client)
             log.info("docker control ready", project=project)
-            return cls(client, project=project)
+            return DockerAvailability(controller=cls(client, project=project))
         except Exception as exc:
-            log.warning("docker socket unavailable; module removal disabled", error=str(exc))
-            return None
+            reason = str(exc)
+            log.warning("docker socket unavailable; container teardown deferred", error=reason)
+            return DockerAvailability(controller=None, reason=reason)
 
     @staticmethod
     def _detect_project(client: Any) -> str | None:

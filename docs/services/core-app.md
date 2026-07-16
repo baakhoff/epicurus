@@ -547,6 +547,7 @@ container, and its review is mandatory (nothing self-applies, ever).
 | --- | --- |
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). Also carries the reserved **`core`** pseudo-module (always healthy + enabled — it is this process), so the shell discovers its `review` page like any module's; the Modules screen filters it back out, since it manages what the operator *installed*. |
 | `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
+| `GET /platform/v1/modules/docker-status` | Whether the core can reach Docker right now (#622, ADR-0099): `{available: bool, reason: str \| null}` — `reason` is the probe's own exception text, surfaced so the Modules page states plainly what's deferred (never "removal disabled" — see the callout below) and how to enable it, without the operator attempting a removal or reading the logs. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, #382, ADR-0028): tombstone the module — which hides it everywhere and stops routing its tools at once — and tear its container down. **Decoupled from the live Docker socket** (#382): soft-removes with **200** even when the core has no Docker access, deferring the container teardown to the next startup reconcile; the response carries `container_teardown_deferred` (true when no socket was available). With a socket present it also stops + removes the container now, scoped to the core's own Compose project and refusing core-app / web / data-plane. **403** protected (enforced regardless of the socket) · **404** unknown. |
@@ -567,16 +568,23 @@ container, and its review is mandatory (nothing self-applies, ever).
 | `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 | `GET /platform/v1/calendar-feed?start=&end=` | **Cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items (e.g. open tasks with a due date) from every enabled, healthy module — each stamped with its owning `module`. **Not a manifest-declared capability** — probes every module for `GET {base}/calendar-feed?start=&end=` and skips it on a 404/unreachable, the same best-effort tolerance `/suggestions` already relies on, so a module opts in purely by serving the path (`tasks` is the first). Item shape: `{id, title, date, status, ref_id, kind}` (`date` a floating `YYYY-MM-DD`, `end` exclusive — ADR-0023's own range convention; `kind` + `ref_id` + the stamped `module` route a click to that module's existing `GET /resolve/{kind}/{ref_id}` hover-card, ADR-0019 — no new UI contract). Backs the calendar page's read-only task-due-date overlay. (Lives at `/platform/v1/calendar-feed`, not under `/modules`.) |
 
-> **Privileged surface (ADR-0028, #307, #382).** Tearing down a removed module's container — and
-> applying the Ollama KV-cache type — needs the Docker socket, mounted read-write on `core-app`
-> **only**. The core touches it through a single `DockerController`: it stops/removes **only a
-> configured module's own container**, and separately **restarts only an allowlisted infra
-> container** (`ollama`, which is never removable). Both are scoped to this Compose project and
-> never touch core-app / web / a data-plane service. Module **removal itself no longer needs the
-> socket** (#382): it tombstones the module (hidden + unrouted at once) and **defers** the
-> container teardown to the next startup reconcile when the socket is absent — so dropping the
-> mount leaves removal working (the container lingers until the next restart), while a KV-cache
-> change then saves without applying.
+> **Privileged surface, opt-in (ADR-0028, #307, #382, #622/ADR-0099).** Tearing down a removed
+> module's container — and applying the Ollama KV-cache type — needs the Docker socket. The core
+> touches it through a single `DockerController`: it stops/removes **only a configured module's
+> own container**, and separately **restarts only an allowlisted infra container** (`ollama`,
+> which is never removable). Both are scoped to this Compose project and never touch core-app /
+> web / a data-plane service. Module **removal itself never needs the socket** (#382): it
+> tombstones the module (hidden + unrouted at once) regardless, and **defers** the container
+> teardown to the next startup reconcile when Docker isn't reachable — so removal always works;
+> a KV-cache change likewise saves without applying. **The socket is NOT mounted by default**
+> (#622, ADR-0099) — mounting it unconditionally bought nothing real anyway, since the app's
+> unprivileged uid (10001, the same [entrypoint privilege drop](../infrastructure/index.md#shared-file-space)
+> the shared file space uses) can't reach it without a host-matched group either way.
+> Opt in with `services/core-app/compose.docker-socket.yaml` (mounts the socket **and** forwards
+> `DOCKER_GID`, the host's docker-socket group id — the entrypoint joins it before dropping
+> privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
+> `GET /platform/v1/modules/docker-status` reports the live state so the Modules page states it
+> proactively instead of an operator finding out by attempting a removal.
 
 Caller-supplied path segments the registry interpolates into a module request —
 `ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a

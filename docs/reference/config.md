@@ -161,6 +161,16 @@ The on-disk file tree is **tenant-scoped** (constraint #1): the core indexes
 `<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default
 `local`; each project is a top-level folder) so they appear as knowledge bases.
 
+## Docker-socket opt-in (#622, ADR-0099)
+
+Not a `CoreAppSettings` field — read directly by `services/core-app/docker-entrypoint.py`
+(the container's root-run entrypoint) before the app process even starts, so it can't go
+through pydantic-settings like the rest of this page.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `DOCKER_GID` | unset | core-app entrypoint | The host's docker-socket group id. When set, the entrypoint joins it (via `setgroups`, while still root) before dropping to the unprivileged app uid — the missing half of the opt-in `services/core-app/compose.docker-socket.yaml` overlay, which mounts `/var/run/docker.sock` but cannot by itself make it reachable by a non-root process. Unset (the default): the socket, if mounted at all, stays unreachable — module removal and the Ollama KV-cache restart still work, just deferred to the next restart (see [modules](modules.md#removing-a-module--tombstone-now-tear-the-container-down-out-of-band-127-382-adr-0028)). Find your host's value with `getent group docker \| cut -d: -f3` or `stat -c '%g' /var/run/docker.sock`. |
+
 ## Type aliases
 
 ```python

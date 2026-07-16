@@ -277,9 +277,12 @@ def create_app() -> FastAPI:
     live_runs = LiveRunRegistry(grace_seconds=settings.live_run_grace_seconds)
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
-    # restart-only path for Ollama's KV-cache apply (#307). None when the socket isn't mounted —
-    # removal returns 503, and a KV-cache change saves but isn't applied (manual restart).
-    docker = DockerController.from_env()
+    # restart-only path for Ollama's KV-cache apply (#307). The socket is an explicit opt-in
+    # (ADR-0099) — unavailable by default, which defers container teardown on removal to the
+    # next restart and leaves a KV-cache change unapplied until a manual restart; it never
+    # disables removal itself (ADR-0056/#382) or blocks startup.
+    docker_availability = DockerController.from_env()
+    docker = docker_availability.controller
     registry = ModuleRegistry(
         settings.module_base_urls,
         mcp=mcp_host,
@@ -287,6 +290,7 @@ def create_app() -> FastAPI:
         tenant=settings.default_tenant_id,
         prefs=module_prefs,
         docker=docker,
+        docker_unavailable_reason=docker_availability.reason,
         core=core_review,
     )
     ollama_runtime = OllamaRuntime(

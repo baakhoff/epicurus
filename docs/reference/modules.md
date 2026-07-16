@@ -444,13 +444,24 @@ operator is the approver. Knowledge is the first user (ADR-0033); see
 **The wire contract lives in `epicurus_core.review`** (ADR-0090): `ReviewSuggestion` /
 `ReviewData` / `ApplyResult` / `ApproveBody` / `ReviewDecision` / `ReviewAuditData` are shared
 Pydantic models every `review`-page module imports, rather than each redefining an identical
-shape — so a new adopter (e.g. governed playbooks, #525) gets edit-before-approve and the
+shape — so a new adopter (governed playbooks, #525/#616) gets edit-before-approve and the
 audit trail for free. Persistence stays per-module (each owns its own `*_suggestions` and
 `*_suggestion_decisions` tables), mirroring the editor version-history precedent (ADR-0046):
 shared code for the wire shape, per-module tables for storage. The audit table is
 append-only and capped per tenant (newest `MAX_DECISIONS` rows, currently 200), pruned on
 each insert — the pending queue drops a row on resolution (ADR-0033: "the queue *is* the set
 of rows"), so the audit table is what actually survives to be reviewed later.
+
+**Not every `review`-page implementer is a module.** Governed playbooks (ADR-0093) made the core
+itself one: it serves its own queue — the agent's proposed edits to its base instructions and
+named playbooks — as a reserved **pseudo-module** named `core` that `ModuleRegistry` answers
+**in-process**, rather than through the HTTP probe every real module is reached by (standing up a
+loopback module for it was rejected as needless indirection). It implements the same surface — a
+manifest declaring one `review` page, `GET /pages/{id}`, the approve/reject, the audit trail —
+and owns its rows in the core's `agent_playbook_proposals` / `agent_playbook_decisions`, so the
+per-implementer-storage rule holds. It is deliberately **not** a configured base, so it
+contributes no MCP tools and joins no base-driven fan-out: it is a page implementer and nothing
+more. See [core-app](../services/core-app.md).
 
 The `calendar` archetype's data shape is a window of events (the shell renders the month /
 week / agenda views and re-fetches as the user navigates). Like the `board`, it is
@@ -657,15 +668,26 @@ needs the Docker socket.
   its `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
   stack is never touched — and **never** core-app, web, or a data-plane / infra service (a hard
   denylist on top of the configured-module guard, also enforced in the registry before tombstoning).
-  The read-write socket is mounted on `core-app` only; dropping that mount no longer disables
-  removal — it only defers the container teardown to the next restart.
+- **The socket is opt-in, not mounted by default (#622, ADR-0099).** Mounting it unconditionally
+  never actually worked on a real deployment anyway — `core-app` drops to an unprivileged uid after
+  startup, and reaching a bind-mounted socket needs a host-matched group the image doesn't define —
+  so an always-on mount bought no real capability while still exposing a root-equivalent surface by
+  default. An operator opts in with `services/core-app/compose.docker-socket.yaml`, which mounts the
+  socket **and** forwards `DOCKER_GID` (the entrypoint joins that host group before dropping
+  privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
+  Dropping (or never adding) the mount never disables removal — it only defers the container
+  teardown to the next restart.
+- **Proactive status, not a mystery banner.** `GET /platform/v1/modules/docker-status` reports
+  `{available, reason}` — `reason` is the probe's own exception text — so the Modules page states
+  up front what's deferred and how to enable it, instead of an operator finding out only by
+  attempting a removal or reading the logs.
 - **It stays gone.** A removed module is dropped from the module list, agent tool discovery, and the
   nav. Because a `compose up` / Watchtower pull could recreate the container — and because a
   socket-less removal leaves the container up — the core **re-removes** any tombstoned module whose
   container is still present, on every startup. Bringing a module back means redeploying it and
   clearing its tombstone.
 
-See ADR-0028 (and its #382 amendment) for the full rationale and security posture.
+See ADR-0028 (and its #382 and ADR-0099 amendments) for the full rationale and security posture.
 
 ## Per-module model selection (#128, ADR-0029)
 

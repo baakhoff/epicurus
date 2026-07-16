@@ -56,7 +56,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `PUT /platform/v1/agent/memory/profile` | Save an operator edit (`{content}`) — stored as an `edited`, **pinned** version the nightly synthesizer won't clobber. A blank body **clears** the profile (resume auto-synthesis), same as DELETE. |
 | `DELETE /platform/v1/agent/memory/profile` | Clear the profile (all versions); the next nightly synthesis regenerates a fresh `auto` one. Returns `{cleared}`. |
 | `POST /platform/v1/agent/attachments` | Upload a file to attach to a turn → its core-side handle (`att_id`). Capped at `ATTACHMENT_MAX_BYTES` (10 MiB; **413** over) with a content-type allowlist (`ATTACHMENT_ALLOWED_TYPES`; **415** if disallowed); best-effort mirrored to the storage sink (ADR-0025). An `image/*` upload rides the turn as real multimodal content when the selected model supports vision (#633) — see below. |
-| `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. |
+| `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. These routes read and write the **base prompt alone** — the enabled playbooks composed onto it for the turn (ADR-0093 §4, see *Governed playbooks* below) are not part of this editable document. Each `PUT` snapshots the prompt it replaced, so an edit is undoable (ADR-0046). |
 
 Tools are offered to the model **only when it can use them**: the loop checks the resolved
 model's capabilities (`gateway.supports_tools` → `/api/show`; hosted providers are assumed
@@ -144,6 +144,80 @@ client falls back to history. Finished runs are reaped after `LIVE_RUN_GRACE_SEC
 one *running* run exists per `(tenant, session)` — a second start gets `409` (+ `X-Run-Id`).
 Multi-instance re-attach (a shared event log over Valkey/NATS, or sticky routing) is a named
 follow-up; v1 is single-instance.
+
+### Governed playbooks (ADR-0093)
+
+The agent's behaviour used to improve only when the operator hand-edited the base prompt.
+**Playbooks** capture what the system learns in use — recurring corrections, discovered
+procedures ("for a morning briefing, check calendar before mail") — as durable guidance, without
+ever letting the agent rewrite itself. The rule is absolute: the nightly reflection pass
+**proposes**, the operator **approves**, and only an approval writes. Nothing self-applies.
+
+**What a playbook is.** A named, independently enable-able block of guidance stored beside the
+base prompt (`agent_playbooks`), rather than more text crammed into one monolithic instruction
+string. Add or silence one without touching the rest.
+
+**How guidance reaches the model.** `Agent._assemble` is unchanged: it calls
+`AgentInstructionsStore.get_instructions(tenant)` and leads the turn with whatever string comes
+back. What changed is what that method *composes* — the base prompt, then every **enabled**
+playbook under a `## Playbook: <name>` heading (so the model can attribute guidance to its
+source), returned as one opaque string. Composition therefore happens *below* the accessor, which
+is why the assembly path needed no change at all. Playbooks are ordered oldest-first then by
+name — a total, stable order, so the prompt never reshuffles between reads. Enrichment is
+best-effort: if the playbook read fails the turn proceeds on the base prompt alone rather than
+breaking. Token budget follows ADR-0083's precedent — an informal, UI-side soft-size warning over
+the *combined* length, not a hard server-side cap.
+
+**The approval surface.** A proposal is an ordinary `ReviewSuggestion`
+([`epicurus_core.review`](../reference/platform-api.md), ADR-0090) — `operation: "update"`
+against the base instructions or an existing playbook, `"create"` for a new one — so the existing
+`ReviewView` / `SuggestionReviewModal` render it with the same diff, editable draft, and audit
+trail every module's queue gets. Approve applies the (possibly hand-edited) content through the
+stores below; reject discards. Both record a durable decision row.
+
+**The reserved `core` pseudo-module.** Every other `review`-page implementer is an external
+module the registry reaches over HTTP; the core hosts no page of its own. Rather than bend the
+core into a module that calls itself over the network (rejected in the ADR as needless
+indirection), `ModuleRegistry` accepts one **reserved entry named `core`** that it answers
+**in-process** — see *Module registry* below. It rides `GET /platform/v1/modules` so the shell
+discovers its page like any module's, with no new endpoint and no new frontend contract.
+
+**Where proposals come from.** A `playbook-reflection` job on the nightly maintenance batch (see
+*Maintenance orchestrator* below — registered `nightly=True`, so it rides the orchestrator's one
+schedule rather than a knob of its own). Per tenant it scans the sessions active since its last
+run and makes **one** gateway call over them, asking for candidate edits; each is staged for
+review. It is metered under **the tenant whose sessions it scanned** — never a synthetic
+background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details that matter:
+
+- **It cannot apply anything.** It is handed a proposal sink and a *read-only* playbook lookup,
+  never the stores that own the documents — the ADR's hard rule is enforced by construction, not
+  by discipline.
+- **The operation is derived, not trusted.** A playbook the tenant already has is an `update`,
+  otherwise a `create` — decided from what exists, because a mislabelled `create` would render an
+  empty *current* side and hide from the operator exactly what their approval would overwrite.
+- **Rejections feed back.** Recently rejected proposals are digested into the prompt as explicit
+  negative context (from the `agent_playbook_decisions` trail, ADR-0093 §6), so a declined idea
+  isn't re-proposed unchanged.
+- **It doesn't stack drafts.** A document with a proposal still awaiting the operator is skipped,
+  so the queue can't grow while they're away.
+- **A watermark bounds the scan** (`agent_reflection_state`, durable — an in-memory marker would
+  reset on restart and re-propose the whole history). It is snapshotted *before* the scan and
+  advanced only on a completed pass, so a session written mid-pass is re-read next time rather
+  than lost; re-reading is harmless (a duplicate is suppressed), losing one is not.
+- **Junk costs nothing.** A non-JSON reply, an unknown target, a nameless playbook, or a runaway
+  generation stages nothing rather than raising. Nothing new since the last pass? No gateway call
+  at all.
+
+**Storage and undo.** An approved edit to the *base* prompt writes through the **existing**
+`AgentInstructionsStore` — the same path the operator's own Settings edit uses, so an approved
+edit is indistinguishable from a hand-typed one. Both halves version ADR-0046-style
+(snapshot-on-save, capped at the same `MAX_VERSIONS = 50`, oldest pruned). One deliberate
+departure from the editor's version store: it snapshots the content *being saved*; these
+snapshot the content being **replaced**. The editor accumulates many operator saves, so the prior
+body is always somewhere in its history; here the very first write may be an approved
+agent-authored edit against a body never saved through this path, and recording only the new
+content would leave the original unrecoverable — exactly the undo the ADR says an agent-proposed
+edit needs. A save that changes nothing records no version.
 
 ### Built-in agent tools (ADR-0039)
 
@@ -453,10 +527,27 @@ previously-healthy module goes unreachable (with `repr(exc)`, never the empty st
 module has never yet been reachable (the startup/reconcile grace window) — a module that stays
 down produces no repeat log.
 
+**The reserved `core` pseudo-module (ADR-0093 §2).** The registry accepts one optional entry
+that it answers **in-process** instead of probing over HTTP: the core's own `review` page (see
+*Governed playbooks* above). It implements the same surface a real module serves — a manifest,
+`GET /pages/{id}`, the review approve/reject, the audit trail — so the registry's handling is a
+thin dispatch rather than a parallel implementation, and the shell cannot tell the two apart.
+The reserved name is read from the entry's own manifest, so the registry hardcodes nothing.
+
+Crucially it is **not** a configured base URL. `snapshot()` stays exactly 1:1 with the configured
+bases (several callers zip the two together), so the pseudo-module can never leak into a
+base-driven fan-out: not `enabled_mcp_urls` (it contributes no tools to the agent), not the
+re-embed fan-out, not the calendar feed. It opts into a capability by being asked, never by
+default — the two reads that *should* see it (`GET /platform/v1/modules`, so the shell discovers
+its page; and the pending-suggestions feed) compose it in explicitly. The management writes
+—`enabled`, `DELETE`, `suggestions-enabled` — all **403** for it: it is this process, it has no
+container, and its review is mandatory (nothing self-applies, ever).
+
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). |
+| `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). Also carries the reserved **`core`** pseudo-module (always healthy + enabled — it is this process), so the shell discovers its `review` page like any module's; the Modules screen filters it back out, since it manages what the operator *installed*. |
 | `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
+| `GET /platform/v1/modules/docker-status` | Whether the core can reach Docker right now (#622, ADR-0099): `{available: bool, reason: str \| null}` — `reason` is the probe's own exception text, surfaced so the Modules page states plainly what's deferred (never "removal disabled" — see the callout below) and how to enable it, without the operator attempting a removal or reading the logs. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, #382, ADR-0028): tombstone the module — which hides it everywhere and stops routing its tools at once — and tear its container down. **Decoupled from the live Docker socket** (#382): soft-removes with **200** even when the core has no Docker access, deferring the container teardown to the next startup reconcile; the response carries `container_teardown_deferred` (true when no socket was available). With a socket present it also stops + removes the container now, scoped to the core's own Compose project and refusing core-app / web / data-plane. **403** protected (enforced regardless of the socket) · **404** unknown. |
@@ -477,16 +568,23 @@ down produces no repeat log.
 | `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 | `GET /platform/v1/calendar-feed?start=&end=` | **Cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items (e.g. open tasks with a due date) from every enabled, healthy module — each stamped with its owning `module`. **Not a manifest-declared capability** — probes every module for `GET {base}/calendar-feed?start=&end=` and skips it on a 404/unreachable, the same best-effort tolerance `/suggestions` already relies on, so a module opts in purely by serving the path (`tasks` is the first). Item shape: `{id, title, date, status, ref_id, kind}` (`date` a floating `YYYY-MM-DD`, `end` exclusive — ADR-0023's own range convention; `kind` + `ref_id` + the stamped `module` route a click to that module's existing `GET /resolve/{kind}/{ref_id}` hover-card, ADR-0019 — no new UI contract). Backs the calendar page's read-only task-due-date overlay. (Lives at `/platform/v1/calendar-feed`, not under `/modules`.) |
 
-> **Privileged surface (ADR-0028, #307, #382).** Tearing down a removed module's container — and
-> applying the Ollama KV-cache type — needs the Docker socket, mounted read-write on `core-app`
-> **only**. The core touches it through a single `DockerController`: it stops/removes **only a
-> configured module's own container**, and separately **restarts only an allowlisted infra
-> container** (`ollama`, which is never removable). Both are scoped to this Compose project and
-> never touch core-app / web / a data-plane service. Module **removal itself no longer needs the
-> socket** (#382): it tombstones the module (hidden + unrouted at once) and **defers** the
-> container teardown to the next startup reconcile when the socket is absent — so dropping the
-> mount leaves removal working (the container lingers until the next restart), while a KV-cache
-> change then saves without applying.
+> **Privileged surface, opt-in (ADR-0028, #307, #382, #622/ADR-0099).** Tearing down a removed
+> module's container — and applying the Ollama KV-cache type — needs the Docker socket. The core
+> touches it through a single `DockerController`: it stops/removes **only a configured module's
+> own container**, and separately **restarts only an allowlisted infra container** (`ollama`,
+> which is never removable). Both are scoped to this Compose project and never touch core-app /
+> web / a data-plane service. Module **removal itself never needs the socket** (#382): it
+> tombstones the module (hidden + unrouted at once) regardless, and **defers** the container
+> teardown to the next startup reconcile when Docker isn't reachable — so removal always works;
+> a KV-cache change likewise saves without applying. **The socket is NOT mounted by default**
+> (#622, ADR-0099) — mounting it unconditionally bought nothing real anyway, since the app's
+> unprivileged uid (10001, the same [entrypoint privilege drop](../infrastructure/index.md#shared-file-space)
+> the shared file space uses) can't reach it without a host-matched group either way.
+> Opt in with `services/core-app/compose.docker-socket.yaml` (mounts the socket **and** forwards
+> `DOCKER_GID`, the host's docker-socket group id — the entrypoint joins it before dropping
+> privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
+> `GET /platform/v1/modules/docker-status` reports the live state so the Modules page states it
+> proactively instead of an operator finding out by attempting a removal.
 
 Caller-supplied path segments the registry interpolates into a module request —
 `ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a
@@ -527,13 +625,16 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Four
+registers by being added to the list; the run / route / schedule machinery is unchanged. Five
 ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
 deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light, nightly-eligible
 — `ProfileSynthesizer.run` distils each tenant's facts into its statically-injected profile,
-ADR-0094), the **module re-index** fan-out (heavy, manual-only — the same `reembed` fan-out as
-above), and **memory facts re-embed** (heavy, manual-only — calls `UserFactStore.reembed_all` for
-the default tenant, #436). Jobs run **sequenced** (gentle on a single GPU) and each is contained:
+ADR-0094), the **playbook reflection** pass (light, nightly-eligible — `PlaybookReflector.run`
+proposes edits to the agent's own guidance for the operator to approve, ADR-0093; see *Governed
+playbooks* above), the **module re-index** fan-out (heavy, manual-only — the same `reembed`
+fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
+`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
+single GPU) and each is contained:
 one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs follow a
 runtime-editable **schedule** (below, #621); the manual "run everything" trigger is always
 available regardless of it.
@@ -669,6 +770,7 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `MEMORY_EXTRACTION_BATCH_LIMIT` | `200` | Max exchanges distilled per nightly drain. |
 | `MEMORY_RECALL_TIMEOUT_S` | `4.0` | Time-box (seconds) for the inline recall embed before a turn proceeds without it (ADR-0051). 4s (was 2s) fits a single-GPU embed-model swap. |
 | `MEMORY_PROFILE_MODEL` | `""` | Optional dedicated model for the nightly **standing-profile** synthesis (ADR-0094); blank = the operator's default chat model. A small model keeps the pass cheap. |
+| `PLAYBOOK_REFLECTION_MODEL` | `""` | Optional dedicated model for the nightly **playbook-reflection** pass (ADR-0093); blank = the operator's default chat model. A small model keeps the pass cheap. No reflection *hour* knob exists — the pass rides the maintenance schedule. |
 | `MEMORY_PROFILE_MAX_VERSIONS` | `5` | How many past standing-profile versions to retain per tenant (the newest is injected). |
 | `DEFAULT_TIMEZONE` | `UTC` | Fallback IANA timezone for the `now` tool when unset in Settings (ADR-0039). |
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
@@ -744,6 +846,40 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):
   `tenant`, `instructions` (nullable). A NULL/blank row falls back to the shipped
   `DEFAULT_AGENT_INSTRUCTIONS`; resolved per turn and injected first in `Agent._assemble`.
+- **Postgres `agent_instructions_versions`** — snapshots of the base prompt (ADR-0046 via
+  ADR-0093 §3): `id`, `vid`, `tenant`, `content`, `created_at`. Each `set_instructions` records the
+  prompt it **replaced** (the first edit therefore captures the shipped default), deduplicated,
+  newest `MAX_VERSIONS` (50) per tenant retained, oldest pruned. A parallel table to
+  `agent_playbook_versions` rather than one shared version stream: the base prompt is a per-tenant
+  singleton and a playbook is one of N named documents, so interleaving them would complicate
+  "roll back *this* document".
+- **Postgres `agent_playbooks`** — named blocks of guidance composed onto the base prompt
+  (ADR-0093 §3): `id` (uuid), `tenant`, `name` (unique per tenant), `content`, `enabled`,
+  `created_at`, `updated_at`. Only **enabled** rows are composed into the turn's prompt, oldest
+  first then by name (a total, stable order — the primary key is a uuid and carries none).
+- **Postgres `agent_playbook_versions`** — snapshots of a playbook's content (ADR-0046): `id`,
+  `vid`, `tenant`, `playbook_id`, `name` (snapshotted too, so a version stays readable after a
+  rename), `content`, `created_at`. Same replace-then-snapshot rule, dedup, and 50-per-playbook
+  cap as the base prompt above. Dropped with its playbook.
+- **Postgres `agent_playbook_proposals`** — the reserved `core` review page's **pending queue**
+  (ADR-0093 §2): `id`, `sid`, `tenant`, `path` (`instructions`, or `playbooks/<name>`),
+  `operation` (`update`/`create` only — the agent never proposes a delete), `proposed_content`,
+  `origin`, `note`, `created_at`. The queue *is* the set of rows (ADR-0033): resolving one drops
+  it. Written **only** by the nightly reflection pass; read by the review page.
+- **Postgres `agent_playbook_decisions`** — the durable resolved-decision trail behind that queue
+  (ADR-0090): `id`, `sid`, `tenant`, `path`, `operation`, `origin`, `note`, `proposed_content`,
+  `applied_content` (empty for a reject — the operator's edit is the delta worth keeping),
+  `decision` (`approved`/`rejected`), `proposed_at`, `decided_at`. Newest `MAX_DECISIONS` (200)
+  per tenant retained. Recorded **before** the pending row drops, so a crash between the two
+  leaves an audited decision and a re-resolvable queue row rather than a silently vanished
+  proposal. The `rejected` rows are what the reflection pass reads back as negative context
+  (ADR-0093 §6).
+- **Postgres `agent_reflection_state`** — the nightly reflection pass's per-tenant watermark
+  (ADR-0093 §1): `tenant`, `last_run_at`. Durable rather than in-memory (constraint #2): an
+  in-process marker would reset on every restart and re-scan the whole history, re-proposing
+  lessons the operator has already seen. Snapshotted before a scan and advanced only on a
+  completed pass. Read back as **aware UTC** regardless of backend — Postgres returns an aware
+  datetime, SQLite a naive one, and comparing the two raises.
 - **Postgres `agent_suspended_runs`** — a turn paused by `ask_user` (ADR-0053): `id` (run_id),
   `tenant`, `session_id`, `model`, `pending_call_id`, `question`, `conversation` (JSON),
   `created_at`. Written on suspend, **consumed** on resume, reaped after `ASK_USER_TTL_HOURS`.

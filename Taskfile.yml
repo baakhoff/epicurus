@@ -47,7 +47,7 @@ tasks:
       - task: test
 
   up:
-    desc: Start the full stack (data plane + enabled modules; observability is opt-in, see `obs-up`)
+    desc: Start the full stack (data plane + enabled modules; observability and Docker-socket access are opt-in, see `obs-up` / `docker-socket-up`)
     cmds:
       - docker compose up -d
 
@@ -65,6 +65,16 @@ tasks:
     desc: Stop the stack including the observability profile (append `-- -v` to drop volumes)
     cmds:
       - docker compose --profile observability down {{.CLI_ARGS}}
+
+  docker-socket-up:
+    desc: 'Start the stack with the opt-in Docker-socket override (#622): immediate module-removal teardown + KV-cache restart; requires DOCKER_GID (see services/core-app/compose.docker-socket.yaml)'
+    cmds:
+      - docker compose -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
+
+  docker-socket-down:
+    desc: Stop the stack including the Docker-socket override (append `-- -v` to drop volumes)
+    cmds:
+      - docker compose -f compose.yaml -f services/core-app/compose.docker-socket.yaml down {{.CLI_ARGS}}
 
   smoke:
     desc: Boot an isolated copy of the stack and assert the integration last mile (mirrors the CI gate)

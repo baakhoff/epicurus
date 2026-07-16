@@ -583,6 +583,18 @@ changes directly, so the queue stays empty by design — the page shows a contex
 automatically" empty state rather than "nothing awaits review". The switch is always shown
 (even with an empty queue) so the operator can turn review back on.
 
+**The one group without that switch is `core`** — the agent's own base instructions and
+playbooks (ADR-0093), which the core serves as a reserved in-process pseudo-module. Its review is
+**mandatory**: the ADR's hard rule is that agent-proposed guidance never self-applies and no path
+bypasses the operator's Approve, so there is no flag to read and none to write (the core answers
+the write with a **403**). `reviewIsMandatory()` (`src/lib/suggestions.ts`) gates it: the group
+renders a plain *Always reviewed* label instead of a Switch, and skips the `suggestions-enabled`
+query entirely rather than offer a control the server refuses. The **Modules** screen filters the
+same reserved name out of its list — the core rides `GET /platform/v1/modules` only so the shell
+discovers its `review` page like any module's; it isn't something the operator installed, and has
+no container to enable, configure, or remove. Everything else — the diff, the editable draft, the
+audit trail, the review window — is the *unmodified* shared machinery.
+
 ### The chat SSE protocol
 
 `POST /platform/v1/agent/chat/stream` returns Server-Sent Events: an optional leading

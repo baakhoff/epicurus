@@ -599,6 +599,15 @@ export const ModuleSnapshot = z.object({
 });
 export type ModuleSnapshot = z.infer<typeof ModuleSnapshot>;
 
+/** Whether the core can reach Docker right now, and why not (#622) — never disables module
+ * removal itself (ADR-0056/#382); only container teardown + the Ollama KV-cache restart
+ * defer to the next restart while `available` is false. */
+export const DockerStatus = z.object({
+  available: z.boolean(),
+  reason: z.string().nullish(),
+});
+export type DockerStatus = z.infer<typeof DockerStatus>;
+
 /* ── archetype data shapes (core-rendered; the module supplies data only) ─── */
 
 /** One row in a `browser` page: a list entry plus its detail body. */

@@ -58,6 +58,20 @@ images to GHCR.
 
 ### Fixed
 
+- **Agent: nightly reflection never showed the model the document it was asked to rewrite**
+  (#658) — the `update` path's system prompt demanded "the FULL new text… it replaces what is
+  there," but `_build_prompt` passed only transcripts and recent rejections, and `list_playbooks`
+  was used for names only; `get_base` was never called. Since `instructions` is always an
+  `update` (there's nothing to create), that path asked for a full regeneration of text the model
+  had no access to — mostly rejectable noise, at the cost of a real gateway call per tenant per
+  night. Now the prompt includes the current base instructions (`get_base`) and every existing
+  playbook's current content — the model edits real text instead of reconstructing from nothing.
+  Folded in from the same review: the out-of-window `continue` in the session scan is now a
+  `break` (`sessions()` is DESC-ordered, so the first miss guarantees the rest miss), and
+  `test_reflection.py`'s model-override test now constructs the reflector with `model=` instead
+  of poking the private attribute, so `settings.playbook_reflection_model` reaching the
+  constructor is actually covered. `core-app` 0.83.0→0.83.1 (PATCH).
+
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
   disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either

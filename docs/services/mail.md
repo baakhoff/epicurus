@@ -332,15 +332,32 @@ download row).
 }
 ```
 
-### NATS events
+### Module events (ADR-0103, #663)
 
-| Subject (base) | Direction | Payload | Condition |
-| --- | --- | --- | --- |
-| `mail.sent` | emitted | `{"id": str, "to": str, "subject": str}` | After a confirmed send succeeds (published by `POST /send`, best-effort — a bus hiccup never fails a completed send) |
+Emitted on the module event spine (`epicurus_core.module_events.emit_event`), not a raw
+`EventBus.publish` — see [the event catalog](../reference/events.md#the-event-catalog) for the
+full envelope shape, payload discipline, and `dedup_key` convention. The base subject is shown;
+the wire subject gains the spine's `events.` prefix and is tenant-scoped
+(`<tenant_id>.events.mail.sent`).
 
-Subjects are tenant-scoped at runtime: `<tenant_id>.mail.sent`. Before v0.9.0 this event was
-declared but never actually published; it is now emitted at `/send`, the one point a message is
-really sent (ADR-0085).
+| Event | Emitted from | Condition |
+| --- | --- | --- |
+| `mail.sent` | `POST /send`, `POST /pages/mailbox/send` | After a confirmed send succeeds — best-effort, a spine hiccup never fails a completed send. `dedup_key` is the provider's sent message id. |
+| `mail.received` | `CachedMailbox.reconcile` | Once per genuinely-new message found during an incremental sync — **never** on an initial or full resync (no-firehose). `dedup_key` is the provider message id; payload carries `from`/`subject` (capped)/`folder`/`has_attachments`/`provider`, never the body. |
+| `mail.sync_failed` | `CachedMailbox.reconcile` | A provider/auth error (`httpx.HTTPError` — surfaces this way via `PlatformClient.get_oauth_token`), or an expired sync cursor forcing a full resync. Rate-limited per running instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s / 15 min) so a flapping connection can't storm the bus. |
+
+Before v0.9.0, `mail.sent` was declared but never actually published; before v0.14.0 it published
+on the bare `mail.sent` subject via a raw `EventBus.publish` call with an ad-hoc, uncapped
+payload. All three events now ride the same catalogued, validated contract every module's
+events share.
+
+#### Provider caveats
+
+Gmail's `users.history.list` reports changes at **thread** granularity for most purposes
+(`changed_thread_ids`, used to rebuild cached rows), but its `messagesAdded` history-record type
+already carries the specific message id — `new_message_ids` is derived from that narrower field,
+not inferred from a thread-level diff. A future IMAP provider has no equivalent single call: it
+would derive `new_message_ids` from the UIDs above the last-seen `UIDNEXT` on a `UID FETCH`.
 
 ---
 
@@ -368,6 +385,9 @@ mailbox incrementally.
 - **Read/unread converges both ways.** A mark-read is written through to the cache optimistically
   (the list reflects it before the provider round-trips); a mark made elsewhere flows back in
   through the next reconcile.
+- **The delta is also where `mail.received`/`mail.sync_failed` are emitted (#663).** A reconcile
+  is the one place a genuinely-new message (vs. a flag flip) or a broken sync is already known —
+  see [Module events](#module-events-adr-0103-663) above.
 
 The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `epicurus_mail.db`.
 
@@ -379,6 +399,7 @@ The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `ep
 | --- | --- | --- |
 | `PLATFORM_URL` | `http://localhost:8080` | Internal core base URL. On the Docker network: `http://core-app:8080`. |
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Postgres DSN for the tenant-scoped local cache (ADR-0096, #623). The module owns its own `mail_*` tables in the shared Postgres — no shared database, just a shared server. |
+| `MAIL_SYNC_FAILED_COOLDOWN_S` | `900` | Minimum seconds between `mail.sync_failed` emissions (#663) — a reconcile fires on every mailbox page open, so an account stuck failing must not storm the event spine once per open. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant this module acts on behalf of. |
 | `NATS_URL` | `nats://localhost:4222` | NATS event backbone. |
 | `LOG_LEVEL` | `info` | Logging verbosity. |
@@ -419,7 +440,7 @@ materialization of the landing view, not a mail store. Every table is scoped by 
 | --- | --- |
 | `core-app` | Platform API — token retrieval, event bus |
 | `postgres` | The tenant-scoped local cache (`mail_*` tables, ADR-0096) |
-| `nats` | Event publication (`mail.sent`) |
+| `nats` | Module event spine emission (`mail.sent`/`mail.received`/`mail.sync_failed`, #663) |
 | Gmail API (`gmail.googleapis.com`) | The underlying mail provider |
 
 ---
@@ -482,3 +503,13 @@ Implementing `MailProvider` now also means the `mailbox`-page seam: `list_labels
 — typed in mail-domain terms. A backend that can't do one should **capability-gate** it
 (e.g. return an empty label list, or raise a clear "unsupported") rather than force a fake
 symmetry (ADR-0030): asymmetry is fine, silent wrong answers are not.
+
+**Updated for the module event spine (#663).** `changed_threads_since` must also fill
+`ThreadChanges.new_message_ids` — the strict, message-granular subset of the delta that is a
+message genuinely *arriving* (never a flag flip) — or `mail.received` will simply never fire
+for that provider. `read`/`search`/`get_thread` must fill `MailMessage.label_ids` (a message's
+own folders, not the thread's aggregate) so an event's `folder` payload field is accurate. For
+IMAP specifically: a `UIDVALIDITY` rotation is exactly the "cursor too old to replay" signal
+`changed_threads_since` already returns `None` for (see the *Local cache* section below), which
+`CachedMailbox.reconcile` maps to `mail.sync_failed(reason="cursor_expired")` for free — no new
+failure-detection code needed on the reconcile side, only in the provider's own history walk.

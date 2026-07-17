@@ -246,12 +246,24 @@ operator (and the agent, via the indexed docs) reads to know what the system can
 | Event | Module | Payload | `dedup_key` | Notes |
 | --- | --- | --- | --- | --- |
 | `echo.pinged` | `echo` | `{note?: str}` — a short crumb, truncated to 200 chars | fresh per ping, or caller-supplied | The reference emitter ([echo](../services/echo.md)). Fired by the `echo_ping` tool / the "Ping the spine" action. Carries an `EntityRef` of kind `ping`. Pass an explicit `dedup_key` to demonstrate the log's idempotency: two pings, one event. |
+| `mail.received` | `mail` | `{message_id, from, subject (≤200 chars), folder, has_attachments: bool, provider}` | the provider message id | The first provider-backed emitter ([mail](../services/mail.md)). Fired from the cache reconcile (ADR-0096, #623) once per genuinely-new message — **never** on an initial or full resync (no-firehose). Carries an `EntityRef` of kind `message`. See *Provider caveats* below. |
+| `mail.sent` | `mail` | `{to (≤200 chars), subject (≤200 chars)}` | the provider's sent message id | Fired after a confirmed send succeeds (`POST /send` / `POST /pages/mailbox/send`, ADR-0085) — best-effort, a spine hiccup never fails a completed send. Carries an `EntityRef` of kind `message`. |
+| `mail.sync_failed` | `mail` | `{reason: "provider_error" \| "cursor_expired", provider}` | `"<reason>:<ISO timestamp>"` | Fired on a reconcile failure — a provider/auth error, or an expired sync cursor forcing a full resync. Rate-limited per running instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s) so a flapping account can't storm the bus; each emission that clears the cooldown is a fresh observation, not a repeat, so the key is time-based rather than derived from the failure itself. |
 
-Real module emitters (mail, calendar, tasks, notes, knowledge, files) are companion issues
-and append their rows as they land.
+Real module emitters (calendar, tasks, notes, knowledge, files) are companion issues and append
+their rows as they land.
 
 ### Provider caveats
 
 Notes on emitters whose truth depends on an external provider — polling granularity,
-missing change feeds, provider-side dedup quirks. Empty until the first provider-backed
-emitter lands; it is a section rather than a footnote because it *will* fill up.
+missing change feeds, provider-side dedup quirks.
+
+**Mail / Gmail.** `changed_threads_since` (Gmail's `users.history.list`) reports most changes at
+**thread** granularity, but its `messagesAdded` history-record type already carries the specific
+message id, which is what `mail.received`'s message-level detection is built on — it is not
+inferred from a thread-level diff. IMAP does not exist in this codebase yet (only `GmailProvider`
+is implemented, despite the `MailProvider` seam being provider-neutral by design); a future IMAP
+provider would derive new-message ids from the UIDs above the last-seen `UIDNEXT` on a
+`UID FETCH`, and a `UIDVALIDITY` rotation would report through the same "cursor too old to
+replay" path Gmail's expired-history 404 already uses — `mail.sync_failed(reason="cursor_expired")`
+needs no provider-specific handling on the reconcile side.

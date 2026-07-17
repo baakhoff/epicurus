@@ -34,6 +34,7 @@ from epicurus_core import (
     UiSection,
     capped_listing,
     draft_review,
+    event_subject,
     tool_envelope,
 )
 from epicurus_mail.cache import CachedMailbox
@@ -245,7 +246,17 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         oauth_scopes={"google": GMAIL_API_SCOPES},
     )
 
-    module.emits("mail.sent", "Published after a message is sent successfully.")
+    module.emits(event_subject("mail.sent"), "Emitted after a message is sent successfully.")
+    module.emits(
+        event_subject("mail.received"),
+        "Emitted per genuinely-new message during an incremental sync — never on an "
+        "initial or full resync (#663).",
+    )
+    module.emits(
+        event_subject("mail.sync_failed"),
+        "Emitted when a reconcile fails (provider/auth error, or an expired sync cursor "
+        "forcing a full resync) — rate-limited per account.",
+    )
 
     @module.tool()
     async def mail_search(query: str, max_results: int = 10) -> str:

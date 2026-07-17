@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -21,10 +22,12 @@ from epicurus_core import (
 )
 from epicurus_tasks.db import RepeatStore, TaskStore
 from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
+from epicurus_tasks.lead_time_prefs import LeadTimePrefsStore
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
 from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.router import TasksRouter, operator_clock
+from epicurus_tasks.scheduler import FiredMarkerStore, run_periodic
 from epicurus_tasks.service import (
     MODULE_NAME,
     TASK_KIND,
@@ -70,7 +73,11 @@ def create_app() -> FastAPI:
     # the engine, so ``TaskStore.init`` provisions its table too. Google has no recurrence
     # field, so its repeating tasks' rules live here; the local store keeps its own in-row.
     repeats = RepeatStore(engine)
+    # The lead-time scheduler's own tables (#664) — same engine/database, separate tables.
+    lead_prefs = LeadTimePrefsStore(engine)
+    markers = FiredMarkerStore(engine)
 
+    bus = EventBus.from_settings(settings)
     # Hold every backend at once and route to the active list per the operator's selection
     # (ADR-0030): the silent local default plus each connectable external provider. There
     # is no longer a single provider chosen at startup.
@@ -83,13 +90,15 @@ def create_app() -> FastAPI:
     # local so the board's Today/Overdue grouping (`page()` below) reads the *same* clock as the
     # sweep — otherwise the display groups by the UTC day while the sweep uses the operator's, and
     # the two disagree within one render across the UTC/operator midnight (a task the sweep counts
-    # as due today lands in the board's Overdue column, #555).
+    # as due today lands in the board's Overdue column, #555). The lead-time scheduler (#664)
+    # reuses this exact clock too, so it can never disagree with the sweep about what day it is.
     operator_today = operator_clock(platform.get_timezone)
     provider: TasksProvider = TasksRouter(
         local=local_provider,
         external=external,
         prefs=platform,
         now=operator_today,
+        bus=bus,
     )
 
     async def _list_categories() -> list[tuple[str, str]]:
@@ -107,7 +116,6 @@ def create_app() -> FastAPI:
         except Exception:  # a discovery hiccup must not break the tool
             return []
 
-    bus = EventBus.from_settings(settings)
     module = build_module(
         provider, tenant_id=settings.default_tenant_id, categories=_list_categories
     )
@@ -118,11 +126,29 @@ def create_app() -> FastAPI:
         async with module.mcp.session_manager.run():
             # The local store always backs the module now (it is the silent default).
             await store.init()
+            await lead_prefs.init()
+            await markers.init()
             await bus.connect()
+            # The lead-time scheduler (#664) — tasks' first periodic background job, the same
+            # pattern as calendar's. Started/cancelled around the app lifetime.
+            scheduler_task = asyncio.create_task(
+                run_periodic(
+                    tenant=settings.default_tenant_id,
+                    provider=provider,
+                    lead_prefs=lead_prefs,
+                    markers=markers,
+                    bus=bus,
+                    today=operator_today,
+                    poll_interval_s=settings.scheduler_poll_interval_s,
+                )
+            )
             log.info("tasks service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
+                scheduler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scheduler_task
                 await bus.close()
                 await engine.dispose()
 

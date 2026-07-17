@@ -398,9 +398,37 @@ referenced event resolves wherever it lives.
 | `GET` | `/attachments/{ref_id}` | Resolve an attached event to `{title, excerpt}` (ADR-0019); missing event is `404`. Core-proxied. |
 | `POST /GET …` | `/mcp` | MCP SSE endpoint used by the core agent host. |
 
-### NATS events
+### Module events (ADR-0103, #664)
 
-This module does not emit or consume NATS events in v0.1.
+Emitted on the module event spine (`epicurus_core.module_events.emit_event`), not a raw
+`EventBus.publish` — see [the event catalog](../reference/events.md#the-event-catalog) for the
+full envelope shape, payload discipline, and `dedup_key` convention. Base subject shown; the
+wire subject gains the spine's `events.` prefix and is tenant-scoped.
+
+| Event | Emitted from | Condition |
+| --- | --- | --- |
+| `calendar.event_created` | `CollectionRouter.create_event` | A new event was created through this module — the **provider-write** seam, so only operator/agent-driven writes are observed (see the caveat below). |
+| `calendar.event_updated` | `CollectionRouter.update_event` | An existing event was edited. Payload's `time_changed` flags whether `start`/`end` actually moved (a before/after comparison); `dedup_key` includes a change hash of the event's mutable fields so each distinct edit is its own log entry, while a retried write with identical resulting state dedups. |
+| `calendar.event_cancelled` | `CollectionRouter.delete_event` | An event was deleted through this module. |
+| `calendar.event_starting_soon` | The lead-time scheduler (`epicurus_calendar.scheduler`) | An event is within its configured lead time of starting (tenant setting, default 15 minutes) — fires at most once per event via a durable marker. |
+| `calendar.event_ended` | The lead-time scheduler | An event's end time has passed — fires at most once per event. |
+
+**Provider-write seam only.** Calendar has no sync/reconcile layer analogous to mail's
+(ADR-0096, #623) — `event_created`/`event_updated`/`event_cancelled` only observe changes made
+*through this module*. A change made directly in Google Calendar's own UI, outside epicurus, is
+never seen and never emits. Building the equivalent of mail's local cache + incremental sync for
+calendar (which would also be the natural home for Google-only `invitation_received` /
+`attendee_responded` — deliberately **not implemented** in this PR) is out of scope here; a
+declared-but-never-published event would repeat the exact mistake `docs/services/mail.md`
+documents as a lesson already learned once.
+
+**The lead-time scheduler** (`epicurus_calendar.scheduler`) is calendar's first periodic
+background job — a poll loop started/stopped with the app lifespan, ticking every
+`SCHEDULER_POLL_INTERVAL_S` (default 60s). Fire-once state lives in the
+`calendar_fired_markers` table (below), keyed `(tenant, event_id, marker)` with a database
+uniqueness constraint deciding races, not a read-then-write check — proven to survive a process
+restart. The lead time itself is a tenant setting (`calendar_lead_time_prefs`, below) — storage
+only in this PR, no operator-facing settings UI yet.
 
 ## Configuration
 
@@ -412,6 +440,7 @@ lives in the core (`module_prefs`), not in service config.
 |----------------------|---------|-------------|
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Postgres DSN for the local default event store. |
 | `PLATFORM_URL` | `http://localhost:8080` | Core service URL for OAuth token fetching (Google provider) and platform API calls. On the Docker network: `http://core-app:8080`. |
+| `SCHEDULER_POLL_INTERVAL_S` | `60` | How often the lead-time scheduler ticks (#664) — `event_starting_soon`/`event_ended`. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant this instance serves. |
 | `NATS_URL` | `nats://nats:4222` | NATS broker URL. |
 | `LOG_LEVEL` | `info` | Structured-log level. |
@@ -465,12 +494,19 @@ Calendar and in the core's OAuth vault. An all-day Google event uses `start.date
 (date-only) rather than `start.dateTime`/`end.dateTime`; the provider maps between those and
 the `all_day` flag.
 
+The **lead-time scheduler** (#664) owns two more tables, in the same shared Postgres:
+
+| Table | Scope | Holds |
+| --- | --- | --- |
+| `calendar_lead_time_prefs` | `(tenant)` PK | The `event_starting_soon` lead time in minutes; `NULL`/missing falls back to `DEFAULT_LEAD_MINUTES` (15). |
+| `calendar_fired_markers` | `(tenant, event_id, marker)` unique | A fire-once claim — `event_id` is provider-qualified (`"<provider>:<id>"`), `marker` is `"starting_soon"` or `"ended"`, `fired_at_ns` (`BigInteger`, nanosecond epoch) records when. A row's mere existence is the claim; a second insert attempt for the same key violates the unique constraint and is read as "already fired," not an error. |
+
 ## Dependencies
 
 | Service | Purpose |
 |---------|---------|
-| Postgres | Local provider event store; schema auto-created on startup. |
-| NATS | Event bus (heartbeat / future events). |
+| Postgres | Local provider event store + lead-time scheduler tables; schema auto-created on startup. |
+| NATS | Module event spine (#664: `event_created`/`event_updated`/`event_cancelled`/`event_starting_soon`/`event_ended`). |
 | `core-app` (platform API) | OAuth token fetch (Google provider). Discovery / MCP host. |
 
 The Google provider additionally talks outbound to `https://www.googleapis.com/calendar/v3`.

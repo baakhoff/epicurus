@@ -249,9 +249,20 @@ operator (and the agent, via the indexed docs) reads to know what the system can
 | `mail.received` | `mail` | `{message_id, from, subject (≤200 chars), folder, has_attachments: bool, provider}` | the provider message id | The first provider-backed emitter ([mail](../services/mail.md)). Fired from the cache reconcile (ADR-0096, #623) once per genuinely-new message — **never** on an initial or full resync (no-firehose). Carries an `EntityRef` of kind `message`. See *Provider caveats* below. |
 | `mail.sent` | `mail` | `{to (≤200 chars), subject (≤200 chars)}` | the provider's sent message id | Fired after a confirmed send succeeds (`POST /send` / `POST /pages/mailbox/send`, ADR-0085) — best-effort, a spine hiccup never fails a completed send. Carries an `EntityRef` of kind `message`. |
 | `mail.sync_failed` | `mail` | `{reason: "provider_error" \| "cursor_expired", provider}` | `"<reason>:<ISO timestamp>"` | Fired on a reconcile failure — a provider/auth error, or an expired sync cursor forcing a full resync. Rate-limited per running instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s) so a flapping account can't storm the bus; each emission that clears the cooldown is a fresh observation, not a repeat, so the key is time-based rather than derived from the failure itself. |
+| `calendar.event_created` | `calendar` | `{title (≤200 chars), start, end, all_day: bool}` | `"<provider>:<event_id>"` | Fired by `CollectionRouter.create_event` ([calendar](../services/calendar.md)) — the **provider-write** seam only; see *Provider caveats* below. Carries an `EntityRef` of kind `event`. |
+| `calendar.event_updated` | `calendar` | `{title, start, end, all_day, time_changed: bool}` | `"<provider>:<event_id>:<change hash>"` | Fired by `CollectionRouter.update_event`. `time_changed` is a real before/after comparison (the router fetches the prior state first), not inferred from which args were passed — except in the narrow case the prior state can't be resolved, where it degrades to "were `start`/`end` actually supplied." The change hash means a genuinely different edit is its own log entry; an identical retried write dedups. |
+| `calendar.event_cancelled` | `calendar` | `{title (≤200 chars)}` | `"<provider>:<event_id>"` | Fired by `CollectionRouter.delete_event`, after the delete actually succeeds (the event's prior state is snapshotted first — nothing is left to read once it's gone). |
+| `calendar.event_starting_soon` | `calendar` | `{title, start, end, lead_minutes: int}` | `"<provider>:<event_id>:starting_soon"` | Fired by the lead-time scheduler (`epicurus_calendar.scheduler`, calendar's first periodic background job) when an event enters its lead window (tenant setting, default 15 minutes). Fire-once via a durable marker — proven to survive a restart. |
+| `calendar.event_ended` | `calendar` | `{title, start, end}` | `"<provider>:<event_id>:ended"` | Fired by the same scheduler once an event's end time has passed; bounded lookback (`DEFAULT_LOOKBACK_MINUTES` = 60) — an event that ended longer ago than that before the scheduler could tick (e.g. downtime) is never reported. Fire-once, same marker mechanism as `event_starting_soon`. |
+| `tasks.task_created` | `tasks` | `{title (≤200 chars), due, status}` | `"<account>:<task_id>"` | Fired by `TasksRouter.add_task` ([tasks](../services/tasks.md)). Carries an `EntityRef` of kind `task`. **Not** fired for a recurring task's auto-materialized successor — see *Provider caveats* below. |
+| `tasks.task_completed` | `tasks` | `{title, due, status: "done"}` | `"<account>:<task_id>"` | Fired by `TasksRouter.complete_task`. |
+| `tasks.task_updated` | `tasks` | `{title, due, status}` | `"<account>:<task_id>:<change hash>"` | Fired by `TasksRouter.update_task` for a non-move edit; same dedup posture as `calendar.event_updated`. |
+| `tasks.task_moved` | `tasks` | `{title, due, status, from_list, to_list}` | `"<target account>:<new task_id>"` | Fired by the cross-list move seam (ADR-0038/#257) instead of `task_updated`, never alongside it — Google Tasks has no move API, so a move recreates the task in the target list and deletes the source, and the dedup key follows the *new* id. |
+| `tasks.task_due_soon` | `tasks` | `{title, due, lead_days: int}` | `"<account>:<task_id>:due_soon"` | Fired by the lead-time scheduler (`epicurus_tasks.scheduler`, tasks' first periodic background job) when an open task enters its lead window (tenant setting, default 1 day) — evaluated against the *operator's local calendar day* (ADR-0039), reusing the same clock the overdue-recurrence sweep resolves. Fire-once via a durable marker. |
+| `tasks.task_overdue` | `tasks` | `{title, due}` | `"<account>:<task_id>:overdue"` | Fired by the same scheduler once an open task's due date has passed. Fire-once, same marker mechanism as `task_due_soon`. |
 
-Real module emitters (calendar, tasks, notes, knowledge, files) are companion issues and append
-their rows as they land.
+Real module emitters (notes, knowledge, files) are companion issues and append their rows as
+they land.
 
 ### Provider caveats
 
@@ -267,3 +278,21 @@ provider would derive new-message ids from the UIDs above the last-seen `UIDNEXT
 `UID FETCH`, and a `UIDVALIDITY` rotation would report through the same "cursor too old to
 replay" path Gmail's expired-history 404 already uses — `mail.sync_failed(reason="cursor_expired")`
 needs no provider-specific handling on the reconcile side.
+
+**Calendar.** `event_created`/`event_updated`/`event_cancelled` only observe the **provider-write**
+seam (`CollectionRouter`) — a change made directly in Google Calendar's own UI, outside epicurus,
+is never seen and never emits, because calendar has no sync/reconcile layer analogous to mail's
+(ADR-0096, #623). `invitation_received` / `attendee_responded` (Google-only, per ADR-0030 — the
+local provider would stay silent by design) are **not implemented**: both would need that same
+kind of polling/diff layer to detect a change nobody made through this module, which is a
+materially larger feature than wiring emission into an existing seam. Declaring either without
+actually publishing it would repeat mail's own "declared but never emitted" mistake (see
+[mail](../services/mail.md)) rather than avoid it, so neither is in the manifest's `emits()` list
+either. A future sync layer for calendar (mirroring mail's) is the natural place to add them.
+
+**Tasks.** A recurring task's auto-materialized successor (the overdue sweep and on-complete
+materialization, `TasksRouter._materialize`, ADR-0082) calls the *inner* provider's `add_task`
+directly, bypassing the router's own `add_task` — so it does not currently emit `task_created`.
+A deliberate scope limit for #664, not an oversight: folding emission into the materialize path
+touches the same recurrence machinery a `#533`-class concurrency bug already lives in, and was
+judged safer to leave alone than to touch in the same PR that first wires up event emission.

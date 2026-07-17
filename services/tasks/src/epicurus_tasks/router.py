@@ -22,17 +22,37 @@ module — **each enabled list is a category**:
 It satisfies the :class:`~epicurus_tasks.providers.TasksProvider` Protocol, so the module's
 tools and board treat it like any other backend. Reads fall back to the local store when
 nothing is enabled or the core is unreachable (local-first).
+
+``add_task``/``complete_task``/``update_task``/``_move_task`` are also the module-event-spine
+emission seam (#664, ADR-0103): ``task_created``/``task_completed``/``task_updated``/
+``task_moved`` fire here, the one place every operator/agent-driven write already passes
+through regardless of which backend handles it. A task materialized by the recurrence sweep
+(``_materialize``, called from both ``_materialize_next`` and ``_sweep_overdue``) calls the
+*inner* provider's ``add_task`` directly, bypassing this router's own ``add_task`` — so a
+recurring task's auto-spawned successor does **not** currently emit ``task_created``. Flagged
+as a known, deliberate scope limit for this PR, not an oversight.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, tzinfo
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
+from epicurus_core import (
+    LOCAL_ACCOUNT,
+    Collection,
+    CollectionPrefs,
+    CollectionRef,
+    EntityRef,
+    EventBus,
+    emit_event,
+    get_logger,
+)
 from epicurus_tasks.models import Task, TaskScope
 from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.recurrence import next_due
@@ -136,10 +156,12 @@ class TasksRouter:
         external: dict[str, TasksProvider],
         prefs: CollectionPrefsSource,
         now: Callable[[], Awaitable[str]] = _utc_today,
+        bus: EventBus | None = None,
     ) -> None:
         self._local = local
         self._external = external
         self._prefs = prefs
+        self._bus = bus
         # Clock for recurrence materialization (ADR-0082); injectable so tests are
         # deterministic without freezing the wall clock. Defaults to UTC; production wires
         # `operator_clock(platform.get_timezone)` instead (#535).
@@ -216,7 +238,7 @@ class TasksRouter:
     ) -> Task:
         prefs = await self._load_prefs()
         provider, ref = self._resolve_collection(list_id, prefs)
-        return await provider.add_task(
+        task = await provider.add_task(
             tenant_id,
             title,
             notes=notes,
@@ -227,6 +249,8 @@ class TasksRouter:
             list_id=ref.collection or None,
             repeat=repeat,
         )
+        await self._emit_created(tenant_id, task, ref)
+        return task
 
     async def complete_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
@@ -237,6 +261,7 @@ class TasksRouter:
         # If the completed task carried a repeat rule, materialize its next instance and retire
         # the rule on this one — the recurrence moves to the live successor (ADR-0082).
         await self._materialize_next(tenant_id, provider, ref, done)
+        await self._emit_completed(tenant_id, done, ref)
         return done
 
     async def update_task(
@@ -275,7 +300,7 @@ class TasksRouter:
                     tags=tags,
                     repeat=repeat,
                 )
-        return await provider.update_task(
+        updated = await provider.update_task(
             tenant_id,
             task_id,
             title=title,
@@ -287,6 +312,8 @@ class TasksRouter:
             list_id=ref.collection or None,
             repeat=repeat,
         )
+        await self._emit_updated(tenant_id, updated, ref)
+        return updated
 
     async def delete_task(
         self, tenant_id: str, task_id: str, *, list_id: str | None = None
@@ -339,9 +366,87 @@ class TasksRouter:
         )
         await source_provider.delete_task(tenant_id, task_id, list_id=source_ref.collection or None)
         titles = await self._title_map(tenant_id, [target_ref])
-        return self._stamp(
+        moved = self._stamp(
             [created], ref=target_ref, title=titles.get((target_ref.account, target_ref.collection))
         )[0]
+        await self._emit_moved(tenant_id, moved, source_ref=source_ref, target_ref=target_ref)
+        return moved
+
+    # ── event spine (#664) ──────────────────────────────────────────────────
+
+    async def _emit_created(self, tenant_id: str, task: Task, ref: CollectionRef) -> None:
+        if self._bus is None:
+            return
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="tasks",
+                event_type="tasks.task_created",
+                dedup_key=f"{ref.account}:{task.id}",
+                payload=_task_summary_payload(task),
+                entity_ref=EntityRef(ref_id=task.id, module="tasks", kind="task", title=task.title),
+            )
+        except Exception as exc:  # a spine hiccup must never fail an already-completed write
+            log.warning("tasks.task_created emit failed", task_id=task.id, error=str(exc))
+
+    async def _emit_completed(self, tenant_id: str, task: Task, ref: CollectionRef) -> None:
+        if self._bus is None:
+            return
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="tasks",
+                event_type="tasks.task_completed",
+                dedup_key=f"{ref.account}:{task.id}",
+                payload=_task_summary_payload(task),
+                entity_ref=EntityRef(ref_id=task.id, module="tasks", kind="task", title=task.title),
+            )
+        except Exception as exc:
+            log.warning("tasks.task_completed emit failed", task_id=task.id, error=str(exc))
+
+    async def _emit_updated(self, tenant_id: str, task: Task, ref: CollectionRef) -> None:
+        if self._bus is None:
+            return
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="tasks",
+                event_type="tasks.task_updated",
+                # Same "dedup provider id + change hash" posture as calendar.event_updated
+                # (#664): a genuinely different edit gets its own dedup_key so the core's
+                # log records it as its own entry rather than merging it away.
+                dedup_key=f"{ref.account}:{task.id}:{_task_change_hash(task)}",
+                payload=_task_summary_payload(task),
+                entity_ref=EntityRef(ref_id=task.id, module="tasks", kind="task", title=task.title),
+            )
+        except Exception as exc:
+            log.warning("tasks.task_updated emit failed", task_id=task.id, error=str(exc))
+
+    async def _emit_moved(
+        self, tenant_id: str, task: Task, *, source_ref: CollectionRef, target_ref: CollectionRef
+    ) -> None:
+        if self._bus is None:
+            return
+        payload = _task_summary_payload(task)
+        payload["from_list"] = source_ref.collection or _LOCAL_TITLE
+        payload["to_list"] = target_ref.collection or _LOCAL_TITLE
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="tasks",
+                event_type="tasks.task_moved",
+                # The move recreates the task in the target (Google Tasks has no move API,
+                # ADR-0038), so the *new* id is the one thing that uniquely names this move.
+                dedup_key=f"{target_ref.account}:{task.id}",
+                payload=payload,
+                entity_ref=EntityRef(ref_id=task.id, module="tasks", kind="task", title=task.title),
+            )
+        except Exception as exc:
+            log.warning("tasks.task_moved emit failed", task_id=task.id, error=str(exc))
 
     async def _materialize_next(
         self, tenant_id: str, provider: TasksProvider, ref: CollectionRef, done: Task
@@ -764,3 +869,31 @@ class TasksRouter:
         except Exception as exc:
             log.warning("collection prefs unavailable; using local default", error=str(exc))
             return CollectionPrefs()
+
+
+def _task_summary_payload(task: Task) -> dict[str, Any]:
+    """Pointers + minimal metadata for a task event — never the free-form ``notes`` body
+    (#664, mirrors mail's and calendar's payload discipline)."""
+    return {
+        "title": task.title[:200],
+        "due": task.due,
+        "status": task.status,
+    }
+
+
+def _task_change_hash(task: Task) -> str:
+    """A short, stable fingerprint of a task's mutable fields (#664's "dedup + change hash"
+    posture, mirroring calendar.event_updated). Deliberately not Python's ``hash()`` — it is
+    salted per-process (``PYTHONHASHSEED``), so identical content would hash differently
+    across a restart, breaking the log's dedup guarantee for an update that straddles one.
+    """
+    fingerprint = {
+        "title": task.title,
+        "notes": task.notes,
+        "due": task.due,
+        "status": task.status,
+        "priority": task.priority,
+        "tags": sorted(task.tags),
+    }
+    digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
+    return digest[:12]

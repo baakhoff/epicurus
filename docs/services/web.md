@@ -298,7 +298,31 @@ unsubscribe, a list of every subscribed device (any row removable), one Switch p
 type="time">` pair + explicit Save, the same "interdependent fields" reasoning as the
 maintenance schedule editor above — mirrors the settings-primitives shared with the
 notification center, #671), and a "send test notification" button — the only way to trigger a
-real end-to-end push before #671 or the automations engine give the pipe a first real caller.
+real end-to-end push before the automations engine gives the pipe a first real event-sourced
+caller.
+
+### Notification center (#671, ADR-0104)
+
+`NotificationsScreen.tsx` — a fixed top-level surface (`/notifications`, `SURFACES` in
+`src/app/registry.ts`), not a module page: category filter (`<Select>`, options sourced from
+the same `known_categories` [`PushPrefs`](../reference/notifications.md#pushprefs) already
+returns — never duplicated), an "unread only" `Switch`, per-row mark-read-on-click (the
+standard notification-inbox convention — GitHub, Slack, Gmail all do this; re-clicking an
+already-read row is a no-op, not a repeat network call), and "Mark all read" (shown only
+when something is unread). A row's `entity_ref` renders via the existing `EntityRefChip`
+(ADR-0019, no parallel rendering path) and its `deep_link` via `CardLink` (the same
+in-app-`Link`/external-new-tab/unsafe-scheme-dropped handling a hover-card's `href` already
+gets) — independently: a row may carry either, both, or neither.
+
+**Shell badge**: the Notifications nav entry is the *only* `Surface` with a live indicator —
+`useNotificationsUnreadCount()` (`App.tsx`) polls `GET .../unread-count` every 15s, the same
+shape as the `useAwayFinishedWatch` (#492) precedent, not SSE (React Query already pauses
+`refetchInterval` while the tab is hidden, so this costs nothing extra backgrounded). The
+side rail's horizontal row layout gets a trailing count pill (`NavBadge`, capped at "99+");
+the mobile tab bar's vertical icon-over-label layout has no room for one, so it gets a small
+corner dot instead (`UnreadDot`) — no count, matching the away-finished title-dot's own
+restraint. Both call the same hook — React Query dedupes the shared `["notifications-
+unread-count"]` cache entry, so mounting both costs one network request, not two.
 
 ### Models — per-model rows (#328)
 

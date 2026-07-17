@@ -1,16 +1,20 @@
-# Reference: push notifications
+# Reference: push notifications & the notification center
 
-`epicurus_core_app.push` (#670, ADR-0102) — VAPID-signed web push: per-device subscriptions,
-per-category + quiet-hours preferences, and the send path. Core-owned, not a module (ADR-0018)
-— there is no `push` service; every endpoint below lives on `core-app` at `/platform/v1/push`.
+`epicurus_core_app.push` (#670, ADR-0102) and `epicurus_core_app.notifications` (#671,
+ADR-0104) — VAPID-signed web push and the durable in-app record of every push-worthy event.
+Both core-owned, not a module (ADR-0018) — there is no `push` or `notifications` service;
+every endpoint below lives on `core-app` at `/platform/v1/push` or `/platform/v1/notifications`.
 
 The flow is: a browser subscribes via the Push API → the core stores the subscription →
 some caller (today, only the Settings "send test notification" button) calls
 [`PushService.notify`](#pushservicenotify-core-internal) → the core resolves the tenant's
-prefs (category/automation toggle → quiet hours → rate cap) → either delivers a VAPID-signed
-push to every subscribed device, queues it for a quiet-hours digest, or skips it — and the
-service worker (`services/web/src/sw.ts`) turns a delivered push into a system notification
-and a deep link back into the PWA.
+prefs (category/automation toggle → **center**: record a durable row, independent of the
+next step; **push**: quiet hours → rate cap) → either delivers a VAPID-signed push to every
+subscribed device, queues it for a quiet-hours digest, or skips it — and the service worker
+(`services/web/src/sw.ts`) turns a delivered push into a system notification and a deep link
+back into the PWA. The center row lands **immediately**, regardless of what the push half
+does (ADR-0104 §1) — a quiet-hours-suppressed notification is not itself suppressed from the
+center.
 
 ## HTTP — `/platform/v1/push` (browser-facing)
 
@@ -64,14 +68,19 @@ the automations engine's push sink, a future system notice — never a module (A
 a module ever needs to trigger a push, that gets a `PlatformClient` method and an endpoint
 added in the PR that needs it, per the module-side-client-helper lesson, ADR-0020).
 
-Resolves, in order: (1) the category/automation's effective `push` toggle (`PushPrefs.
-effective`) — off returns `skipped_disabled`; (2) quiet hours in the tenant's timezone — inside
-the window, the notification is queued (`push_queue`) and `queued` is returned, never dropped
-(ADR-0102 §2); (3) an in-memory per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`, default 30/hour,
-0 = unlimited) — over the cap returns `skipped_rate_limited`; otherwise it fans out to every
+Resolves `PushPrefs.effective(category, automation_id)` once, then does two independent
+things with it (ADR-0104 §1): if `effective.center`, records a
+[notification-center row](#notification-center-671-adr-0104) — unconditionally, before any
+push-routing decision below. Then, independently: (1) if `effective.push` is off, push
+delivery is skipped (`skipped_disabled`, but the center row above was still written if
+`center` was on); (2) quiet hours in the tenant's timezone — inside the window, the
+notification is queued (`push_queue`) and `queued` is returned, never dropped (ADR-0102 §2);
+(3) an in-memory per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`, default 30/hour, 0 =
+unlimited) — over the cap returns `skipped_rate_limited`; otherwise it fans out to every
 subscribed device via VAPID-signed webpush and returns `sent` (with `sent_count`/
 `pruned_count`). `NotifyResult.outcome` is one of `sent | queued | skipped_disabled |
-skipped_rate_limited | skipped_no_devices`.
+skipped_rate_limited | skipped_no_devices` — and describes **push delivery only**; it says
+nothing about whether a center row was written (check `center` in the tenant's prefs for that).
 
 A subscription the push service reports **Gone** (404/410 — an uninstalled PWA, cleared site
 data, an expired registration) is pruned automatically; that's expected churn, not an error.
@@ -105,6 +114,42 @@ the queue. A failed send leaves the queue intact for the next tick.
 | `category` | `str` | The notification's category (or `"digest"` for a quiet-hours digest). |
 | `device_count` | `int` | Devices actually sent to (excludes pruned/failed). |
 
+## Notification center (#671, ADR-0104)
+
+The durable, category-filterable record of every push-worthy event — written only by
+[`PushService.notify`](#pushservicenotify-core-internal) (there is no create route: the
+center has exactly one writer). A core page (`/notifications`, ADR-0018/0019), not a module
+page — the web shell's Settings-adjacent surfaces pattern, same as Push notifications above.
+
+### HTTP — `/platform/v1/notifications` (browser-facing)
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET ""` | List the tenant's notifications, newest first. Query params: `category?` (filter to one category), `unread_only?` (bool, default false). |
+| `GET /unread-count` | `{count}` — the shell badge's poll target (15s interval, matching `useAwayFinishedWatch`'s #492 precedent; not SSE, ADR-0104 §4). |
+| `POST /{id}/read` | Mark one notification read (idempotent). 404 unknown id. |
+| `POST /read-all` | Mark every unread notification read. Returns `{marked: <count>}`. |
+
+### `Notification`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `str` | Opaque external id. |
+| `category` | `str` | Same taxonomy as [`PushPrefs.known_categories`](#pushprefs) — reused, not duplicated. |
+| `title` / `body` | `str` | The notification's text. |
+| `deep_link` | `str \| None` | An in-app path to navigate to on click, rendered via `CardLink` (in-app `Link` / external new-tab / unsafe-scheme-dropped, the same handling a hover-card's `href` gets). Independent of `entity_ref` — a notification may carry either, both, or neither (ADR-0104 §5). |
+| `entity_ref` | `EntityRef \| None` | ADR-0019's contract, rendered via `EntityRefChip` — no parallel rendering path. |
+| `automation_id` | `str \| None` | Set when the automations engine's sink triggered this notification. |
+| `created_at` | `str` (ISO) | When it was recorded. |
+| `read_at` | `str \| None` (ISO) | `None` until marked read. |
+
+### Retention
+
+A per-tenant row cap (`NotificationStore`'s `max_per_tenant`, default 500), not time-based —
+the oldest rows are pruned past the cap on every `create()` (ADR-0104 §3; contrast with the
+module-event log's day-based `EVENTS_RETENTION_DAYS`, ADR-0103 §5 — a different retention
+question: "what haven't I looked at" bounds naturally by count, not by age).
+
 ## Service worker (`services/web/src/sw.ts`)
 
 `push` — parses the JSON payload (`{title, body, category, deep_link, entity_ref}`) and calls
@@ -115,4 +160,5 @@ PWA window and navigates it to `deep_link`, or opens a new one. Both are testabl
 [web](../services/web.md).
 
 See the running services that speak this contract: [core-app](../services/core-app.md#push-notifications-adr-0102)
-(the send path) and [web](../services/web.md) (subscribe flow + settings UI + service worker).
+(the send path + the notification center) and [web](../services/web.md) (subscribe flow +
+settings UI + service worker + the Notifications page).

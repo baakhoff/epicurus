@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core import SecretError
+from epicurus_core_app.notifications import NotificationStore
 from epicurus_core_app.push.prefs import ChannelPrefs, PushPrefsStore
 from epicurus_core_app.push.queue import PushQueueStore, QueuedPush
 from epicurus_core_app.push.service import PushService
@@ -76,12 +77,14 @@ class _Fixture:
         subscriptions: PushSubscriptionStore,
         prefs: PushPrefsStore,
         queue: PushQueueStore,
+        notifications: NotificationStore,
         bus: _FakeEventBus,
     ) -> None:
         self.service = service
         self.subscriptions = subscriptions
         self.prefs = prefs
         self.queue = queue
+        self.notifications = notifications
         self.bus = bus
 
 
@@ -97,11 +100,14 @@ async def _fixture(*, rate_cap_per_hour: int = 30, timezone: Any = _utc) -> _Fix
     await prefs.init()
     queue = PushQueueStore(_engine())
     await queue.init()
+    notifications = NotificationStore(_engine())
+    await notifications.init()
     bus = _FakeEventBus()
     service = PushService(
         subscriptions=subscriptions,
         prefs=prefs,
         queue=queue,
+        notifications=notifications,
         secrets=_FakeSecretStore(),  # type: ignore[arg-type]
         bus=bus,  # type: ignore[arg-type]
         timezone=timezone,
@@ -109,7 +115,7 @@ async def _fixture(*, rate_cap_per_hour: int = 30, timezone: Any = _utc) -> _Fix
         vapid_subject="mailto:test@example.com",
         rate_cap_per_hour=rate_cap_per_hour,
     )
-    return _Fixture(service, subscriptions, prefs, queue, bus)
+    return _Fixture(service, subscriptions, prefs, queue, notifications, bus)
 
 
 def _webpush_ok(**_kwargs: Any) -> str:
@@ -176,6 +182,96 @@ async def test_notify_delivers_when_no_prefs_are_set(monkeypatch: pytest.MonkeyP
     result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
     assert result.outcome == "sent"
     assert result.sent_count == 1
+
+
+# ── notify: notification center (#671) ────────────────────────────────────────────
+
+
+async def test_notify_records_a_center_row_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    ref = {"ref_id": "e1", "module": "mail", "kind": "thread", "title": "Hello"}
+    await fx.service.notify(
+        TENANT,
+        category="mail",
+        title="New mail",
+        body="b",
+        deep_link="/m/mail/e1",
+        entity_ref=ref,
+    )
+    rows = await fx.notifications.list(TENANT)
+    assert len(rows) == 1
+    assert rows[0].category == "mail"
+    assert rows[0].title == "New mail"
+    assert rows[0].deep_link == "/m/mail/e1"
+    assert rows[0].entity_ref == ref
+    assert rows[0].read_at is None
+
+
+async def test_notify_skips_the_center_row_when_center_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=True, center=False)})
+    await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert await fx.notifications.list(TENANT) == []
+
+
+async def test_notify_records_the_center_row_even_when_push_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`push` and `center` are independent toggles — one being off must not affect the other."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=False, center=True)})
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.outcome == "skipped_disabled"
+    rows = await fx.notifications.list(TENANT)
+    assert len(rows) == 1
+
+
+async def test_notify_records_the_center_row_immediately_during_quiet_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance criterion (#671): a quiet-hours-suppressed push still appears in the
+    center immediately — it does not wait for the digest to flush."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.prefs.set_quiet_hours(TENANT, enabled=True, start="00:00", end="23:59")
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.outcome == "queued"
+    rows = await fx.notifications.list(TENANT)
+    assert len(rows) == 1  # recorded immediately, not deferred alongside the push digest
+
+
+async def test_notify_records_the_center_row_even_when_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture(rate_cap_per_hour=1)
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.service.notify(TENANT, category="mail", title="first", body="b")
+    result = await fx.service.notify(TENANT, category="mail", title="second", body="b")
+    assert result.outcome == "skipped_rate_limited"
+    rows = await fx.notifications.list(TENANT)
+    assert len(rows) == 2  # both recorded, even though only the first was actually pushed
+
+
+async def test_notify_uses_the_automation_overrides_center_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.prefs.set_categories(TENANT, {"automation": ChannelPrefs(push=True, center=True)})
+    await fx.prefs.set_automation_override(TENANT, "auto-1", ChannelPrefs(push=True, center=False))
+    await fx.service.notify(
+        TENANT, category="automation", title="t", body="b", automation_id="auto-1"
+    )
+    assert await fx.notifications.list(TENANT) == []  # override's center=False wins
 
 
 # ── notify: quiet hours ──────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core import SecretError
+from epicurus_core_app.notifications import NotificationStore
 from epicurus_core_app.push.prefs import PushPrefsStore
 from epicurus_core_app.push.queue import PushQueueStore
 from epicurus_core_app.push.routes import create_push_router
@@ -56,10 +57,13 @@ async def _app() -> FastAPI:
     await prefs.init()
     queue = PushQueueStore(_engine())
     await queue.init()
+    notifications = NotificationStore(_engine())
+    await notifications.init()
     service = PushService(
         subscriptions=subscriptions,
         prefs=prefs,
         queue=queue,
+        notifications=notifications,
         secrets=_FakeSecretStore(),  # type: ignore[arg-type]
         bus=_FakeEventBus(),  # type: ignore[arg-type]
         timezone=_utc,

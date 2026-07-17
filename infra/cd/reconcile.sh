@@ -33,6 +33,7 @@ from_env() {
 
 TRACK_BRANCH="${EPICURUS_TRACK_BRANCH:-$(from_env EPICURUS_TRACK_BRANCH)}"
 VERSION="${EPICURUS_VERSION:-$(from_env EPICURUS_VERSION)}"
+DOCKER_GID="${DOCKER_GID:-$(from_env DOCKER_GID)}"
 
 # Branch-tracking mode: sync the checkout to the branch HEAD so the compose
 # files, .env.example, and any new services match the images about to be pulled.
@@ -46,10 +47,21 @@ if [ -n "${TRACK_BRANCH}" ]; then
   git reset --hard "origin/${TRACK_BRANCH}" --quiet
 fi
 
+# Docker-socket opt-in (#622, ADR-0099): persist it across reconciles rather than reverting to
+# degraded mode on every run. Only added when the operator has actually set DOCKER_GID (env or
+# .env) — the same trigger the overlay itself requires — so a reconcile with nothing set stays
+# fail-safe (no socket mount), identical to a plain `docker compose up`. See
+# services/core-app/compose.docker-socket.yaml and docs/infrastructure/auto-deploy.md.
+COMPOSE_FILES=(-f compose.yaml)
+if [ -n "${DOCKER_GID}" ]; then
+  log "DOCKER_GID is set — including the Docker-socket opt-in overlay."
+  COMPOSE_FILES+=(-f services/core-app/compose.docker-socket.yaml)
+fi
+
 log "Pulling images (EPICURUS_VERSION=${VERSION:-latest})..."
-docker compose pull
+docker compose "${COMPOSE_FILES[@]}" pull
 
 log "Restarting updated containers..."
-docker compose up -d --remove-orphans
+docker compose "${COMPOSE_FILES[@]}" up -d --remove-orphans
 
 log "Done."

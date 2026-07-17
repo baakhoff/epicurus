@@ -58,6 +58,18 @@ images to GHCR.
 
 ### Fixed
 
+- **Infra: `task reconcile` silently reverted the docker-socket opt-in on every deploy** (#655) —
+  the #622 opt-in (`services/core-app/compose.docker-socket.yaml` + `DOCKER_GID`) only lasted
+  until the next pull-based reconcile: `infra/cd/reconcile.sh` ran plain
+  `docker compose up -d` with no overlay, so `core-app` was recreated without the socket mount,
+  silently dropping back to deferred-teardown mode (fails safe, but the opt-in didn't stick — the
+  pull-based reconcile is the actual deploy path, not a one-off `docker compose up`). Now
+  `reconcile.sh` reads `DOCKER_GID` the same way it already reads `EPICURUS_VERSION` /
+  `EPICURUS_TRACK_BRANCH` (env, falling back to `.env`) and includes the overlay on both the pull
+  and the up when it's set — unset stays exactly as fail-safe as before. `docs/infrastructure/`
+  updated to cover persisting the opt-in, not just the fresh-deploy default. Infra-only; no
+  component version change.
+
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
   disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either

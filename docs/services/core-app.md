@@ -740,6 +740,40 @@ or per-tenant subscriptions) is the named follow-up. Gated by `MESSAGING_INBOUND
 Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-0060) — the run's
 `{ran_at, scope, jobs:[{key, status, detail}]}` summary, for downstream consumers.
 
+### Module event spine — durable intake (ADR-0103)
+
+The core is the spine's recorder: modules announce world changes with
+[`emit_event`](../reference/events.md#emit_event), and the core keeps the copy of record.
+The bus is fire-and-forget and replays nothing, so "what happened" is a question you ask
+Postgres, not NATS.
+
+`EventIntake` **consumes `*.events.>`** — one subscription, **every tenant**
+(`EventBus.subscribe_any_tenant`). This deliberately departs from the inbound-messaging
+consumer's per-tenant subscribe: a tenant added at runtime would otherwise be silently
+unheard until restart, and an intake that drops a tenant's events looks exactly like a
+tenant that emitted none. It is core-only by construction — on the bus the core
+authenticates with unrestricted pub/sub while a module is confined to its own tenant-scoped
+subjects (ADR-0066).
+
+Per message it: parses the [`EventEnvelope`](../reference/events.md#eventenvelope) (whose
+validators reject an oversized or credential-carrying payload *on the way in*, so the
+contract is enforced rather than trusted); checks that the **subject's tenant and the
+envelope's `tenant_id` agree** — two independent claims, and a mismatch is dropped rather
+than filed under a guess; records it in `module_events`; then fans it out to the live feed
+and to any registered `on_event` listener. Malformed and mis-tenanted messages are logged
+and dropped — one module's bad emit must not take down intake for every other module.
+
+`on_event(listener)` is the seam consumers attach to (the automations engine, #666). It
+fires only for **newly-stored** events: a duplicate is not a change, so a consumer never
+sees the same one twice.
+
+`EventRetention` prunes the log on an hourly loop to `EVENTS_RETENTION_DAYS` (default 30;
+`0` disables).
+
+The feed is at `GET /platform/v1/events[/stream]` — the Observability screen's **Events**
+tab (see [observability](../reference/observability.md#raw-events-feed)). The event catalog
+lives in [events](../reference/events.md#the-event-catalog).
+
 ## Configuration
 
 `CoreAppSettings` extends the shared [`CoreSettings`](../reference/config.md). Key fields
@@ -761,6 +795,8 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
 | `DRAFT_REVIEW_TTL_HOURS` | `24` | How long a turn paused on a draft-first send waits for Confirm/Decline before its pending draft is reaped (ADR-0085, #563). |
 | `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
+| `EVENTS_RETENTION_DAYS` | `30` | How long a module event stays in the durable log (ADR-0103). `0` disables pruning — keep everything, and mind the disk. |
+| `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
@@ -794,6 +830,16 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `memory_search` built-in's *sessions* half (ADR-0089) runs a tenant-scoped case-insensitive
   content match here (portable `ILIKE`, no full-text index — a single operator's history is
   small; FTS is a future optimization), joined back to each session's opening-message title.
+- **Postgres `module_events`** — the module event spine's durable log (ADR-0103), the core's
+  copy of record for every world change a module announced: `id`, `tenant`, `module`, `type`,
+  `occurred_at` (the emitter's clock — when the change happened), `received_at` (ours — what
+  retention prunes on, being the only one of the two guaranteed monotonic with respect to this
+  table), `dedup_key`, JSON `entity_ref` (ADR-0019) / `payload`, `schema_version`. Tenant-scoped.
+  `UniqueConstraint(tenant, module, dedup_key)` is what makes the log idempotent: a re-delivered
+  change collapses to one row, decided by the database rather than a read-then-write check that
+  races. **First write wins** — a duplicate never updates the stored row, because an event
+  describes a change that already happened and a later delivery carries no newer truth. Bounded
+  by `EVENTS_RETENTION_DAYS`.
 - **Postgres `agent_attachments`** — the core-side handle for an uploaded chat attachment
   (ADR-0019): `att_id` (primary key), `tenant`, `kind` (the upload's MIME content-type), `title`,
   `content` (raw bytes), `created_at`. Written by `POST /agent/attachments`; read back once per

@@ -14,6 +14,37 @@ images to GHCR.
 
 ### Added
 
+- **Events: the module event spine** (#662, ADR-0103) — the keystone of event-driven
+  proactivity: modules announce that the world changed, the core keeps the copy of record, and
+  the automations engine (a companion issue) decides whether anything should happen about it.
+  Nothing consumes events yet, which is exactly why the contract is fixed now — every emitter
+  and every consumer will be written against it. **One envelope** in `epicurus_core.module_events`
+  (`tenant_id · module · type · occurred_at · dedup_key · entity_ref? · payload ·
+  schema_version`) plus an `emit_event()` helper over the existing NATS plumbing, on a dedicated
+  `events.` subject namespace (`<tenant>.events.mail.received`) so the spine is subscribable as
+  a whole while the bus's existing per-module subjects keep their names. Payload discipline —
+  **pointers and metadata, never content, never secrets** — is *enforced*, not requested: a
+  4096-byte cap a mail body cannot fit through, and rejection of credential-shaped payload keys
+  (an over-match by design: `idempotency_key` is refused exactly like `api_key`, because a false
+  positive costs a rename and a false negative leaks a credential to a browser tab). A `type`
+  must be prefixed with its own module, so a subject is self-describing and a typo fails at emit
+  rather than mis-attributing an event forever. **Durable intake** in core-app subscribes
+  `*.events.>` — one subscription, *every* tenant (`EventBus.subscribe_any_tenant`), departing
+  from the inbound-messaging consumer's per-tenant subscribe, which would leave a tenant added
+  at runtime silently unheard until restart. Each message carries two independent tenant claims
+  (the subject's and the envelope's); a mismatch is dropped rather than filed under a guess.
+  Events land in a tenant-scoped `module_events` log, deduped by a database constraint on
+  `(tenant, module, dedup_key)` with **first write wins** (a later delivery of an
+  already-recorded change carries no newer truth), bounded by `EVENTS_RETENTION_DAYS` (30;
+  `0` keeps everything). Delivery is **best-effort v1** — core pub/sub, at-most-once; JetStream
+  is enabled on the server and deliberately unused, which is *why* the log rather than the bus
+  is the copy of record. A **raw Events feed** joins the log console on the Observability screen
+  behind a new tab strip (the automation-runs feed lands as a third tab); the ADR-0031 redaction
+  rule moved into `epicurus_core.redaction` so both surfaces share one list rather than drifting.
+  **echo** gains `echo_ping` / a "Ping the spine" action emitting `echo.pinged` — the reference
+  emitter — and `task smoke` now asserts the whole chain end-to-end on a fresh stack: emit →
+  NATS → intake → durable log → feed, plus the log's idempotency. `docs/reference/events.md`
+  starts **the event catalog**; real module emitters extend it.
 - **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
   governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
   job on the maintenance orchestrator's nightly batch (additive — one entry appended to the

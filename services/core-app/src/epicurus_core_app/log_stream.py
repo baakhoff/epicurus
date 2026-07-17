@@ -6,9 +6,11 @@ capped ring buffer and fanned out to active SSE subscribers. History is replayed
 first, then live entries trickle in — so a freshly opened console tab catches up
 without a page refresh.
 
-Security: keys whose name contains any of the ``_REDACTED_KEYS`` substrings are
-stripped from the ``context`` dict before any entry leaves this module, so the
-stream never surfaces tokens, secrets, or API keys.
+Security: keys whose name looks like a credential are stripped from the ``context``
+dict before any entry leaves this module, so the stream never surfaces tokens,
+secrets, or API keys. The rule itself lives in :mod:`epicurus_core.redaction` — the
+raw events feed (the spine's console, ADR-0031's second surface) applies the same one,
+and a security rule kept in two places is a security rule that drifts.
 """
 
 from __future__ import annotations
@@ -21,9 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-_REDACTED_KEYS: frozenset[str] = frozenset(
-    {"token", "key", "secret", "password", "credential", "auth", "api_key"}
-)
+from epicurus_core.redaction import is_secret_key
 
 _LEVELS = ["debug", "info", "warning", "error", "critical"]
 _DEFAULT_LEVEL_IDX = _LEVELS.index("info")
@@ -35,11 +35,6 @@ class LogEntry(BaseModel):
     service: str
     message: str
     context: dict[str, Any]
-
-
-def _is_redacted(key: str) -> bool:
-    lower = key.lower()
-    return any(r in lower for r in _REDACTED_KEYS)
 
 
 class LogBuffer:
@@ -71,7 +66,7 @@ class LogBuffer:
             k: v
             for k, v in event_dict.items()
             if k not in {"event", "level", "timestamp", "service", "logger", "_record"}
-            and not _is_redacted(k)
+            and not is_secret_key(k)
         }
         entry = LogEntry(ts=ts, level=level, service=service, message=message, context=context)
         self._history.append(entry)

@@ -295,6 +295,58 @@ finds due rows each tick and runs them sequentially through the normal headless-
 
 ---
 
+## Module events (ADR-0103)
+
+The raw feed over the core's durable event log — what the *modules* announced happened. The
+envelope, the emit helper, and the catalog are in [events](events.md); the delivery posture
+and the log's semantics are in
+[core-app](../services/core-app.md#module-event-spine--durable-intake-adr-0103).
+
+Shell-facing, not `PlatformClient`: a module *emits* on the bus, it does not read the log
+back over HTTP.
+
+### `GET /platform/v1/events`
+
+A snapshot, **newest first**.
+
+Query: `tenant_id` (default: the default tenant) · `module` (exact) · `type` (exact) ·
+`limit` (1–1000, default 200; **422** outside that range).
+
+```json
+[
+  {
+    "id": 42,
+    "tenant": "local",
+    "module": "mail",
+    "type": "mail.received",
+    "occurred_at": "2026-07-17T12:00:00Z",
+    "received_at": "2026-07-17T12:00:01Z",
+    "dedup_key": "gmail:18f2c1",
+    "entity_ref": { "ref_id": "18f2c1", "module": "mail", "kind": "message", "title": "Re: lunch" },
+    "payload": { "message_id": "18f2c1", "unread": 1 },
+    "schema_version": 1
+  }
+]
+```
+
+`occurred_at` is the emitting module's clock (when the change happened); `received_at` is
+the core's (when it heard). The `payload` is safe to render verbatim — credential-shaped
+keys are rejected at emit and redacted again here.
+
+### `GET /platform/v1/events/stream`
+
+The same data as an SSE tail: recent history **oldest-first**, then live events. Query:
+`tenant_id` · `module` · `type`. Each frame is `event: module_event` with the JSON above.
+
+The stream never closes on its own. An event landing mid-replay may appear twice — clients
+de-duplicate on `id`; the subscriber registers before the history query on purpose, since a
+duplicated row is cosmetic and a missing one is not.
+
+Driven by the Observability screen's **Events** tab
+([observability](observability.md#raw-events-feed)).
+
+---
+
 ## Knowledge-base / notes / suggestions endpoints (shell-facing)
 
 These are consumed by the web shell, not the `PlatformClient`. The full module-registry

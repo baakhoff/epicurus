@@ -7,6 +7,7 @@
 #   * each module's status_url is reachable THROUGH core                       (#92)
 #   * one MCP tool round-trips through core
 #   * an attachable module's chat-attachment picker round-trips through core    (#136)
+#   * a module event reaches the durable log and the raw feed                   (#662)
 #
 # Every recent module PR passed CI green and then broke on first real boot for one
 # of these reasons (see #98). This gate boots the actual stack and fails if any of
@@ -239,6 +240,51 @@ for m in $EXPECT_MODULES; do
 done
 [ "$attach_seen" -gt 0 ] || die "no attachable module served a picker through core (attach proxy broken?)"
 ok "chat-attachment picker round-tripped through core ($attach_seen attachable module(s))"
+
+# Module event spine (#662, ADR-0103) — the acceptance gate for the whole chain:
+# emit -> NATS -> the core's cross-tenant intake -> the durable log -> the raw feed.
+# Unit tests fake the bus, so this is the only place the `*.events.>` wildcard is proven
+# against a real broker — and that failure mode is silent (a wildcard that matches nothing
+# produces no error, no log, and an intake that looks healthy and records nothing).
+# echo_ping is the spine's reference emitter; a fixed dedup_key also proves the log's
+# idempotency, which is the one property a single emit can never demonstrate.
+PING_KEY="smoke-$$"
+ping_body="{\"arguments\":{\"note\":\"smoke\",\"dedup_key\":\"$PING_KEY\"}}"
+ep="$(http -X POST "http://core-app:8080/platform/v1/modules/echo/tools/echo_ping" \
+  -H 'Content-Type: application/json' -d "$ping_body" || true)"
+printf '%s' "$ep" | grep -q "$PING_KEY" || die "echo_ping did not round-trip through core: $ep"
+
+# Delivery is asynchronous (fire-and-forget pub/sub) — poll, never assume.
+i=0
+ev=""
+while [ "$i" -lt 20 ]; do
+  ev="$(http "http://core-app:8080/platform/v1/events?module=echo" || true)"
+  printf '%s' "$ev" | grep -q "\"dedup_key\":\"$PING_KEY\"" && break
+  i=$((i + 1))
+  sleep 1
+done
+printf '%s' "$ev" | grep -q "\"dedup_key\":\"$PING_KEY\"" \
+  || die "echo.pinged never reached the durable event log (emit -> intake broken?): $ev"
+printf '%s' "$ev" | grep -q '"type":"echo.pinged"' || die "logged event has the wrong type: $ev"
+printf '%s' "$ev" | grep -q '"module":"echo"' || die "logged event has the wrong module: $ev"
+printf '%s' "$ev" | grep -q '"entity_ref"' || die "logged event dropped its entity_ref: $ev"
+ok "echo.pinged reached the core's durable event log (emit -> NATS -> intake -> log, #662)"
+
+# The same change announced twice is one event: the log dedups on (tenant, module, key).
+http -X POST "http://core-app:8080/platform/v1/modules/echo/tools/echo_ping" \
+  -H 'Content-Type: application/json' -d "$ping_body" >/dev/null 2>&1 || true
+sleep 3  # let the duplicate land and be rejected — asserting too early would pass either way
+dupes="$(http "http://core-app:8080/platform/v1/events?module=echo" \
+  | grep -o "\"dedup_key\":\"$PING_KEY\"" | wc -l | tr -d ' ')"
+[ "$dupes" = "1" ] || die "duplicate emission was stored $dupes times, expected 1 (dedup broken?)"
+ok "a duplicate emission was stored once (dedup on tenant+module+dedup_key, #662)"
+
+# The raw feed replays it: history first, so a short read is enough to see it.
+# -N disables curl's buffering; the shorter --max-time wins and ends the (endless) stream.
+feed="$(http --max-time 6 -N "http://core-app:8080/platform/v1/events/stream?module=echo" || true)"
+printf '%s' "$feed" | grep -q '^event: module_event' || die "events feed served no SSE frame: $feed"
+printf '%s' "$feed" | grep -q "$PING_KEY" || die "events feed did not replay the logged event: $feed"
+ok "the raw events feed replayed it as SSE (log -> feed, #662)"
 
 # OpenBao secret persistence across a vault (and core) restart.
 . "$SECRETS_FILE"

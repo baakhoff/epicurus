@@ -100,6 +100,88 @@ export function Badge({
   );
 }
 
+export interface TabSpec<T extends string> {
+  id: T;
+  label: string;
+  /** Optional trailing count/badge text (e.g. "12"). */
+  hint?: string;
+}
+
+/**
+ * A segmented tab strip for switching between views *within* one screen.
+ *
+ * Not the app's nav (that is the rail + MobileTabBar, driven by the surface registry) —
+ * this is for a screen that hosts more than one feed of the same kind, like Observability's
+ * logs / events / runs. Keyboard behavior follows the WAI-ARIA tabs pattern: arrow keys
+ * move between tabs, so the strip is operable without a pointer.
+ */
+export function Tabs<T extends string>({
+  tabs,
+  value,
+  onChange,
+  label,
+  className,
+}: {
+  tabs: TabSpec<T>[];
+  value: T;
+  onChange: (id: T) => void;
+  /** Accessible name for the tab strip (e.g. "Observability views"). */
+  label: string;
+  className?: string;
+}) {
+  const move = (delta: number) => {
+    const index = tabs.findIndex((t) => t.id === value);
+    if (index < 0) return;
+    // Wrap around — the ARIA pattern expects the ends to be reachable, not to dead-end.
+    const next = tabs[(index + delta + tabs.length) % tabs.length];
+    onChange(next.id);
+  };
+
+  return (
+    <div
+      role="tablist"
+      aria-label={label}
+      className={cn("flex items-center gap-1 rounded-(--radius-field) bg-surface-2 p-0.5", className)}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowRight") {
+          e.preventDefault();
+          move(1);
+        } else if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          move(-1);
+        }
+      }}
+    >
+      {tabs.map((tab) => {
+        const selected = tab.id === value;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            // Roving tabindex: only the active tab is in the tab order; the arrow keys
+            // move within the strip. Otherwise every tab is a separate tab stop.
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(tab.id)}
+            className={cn(
+              "rounded-(--radius-field) px-3 py-1 text-xs transition-colors",
+              selected
+                ? "bg-surface-1 text-ink shadow-xs"
+                : "text-ink-faint hover:text-ink-dim",
+            )}
+          >
+            {tab.label}
+            {tab.hint !== undefined && (
+              <span className="ml-1.5 text-ink-faint tabular-nums">{tab.hint}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Dot({ tone }: { tone: "ok" | "danger" | "accent" | "dim" }) {
   const tones = {
     ok: "bg-ok",

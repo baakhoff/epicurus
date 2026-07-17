@@ -1,7 +1,15 @@
 # Reference: `events`
 
-`epicurus_core.events` — the async NATS client (the event backbone). Subjects are
-tenant-scoped via [`scope_subject`](tenancy.md).
+Two layers, and it matters which one you want:
+
+- **`epicurus_core.events`** — the async NATS client (the event *backbone*). Any service
+  publishing or subscribing to anything uses this.
+- **`epicurus_core.module_events`** — the module event *spine* (ADR-0103): one standardized
+  envelope for announcing that the world changed, plus the durable log the core keeps of
+  every announcement. **This is what a module emits.** Jump to
+  [the spine](#the-module-event-spine) and [the event catalog](#the-event-catalog).
+
+Subjects are tenant-scoped via [`scope_subject`](tenancy.md).
 
 ## `EventBus`
 
@@ -36,6 +44,7 @@ authenticates as `core` and modules as `module`. See [NATS](../infrastructure/na
 | `async publish(subject, data, tenant_id=None) -> None` | Publish `data` to the tenant-scoped `subject`. |
 | `async request(subject, data, *, timeout=2.0, tenant_id=None) -> Event` | Request/reply; await one response. |
 | `async subscribe(subject, handler, *, tenant_id=None, queue="") -> Subscription` | Call `handler(Event)` per message. |
+| `async subscribe_any_tenant(subject, handler, *, queue="") -> Subscription` | Call `handler(Event)` per message on `*.<subject>` — **every** tenant. Core-only. |
 | `async reply(subject, replier, *, tenant_id=None, queue="") -> Subscription` | Respond to each request with `replier(Event)`'s result. |
 | `client` *(property)* | The underlying NATS client; raises if not connected. |
 
@@ -83,3 +92,166 @@ async with EventBus(settings.nats_url) as bus:
     await bus.subscribe("inbox.message", on_msg, tenant_id="local")
     await bus.publish("inbox.message", {"text": "hi"}, tenant_id="local")
 ```
+
+### `subscribe_any_tenant` — core-only
+
+Subscribes `*.<subject>`: the single-token wildcard sits exactly where `scope_subject`
+puts the tenant, so it matches every tenant's copy of a subject and nothing else
+(application subjects always carry that leading token).
+
+**Do not use this from a module.** On the bus the core authenticates with unrestricted
+pub/sub while a module is confined to its own tenant-scoped subjects
+([ADR-0066](../infrastructure/nats.md)); a module reaching across tenants is a boundary
+violation, not a feature. The core needs it because a per-tenant subscription list means a
+tenant added at runtime is silently unheard until restart.
+
+The handler must read the tenant off the message (`Event.subject`'s first token) or its
+payload — and should trust neither without checking the other agrees.
+
+---
+
+## The module event spine
+
+`epicurus_core.module_events` (ADR-0103). A module **emits** when something changed in the
+world it owns: mail arrived, a calendar event moved, a note was saved. It says only that
+the change happened and where to look — never what should be done about it. That is the
+automations engine's job, and keeping the two apart is what lets a module emit before any
+consumer exists, and lets a consumer be written once against every module.
+
+### `emit_event`
+
+```python
+async def emit_event(
+    bus: EventBus,
+    *,
+    tenant_id: str,
+    module: str,
+    event_type: str,
+    dedup_key: str,
+    payload: dict[str, Any] | None = None,
+    entity_ref: EntityRef | None = None,
+    occurred_at: datetime | None = None,
+) -> EventEnvelope
+```
+
+The one way a module emits:
+
+```python
+from epicurus_core import EntityRef, emit_event
+
+await emit_event(
+    bus,
+    tenant_id=tenant,
+    module="mail",
+    event_type="mail.received",
+    dedup_key=f"gmail:{msg.id}",              # deterministic per change — never a uuid
+    payload={"message_id": msg.id, "subject": msg.subject, "unread": 1},
+    entity_ref=EntityRef(ref_id=msg.id, module="mail", kind="message", title=msg.subject),
+)
+```
+
+`event_type` maps to the envelope's `type` field (the parameter avoids shadowing the
+builtin at every call site). `occurred_at` defaults to now (UTC) — pass it explicitly when
+the change happened earlier than the moment you noticed it, since that is what a digest
+window and the feed order by.
+
+Raises `ValueError` (via the envelope's validators) **before anything reaches the bus** on
+a malformed type, a mismatched module prefix, an oversized payload, or a credential-shaped
+payload key. Publishing is fire-and-forget: it returns once the client accepts the
+message, not once anything consumes it.
+
+### `EventEnvelope`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema_version` | `int` | Envelope schema (currently `1`). Bumped only on a breaking shape change; additive optional fields do not bump it. |
+| `tenant_id` | `str` | Constraint #1. Must be a well-formed tenant id. |
+| `module` | `str` | The emitting module — one lowercase subject token. |
+| `type` | `str` | Dotted, and **prefixed with `module`**: `mail.received`, `echo.pinged`. Also the subject suffix. |
+| `occurred_at` | `datetime` | When the change happened, in the emitter's clock. Must be timezone-aware. |
+| `dedup_key` | `str` | The emitter's idempotency key for the *change*. 1–255 chars. |
+| `entity_ref` | `EntityRef \| None` | The entity this is about ([ADR-0019](../services/core-app.md)) — a feed row or notification renders a hover-card chip from it with no per-module code. |
+| `payload` | `dict[str, Any]` | Pointers + minimal metadata. Capped and credential-screened. |
+
+Helpers: `envelope.subject()` and `event_subject(type)` both return the *base* subject
+(`events.<type>`); the bus tenant-scopes it at publish time. `EVENTS_WILDCARD`
+(`"events.>"`) is what the core's intake subscribes.
+
+### Two rules that will bite you
+
+**`dedup_key` must be deterministic per change.** The core's log dedups on
+`(tenant, module, dedup_key)`, so a poll loop that re-sees the same mail must reuse the
+same key — a provider id (`"gmail:18f2c1"`) beats a fresh uuid, which defeats the whole
+mechanism by being different every time. (`echo.pinged` is the one legitimate exception:
+two pings genuinely *are* two changes, so its identity is fresh by definition.)
+
+**The payload is pointers, never content — and this is enforced.** An id, a subject line,
+a count. Never a mail body, never document text, never a credential. A consumer that needs
+the real thing fetches it through the owning module's tools under its own authorization,
+which is what keeps the log from becoming a second, unguarded copy of every module's data.
+Two validators enforce it rather than ask:
+
+- **`MAX_PAYLOAD_BYTES` = 4096.** Sized to fit ids and counts and to *not* fit a body.
+- **Credential-shaped keys are rejected.** The [redaction](#redaction) rule matches key
+  *names* by blunt case-insensitive substring, so a payload key containing `key`, `token`,
+  `auth`, or `secret` is refused **even when innocent** — `idempotency_key` and `sort_key`
+  fail exactly like `api_key`. Name a field for what it points at (`message_id`, not
+  `message_key`), and never repeat an envelope field in the payload (`dedup_key` itself
+  trips the screen).
+
+### Redaction
+
+`epicurus_core.redaction` — one rule, shared by every surface that shows operator-facing
+data: the log console redacts on it (ADR-0031), the envelope *rejects* on it at emit, and
+the events feed redacts on it again on the way out.
+
+| Member | Description |
+| --- | --- |
+| `REDACTED_KEYS` | The substrings that mark a key name as credential-shaped. |
+| `is_secret_key(key)` | Whether a key name looks like it holds a credential. |
+| `secret_keys_in(mapping)` | The offending key names, sorted — for a "reject this" error. |
+| `redact_mapping(mapping)` | A copy without its credential-shaped keys. |
+
+Matching is a deliberate over-match: a false positive costs one hidden field or a rename, a
+false negative leaks a credential to a browser tab, and those are not symmetric.
+
+### Delivery posture
+
+**Best-effort, at-most-once.** Core NATS pub/sub — an event emitted while the core is down
+is *gone*, not queued. JetStream is enabled on the server and deliberately unused here
+(ADR-0103 §4). This is why the core's `module_events` table, not the bus, is the copy of
+record: "what happened" is a question you ask Postgres. Promoting the spine to JetStream is
+a named follow-up; `dedup_key` already makes redelivery safe, so it is a transport change
+rather than a contract change.
+
+### The durable log
+
+The core subscribes `*.events.>` (one subscription, every tenant), verifies that the
+subject's tenant and the envelope's `tenant_id` agree, and records each event in the
+tenant-scoped `module_events` table. Duplicates — same `(tenant, module, dedup_key)` — are
+stored once; **first write wins**, since a later delivery of an already-recorded change
+carries no newer truth. Retention is time-based (`EVENTS_RETENTION_DAYS`, default 30 days;
+`0` disables). Malformed and mis-tenanted messages are logged and dropped.
+
+Read it over HTTP — `GET /platform/v1/events` and `GET /platform/v1/events/stream` — see
+[platform-api](platform-api.md). The Observability screen's **Events** tab is the live tail.
+
+---
+
+## The event catalog
+
+Every event on the spine. **Adding an emitter? Add a row here** — this table is what an
+operator (and the agent, via the indexed docs) reads to know what the system can tell them.
+
+| Event | Module | Payload | `dedup_key` | Notes |
+| --- | --- | --- | --- | --- |
+| `echo.pinged` | `echo` | `{note?: str}` — a short crumb, truncated to 200 chars | fresh per ping, or caller-supplied | The reference emitter ([echo](../services/echo.md)). Fired by the `echo_ping` tool / the "Ping the spine" action. Carries an `EntityRef` of kind `ping`. Pass an explicit `dedup_key` to demonstrate the log's idempotency: two pings, one event. |
+
+Real module emitters (mail, calendar, tasks, notes, knowledge, files) are companion issues
+and append their rows as they land.
+
+### Provider caveats
+
+Notes on emitters whose truth depends on an external provider — polling granularity,
+missing change feeds, provider-side dedup quirks. Empty until the first provider-backed
+emitter lands; it is a section rather than a footnote because it *will* fill up.

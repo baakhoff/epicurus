@@ -67,8 +67,18 @@ from epicurus_core.messaging import (
     session_id_for,
 )
 from epicurus_core.module import EpicurusModule, add_manifest_route
+from epicurus_core.module_events import (
+    EVENTS_PREFIX,
+    EVENTS_WILDCARD,
+    MAX_PAYLOAD_BYTES,
+    SCHEMA_VERSION,
+    EventEnvelope,
+    emit_event,
+    event_subject,
+)
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
 from epicurus_core.platform_client import PlatformClient
+from epicurus_core.redaction import REDACTED_KEYS, is_secret_key, redact_mapping, secret_keys_in
 from epicurus_core.review import (
     ApplyResult,
     ApproveBody,
@@ -95,10 +105,15 @@ from epicurus_core.tracing import get_tracer, setup_tracing
 
 __all__ = [
     "CONTRACT_VERSION",
+    "EVENTS_PREFIX",
+    "EVENTS_WILDCARD",
     "LIST_CAP",
     "LOCAL_ACCOUNT",
+    "MAX_PAYLOAD_BYTES",
     "MESSAGING_INBOUND",
     "MESSAGING_OUTBOUND",
+    "REDACTED_KEYS",
+    "SCHEMA_VERSION",
     "Account",
     "AccountsView",
     "ApplyResult",
@@ -118,6 +133,7 @@ __all__ = [
     "EpicurusModule",
     "Event",
     "EventBus",
+    "EventEnvelope",
     "EventHandler",
     "EventSpec",
     "FileEntry",
@@ -165,15 +181,20 @@ __all__ = [
     "create_ops_router",
     "current_tenant",
     "draft_review",
+    "emit_event",
+    "event_subject",
     "get_logger",
     "get_tracer",
+    "is_secret_key",
     "is_valid_tenant_id",
+    "redact_mapping",
     "reset_current_tenant",
     "route_paths",
     "scope_bucket",
     "scope_collection",
     "scope_secret_path",
     "scope_subject",
+    "secret_keys_in",
     "session_id_for",
     "set_current_tenant",
     "setup_tracing",

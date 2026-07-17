@@ -58,6 +58,21 @@ images to GHCR.
 
 ### Fixed
 
+- **Web: the document pane's "Review & approve" hard-reloaded the SPA, and its review-state
+  query key missed the toggle's own invalidation** (#659). `Panel.tsx`'s `DocumentView` was the
+  only SPA-internal hard navigation in the app (`window.location.assign`) — it dropped the live
+  SSE stream for no reason (recoverable via ADR-0055 re-attach, but nothing to recover *from* if
+  it just doesn't reload); now it navigates in-app via `useNavigate()` and explicitly dismisses
+  the pane first (the panel is Shell-global and persists across routes, so — unlike the reload
+  it replaces — nothing implicitly clears it). Separately, the pane's `["suggestionsEnabled",
+  module]` query key was a duplicate camelCase cache entry alongside `ReviewView`/
+  `SuggestionsScreen`'s established `["suggestions-enabled", module]`, so toggling review while
+  the pane was open missed the invalidation the toggle fires — self-healed on refetch, but could
+  leave the pane's "applied vs. staged" branch briefly stale. Also fixed while in the area: the
+  panel store's `replace()` accepted a title update, but silently discarded it; and `EditorView`'s
+  `doc` prop (the pane's applied→editor handover) had no direct test coverage. `web` 0.111.0→
+  0.111.1 (PATCH).
+
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
   disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either

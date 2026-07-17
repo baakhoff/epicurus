@@ -189,6 +189,14 @@ class CoreAppSettings(CoreSettings):
     # 60s keeps the worst-case delivery lag under a minute without meaningfully polling Postgres.
     scheduled_turns_poll_interval_s: int = 60
 
+    # ── Automations (ADR-0105) ───────────────────────────────────────────────────
+    # How often the automations loop drains the trigger queue (closing digest windows) and
+    # checks schedule triggers for due-ness. A plain poll, for the same reason scheduled
+    # turns polled: rows are created/paused/deleted at runtime with independently
+    # configured hours, which a fixed set of sleep-until-hour tasks cannot express. 60s
+    # bounds the worst-case lag at a minute without meaningfully polling Postgres.
+    automations_poll_interval_s: int = 60
+
     # ── Module event spine ───────────────────────────────────────────────────────
     # The core records every module event in a durable log (the bus keeps no history), so the
     # log grows with the chattiest emitter and needs a bound. Days, not rows: the log answers

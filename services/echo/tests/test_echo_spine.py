@@ -50,6 +50,35 @@ async def test_ui_offers_the_ping_action() -> None:
     assert any(a.tool == "echo_ping" for a in manifest.ui.actions)
 
 
+async def test_the_tools_declare_their_side_effects() -> None:
+    # The automations autonomy dial gates on these (ADR-0105), and echo is the reference:
+    # `echo` observes, `echo_ping` puts an event on the bus that other things react to.
+    manifest = await build_module().manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["echo"] == "read"
+    assert classes["echo_ping"] == "write"
+
+
+async def test_an_unannotated_tool_would_default_to_write() -> None:
+    # Fail closed: forgetting to annotate costs a tool its availability to a Notify
+    # automation, never the guarantee.
+    from epicurus_core import ToolSpec
+
+    assert ToolSpec(name="whatever").side_effect == "write"
+
+
+async def test_the_manifest_declares_an_automation_template() -> None:
+    # The Templates-tab contract. Declaring it creates nothing — the operator
+    # instantiates it — so installing echo never starts an automation on its own.
+    manifest = await build_module().manifest()
+    template = next(t for t in manifest.automation_templates if t.key == "on-ping")
+    assert template.trigger == {"module": "echo", "event_type": ECHO_PINGED}
+    assert template.autonomy == "notify"
+    assert template.sinks == ["chat"]
+    # A template carries no "enabled" — there is nothing for a module to switch on.
+    assert not hasattr(template, "enabled")
+
+
 # ── emit_ping ────────────────────────────────────────────────────────────────
 
 

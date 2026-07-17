@@ -22,10 +22,12 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import (
     AccountsView,
+    AutomationTemplate,
     CollectionPrefs,
     ModuleManifest,
     SecretError,
     SecretStore,
+    SideEffect,
     WritesDocument,
     get_logger,
 )
@@ -435,6 +437,41 @@ class ModuleRegistry:
                 if spec.name == tool and spec.writes_document is not None:
                     return snap.manifest.name, spec.writes_document
         return None
+
+    async def tool_side_effects(self) -> dict[str, SideEffect]:
+        """``{tool name -> side effect}`` across every enabled module (ADR-0105).
+
+        What the automations autonomy dial gates on. Resolved here for the same reason
+        ``document_tool`` is: the manifest is the only place the annotation exists — MCP's
+        own ``list_tools`` doesn't carry it — so ``McpHost.discover`` can't see it and asks
+        for this map instead. Read-only over the TTL-cached snapshot (#478).
+
+        A tool absent from the result is unclassified, and the caller reads that as
+        ``write`` (the ``ToolSpec`` default). Disabled and removed modules are skipped
+        exactly as in ``enabled_mcp_urls`` — their tools aren't offered at all, so their
+        classification is moot.
+        """
+        classes: dict[str, SideEffect] = {}
+        for snap in await self.snapshot():
+            if not snap.enabled or snap.removed:
+                continue
+            for spec in snap.manifest.tools:
+                classes[spec.name] = spec.side_effect
+        return classes
+
+    async def automation_templates(self) -> list[tuple[str, AutomationTemplate]]:
+        """``(module name, template)`` for every enabled module's preset automations.
+
+        The Templates tab's data source (ADR-0105). Declaring a template never creates
+        anything — it is a starting point the operator instantiates — so this is a plain
+        read, gated on enabled/removed like the rest.
+        """
+        return [
+            (snap.manifest.name, template)
+            for snap in await self.snapshot()
+            if snap.enabled and not snap.removed
+            for template in snap.manifest.automation_templates
+        ]
 
     async def _post_reindex(self, base: str) -> None:
         """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``)."""

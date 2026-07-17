@@ -25,6 +25,7 @@ from epicurus_core import (
     Attachment,
     DraftReview,
     EntityRef,
+    SideEffect,
     ToolEnvelope,
     WritesDocument,
     get_logger,
@@ -205,6 +206,28 @@ def _document_payload(
     }
 
 
+class TurnUsage(BaseModel):
+    """What a turn cost, summed across its steps (ADR-0105).
+
+    A turn is one *or more* gateway calls — every tool round is another completion — so the
+    interesting number is the total, not the last one. Both counts stay ``None`` until a
+    call actually reports usage: a provider that returns none must read as "unknown", not
+    as "free". Reporting 0 for an unmetered turn would quietly understate every bill.
+    """
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    steps: int = 0
+
+    def add(self, result: ChatResult) -> None:
+        """Fold one completion's usage in."""
+        self.steps += 1
+        if result.prompt_tokens is not None:
+            self.prompt_tokens = (self.prompt_tokens or 0) + result.prompt_tokens
+        if result.completion_tokens is not None:
+            self.completion_tokens = (self.completion_tokens or 0) + result.completion_tokens
+
+
 class AgentTurn(BaseModel):
     """The result of one agent turn."""
 
@@ -219,6 +242,10 @@ class AgentTurn(BaseModel):
     # The turn's process — thinking + tool steps — persisted so the activity timeline
     # survives a reopen, not only the live stream (ADR-0041).
     activity: MessageActivity = Field(default_factory=MessageActivity)
+    # What the turn cost (ADR-0105). The automations ledger records it per run; an ordinary
+    # turn ignores it. Only the non-streaming path fills it — the streamed one is not
+    # token-metered by the providers today — and automations run non-streaming.
+    usage: TurnUsage = Field(default_factory=TurnUsage)
 
 
 def _entity_refs_for_model(refs: list[EntityRef], *, tenant_id: str | None = None) -> str:
@@ -579,12 +606,20 @@ class Agent:
         model: str | None = None,
         tenant_id: str | None = None,
         session_id: str | None = None,
+        allow: frozenset[SideEffect] | None = None,
+        automation_id: str | None = None,
     ) -> AgentTurn:
         """Run one turn to completion (or until ``max_steps`` tool rounds).
 
         With ``session_id`` and memory configured, the turn is grounded in the
         session's prior messages plus semantically recalled context, and both the
         new user input and the answer are persisted for future turns.
+
+        ``allow`` restricts the turn's tool surface to tools of those side-effect classes
+        (ADR-0105) — how an automation's autonomy level is *enforced* rather than merely
+        requested. ``None`` (an ordinary turn) offers everything enabled. ``automation_id``
+        attributes the turn's gateway usage to the automation that caused it, alongside the
+        tenant — the dual attribution the SaaS overlay meters on.
         """
         tenant = tenant_id or self._default_tenant
         messages, images = await self._expand_attachments(messages, tenant=tenant)
@@ -595,7 +630,13 @@ class Agent:
         else:
             if images:
                 convo = _attach_images(convo, images)
-            turn = await self._loop(convo, model=model, tenant_id=tenant_id)
+            turn = await self._loop(
+                convo,
+                model=model,
+                tenant_id=tenant_id,
+                allow=allow,
+                automation_id=automation_id,
+            )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         if not blocked:
             self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
@@ -1246,10 +1287,18 @@ class Agent:
             return [*system, *profile, *messages]
 
     async def _loop(
-        self, messages: list[ChatMessage], *, model: str | None, tenant_id: str | None
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None,
+        tenant_id: str | None,
+        allow: frozenset[SideEffect] | None = None,
+        automation_id: str | None = None,
     ) -> AgentTurn:
         """The tool-calling loop: ask, run tools, feed results back, until an answer."""
-        specs, route = await self._mcp.discover()
+        # `allow` filters both what the model is told about and what `route` will dispatch,
+        # so a withheld tool is unroutable, not merely unmentioned (ADR-0105).
+        specs, route = await self._mcp.discover(allow=allow)
         call_tenant = tenant_id or self._default_tenant
         max_steps = await self._effective_max_steps(tenant_id)
         # Offer tools only to a tool-capable model (else the runtime errors); a tool-less model
@@ -1259,6 +1308,7 @@ class Agent:
         tools_used: list[str] = []
         timeline: list[ActivityItem] = []
         refs = _RefCollector()
+        usage = TurnUsage()  # summed across every step, for the automations ledger
 
         def activity() -> MessageActivity:
             return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
@@ -1269,7 +1319,14 @@ class Agent:
         content = ""
         stopped = "completed"
         for _ in range(max_steps):
-            result = await self._gateway.chat(convo, model=model, tools=offer, tenant_id=tenant_id)
+            result = await self._gateway.chat(
+                convo,
+                model=model,
+                tools=offer,
+                tenant_id=tenant_id,
+                automation_id=automation_id,
+            )
+            usage.add(result)
             if result.reasoning:
                 reasoned = True
                 append_thinking(timeline, result.reasoning)
@@ -1364,6 +1421,7 @@ class Agent:
             stopped=stopped,
             entity_refs=refs.refs,
             activity=activity(),
+            usage=usage,
         )
 
     async def _document_written_by(

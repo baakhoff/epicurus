@@ -14,6 +14,39 @@ images to GHCR.
 
 ### Added
 
+- **Automations: the engine** (#666, ADR-0105) — the centerpiece of event-driven proactivity,
+  and what the event spine exists to feed: modules announce that the world changed, and this
+  decides whether the assistant should do anything about it. A tenant-scoped `automations` row
+  is a **trigger** (an event — module + type + a deterministic payload filter + an optional
+  local-hour window — *or* a schedule, reusing the ADR-0092 cadence vocabulary), an **agent
+  step** (prompt + optional per-automation model + autonomy level), **sinks**, a rate cap, and
+  a digest window. **The 4-level autonomy dial is structural, not persuasive.** A Notify
+  automation is not asked to avoid writing — it is handed no tool that can. That needed a
+  vocabulary the codebase didn't have, so tools now declare `side_effect` on their `ToolSpec`:
+  `read` (observes), `propose` (**stages for approval by construction** — a draft-first send,
+  a propose tool that files a suggestion), `write` (applies directly). Three classes, because
+  two collapse the dial: with only read/write, Propose and Act get identical surfaces and the
+  middle of the dial becomes prompt wording again. It is *declared*, never inferred —
+  `mail_mark_read` contains "read" and mutates — and **defaults to `write`**, so a forgotten
+  annotation costs availability, never containment. Enforcement filters the `route` the agent
+  dispatches on, not just the specs the model is shown: a withheld tool is **unroutable**, and
+  a model that names it anyway is told `error: unknown tool`. Levels: notify→read ·
+  propose→+propose · act→+write · silent_act→ the same reach as act, reporting **only** to the
+  ledger. The runner matches on the event intake, queues durably (ADR-0051), batches a digest
+  from the *oldest* pending trigger, runs one agent turn with the triggering events as
+  **context, explicitly not instructions**, then fans out to sinks **deterministically after**
+  the turn — a model that could choose its own reporting could choose not to report. Safety:
+  a **Postgres-persisted** kill switch (unlike the in-memory power pause — a stop a restart
+  undoes is not a stop), rate caps that a *failing* run also consumes, a rate-limited
+  `core.automation_failed`, and a **depth-1 loop guard** — an event a run produces carries a
+  `causation_id` and the matcher refuses *any* event carrying one, because A→B→A is a loop too.
+  `automation_runs` always records, at every level, with **dual metering**: tenant *and*
+  automation, on the ledger and on `UsageEvent`, since an automation quietly burning tokens is
+  otherwise indistinguishable from the operator's own chatting. **Scheduled turns (#614) fold
+  in** — migrated at startup, idempotently and non-destructively, keeping cadence, session,
+  enabled flag and last-run stamp, at `notify` because that is what they already were. Modules
+  may declare `automation_templates`; they are **never auto-instantiated** (the contract
+  carries no `enabled` field to set).
 - **Events: the module event spine** (#662, ADR-0103) — the keystone of event-driven
   proactivity: modules announce that the world changed, the core keeps the copy of record, and
   the automations engine (a companion issue) decides whether anything should happen about it.

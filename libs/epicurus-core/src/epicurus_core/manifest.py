@@ -17,6 +17,7 @@ CONTRACT_VERSION = "0.1"
 
 __all__ = [
     "CONTRACT_VERSION",
+    "AutomationTemplate",
     "CollectionsSpec",
     "EventSpec",
     "ModelRole",
@@ -24,6 +25,7 @@ __all__ = [
     "ModuleManifest",
     "PageArchetype",
     "PageSpec",
+    "SideEffect",
     "ToolSpec",
     "UiAction",
     "UiSection",
@@ -66,6 +68,27 @@ class WritesDocument(BaseModel):
         return [a for a in (self.content_arg, self.title_arg, self.target_arg) if a is not None]
 
 
+SideEffect = Literal["read", "propose", "write"]
+"""What a tool *does to the world* — the vocabulary the automations autonomy dial gates on.
+
+Three classes, because two cannot express the dial (ADR-0105):
+
+* ``read`` — observes and changes nothing (``mail_search``, ``calendar_list``, ``now``).
+* ``propose`` — **stages for human approval by construction**, never applies on its own:
+  ``mail_send`` composes a :class:`~epicurus_core.contracts.DraftReview` (the draft-first
+  guarantee, ADR-0085), ``knowledge_propose_*`` stages a suggestion (#305). The tool
+  cannot transmit or commit even if the model wants it to.
+* ``write`` — applies directly (``calendar_create_event``, ``mail_mark_read``).
+
+The default is ``write``, and that direction is deliberate: an unannotated tool is
+invisible to a read-only automation rather than silently trusted by one. A missing
+annotation costs availability, never containment.
+
+This is *not* a naming heuristic — those break immediately (``mail_mark_read`` reads
+nothing; it mutates). It is declared beside the tool, by the author who knows.
+"""
+
+
 class ToolSpec(BaseModel):
     """A tool the module exposes to the agent over MCP."""
 
@@ -76,6 +99,12 @@ class ToolSpec(BaseModel):
     # (#541, ADR-0100). Absent on the vast majority of tools — a tool that writes no document
     # simply omits it, and its calls render as they always have.
     writes_document: WritesDocument | None = None
+    # What this tool does to the world (ADR-0105). An automation's autonomy level derives its
+    # tool allowance from this, enforced at the turn's tool surface — so a Notify automation is
+    # not *asked* to avoid writing, it is handed no tool that can. Defaults to the most
+    # restrictive reading (``write``), so forgetting to annotate a read tool costs its
+    # availability rather than the guarantee.
+    side_effect: SideEffect = "write"
 
     @model_validator(mode="after")
     def _writes_document_names_real_args(self) -> ToolSpec:
@@ -177,6 +206,37 @@ class UiSection(BaseModel):
     ui_url: str | None = None
 
 
+class AutomationTemplate(BaseModel):
+    """A preset automation a module suggests, for the shell's Templates tab (ADR-0105).
+
+    A module knows what is worth automating about itself — "tell me when mail arrives from
+    someone I've replied to before", "summarize tomorrow's calendar each evening" — far
+    better than the core does. Declaring it here surfaces it as a **starting point the
+    operator instantiates**, never a live automation: a module cannot create one, and
+    installing a module must never make the assistant start doing things unasked. That is
+    a product decision (owner-decided, Templates tab, never auto-instantiated), and the
+    contract enforces it by carrying no "enabled" field to set.
+
+    An instantiated template becomes an ordinary automation row with
+    ``source="template:<module>"``, and the operator then owns it — later edits to the
+    module's template do not reach back into it.
+
+    ``trigger`` and ``sinks`` are deliberately loose (``dict``/``list[str]``): the core's
+    automations model owns that vocabulary and validates the shape when a template is
+    instantiated, so a module pinned to an older library cannot break the core's parse by
+    declaring a field it has since renamed. A template that fails validation is skipped
+    with a warning, not fatal.
+    """
+
+    key: str = Field(min_length=1)  # unique within the module; identifies the template
+    name: str = Field(min_length=1)  # the automation's name when instantiated
+    description: str = ""  # what it does, shown on the template card
+    trigger: dict[str, Any] = Field(default_factory=dict)  # the core's trigger vocabulary
+    prompt: str = ""  # the agent step's instructions
+    autonomy: str = "notify"  # the level it is *suggested* at; the operator may change it
+    sinks: list[str] = Field(default_factory=list)  # e.g. ["chat"], ["push", "notes"]
+
+
 class CollectionsSpec(BaseModel):
     """A module's account/collection capability (ADR-0030).
 
@@ -274,3 +334,7 @@ class ModuleManifest(BaseModel):
     # (#332) calls it when the operator changes the embedding model. Modules that hold no
     # embeddings leave this ``False``.
     reindexable: bool = False
+    # Preset automations this module suggests (ADR-0105). Offered on the shell's Templates tab
+    # as starting points the operator instantiates — **never auto-instantiated**, so installing
+    # a module cannot make the assistant start acting on its own.
+    automation_templates: list[AutomationTemplate] = Field(default_factory=list)

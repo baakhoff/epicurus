@@ -148,6 +148,12 @@ class EventEnvelope(BaseModel):
     entity_ref: EntityRef | None = None
     # Pointers + minimal metadata only. Capped and credential-screened below.
     payload: dict[str, Any] = Field(default_factory=dict)
+    # Set only on an event produced *by* an automation run: the id of the run that caused
+    # it (ADR-0105's loop guard). A module emitter never sets this — it announces a change
+    # in the world, which has no cause inside the system. The automations matcher refuses
+    # to trigger on an event that carries one, which is the depth-1 hard stop that keeps an
+    # automation from feeding itself. Additive and optional, so schema_version stays 1.
+    causation_id: str | None = None
 
     @field_validator("tenant_id")
     @classmethod
@@ -239,6 +245,7 @@ async def emit_event(
     payload: dict[str, Any] | None = None,
     entity_ref: EntityRef | None = None,
     occurred_at: datetime | None = None,
+    causation_id: str | None = None,
 ) -> EventEnvelope:
     """Announce a world change on the tenant-scoped spine; returns what was published.
 
@@ -259,6 +266,10 @@ async def emit_event(
     when the change happened earlier than the moment you noticed it, since that is the
     timestamp a digest window and the feed order by.
 
+    *causation_id* is **core-only**: a module leaves it unset, because a change in the world
+    has no cause inside the system. The automations runner stamps it on events produced by a
+    run, and the matcher then refuses to trigger on them — the loop guard (ADR-0105).
+
     Raises ``ValueError`` (via the envelope's validators) on a malformed type, a
     mismatched module prefix, an oversized payload, or a credential-shaped payload key —
     before anything reaches the bus. Publishing itself is fire-and-forget: this returns
@@ -272,6 +283,7 @@ async def emit_event(
         dedup_key=dedup_key,
         entity_ref=entity_ref,
         payload=payload or {},
+        causation_id=causation_id,
     )
     await bus.publish(envelope.subject(), envelope.model_dump(mode="json"), tenant_id=tenant_id)
     return envelope

@@ -172,6 +172,7 @@ message, not once anything consumes it.
 | `dedup_key` | `str` | The emitter's idempotency key for the *change*. 1–255 chars. |
 | `entity_ref` | `EntityRef \| None` | The entity this is about ([ADR-0019](../services/core-app.md)) — a feed row or notification renders a hover-card chip from it with no per-module code. |
 | `payload` | `dict[str, Any]` | Pointers + minimal metadata. Capped and credential-screened. |
+| `causation_id` | `str \| None` | **Core-only.** The automation run that produced this event ([automations](automations.md#the-loop-guard), ADR-0105). A module emitter always leaves it unset — a change in the world has no cause inside the system — and the automations matcher refuses any event carrying one. |
 
 Helpers: `envelope.subject()` and `event_subject(type)` both return the *base* subject
 (`events.<type>`); the bus tenant-scopes it at publish time. `EVENTS_WILDCARD`
@@ -246,6 +247,7 @@ operator (and the agent, via the indexed docs) reads to know what the system can
 | Event | Module | Payload | `dedup_key` | Notes |
 | --- | --- | --- | --- | --- |
 | `echo.pinged` | `echo` | `{note?: str}` — a short crumb, truncated to 200 chars | fresh per ping, or caller-supplied | The reference emitter ([echo](../services/echo.md)). Fired by the `echo_ping` tool / the "Ping the spine" action. Carries an `EntityRef` of kind `ping`. Pass an explicit `dedup_key` to demonstrate the log's idempotency: two pings, one event. |
+| `core.automation_failed` | `core` | `{automation_id, name, error}` — the error truncated to 500 chars | `<automation_id>:<unix ts>` | An automation run failed ([automations](automations.md#safety), ADR-0105). **Rate-limited** to one per automation per 15 minutes: a broken automation on a chatty trigger would otherwise firehose the very log you are reading. Carries a `causation_id`, so a failure can never itself trigger an automation. |
 
 Real module emitters (mail, calendar, tasks, notes, knowledge, files) are companion issues
 and append their rows as they land.

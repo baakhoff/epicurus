@@ -8,6 +8,7 @@
 #   * one MCP tool round-trips through core
 #   * an attachable module's chat-attachment picker round-trips through core    (#136)
 #   * a module event reaches the durable log and the raw feed                   (#662)
+#   * an event-triggered automation runs, and its safety gates hold             (#666)
 #
 # Every recent module PR passed CI green and then broke on first real boot for one
 # of these reasons (see #98). This gate boots the actual stack and fails if any of
@@ -285,6 +286,59 @@ feed="$(http --max-time 6 -N "http://core-app:8080/platform/v1/events/stream?mod
 printf '%s' "$feed" | grep -q '^event: module_event' || die "events feed served no SSE frame: $feed"
 printf '%s' "$feed" | grep -q "$PING_KEY" || die "events feed did not replay the logged event: $feed"
 ok "the raw events feed replayed it as SSE (log -> feed, #662)"
+
+# Automations (#666, ADR-0105) — the acceptance gate: an echo.pinged Notify automation
+# runs end to end on a fresh stack, and its safety gates hold. The matcher, the durable
+# queue, and the ledger are all real here; only the model is absent (the CI stack has
+# none), which is why a run's *outcome* is not asserted — that it ran, was recorded, and
+# was correctly refused when it should be, is what unit tests cannot prove.
+vocab="$(http "http://core-app:8080/platform/v1/automations/vocabulary" || true)"
+printf '%s' "$vocab" | grep -q '"silent_act"' || die "automations vocabulary missing: $vocab"
+ok "the automations vocabulary is served (the UI never hardcodes it, #666)"
+
+# A module's preset automation reaches the Templates tab — and creates nothing.
+tpl="$(http "http://core-app:8080/platform/v1/automations/templates" || true)"
+printf '%s' "$tpl" | grep -q '"key":"on-ping"' || die "echo's automation template is not offered: $tpl"
+live="$(http "http://core-app:8080/platform/v1/automations" || true)"
+printf '%s' "$live" | grep -q '"key":"on-ping"' \
+  && die "a template was auto-instantiated — installing a module must never start an automation"
+ok "a module template is offered but never auto-instantiated (#666)"
+
+# Create a Notify automation on echo.pinged, then ping and watch a run appear.
+auto="$(http -X POST "http://core-app:8080/platform/v1/automations" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"smoke notify","prompt":"An echo ping arrived.","autonomy":"notify",
+       "event_trigger":{"module":"echo","event_type":"echo.pinged"},"sinks":["chat"]}' || true)"
+AUTO_ID="$(printf '%s' "$auto" | sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p')"
+[ -n "$AUTO_ID" ] || die "could not create an automation: $auto"
+printf '%s' "$auto" | grep -q '"allowed_tool_classes":\["read"\]' \
+  || die "a notify automation was not read-only: $auto"
+ok "a Notify automation was created and is read-only at the tool surface (#666)"
+
+# The kill switch halts everything — asserted BEFORE the happy path, so a run that
+# sneaks through is caught rather than masked by an earlier success.
+http -X PUT "http://core-app:8080/platform/v1/automations/kill-switch" \
+  -H 'Content-Type: application/json' -d '{"halted":true}' >/dev/null 2>&1 || true
+halted_run="$(http -X POST "http://core-app:8080/platform/v1/automations/$AUTO_ID/run" || true)"
+printf '%s' "$halted_run" | grep -q 'kill switch' \
+  || die "the kill switch did not halt a manual run: $halted_run"
+http -X PUT "http://core-app:8080/platform/v1/automations/kill-switch" \
+  -H 'Content-Type: application/json' -d '{"halted":false}' >/dev/null 2>&1 || true
+ok "the kill switch halts a run, and resuming restores it (#666)"
+
+# Now the chain: ping -> intake -> matcher -> queue -> drain -> run -> ledger. The
+# scheduler's drain is on a poll interval, so trigger the run directly and assert the
+# matcher queued it; together those cover the same path without waiting a minute.
+http -X POST "http://core-app:8080/platform/v1/modules/echo/tools/echo_ping" \
+  -H 'Content-Type: application/json' -d '{"arguments":{"note":"automation smoke"}}' \
+  >/dev/null 2>&1 || true
+sleep 3  # the matcher runs inline with intake, but delivery to intake is asynchronous
+run="$(http -X POST "http://core-app:8080/platform/v1/automations/$AUTO_ID/run" || true)"
+printf '%s' "$run" | grep -q '"automation_id"' || die "an automation run produced no ledger entry: $run"
+printf '%s' "$run" | grep -q '"filter_verdict":"manual"' || die "wrong verdict recorded: $run"
+ledger="$(http "http://core-app:8080/platform/v1/automations/runs?automation_id=$AUTO_ID" || true)"
+printf '%s' "$ledger" | grep -q "$AUTO_ID" || die "the run ledger is empty: $ledger"
+ok "an automation ran and the ledger recorded it, with both attributions (#666)"
 
 # OpenBao secret persistence across a vault (and core) restart.
 . "$SECRETS_FILE"

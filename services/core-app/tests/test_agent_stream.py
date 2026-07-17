@@ -68,7 +68,9 @@ class _FakeMcp:
         self._outputs = outputs or {}
         self._fail = fail
 
-    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    async def discover(
+        self, *, allow: frozenset[str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         specs = [{"type": "function", "function": {"name": "echo"}}]
         return specs, {"echo": "http://echo:8080/mcp"}
 
@@ -644,7 +646,9 @@ class _DraftMcp:
         self._output = output
         self.calls: list[str] = []
 
-    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    async def discover(
+        self, *, allow: frozenset[str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         specs = [{"type": "function", "function": {"name": "mail_send"}}]
         return specs, {"mail_send": "http://mail:8080/mcp"}
 
@@ -934,7 +938,9 @@ def _doc_lookup(
 class _ScribeMcp(_FakeMcp):
     """Routes `write_doc` — the base fake only knows `echo`, so a call would error out."""
 
-    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    async def discover(
+        self, *, allow: frozenset[str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         specs = [{"type": "function", "function": {"name": "write_doc"}}]
         return specs, {"write_doc": "http://knowledge:8080/mcp"}
 

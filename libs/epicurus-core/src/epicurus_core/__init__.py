@@ -46,6 +46,7 @@ from epicurus_core.files import (
 from epicurus_core.logging import configure_logging, get_logger
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
+    AutomationTemplate,
     CollectionsSpec,
     EventSpec,
     ModelRole,
@@ -53,6 +54,7 @@ from epicurus_core.manifest import (
     ModuleManifest,
     PageArchetype,
     PageSpec,
+    SideEffect,
     ToolSpec,
     UiAction,
     UiSection,
@@ -120,6 +122,7 @@ __all__ = [
     "ApproveBody",
     "Attachment",
     "AttachmentSource",
+    "AutomationTemplate",
     "ChatMessage",
     "ChatResult",
     "Collection",
@@ -166,6 +169,7 @@ __all__ = [
     "S3FileStore",
     "SecretError",
     "SecretStore",
+    "SideEffect",
     "TenantError",
     "ToolEnvelope",
     "ToolSpec",

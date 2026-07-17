@@ -16,6 +16,7 @@ import uuid
 from typing import Any
 
 from epicurus_core import (
+    AutomationTemplate,
     EntityRef,
     EpicurusModule,
     Event,
@@ -83,7 +84,7 @@ def build_module(bus: EventBus | None = None, *, tenant: str = "local") -> Epicu
     """
     module = EpicurusModule(
         "echo",
-        version="0.4.0",
+        version="0.5.0",
         description="Echoes messages — proves the MCP tool + NATS event contract.",
         config=["greeting"],
         ui=UiSection(
@@ -122,6 +123,23 @@ def build_module(bus: EventBus | None = None, *, tenant: str = "local") -> Epicu
                 nav_order=50,
             )
         ],
+        # A preset automation for the Templates tab (ADR-0105) — the reference for the
+        # contract. Declaring it creates nothing: the operator instantiates it, so
+        # installing echo never makes the assistant start doing anything on its own.
+        automation_templates=[
+            AutomationTemplate(
+                key="on-ping",
+                name="Tell me when the spine is pinged",
+                description=(
+                    "Runs a read-only turn whenever echo.pinged lands — the reference "
+                    "automation, and the smallest end-to-end proof of the engine."
+                ),
+                trigger={"module": "echo", "event_type": ECHO_PINGED},
+                prompt="An echo ping arrived. Say so in one short sentence.",
+                autonomy="notify",
+                sinks=["chat"],
+            )
+        ],
         # Serves GET /resolve/{kind}/{ref_id} so a referenced echo entity gets a
         # hover-card (ADR-0019) — the reference for the resolver contract.
         resolver=True,
@@ -129,12 +147,17 @@ def build_module(bus: EventBus | None = None, *, tenant: str = "local") -> Epicu
         docs_url="/module-docs",
     )
 
-    @module.tool()
+    # side_effect classifies each tool for the automations autonomy dial (ADR-0105), and
+    # echo is the reference for that too: `echo` observes and changes nothing, while
+    # `echo_ping` puts an event on the bus that other things react to. Unannotated would
+    # mean "write" for both — safe, but it would leave a Notify automation with no echo
+    # tool at all, which is precisely what annotating a read tool buys you.
+    @module.tool(side_effect="read")
     def echo(message: str) -> str:
         """Return the given message unchanged."""
         return message
 
-    @module.tool()
+    @module.tool(side_effect="write")
     async def echo_ping(note: str = "", dedup_key: str = "") -> str:
         """Announce an ``echo.pinged`` event on the module event spine.
 

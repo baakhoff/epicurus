@@ -58,6 +58,16 @@ images to GHCR.
 
 ### Fixed
 
+- **Web: confirming a mid-history edit could trim the transcript to a state the server was never
+  asked to produce** (#660). Editing a user message further back than the last turn discards every
+  real turn since it, so `saveEdit()` confirms the count first — but it only guards
+  `chat.streaming`/a dropped connection at the moment the dialog *opens*. A run starting elsewhere
+  (another tab, a scheduled turn) or the connection dropping while the dialog sat open went
+  unchecked: clicking **Resend** still applied the optimistic trim and re-ran the edit regardless.
+  The dialog's own confirm now re-checks both at click time, the same guard `saveEdit()` already
+  applies — blocked exactly like Cancel, leaving the inline editor open with the draft intact to
+  retry. `web` 0.111.0→0.111.1 (PATCH).
+
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
   disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either

@@ -223,6 +223,26 @@ were — the headless path structurally cannot send.
 
 `POST /platform/v1/scheduled-turns` still works; new work should create an automation.
 
+## The Automations page (#668)
+
+A first-class core surface (`/automations`, beside Settings in the nav — ADR-0018
+posture: the shell renders, core-app supplies data). The **kill switch** sits above
+everything; the list shows each row's trigger **in words**, its autonomy badge, sink
+icons, an enabled toggle, and last-run status; the **editor** (one sheet for create /
+edit / template-instantiate, saved explicitly — the fields are interdependent) edits
+every stored field: instructions, a per-automation model (ADR-0029's core-default
+fall-through), an event trigger (type picker driven by module manifests' declared
+`events.*` subjects, with a free-text escape hatch, plus the matcher builder and active
+hours) or a schedule (the ADR-0092 vocabulary), sinks + chat mode, the 4-level dial with
+its reach spelled out, and the rate cap / digest window. The **Templates** tab renders
+module-shipped presets grouped by module; *Use* prefills the editor and saving creates an
+independent `source="template:<module>"` row — enabled on save (the editor pass **is**
+the review), never retro-edited by later template changes. Per-row **run history** reads
+the ledger and deep-links into the observability runs feed (`?tab=runs&automation=<id>`);
+the feed links back by automation name. The old scheduled-turns Settings card is
+**absorbed** here — migrated rows simply appear as automations (the old endpoints still
+answer, matching the engine's posture).
+
 ## HTTP
 
 See [platform-api](platform-api.md#automations-adr-0105).

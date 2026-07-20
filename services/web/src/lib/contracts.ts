@@ -84,24 +84,6 @@ export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 export const PageOrderPrefs = z.object({ order: z.array(z.string()) });
 export type PageOrderPrefs = z.infer<typeof PageOrderPrefs>;
 
-/**
- * A recurring prompt that runs unattended and delivers into its own chat session
- * (ADR-0092). `weekday` (0=Monday..6=Sunday) is only meaningful for a `"weekly"` cadence.
- */
-export const ScheduledTurn = z.object({
-  id: z.string(),
-  prompt: z.string(),
-  cadence: z.enum(["daily", "weekly"]),
-  hour: z.number(),
-  weekday: z.number().nullable().default(null),
-  delivery_target: z.string(),
-  enabled: z.boolean(),
-  created_at: z.string(),
-  last_run_at: z.string().nullable().default(null),
-  last_status: z.string().nullable().default(null),
-});
-export type ScheduledTurn = z.infer<typeof ScheduledTurn>;
-
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({
   model: z.string(),
@@ -1310,6 +1292,46 @@ export const AutomationRun = z.object({
   trigger_entity_refs: z.array(EntityRef).default([]),
 });
 export type AutomationRun = z.infer<typeof AutomationRun>;
+
+/** A module's preset automation, offered on the Templates tab — never auto-instantiated. */
+export const AutomationTemplate = z.object({
+  module: z.string(),
+  key: z.string(),
+  name: z.string(),
+  description: z.string().default(""),
+  trigger: z.record(z.string(), z.unknown()).default({}),
+  prompt: z.string().default(""),
+  autonomy: z.string().default("notify"),
+  sinks: z.array(z.string()).default([]),
+});
+export type AutomationTemplate = z.infer<typeof AutomationTemplate>;
+
+/** The engine's closed vocabularies, so the editor never hardcodes them. */
+export const AutomationVocabulary = z.object({
+  autonomy_levels: z.array(z.string()),
+  sinks: z.array(z.string()),
+  matcher_ops: z.array(z.string()),
+});
+export type AutomationVocabulary = z.infer<typeof AutomationVocabulary>;
+
+/** The tenant-wide automations stop (Postgres-persisted — survives a restart). */
+export const AutomationKillSwitch = z.object({ halted: z.boolean() });
+export type AutomationKillSwitch = z.infer<typeof AutomationKillSwitch>;
+
+/** The editor's save shape — create and update share it (`source` only on create). */
+export type AutomationDraft = {
+  name: string;
+  prompt: string;
+  autonomy: string;
+  event_trigger: AutomationEventTrigger | null;
+  schedule_trigger: AutomationScheduleTrigger | null;
+  model: string | null;
+  sinks: string[];
+  chat_mode: string;
+  rate_cap_per_hour: number;
+  digest_window_minutes: number;
+  enabled: boolean;
+};
 
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;
 

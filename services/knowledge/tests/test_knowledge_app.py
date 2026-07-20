@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.23.0"
+    assert manifest.version == "0.24.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -47,6 +47,20 @@ async def test_manifest_declares_attachable_and_resolver() -> None:
     assert manifest.attachable is True  # vault docs can be attached to a chat (#137)
     assert manifest.resolver is True  # cited docs resolve to a hover-card (#143)
     assert manifest.docs_url == "/module-docs"  # contributes its own usage docs (#215)
+
+
+async def test_manifest_declares_spine_events() -> None:
+    manifest = await _module().manifest()
+    subjects = {e.subject for e in manifest.events_emitted}
+    # Spine events (#665); the legacy declared-but-never-published subject is gone.
+    assert {
+        "events.knowledge.doc_created",
+        "events.knowledge.doc_updated",
+        "events.knowledge.doc_deleted",
+        "events.knowledge.vault_synced",
+        "events.knowledge.index_failed",
+    } <= subjects
+    assert "knowledge.index.completed" not in subjects
 
 
 def _indexer_stub() -> object:

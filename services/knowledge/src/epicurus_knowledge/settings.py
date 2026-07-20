@@ -30,6 +30,14 @@ class KnowledgeSettings(CoreSettings):
     # accumulates chunks across files and flushes a batch once this many are pending,
     # cutting the bundled-docs index from one HTTP call per file to one per batch.
     embed_batch_size: int = 64
+    # Quiet window (seconds) a document must sit unsaved before `knowledge.doc_updated`
+    # fires on the event spine (#665). The editor auto-saves on every ~4s idle pause
+    # (ADR-0042), so this is minutes, not milliseconds — one event per editing session.
+    knowledge_events_debounce_s: float = 120.0
+    # Minimum seconds between `knowledge.index_failed` emissions (#665) — a vault stuck
+    # failing must not storm the spine once per watcher wake (the mail.sync_failed
+    # posture: 15 minutes is frequent enough to notice, sparse enough not to be noise).
+    knowledge_index_failed_cooldown_s: float = 900.0
     # Initial index resilience (#230): the first index runs in the background with
     # retry/backoff so a cold `compose up` (deps not yet ready) still ends populated.
     index_retry_max_attempts: int = 30

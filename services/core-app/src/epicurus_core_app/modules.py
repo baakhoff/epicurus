@@ -30,6 +30,7 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
+from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.docker_control import PROTECTED, DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
@@ -216,6 +217,7 @@ class ModuleRegistry:
         docker: DockerController | None = None,
         docker_unavailable_reason: str | None = None,
         core: CorePseudoModule | None = None,
+        events: CoreEventEmitter | None = None,
     ) -> None:
         self._bases = list(base_urls)
         self._mcp = mcp
@@ -223,6 +225,9 @@ class ModuleRegistry:
         self._tenant = tenant
         self._prefs = prefs
         self._docker = docker
+        # Announces suggestion decisions on the spine (#665) from review_action — the one
+        # funnel every review surface passes through. None disables emission (tests).
+        self._events = events
         # Why ``docker`` is None, for the Modules page's proactive status card (#622) — never
         # set when ``docker`` isn't, and vice versa (see ``DockerAvailability``).
         self._docker_reason = docker_unavailable_reason
@@ -1168,7 +1173,9 @@ class ModuleRegistry:
         _safe_segment(page_id, label="page_id")
         _safe_segment(suggestion_id, label="suggestion_id")
         if self._core is not None and self._is_core(name):
-            return await self._core.review_action(page_id, suggestion_id, action, content)
+            result = await self._core.review_action(page_id, suggestion_id, action, content)
+            await self._emit_decision(name, page_id, suggestion_id, result)
+            return result
         base = await self._resolve_review_page(name, page_id)
         kwargs: dict[str, Any] = {}
         if content is not None:
@@ -1179,7 +1186,28 @@ class ModuleRegistry:
             )
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
-            return data
+        await self._emit_decision(name, page_id, suggestion_id, data)
+        return data
+
+    async def _emit_decision(
+        self, name: str, page_id: str, suggestion_id: str, result: dict[str, Any]
+    ) -> None:
+        """Announce a resolved suggestion on the spine (#665) — one seam, every surface.
+
+        Both ``review_action`` branches (the in-process core pseudo-module and the HTTP
+        proxy to a module) converge here, so ``core.suggestion_approved`` /
+        ``core.suggestion_rejected`` fire exactly once per decision regardless of which
+        review surface the operator used. Best-effort inside the emitter — the decision
+        already applied.
+        """
+        if self._events is not None:
+            await self._events.suggestion_decided(
+                self._tenant,
+                module=name,
+                page_id=page_id,
+                suggestion_id=suggestion_id,
+                result=result,
+            )
 
     async def review_audit(self, name: str, page_id: str, *, limit: int = 50) -> dict[str, Any]:
         """Proxy the resolved-decision audit trail for a review page (ADR-0090, #542).

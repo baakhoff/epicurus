@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
@@ -199,6 +200,7 @@ class AutomationRunner:
         sinks: SinkDispatcher,
         *,
         bus: EventBus | None = None,
+        on_recorded: Callable[[AutomationRun], Awaitable[None]] | None = None,
     ) -> None:
         self._store = store
         self._queue = queue
@@ -207,6 +209,10 @@ class AutomationRunner:
         self._kill_switch = kill_switch
         self._sinks = sinks
         self._bus = bus
+        # Invoked with every ledger entry the moment it is written — skips included; the
+        # runs feed's live-tail hook (#669). Best-effort: a feed failure never costs the
+        # ledger write that already landed.
+        self._on_recorded = on_recorded
         # automation id -> when we last announced a failure for it (the quiet period).
         self._last_failure: dict[str, datetime] = {}
 
@@ -340,7 +346,7 @@ class AutomationRunner:
     ) -> AutomationRun:
         """Write the ledger entry — the one thing that always happens."""
         duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
-        return await self._store.record_run(
+        recorded = await self._store.record_run(
             AutomationRun(
                 id=uuid.uuid4().hex,
                 tenant=automation.tenant,
@@ -359,6 +365,14 @@ class AutomationRunner:
                 sinks_fired=sinks_fired or [],
             )
         )
+        # Hand the entry to the live runs feed (#669) — skips included, which is the
+        # tab's whole point. Best-effort: the ledger write above already stands.
+        if self._on_recorded is not None:
+            try:
+                await self._on_recorded(recorded)
+            except Exception as exc:
+                log.warning("runs-feed hook failed", run_id=recorded.id, error=str(exc))
+        return recorded
 
     async def _announce_failure(self, automation: Automation, error: str) -> None:
         """Emit ``core.automation_failed`` on the spine — rate-limited, best-effort.

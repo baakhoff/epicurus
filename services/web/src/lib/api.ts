@@ -10,6 +10,8 @@ import {
   ActiveSessions,
   AgentInstructions,
   AttachmentUploaded,
+  Automation,
+  AutomationRun,
   BridgeStatus,
   CalendarFeedItem,
   CatalogResponse,
@@ -251,6 +253,17 @@ export const api = {
       }
       throw new ApiError(response.status, detail);
     }
+  },
+
+  // Automations (ADR-0105): the engine's rows and its run ledger (#669).
+  automations: () => request(z.array(Automation), "/platform/v1/automations"),
+  automationRuns: (opts: { automationId?: string; outcome?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.automationId) params.set("automation_id", opts.automationId);
+    if (opts.outcome) params.set("outcome", opts.outcome);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const query = params.size ? `?${params}` : "";
+    return request(z.array(AutomationRun), `/platform/v1/automations/runs${query}`);
   },
 
   // The operator's drag-and-drop left-nav page order (#543), reordered on the Modules page.
@@ -862,6 +875,36 @@ export async function* eventStream(
       yield ModuleEvent.parse(JSON.parse(msg.data));
     } catch {
       /* malformed frame — skip, exactly as the log stream does */
+    }
+  }
+}
+
+/**
+ * Tail the automation run ledger over SSE (#669) — history first, then live runs as the
+ * runner records them, skips included. Same shape and shared reader as `eventStream`.
+ *
+ * @param automationId  Optional exact automation filter.
+ * @param outcome       Optional ledger-state filter ("ok" | "error" | "skipped").
+ * @param signal        AbortSignal used to stop the stream.
+ */
+export async function* runStream(
+  automationId?: string,
+  outcome?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<AutomationRun> {
+  const params = new URLSearchParams();
+  if (automationId) params.set("automation_id", automationId);
+  if (outcome) params.set("outcome", outcome);
+  const query = params.size ? `?${params}` : "";
+  for await (const msg of sseRequest(`/platform/v1/automations/runs/stream${query}`, {
+    method: "GET",
+    signal,
+  })) {
+    if (msg.event !== "automation_run") continue;
+    try {
+      yield AutomationRun.parse(JSON.parse(msg.data));
+    } catch {
+      /* malformed frame — skip, exactly as the event stream does */
     }
   }
 }

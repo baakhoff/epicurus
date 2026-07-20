@@ -310,9 +310,19 @@ class AutomationStore:
             return [_to_value(row) for row in rows]
 
     async def runs(
-        self, *, tenant: str, automation_id: str | None = None, limit: int = 100
+        self,
+        *,
+        tenant: str,
+        automation_id: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
     ) -> list[AutomationRun]:
-        """The newest ledger entries first, optionally for one automation."""
+        """The newest ledger entries first, optionally filtered.
+
+        *outcome* narrows to one ledger state (``ok`` / ``error`` / ``skipped``) — the
+        runs feed's server-side filter (#669), so a tab watching for failures never
+        receives the traffic it would throw away.
+        """
         async with self._session() as session:
             stmt = (
                 select(_StoredRun)
@@ -322,6 +332,8 @@ class AutomationStore:
             )
             if automation_id:
                 stmt = stmt.where(_StoredRun.automation_id == automation_id)
+            if outcome:
+                stmt = stmt.where(_StoredRun.outcome == outcome)
             rows = await session.scalars(stmt)
             return [_run_to_value(row) for row in rows]
 

@@ -166,7 +166,9 @@ system.
 ## The run ledger
 
 `automation_runs` — written for **every** run at **every** level. For `silent_act` it is the
-only trace there is.
+only trace there is. The observability page tails it live — the
+[Automation runs feed](observability.md#automation-runs-feed-669) (#669), fed by the
+runner's `on_recorded` hook the moment an entry is written, skips included.
 
 | Field | Meaning |
 | --- | --- |

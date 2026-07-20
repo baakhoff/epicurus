@@ -5,16 +5,20 @@
  * console into its own component a change with no net underneath it. These cover both
  * feeds — so the extraction is pinned, not just the new tab.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { LogEntry, ModuleEvent } from "@/lib/contracts";
+import type { Automation, AutomationRun, LogEntry, ModuleEvent } from "@/lib/contracts";
 
 let logEntries: LogEntry[] = [];
 let moduleEvents: ModuleEvent[] = [];
+let automationRuns: AutomationRun[] = [];
+let automationRows: Automation[] = [];
 const logCalls: { level?: string; service?: string }[] = [];
 const eventCalls: { module?: string; type?: string }[] = [];
+const runCalls: { automationId?: string; outcome?: string }[] = [];
 /** Streams that never end, mirroring the real feeds (which stay open for live entries). */
 let hold = true;
 
@@ -25,6 +29,7 @@ vi.mock("@/lib/api", () => ({
       power: "idle",
       components: [{ name: "model", ready: true, detail: "qwen2.5:7b" }],
     }),
+    automations: vi.fn(() => Promise.resolve(automationRows)),
   },
   logStream: async function* (level?: string, service?: string) {
     logCalls.push({ level, service });
@@ -42,9 +47,29 @@ vi.mock("@/lib/api", () => ({
     }
     while (hold) await new Promise((r) => setTimeout(r, 5));
   },
+  runStream: async function* (automationId?: string, outcome?: string) {
+    runCalls.push({ automationId, outcome });
+    // Filter like the server does (see eventStream above).
+    for (const run of automationRuns) {
+      if (automationId && run.automation_id !== automationId) continue;
+      if (outcome && run.outcome !== outcome) continue;
+      yield run;
+    }
+    while (hold) await new Promise((r) => setTimeout(r, 5));
+  },
 }));
 
 import { ObservabilityScreen } from "@/screens/ObservabilityScreen";
+
+/** The runs tab's entity-ref chips need a query client; the other tabs don't mind one. */
+function renderScreen() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <ObservabilityScreen />
+    </QueryClientProvider>,
+  );
+}
 
 function logEntry(overrides: Partial<LogEntry> = {}): LogEntry {
   return {
@@ -73,11 +98,63 @@ function moduleEvent(overrides: Partial<ModuleEvent> = {}): ModuleEvent {
   };
 }
 
+function automationRun(overrides: Partial<AutomationRun> = {}): AutomationRun {
+  return {
+    id: "r1",
+    automation_id: "a1",
+    started_at: "2026-07-20T09:00:00Z",
+    trigger_refs: [],
+    filter_verdict: "matched",
+    model: "qwen2.5:7b",
+    prompt_tokens: 812,
+    completion_tokens: 96,
+    duration_ms: 4210,
+    outcome: "ok",
+    error: null,
+    output: "An invoice from Acme arrived.",
+    sinks_fired: ["chat"],
+    trigger_entity_refs: [],
+    ...overrides,
+  };
+}
+
+function automation(overrides: Partial<Automation> = {}): Automation {
+  return {
+    id: "a1",
+    name: "Tell me about invoices",
+    enabled: true,
+    source: "user",
+    event_trigger: {
+      module: "mail",
+      event_type: "mail.received",
+      matchers: [],
+      window_start_hour: null,
+      window_end_hour: null,
+    },
+    schedule_trigger: null,
+    prompt: "Summarize the invoice.",
+    model: null,
+    autonomy: "notify",
+    sinks: ["chat"],
+    chat_mode: "rolling",
+    rate_cap_per_hour: 0,
+    digest_window_minutes: 0,
+    created_at: "2026-07-19T08:00:00Z",
+    last_run_at: null,
+    last_status: null,
+    allowed_tool_classes: ["read"],
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   logEntries = [];
   moduleEvents = [];
+  automationRuns = [];
+  automationRows = [];
   logCalls.length = 0;
   eventCalls.length = 0;
+  runCalls.length = 0;
   hold = true;
 });
 
@@ -201,6 +278,12 @@ describe("ObservabilityScreen", () => {
     await userEvent.keyboard("{ArrowRight}");
     expect(screen.getByRole("tab", { name: "Events" })).toHaveAttribute("aria-selected", "true");
 
+    await userEvent.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "Automation runs" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
     await userEvent.keyboard("{ArrowRight}"); // wraps back around
     expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
   });
@@ -208,5 +291,121 @@ describe("ObservabilityScreen", () => {
   it("shows system health", async () => {
     render(<ObservabilityScreen />);
     expect(await screen.findByText("qwen2.5:7b")).toBeInTheDocument();
+  });
+});
+
+describe("Automation runs console (#669)", () => {
+  async function openRunsTab() {
+    renderScreen();
+    await userEvent.click(screen.getByRole("tab", { name: "Automation runs" }));
+  }
+
+  it("streams runs and names the automation from the automations list", async () => {
+    automationRows = [automation({ id: "a1", name: "Tell me about invoices" })];
+    automationRuns = [automationRun({ automation_id: "a1" })];
+    await openRunsTab();
+
+    // Scoped to the list — the automation filter's <option> carries the same text.
+    const list = within(await screen.findByLabelText("Automation runs console"));
+    expect(await list.findByText("Tell me about invoices")).toBeInTheDocument();
+    expect(list.getByText("matched")).toBeInTheDocument();
+    expect(list.getByText("ok")).toBeInTheDocument();
+    expect(list.getByText("812+96 tok")).toBeInTheDocument();
+    expect(list.getByText("4210 ms")).toBeInTheDocument();
+    expect(list.getByText("→ chat")).toBeInTheDocument();
+  });
+
+  it("shows a skipped run's why as loudly as a real run", async () => {
+    // The tab exists so rate caps and pauses are visible, not inferred from silence.
+    automationRuns = [
+      automationRun({
+        id: "r-skip",
+        outcome: "skipped",
+        error: "rate cap reached (4/hour)",
+        model: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        output: "",
+        sinks_fired: [],
+      }),
+    ];
+    await openRunsTab();
+
+    const list = within(await screen.findByLabelText("Automation runs console"));
+    expect(await list.findByText("skipped")).toBeInTheDocument();
+    expect(list.getByText("rate cap reached (4/hour)")).toBeInTheDocument();
+  });
+
+  it("re-subscribes with the outcome filter server-side", async () => {
+    automationRuns = [automationRun({ id: "r-ok", outcome: "ok" })];
+    await openRunsTab();
+    await waitFor(() => expect(runCalls.length).toBe(1));
+    expect(runCalls[0]).toEqual({ automationId: undefined, outcome: undefined });
+
+    await userEvent.selectOptions(screen.getByLabelText("Outcome filter"), "skipped");
+    await waitFor(() => expect(runCalls.at(-1)?.outcome).toBe("skipped"));
+    // The previous filter's rows must not linger under the new one.
+    expect(screen.queryByText("matched")).not.toBeInTheDocument();
+  });
+
+  it("filters by trigger module client-side without tearing down the stream", async () => {
+    automationRows = [
+      automation({ id: "a1", name: "Invoice watcher" }),
+      automation({
+        id: "a2",
+        name: "Note watcher",
+        event_trigger: {
+          module: "notes",
+          event_type: "notes.note_updated",
+          matchers: [],
+          window_start_hour: null,
+          window_end_hour: null,
+        },
+      }),
+    ];
+    automationRuns = [
+      automationRun({ id: "r1", automation_id: "a1" }),
+      automationRun({ id: "r2", automation_id: "a2" }),
+    ];
+    await openRunsTab();
+    const list = within(await screen.findByLabelText("Automation runs console"));
+    expect(await list.findByText("Invoice watcher")).toBeInTheDocument();
+    expect(list.getByText("Note watcher")).toBeInTheDocument();
+    const subscriptions = runCalls.length;
+
+    await userEvent.selectOptions(screen.getByLabelText("Trigger module filter"), "notes");
+
+    expect(list.queryByText("Invoice watcher")).not.toBeInTheDocument();
+    expect(list.getByText("Note watcher")).toBeInTheDocument();
+    expect(runCalls.length).toBe(subscriptions); // no re-subscribe for a client-side view
+  });
+
+  it("expands a run's output on demand", async () => {
+    automationRuns = [automationRun({ output: "An invoice from Acme arrived." })];
+    await openRunsTab();
+
+    const toggle = await screen.findByLabelText("Expand output");
+    expect(screen.queryByText("An invoice from Acme arrived.")).not.toBeInTheDocument();
+    await userEvent.click(toggle);
+    expect(screen.getByText("An invoice from Acme arrived.")).toBeInTheDocument();
+  });
+
+  it("renders the triggering events' entity-ref chips", async () => {
+    automationRuns = [
+      automationRun({
+        trigger_entity_refs: [
+          { ref_id: "m1", module: "mail", kind: "message", title: "Re: invoice" },
+        ],
+      }),
+    ];
+    await openRunsTab();
+    // The chip renders its title in the pill and again in the hover-card body.
+    expect((await screen.findAllByText("Re: invoice")).length).toBeGreaterThan(0);
+  });
+
+  it("falls back to the automation id when the list does not know it", async () => {
+    automationRuns = [automationRun({ automation_id: "deadbeefcafe" })];
+    await openRunsTab();
+    expect(await screen.findByText("deadbeef")).toBeInTheDocument();
   });
 });

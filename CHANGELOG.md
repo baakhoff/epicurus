@@ -58,6 +58,16 @@ images to GHCR.
 
 ### Fixed
 
+- **Web: confirming a mid-history edit could trim the transcript to a state the server was never
+  asked to produce** (#660). Editing a user message further back than the last turn discards every
+  real turn since it, so `saveEdit()` confirms the count first — but it only guards
+  `chat.streaming`/a dropped connection at the moment the dialog *opens*. A run starting elsewhere
+  (another tab, a scheduled turn) or the connection dropping while the dialog sat open went
+  unchecked: clicking **Resend** still applied the optimistic trim and re-ran the edit regardless.
+  The dialog's own confirm now re-checks both at click time, the same guard `saveEdit()` already
+  applies — blocked exactly like Cancel, leaving the inline editor open with the draft intact to
+  retry. `web` 0.111.1→0.111.2 (PATCH).
+
 - **Web: the document pane's "Review & approve" hard-reloaded the SPA, and its review-state
   query key missed the toggle's own invalidation** (#659). `Panel.tsx`'s `DocumentView` was the
   only SPA-internal hard navigation in the app (`window.location.assign`) — it dropped the live

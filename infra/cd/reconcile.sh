@@ -50,18 +50,41 @@ fi
 # Docker-socket opt-in (#622, ADR-0099): persist it across reconciles rather than reverting to
 # degraded mode on every run. Only added when the operator has actually set DOCKER_GID (env or
 # .env) — the same trigger the overlay itself requires — so a reconcile with nothing set stays
-# fail-safe (no socket mount), identical to a plain `docker compose up`. See
-# services/core-app/compose.docker-socket.yaml and docs/infrastructure/auto-deploy.md.
-COMPOSE_FILES=(-f compose.yaml)
+# fail-safe (no socket mount). See services/core-app/compose.docker-socket.yaml and
+# docs/infrastructure/auto-deploy.md.
+#
+# Two constraints shape how this is written, both of which fail *silently* if ignored:
+#
+#   1. POSIX only — no arrays. The header, Taskfile, and the documented scheduled task all invoke
+#      this as `sh infra/cd/reconcile.sh`, and `sh` ignores the shebang. On the deploy box (WSL /
+#      Debian) `/bin/sh` is dash, where a bash array is a parse error: the script dies at *load*,
+#      after `git reset --hard` has already run in branch-tracking mode — checkout advanced,
+#      containers left on the old images. Positional parameters are the portable stand-in.
+#   2. Passing any `-f` disables Compose's override auto-discovery. So the default path passes
+#      none at all (byte-identical to the plain `docker compose` this replaced), and the opt-in
+#      path re-adds a discovered override explicitly — `docker-compose.override.yml` is gitignored
+#      precisely so an operator can keep one on the box, and dropping it here would be the same
+#      class of silent revert this change exists to fix.
+set --
 if [ -n "${DOCKER_GID}" ]; then
   log "DOCKER_GID is set — including the Docker-socket opt-in overlay."
-  COMPOSE_FILES+=(-f services/core-app/compose.docker-socket.yaml)
+  set -- -f compose.yaml
+  for override in \
+    compose.override.yaml compose.override.yml \
+    docker-compose.override.yaml docker-compose.override.yml; do
+    if [ -f "${override}" ]; then
+      log "Preserving local override ${override}."
+      set -- "$@" -f "${override}"
+      break
+    fi
+  done
+  set -- "$@" -f services/core-app/compose.docker-socket.yaml
 fi
 
 log "Pulling images (EPICURUS_VERSION=${VERSION:-latest})..."
-docker compose "${COMPOSE_FILES[@]}" pull
+docker compose "$@" pull
 
 log "Restarting updated containers..."
-docker compose "${COMPOSE_FILES[@]}" up -d --remove-orphans
+docker compose "$@" up -d --remove-orphans
 
 log "Done."

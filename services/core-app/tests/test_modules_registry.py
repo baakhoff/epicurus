@@ -11,6 +11,7 @@ import httpx
 import pytest
 import structlog
 from fastapi import HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from structlog.testing import capture_logs
 
 from epicurus_core import (
@@ -1790,6 +1791,51 @@ async def test_all_suggestions_tolerates_a_broken_core_page() -> None:
     assert await registry.all_suggestions() == []
 
 
+async def test_all_suggestions_tolerates_a_core_db_error() -> None:
+    """#657: the core review page is dispatched in-process (no loopback HTTP), so a storage
+    failure — e.g. ``playbook_proposals.init()`` having failed at startup — surfaces as the
+    driver's own exception, not ``HTTPException``. That must not take out the *entire* feed,
+    an unrelated, healthy module's suggestions included."""
+
+    class _DbBroken(_FakeCore):
+        async def get_page(self, page_id: str) -> dict[str, Any]:
+            raise SQLAlchemyError('relation "playbook_proposals" does not exist')
+
+    mcp, secrets = _FakeMcp(), _FakeSecrets()
+    registry = _StubRegistry(  # type: ignore[arg-type]
+        manifest=_review_manifest(),
+        mcp=mcp,
+        secrets=secrets,
+        tenant="local",
+        prefs=_FakeModulePrefs(),
+        core=_DbBroken(),
+    )
+    resp = MagicMock()
+    resp.json.return_value = {
+        "title": "Suggestions",
+        "suggestions": [{"id": "s1", "path": "kb/a.md", "operation": "update"}],
+    }
+    with patch("epicurus_core_app.modules.httpx.AsyncClient") as mock_cls, capture_logs() as logs:
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        mock_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        result = await registry.all_suggestions()
+    # knowledge's suggestion survives — the core's DB error only drops the core's own entry.
+    assert result == [
+        {
+            "id": "s1",
+            "path": "kb/a.md",
+            "operation": "update",
+            "module": "knowledge",
+            "page_id": "review",
+        }
+    ]
+    warnings = [e for e in logs if e["event"] == "core suggestions page failed; skipping"]
+    assert len(warnings) == 1
+    assert warnings[0]["page_id"] == "playbooks"
+
+
 async def test_all_suggestions_without_a_core_is_unchanged() -> None:
     registry, _, _ = _registry()
     assert await registry.all_suggestions() == []
@@ -1814,6 +1860,16 @@ async def test_core_review_cannot_be_switched_off() -> None:
     registry, _ = _registry_with_core()
     with pytest.raises(HTTPException) as err:
         await registry.set_suggestions_enabled("core", False)
+    assert err.value.status_code == 403
+
+
+async def test_core_suggestions_enabled_query_is_also_403() -> None:
+    """#657: symmetric with the write side — there is no toggle state to report when review
+    can never be turned off, so the read is refused at the same layer rather than silently
+    answering ``True`` for a setting that doesn't exist."""
+    registry, _ = _registry_with_core()
+    with pytest.raises(HTTPException) as err:
+        await registry.get_suggestions_enabled("core")
     assert err.value.status_code == 403
 
 

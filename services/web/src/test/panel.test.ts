@@ -34,4 +34,25 @@ describe("panel store", () => {
     usePanel.getState().back();
     expect(usePanel.getState().stack).toEqual([]);
   });
+
+  describe("replace()", () => {
+    it("swaps the payload, keeping the current entry's title when none is given (#659)", () => {
+      usePanel.getState().open("email-reader", { id: 1 }, "Original");
+      usePanel.getState().replace({ id: 2 });
+      const top = usePanel.getState().stack.at(-1);
+      expect(top).toMatchObject({ payload: { id: 2 }, title: "Original" });
+    });
+
+    it("swaps the title too when one is given (#659) — was silently dropped before", () => {
+      usePanel.getState().open("email-reader", { id: 1 }, "Original");
+      usePanel.getState().replace({ id: 2 }, "Fresh title");
+      const top = usePanel.getState().stack.at(-1);
+      expect(top).toMatchObject({ payload: { id: 2 }, title: "Fresh title" });
+    });
+
+    it("is a no-op on an empty stack", () => {
+      usePanel.getState().replace({ id: 1 }, "Ignored");
+      expect(usePanel.getState().stack).toEqual([]);
+    });
+  });
 });

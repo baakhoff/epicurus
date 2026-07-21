@@ -58,6 +58,19 @@ images to GHCR.
 
 ### Fixed
 
+- **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
+  but that file doesn't exist in the public tree** (#661). The real document was always the
+  gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the
+  Modules page's Docker-status card (#652/#622) or the `docker-socket` compose comment to
+  `docs/DEPLOYMENT.md` got a 404. Both now point at `docs/infrastructure/index.md`'s
+  "Docker-socket access" section, which #652's own docs already established as the real home for
+  that content. Also swept two conceptual "DEPLOYMENT.md" mentions (`.env.example`,
+  `docs/developer/releases.md`) that cited the same gone file for the image-pinning /
+  immutable-image principle — retargeted at `docs/infrastructure/auto-deploy.md`, mirroring the
+  link `releases.md` already uses two sections below for the same document. `web` 0.111.2→0.111.3
+  (PATCH — the Modules page string). `core-app`'s `compose.yaml` touch is comment-only, no
+  runtime effect — no bump.
+
 - **Web: confirming a mid-history edit could trim the transcript to a state the server was never
   asked to produce** (#660). Editing a user message further back than the last turn discards every
   real turn since it, so `saveEdit()` confirms the count first — but it only guards

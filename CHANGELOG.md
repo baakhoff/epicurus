@@ -83,6 +83,82 @@ images to GHCR.
 
 ### Fixed
 
+- **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
+  but that file doesn't exist in the public tree** (#661). The real document was always the
+  gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the
+  Modules page's Docker-status card (#652/#622) or the `docker-socket` compose comment to
+  `docs/DEPLOYMENT.md` got a 404. Both now point at `docs/infrastructure/index.md`'s
+  "Docker-socket access" section, which #652's own docs already established as the real home for
+  that content. Also swept two conceptual "DEPLOYMENT.md" mentions (`.env.example`,
+  `docs/developer/releases.md`) that cited the same gone file for the image-pinning /
+  immutable-image principle — retargeted at `docs/infrastructure/auto-deploy.md`, mirroring the
+  link `releases.md` already uses two sections below for the same document. `web` 0.111.2→0.111.3
+  (PATCH — the Modules page string). `core-app`'s `compose.yaml` touch is comment-only, no
+  runtime effect — no bump.
+
+- **Web: confirming a mid-history edit could trim the transcript to a state the server was never
+  asked to produce** (#660). Editing a user message further back than the last turn discards every
+  real turn since it, so `saveEdit()` confirms the count first — but it only guards
+  `chat.streaming`/a dropped connection at the moment the dialog *opens*. A run starting elsewhere
+  (another tab, a scheduled turn) or the connection dropping while the dialog sat open went
+  unchecked: clicking **Resend** still applied the optimistic trim and re-ran the edit regardless.
+  The dialog's own confirm now re-checks both at click time, the same guard `saveEdit()` already
+  applies — blocked exactly like Cancel, leaving the inline editor open with the draft intact to
+  retry. `web` 0.111.1→0.111.2 (PATCH).
+
+- **Web: the document pane's "Review & approve" hard-reloaded the SPA, and its review-state
+  query key missed the toggle's own invalidation** (#659). `Panel.tsx`'s `DocumentView` was the
+  only SPA-internal hard navigation in the app (`window.location.assign`) — it dropped the live
+  SSE stream for no reason (recoverable via ADR-0055 re-attach, but nothing to recover *from* if
+  it just doesn't reload); now it navigates in-app via `useNavigate()` and explicitly dismisses
+  the pane first (the panel is Shell-global and persists across routes, so — unlike the reload
+  it replaces — nothing implicitly clears it). Separately, the pane's `["suggestionsEnabled",
+  module]` query key was a duplicate camelCase cache entry alongside `ReviewView`/
+  `SuggestionsScreen`'s established `["suggestions-enabled", module]`, so toggling review while
+  the pane was open missed the invalidation the toggle fires — self-healed on refetch, but could
+  leave the pane's "applied vs. staged" branch briefly stale. Also fixed while in the area: the
+  panel store's `replace()` accepted a title update, but silently discarded it; and `EditorView`'s
+  `doc` prop (the pane's applied→editor handover) had no direct test coverage. `web` 0.111.0→
+  0.111.1 (PATCH).
+
+- **Infra: `task reconcile` silently reverted the docker-socket opt-in on every deploy** (#655) —
+  the #622 opt-in (`services/core-app/compose.docker-socket.yaml` + `DOCKER_GID`) only lasted
+  until the next pull-based reconcile: `infra/cd/reconcile.sh` ran plain
+  `docker compose up -d` with no overlay, so `core-app` was recreated without the socket mount,
+  silently dropping back to deferred-teardown mode (fails safe, but the opt-in didn't stick — the
+  pull-based reconcile is the actual deploy path, not a one-off `docker compose up`). Now
+  `reconcile.sh` reads `DOCKER_GID` the same way it already reads `EPICURUS_VERSION` /
+  `EPICURUS_TRACK_BRANCH` (env, falling back to `.env`) and includes the overlay on both the pull
+  and the up when it's set — unset stays exactly as fail-safe as before. `docs/infrastructure/`
+  updated to cover persisting the opt-in, not just the fresh-deploy default. Infra-only; no
+  component version change.
+
+- **Agent: nightly reflection never showed the model the document it was asked to rewrite**
+  (#658) — the `update` path's system prompt demanded "the FULL new text… it replaces what is
+  there," but `_build_prompt` passed only transcripts and recent rejections, and `list_playbooks`
+  was used for names only; `get_base` was never called. Since `instructions` is always an
+  `update` (there's nothing to create), that path asked for a full regeneration of text the model
+  had no access to — mostly rejectable noise, at the cost of a real gateway call per tenant per
+  night. Now the prompt includes the current base instructions (`get_base`) and every existing
+  playbook's current content — the model edits real text instead of reconstructing from nothing.
+  Folded in from the same review: the out-of-window `continue` in the session scan is now a
+  `break` (`sessions()` is DESC-ordered, so the first miss guarantees the rest miss), and
+  `test_reflection.py`'s model-override test now constructs the reflector with `model=` instead
+  of poking the private attribute, so `settings.playbook_reflection_model` reaching the
+  constructor is actually covered. `core-app` 0.83.1→0.83.2 (PATCH).
+
+- **Core: a DB error on the reserved review page emptied the entire Suggestions inbox** (#657) —
+  `ModuleRegistry._core_suggestions` caught only `HTTPException`, but the core review page is
+  dispatched **in-process** (no loopback HTTP), so a storage failure — e.g. a degraded startup
+  that left `playbook_proposals` uninitialized — surfaced as the driver's own exception and
+  escaped the handler, 500ing `GET /platform/v1/suggestions` and taking every module's pending
+  suggestions down with it, not just the core's own. Now catches bare `Exception` and logs a
+  warning instead, matching the precedent in `agent/instructions.py`'s enrichment fallback — a
+  broken core queue drops only its own entry, everything else in the feed survives. Also closed
+  the matching read/write asymmetry: `GET .../core/suggestions-enabled` now 403s like `PUT`
+  already did, rather than answering `true` for a toggle that can never exist (review of the
+  agent's own instructions/playbooks is mandatory, ADR-0093). `core-app` 0.83.0→0.83.1 (PATCH).
+
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never
   disabled — an earlier fix (ADR-0056) already made it tombstone the module immediately either

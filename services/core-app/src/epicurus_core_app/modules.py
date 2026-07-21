@@ -603,8 +603,11 @@ class ModuleRegistry:
 
         Read directly from Postgres (no manifest round-trip, like ``model_for_slot``) so a
         module can resolve its own setting cheaply via ``PlatformClient`` to decide whether to
-        stage a suggestion or apply the change directly.
+        stage a suggestion or apply the change directly. 403 for the reserved pseudo-module,
+        symmetric with :meth:`set_suggestions_enabled` — there is no toggle state to report
+        when review can never be turned off.
         """
+        self._reject_core_management(name, "queried for its review-enabled status")
         return await self._prefs.get_suggestions_enabled(self._tenant, name)
 
     async def set_suggestions_enabled(self, name: str, enabled: bool) -> None:
@@ -1438,7 +1441,14 @@ class ModuleRegistry:
                 continue
             try:
                 data = await core.get_page(page.id)
-            except HTTPException:  # a broken core page must not empty the whole inbox
+            except Exception as exc:  # a broken core page must not empty the whole inbox
+                # In-process call (no loopback HTTP), so a storage failure surfaces as
+                # SQLAlchemyError, not HTTPException — catch broadly, like instructions.py's
+                # enrichment fallback, or a degraded startup (init failure) 500s every module's
+                # suggestions too.
+                log.warning(
+                    "core suggestions page failed; skipping", page_id=page.id, error=str(exc)
+                )
                 continue
             for item in data.get("suggestions", []):
                 out.append({**item, "module": manifest.name, "page_id": page.id})

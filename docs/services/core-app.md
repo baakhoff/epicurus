@@ -189,9 +189,14 @@ run and makes **one** gateway call over them, asking for candidate edits; each i
 review. It is metered under **the tenant whose sessions it scanned** — never a synthetic
 background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details that matter:
 
-- **It cannot apply anything.** It is handed a proposal sink and a *read-only* playbook lookup,
-  never the stores that own the documents — the ADR's hard rule is enforced by construction, not
-  by discipline.
+- **It cannot apply anything.** It is handed a proposal sink and *read-only* playbook and
+  base-instructions lookups, never the stores that own the documents — the ADR's hard rule is
+  enforced by construction, not by discipline.
+- **The model sees what it's editing.** The prompt includes the current base instructions
+  (`AgentInstructionsStore.get_base`) and every existing playbook's current content, enabled or
+  not (matching the same set the operation-derivation rule below already treats as "known") —
+  an `update` is an edit against real text, not a from-scratch regeneration of a document the
+  model was never shown (#658).
 - **The operation is derived, not trusted.** A playbook the tenant already has is an `update`,
   otherwise a `create` — decided from what exists, because a mislabelled `create` would render an
   empty *current* side and hide from the operator exactly what their approval would overwrite.

@@ -36,6 +36,8 @@ import {
   ModelVariants,
   ModuleAttachmentItem,
   ModuleSnapshot,
+  NotificationCenterItem,
+  NotificationsUnreadCount,
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
@@ -303,6 +305,40 @@ export const api = {
     request(PushTestResult, "/platform/v1/push/test", {
       method: "POST",
       body: JSON.stringify({ category }),
+    }),
+
+  // In-app notification center (#671) — the durable record every push-worthy event lands
+  // in, written by the core's send path regardless of whether push itself delivered.
+  notifications: (filter?: { category?: string; unreadOnly?: boolean }) => {
+    const params = new URLSearchParams();
+    if (filter?.category) params.set("category", filter.category);
+    if (filter?.unreadOnly) params.set("unread_only", "true");
+    const qs = params.toString();
+    return request(
+      z.array(NotificationCenterItem),
+      `/platform/v1/notifications${qs ? `?${qs}` : ""}`,
+    );
+  },
+  notificationsUnreadCount: () =>
+    request(NotificationsUnreadCount, "/platform/v1/notifications/unread-count"),
+  markNotificationRead: async (id: string): Promise<void> => {
+    const response = await epFetch(`/platform/v1/notifications/${encodeURIComponent(id)}/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  markAllNotificationsRead: () =>
+    request(z.object({ marked: z.number() }), "/platform/v1/notifications/read-all", {
+      method: "POST",
     }),
 
   // The operator's drag-and-drop left-nav page order (#543), reordered on the Modules page.

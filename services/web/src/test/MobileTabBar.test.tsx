@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -5,6 +6,11 @@ import { describe, expect, it, vi } from "vitest";
 // The service-worker virtual module is a Vite plugin shim — absent under vitest.
 vi.mock("virtual:pwa-register/react", () => ({
   useRegisterSW: () => ({ needRefresh: [false], updateServiceWorker: vi.fn() }),
+}));
+
+// MobileTabBar's Notifications entry polls the unread count (#671) via useQuery.
+vi.mock("@/lib/api", () => ({
+  api: { notificationsUnreadCount: vi.fn().mockResolvedValue({ count: 0 }) },
 }));
 
 import { MobileTabBar } from "@/App";
@@ -22,10 +28,13 @@ const fades = (container: HTMLElement) =>
   [...container.querySelectorAll("[data-fade]")].map((el) => el.getAttribute("data-fade"));
 
 function renderBar() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
-    <MemoryRouter>
-      <MobileTabBar modulePages={pages} />
-    </MemoryRouter>,
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>
+        <MobileTabBar modulePages={pages} />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
   const scroller = utils.container.querySelector(".overflow-x-auto") as HTMLElement;
   Object.defineProperty(scroller, "scrollWidth", { value: 700, configurable: true });

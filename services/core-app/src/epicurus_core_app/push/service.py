@@ -7,9 +7,11 @@ notification" button (``push/routes.py``), since no event source exists yet to t
 real one; see docs/reference/notifications.md for the signature as the documented contract
 future callers code against.
 
-Every call resolves, in order: (1) the category/automation's effective push toggle — off
-skips delivery entirely; (2) quiet hours in the tenant's timezone (ADR-0039) — queues for
-a digest rather than sending; (3) an in-memory per-tenant rate cap — single-instance v1,
+Every call first records a notification-center row (``epicurus_core_app.notifications``) if
+the category/automation's ``center`` toggle is on — regardless of what push delivery does
+below (#671, ADR-0102 §4). Push delivery then resolves, in order: (1) the effective push
+toggle — off skips delivery entirely; (2) quiet hours in the tenant's timezone (ADR-0039) —
+queues for a digest rather than sending; (3) an in-memory per-tenant rate cap — single-instance v1,
 the same disposable-cache trade ADR-0055's live-run registry makes, not backed by a table
 since losing counts on a restart just under-limits for one window, never over-limits.
 Delivery itself fans out to every device via VAPID-signed webpush (RFC 8291/8292), pruning
@@ -30,6 +32,7 @@ from zoneinfo import ZoneInfo
 from pywebpush import WebPushException, webpush
 
 from epicurus_core import EventBus, SecretError, SecretStore, get_logger
+from epicurus_core_app.notifications import NotificationStore
 from epicurus_core_app.push.prefs import PushPrefsStore, is_quiet_now
 from epicurus_core_app.push.queue import PushQueueStore, QueuedPush
 from epicurus_core_app.push.subscriptions import PushSubscriptionStore
@@ -69,6 +72,7 @@ class PushService:
         subscriptions: PushSubscriptionStore,
         prefs: PushPrefsStore,
         queue: PushQueueStore,
+        notifications: NotificationStore,
         secrets: SecretStore,
         bus: EventBus,
         timezone: TimezoneProvider,
@@ -79,6 +83,7 @@ class PushService:
         self._subscriptions = subscriptions
         self.prefs = prefs
         self._queue = queue
+        self._notifications = notifications
         self._secrets = secrets
         self._bus = bus
         self._timezone = timezone
@@ -105,9 +110,22 @@ class PushService:
         entity_ref: dict[str, Any] | None = None,
         automation_id: str | None = None,
     ) -> NotifyResult:
-        """Route one notification: deliver now, queue for quiet hours, or skip."""
+        """Record the notification-center row (if `center` is on), then route push delivery:
+        deliver now, queue for quiet hours, or skip. The two are independent — a category can
+        have push off and center on (or vice versa), so the center write never depends on
+        anything push-related below it (#671, ADR-0102 §4)."""
         prefs = await self.prefs.get(tenant)
         effective = prefs.effective(category, automation_id)
+        if effective.center:
+            await self._notifications.create(
+                tenant=tenant,
+                category=category,
+                title=title,
+                body=body,
+                deep_link=deep_link,
+                entity_ref=entity_ref,
+                automation_id=automation_id,
+            )
         if not effective.push:
             return NotifyResult(outcome="skipped_disabled")
         local_now = await self._local_now()

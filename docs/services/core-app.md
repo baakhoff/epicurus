@@ -727,7 +727,7 @@ to gate it behind. Single-runner v1: one core instance evaluates the poll loop; 
 SaaS deployment needs leader election or a distributed queue so two instances can't double-fire
 the same row — a named follow-up, not attempted here.
 
-### Push notifications (ADR-0102)
+### Push notifications & the notification center (ADR-0102, ADR-0104)
 
 VAPID-signed web push: per-device subscriptions, per-category + quiet-hours preferences, and
 the send path. Full contract (endpoints, `PushPrefs`/`ChannelPrefs` shapes, the
@@ -760,6 +760,26 @@ sink and system notices once they land). The browser-facing surface
 Settings-surface only (ADR-0018): the web **Settings → Push notifications** card, not a
 module page. Service-worker handlers (`push`, `notificationclick`) live in
 `services/web/src/sw.ts` — see [web](web.md).
+
+**The notification center (#671, ADR-0104)** is the durable record every push-worthy event
+lands in — written by `PushService.notify()` itself, immediately, whenever a category's
+`center` toggle is on, **independent of what push delivery does** (a quiet-hours-queued or
+push-disabled notification still records a center row right away; ADR-0104 §1). There is no
+separate "record to the center" call site — one `notify()` call does both, gated by the same
+`PushPrefs.effective()` result but on two independent branches.
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/notifications` | List, newest first. Query params: `category?`, `unread_only?`. |
+| `GET /platform/v1/notifications/unread-count` | `{count}` — the shell badge's poll target. |
+| `POST /platform/v1/notifications/{id}/read` | Mark one read (idempotent). 404 unknown id. |
+| `POST /platform/v1/notifications/read-all` | Mark every unread notification read. |
+
+Also Settings-surface-adjacent (a fixed top-level page, `/notifications`, not a module page):
+the web **Notifications** screen, with a live unread-count badge on its own nav entry
+(polled every 15s, the same shape as the #492 "finished while you were away" watcher — not
+SSE; ADR-0104 §4). Retention is a per-tenant row cap (default 500), not time-based — see the
+[reference](../reference/notifications.md#retention).
 
 ### Events (NATS)
 
@@ -952,6 +972,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `push_queue`** — notifications a tenant's quiet hours deferred: `tenant`,
   `category`, `title`, `body`, `deep_link`, `entity_ref_json`, `queued_at`. Flushed as one
   digest push and cleared by `PushDigestScheduler` once the tenant's quiet window ends.
+- **Postgres `notifications`** — the notification center's durable record (#671, ADR-0104):
+  `id`, `tenant`, `category`, `title`, `body`, `deep_link`, `entity_ref_json`,
+  `automation_id`, `created_at`, `read_at` (`NULL` = unread). Written only by
+  `PushService.notify()`, immediately, whenever a category's `center` toggle is on —
+  independent of push delivery's own outcome. Retention is a per-tenant row cap (default
+  500; `NotificationStore(max_per_tenant=...)`), pruned oldest-first on every insert — not
+  time-based, unlike the module-event log's day-based retention (ADR-0103 §5).
 - **In-memory live runs** (`LiveRunRegistry`, ADR-0055) — *not* persisted: each in-flight turn's
   detached task + its seq-tagged event buffer, keyed by `run_id` and indexed by `(tenant,
   session_id)`. Disposable cache for re-attach; the authoritative answer lands in `agent_messages`.

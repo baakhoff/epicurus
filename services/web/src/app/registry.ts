@@ -4,7 +4,7 @@
  * entries here without restructuring the shell.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, Blocks, Cpu, Folder, Inbox, MessageCircle, Settings } from "lucide-react";
+import { Activity, Bell, Blocks, Cpu, Folder, Inbox, MessageCircle, Settings } from "lucide-react";
 
 import type { ModuleSnapshot, PageArchetype } from "@/lib/contracts";
 
@@ -14,6 +14,9 @@ export interface Surface {
   icon: LucideIcon;
 }
 
+/** The one surface with a live shell badge — see App.tsx's NavBadge. */
+export const NOTIFICATIONS_PATH = "/notifications";
+
 // Memory is no longer a top-level surface — it lives at the foot of Settings, since it's
 // reference you curate occasionally rather than a place you visit often (ADR-0045).
 export const SURFACES: Surface[] = [
@@ -21,6 +24,9 @@ export const SURFACES: Surface[] = [
   // One inbox for every module's agent-proposed changes (#KB-refactor). The per-module review
   // pages no longer get their own nav entry — this surface aggregates them all.
   { path: "/suggestions", label: "Suggestions", icon: Inbox },
+  // The durable record of every push-worthy event (#671, ADR-0102) — a core page, not a
+  // module page; its shell-rendered unread badge is bespoke to this one entry (App.tsx).
+  { path: "/notifications", label: "Notifications", icon: Bell },
   { path: "/models", label: "Models", icon: Cpu },
   { path: "/modules", label: "Modules", icon: Blocks },
   // The file space is a core-owned surface (ADR-0063) — the Files browser no longer

@@ -102,6 +102,8 @@ from epicurus_core_app.modules import (
     create_modules_router,
     create_suggestions_router,
 )
+from epicurus_core_app.notifications import NotificationStore
+from epicurus_core_app.notifications_routes import create_notifications_router
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.object_backend import StorageObjectBackend
@@ -230,10 +232,15 @@ def create_app() -> FastAPI:
     push_subscriptions = PushSubscriptionStore(engine)
     push_prefs = PushPrefsStore(engine)
     push_queue = PushQueueStore(engine)
+    # The notification center (#671): the durable record every push-worthy event lands in,
+    # written by push_service.notify() itself whenever a category's `center` toggle is on —
+    # independent of whether push delivery fires, queues, or skips (ADR-0102 §4).
+    notifications = NotificationStore(engine)
     push_service = PushService(
         subscriptions=push_subscriptions,
         prefs=push_prefs,
         queue=push_queue,
+        notifications=notifications,
         secrets=secrets,
         bus=bus,
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
@@ -532,6 +539,10 @@ def create_app() -> FastAPI:
                 "push queue init failed; quiet-hours digest queueing disabled", error=str(exc)
             )
         try:
+            await notifications.init()
+        except Exception as exc:
+            log.error("notification center init failed; notifications disabled", error=str(exc))
+        try:
             await maintenance_schedule_prefs.init()
         except Exception as exc:
             log.error(
@@ -747,6 +758,9 @@ def create_app() -> FastAPI:
             prefs=push_prefs,
             default_tenant=settings.default_tenant_id,
         )
+    )
+    app.include_router(
+        create_notifications_router(notifications, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(

@@ -28,6 +28,17 @@ images to GHCR.
   system notices — today's only caller is the settings UI's test button. Desktop Chrome/Edge
   and installed Android/iOS PWA (16.4+) both work. Implements ADR-0102. `core-app`
   0.83.0→0.84.0 (MINOR), `web` 0.111.0→0.112.0 (MINOR).
+- **Push: in-app notification center** (#671) — the durable record every push-worthy
+  notification lands in, written by `PushService.notify()` itself the instant a category's
+  `center` toggle is on — independent of whether push delivery fires, queues for quiet
+  hours, or is itself disabled, so a quiet-hours-suppressed push still appears in the center
+  immediately rather than waiting for the digest. A new **Notifications** page (list, category
+  filter, unread-only filter, mark read / mark all read, `EntityRef` hover-cards + deep links
+  via the existing `CardLink`) and a live unread-count badge on its own nav entry (polled every
+  15s, the same shape as the #492 "finished while you were away" watcher). Retention is a
+  per-tenant row cap (500), not time-based. Stacks on #670's shared `{push, center}` prefs
+  object — no second settings surface. Implements ADR-0104. `core-app` 0.84.0→0.85.0 (MINOR),
+  `web` 0.112.0→0.113.0 (MINOR).
 - **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
   governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
   job on the maintenance orchestrator's nightly batch (additive — one entry appended to the

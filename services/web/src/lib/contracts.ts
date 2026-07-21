@@ -263,6 +263,27 @@ export const EntityRef = z.object({
 });
 export type EntityRef = z.infer<typeof EntityRef>;
 
+/**
+ * One row in the in-app notification center (#671) — the durable record of every
+ * push-worthy event, independent of whether push itself delivered (ADR-0102). `entity_ref`
+ * is `null` until a future caller populates it (ADR-0019's hover-card contract).
+ */
+export const NotificationCenterItem = z.object({
+  id: z.string(),
+  category: z.string(),
+  title: z.string(),
+  body: z.string(),
+  deep_link: z.string().nullable().default(null),
+  entity_ref: EntityRef.nullable().default(null),
+  automation_id: z.string().nullable().default(null),
+  created_at: z.string(),
+  read_at: z.string().nullable().default(null),
+});
+export type NotificationCenterItem = z.infer<typeof NotificationCenterItem>;
+
+export const NotificationsUnreadCount = z.object({ count: z.number() });
+export type NotificationsUnreadCount = z.infer<typeof NotificationsUnreadCount>;
+
 /** Context the user attached to a message (ADR-0019). */
 export const Attachment = z.object({
   att_id: z.string(),

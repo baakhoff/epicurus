@@ -134,7 +134,9 @@ def _reply(*proposals: dict[str, Any]) -> str:
     return json.dumps({"proposals": list(proposals)})
 
 
-async def _fresh(replies: list[str] | None = None, chat: _FakeChat | None = None) -> _Harness:
+async def _fresh(
+    replies: list[str] | None = None, chat: _FakeChat | None = None, model: str | None = None
+) -> _Harness:
     engine = _engine()
     playbooks = PlaybookStore(engine)
     proposals = PlaybookProposalStore(engine)
@@ -144,7 +146,9 @@ async def _fresh(replies: list[str] | None = None, chat: _FakeChat | None = None
         await s.init()
     sessions = _FakeSessions()
     the_chat = chat or _FakeChat(replies)
-    reflector = PlaybookReflector(the_chat, sessions, proposals, playbooks, state)
+    reflector = PlaybookReflector(
+        the_chat, sessions, proposals, playbooks, instructions, state, model=model
+    )
     page = CoreReviewPage(
         store=proposals,
         instructions=instructions,
@@ -277,6 +281,69 @@ async def test_base_instructions_are_always_an_update() -> None:
     assert s.operation == "update"
 
 
+# ── the model sees what it's editing (#658) ──────────────────────────────────
+
+
+async def test_the_prompt_shows_the_current_base_instructions() -> None:
+    h = await _fresh()
+    await h.instructions.set_instructions(TENANT, "Be concise and cite sources.")
+    _seed(h)
+
+    await h.reflector.run()
+    assert "Be concise and cite sources." in h.chat.prompts[0]
+
+
+async def test_the_prompt_shows_the_shipped_default_when_no_base_is_set() -> None:
+    h = await _fresh()
+    _seed(h)
+
+    await h.reflector.run()
+    assert "BASE" in h.chat.prompts[0]  # the harness's AgentInstructionsStore default
+
+
+async def test_the_prompt_shows_an_existing_playbooks_current_content() -> None:
+    h = await _fresh()
+    await h.playbooks.create(TENANT, name="Briefing", content="Check calendar before mail.")
+    _seed(h)
+
+    await h.reflector.run()
+    prompt = h.chat.prompts[0]
+    assert "Briefing" in prompt
+    assert "Check calendar before mail." in prompt
+
+
+async def test_a_disabled_playbooks_content_is_still_shown() -> None:
+    """`_stage`'s dedup already treats a disabled playbook as known (a proposal against it is an
+    update, not a duplicate create) — the prompt must show the same set, or the model could be
+    asked to "update" a document it was never actually shown."""
+    h = await _fresh()
+    p = await h.playbooks.create(TENANT, name="Old flow", content="stale guidance")
+    await h.playbooks.set_enabled(TENANT, p.id, False)
+    _seed(h)
+
+    await h.reflector.run()
+    assert "stale guidance" in h.chat.prompts[0]
+
+
+async def test_the_prompt_only_shows_the_scanned_tenants_own_documents() -> None:
+    """A cross-tenant leak would surface here: two tenants, each with distinct base instructions
+    and a distinct playbook, both scanned in the same `run()` fan-out (constraint #1)."""
+    h = await _fresh()
+    await h.instructions.set_instructions(TENANT, "acme's own prompt")
+    await h.playbooks.create(TENANT, name="Acme playbook", content="acme's own guidance")
+    await h.instructions.set_instructions("globex", "globex's own prompt")
+    await h.playbooks.create("globex", name="Globex playbook", content="globex's own guidance")
+    _seed(h, tenant=TENANT, sid="a1")
+    _seed(h, tenant="globex", sid="g1")
+
+    await h.reflector.run()
+    calls = {c["tenant_id"]: str(c["messages"][-1].content) for c in h.chat.calls}
+    assert "acme's own prompt" in calls[TENANT]
+    assert "globex's own prompt" not in calls[TENANT]
+    assert "globex's own prompt" in calls["globex"]
+    assert "acme's own prompt" not in calls["globex"]
+
+
 # ── the scan window + watermark ──────────────────────────────────────────────
 
 
@@ -396,7 +463,10 @@ async def test_approved_proposals_are_not_given_as_negative_context() -> None:
     _seed(h)
 
     await h.reflector.run()
-    assert "a good idea" not in h.chat.prompts[0]
+    # Approving writes "a good idea" as the tenant's actual base instructions, so it correctly
+    # reappears in the *current documents* section (#658) — what must NOT happen is the separate
+    # negative-context block, which only renders when something was actually rejected.
+    assert "REJECTED" not in h.chat.prompts[0]
 
 
 async def test_another_tenants_rejections_are_never_shown() -> None:
@@ -503,8 +573,10 @@ async def test_a_valid_proposal_survives_alongside_an_invalid_one() -> None:
 
 
 async def test_the_configured_model_is_passed_to_the_gateway() -> None:
-    h = await _fresh()
-    h.reflector._model = "small-model"
+    """Constructed with `model=`, the same kwarg `settings.playbook_reflection_model` reaches
+    in `app.py` — not poked onto the instance after the fact, which would leave the constructor
+    wiring itself uncovered (#658)."""
+    h = await _fresh(model="small-model")
     _seed(h)
     await h.reflector.run()
     assert h.chat.calls[0]["model"] == "small-model"

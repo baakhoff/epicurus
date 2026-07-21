@@ -243,14 +243,15 @@ def create_app() -> FastAPI:
     playbook_proposals = PlaybookProposalStore(engine)
     # The nightly pass that *proposes* those edits (ADR-0093 §1): one gateway call per active
     # tenant over the sessions it saw since its last run, metered under that tenant (§5). It is
-    # handed the proposal sink and a read-only playbook lookup — never the stores that own the
-    # documents — so it is structurally incapable of applying anything itself.
+    # handed the proposal sink and read-only playbook + base-instructions lookups — never the
+    # stores that own the documents — so it is structurally incapable of applying anything itself.
     playbook_reflection_state = ReflectionStateStore(engine)
     playbook_reflector = PlaybookReflector(
         gateway,
         conversation_store,
         playbook_proposals,
         agent_playbooks,
+        agent_instructions,
         playbook_reflection_state,
         tenants=conversation_store.distinct_tenants,
         model=settings.playbook_reflection_model or None,

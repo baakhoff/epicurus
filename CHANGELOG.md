@@ -14,6 +14,20 @@ images to GHCR.
 
 ### Added
 
+- **Push: web push end-to-end** (#670) — VAPID-signed browser push, the "push alerts" half of
+  event-driven proactivity. A tenant's VAPID keypair is generated on first send and stored in
+  OpenBao — no operator provisioning step. Per-category + quiet-hours preferences
+  (`push_prefs`, shared with the notification center, #671) gate every send: category off
+  skips it, quiet hours (tenant timezone, ADR-0039) queue it for one summary digest once the
+  window ends rather than dropping it, and an in-memory per-tenant rate cap is the last gate.
+  A subscription the push service reports Gone (404/410) is pruned automatically.
+  `services/web/src/sw.ts` gains `push`/`notificationclick` handlers; a new Settings → Push
+  notifications card handles this-device subscribe/unsubscribe, per-device management,
+  category toggles, quiet hours, and a test-notification button. `PushService.notify()` is a
+  core-internal contract (no HTTP route) for the automations engine's future push sink and
+  system notices — today's only caller is the settings UI's test button. Desktop Chrome/Edge
+  and installed Android/iOS PWA (16.4+) both work. Implements ADR-0102. `core-app`
+  0.83.0→0.84.0 (MINOR), `web` 0.111.0→0.112.0 (MINOR).
 - **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
   governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
   job on the maintenance orchestrator's nightly batch (additive — one entry appended to the

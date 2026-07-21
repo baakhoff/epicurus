@@ -727,10 +727,46 @@ to gate it behind. Single-runner v1: one core instance evaluates the poll loop; 
 SaaS deployment needs leader election or a distributed queue so two instances can't double-fire
 the same row — a named follow-up, not attempted here.
 
+### Push notifications (ADR-0102)
+
+VAPID-signed web push: per-device subscriptions, per-category + quiet-hours preferences, and
+the send path. Full contract (endpoints, `PushPrefs`/`ChannelPrefs` shapes, the
+`PushService.notify` core-internal signature, VAPID key lifecycle, the quiet-hours digest
+scheduler) is in [the reference](../reference/notifications.md) — this is the summary.
+
+A tenant's VAPID keypair is generated lazily (first send, or the first key request) and
+stored in OpenBao; there is no operator provisioning step. A notification's category and
+(optionally) an automation id resolve an effective push/center toggle
+(`PushPrefsStore.get(tenant).effective(category, automation_id)`); if push is on, the tenant's
+quiet-hours window (local time, ADR-0039) decides whether it sends now or is held in
+`push_queue` for `PushDigestScheduler` — a plain poll loop (`PUSH_QUIET_POLL_INTERVAL_S`,
+default 60s) — to deliver as one digest push once the window ends. A per-tenant rate cap
+(`PUSH_RATE_CAP_PER_HOUR`, default 30, in-memory/single-instance) is the last gate before
+fan-out; a subscription the push service reports Gone (404/410) is pruned automatically.
+
+`PushService.notify()` has **no HTTP route** — it's a core-internal contract for other
+core code (the settings UI's test-notification button today; the automations engine's push
+sink and system notices once they land). The browser-facing surface
+(`/platform/v1/push/*`) is subscribe/unsubscribe, prefs, and the VAPID public key only.
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/push/vapid-public-key` | The tenant's `applicationServerKey` (generated on first call). |
+| `GET`/`POST /platform/v1/push/subscriptions` | List / register a device. |
+| `DELETE /platform/v1/push/subscriptions/{id}` | Unsubscribe a device. |
+| `GET`/`PUT /platform/v1/push/prefs` | Read / partially update categories + quiet hours. |
+| `POST /platform/v1/push/test` | Send one real notification through the full pipeline (manual verification). |
+
+Settings-surface only (ADR-0018): the web **Settings → Push notifications** card, not a
+module page. Service-worker handlers (`push`, `notificationclick`) live in
+`services/web/src/sw.ts` — see [web](web.md).
+
 ### Events (NATS)
 
 Emits **`<tenant>.llm.usage`** after every inference call — model, token counts, latency.
 No prompt/response content, no keys. Feeds observability now and SaaS metering later.
+Emits **`<tenant>.push.sent`** after every push delivery attempt (best-effort, never gates
+the send) — `{tenant, category, device_count}`.
 
 **Inbound messaging consumer (ADR-0058)** — the first *inbound* NATS subscriber in core (the
 foundation for Phase 4 chat bridges). It **consumes `<tenant>.messaging.inbound`**
@@ -781,6 +817,9 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
 | `SCHEDULED_TURNS_POLL_INTERVAL_S` | `60` | How often the scheduled-turns poll loop checks for a due row (ADR-0092). |
+| `PUSH_VAPID_SUBJECT` | `mailto:admin@example.com` | Contact identity in the VAPID JWT (RFC 8292); set for a real deployment (#670, ADR-0102). |
+| `PUSH_RATE_CAP_PER_HOUR` | `30` | Max push notifications per tenant per hour, across every category/device (in-memory, single-instance); `0` disables the cap. |
+| `PUSH_QUIET_POLL_INTERVAL_S` | `60` | How often the quiet-hours digest scheduler checks for a tenant whose window just ended. |
 | `OTEL_TRACES_ENABLED` | `false` | Emit OpenTelemetry traces — the agent loop, platform API, and event bus — to Tempo (#57). See the [tracing reference](../reference/observability.md#tracing-57-adr-0068). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://tempo:4318` | OTLP/HTTP base URL for traces (the exporter appends `/v1/traces`). |
 
@@ -900,6 +939,19 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `created_at`, `last_run_at`, `last_status`. `last_run_at` is set on both a real run and a
   paused-skip, so the scheduler's poll tick evaluates a row's due-ness at most once per
   matching window.
+- **Postgres `push_subscriptions`** — one row per subscribed device (#670, ADR-0102): `id`,
+  `tenant`, `endpoint`, `p256dh`, `auth` (the browser's `PushSubscription` — encryption keys
+  never leave this table; the API never returns them), `device_label`, `created_at`,
+  `last_seen_at`. Upserted on `(tenant, endpoint)`; deleted on operator unsubscribe or when
+  the push service reports the endpoint Gone (404/410).
+- **Postgres `push_prefs`** — one row per tenant, the settings-primitives shape (self-healing
+  `init()`, unset falls back to a default): `categories` (JSON `{category: {push, center}}`,
+  shared with #671's notification center), `automation_overrides` (JSON, same shape, keyed by
+  automation id — no HTTP route yet), `quiet_hours_enabled`, `quiet_hours_start`,
+  `quiet_hours_end` (`"HH:MM"`, tenant-local, ADR-0039).
+- **Postgres `push_queue`** — notifications a tenant's quiet hours deferred: `tenant`,
+  `category`, `title`, `body`, `deep_link`, `entity_ref_json`, `queued_at`. Flushed as one
+  digest push and cleared by `PushDigestScheduler` once the tenant's quiet window ends.
 - **In-memory live runs** (`LiveRunRegistry`, ADR-0055) — *not* persisted: each in-flight turn's
   detached task + its seq-tagged event buffer, keyed by `run_id` and indexed by `(tenant,
   session_id)`. Disposable cache for re-attach; the authoritative answer lands in `agent_messages`.

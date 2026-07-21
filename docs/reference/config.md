@@ -116,6 +116,9 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `files_s3_access_key` / `files_s3_secret_key` | `FILES_S3_ACCESS_KEY` / `FILES_S3_SECRET_KEY` | `str` | `epicurus` / `epicurus-dev` | S3 credentials (dev defaults; OpenBao later). |
 | `files_watch` | `FILES_WATCH` | `bool` | `true` | Watch the mounted file space and **incrementally rescan on change** so files landed after startup show in the core Files page and search without a restart (ADR-0063). On by default. Set `false` for startup-only scanning. |
 | `files_watch_debounce_ms` | `FILES_WATCH_DEBOUNCE_MS` | `int` | `1500` | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires. |
+| `push_vapid_subject` | `PUSH_VAPID_SUBJECT` | `str` | `mailto:admin@example.com` | Contact identity in the VAPID JWT (RFC 8292) — a `mailto:`/`https:` URL a push service can use to reach the operator. Set it for a real deployment (#670, ADR-0102); the default is a neutral placeholder, not a working inbox. |
+| `push_rate_cap_per_hour` | `PUSH_RATE_CAP_PER_HOUR` | `int` | `30` | Max push notifications delivered per tenant per hour, across every category/device — in-memory, single-instance v1 (ADR-0102 §3). `0` disables the cap. |
+| `push_quiet_poll_interval_s` | `PUSH_QUIET_POLL_INTERVAL_S` | `int` | `60` | How often the quiet-hours digest scheduler checks whether a tenant's quiet window just ended (a plain poll, mirroring maintenance/scheduled-turns). |
 
 ### Properties
 

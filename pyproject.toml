@@ -29,8 +29,8 @@ dev = [
     # upward and the bump rides invisibly inside an unrelated PR's lockfile — a
     # green-local/red-CI split (#514: mypy 1.13 -> 2.1.0 flagged new no-any-return).
     # Bump these deliberately, in their own chore PR.
-    "ruff==0.15.20",
-    "mypy==2.1.0",
+    "ruff==0.15.22",
+    "mypy==2.3.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",

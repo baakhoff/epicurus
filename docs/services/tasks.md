@@ -405,6 +405,39 @@ attach proxy forwards no list selector).
 - Additional scopes required: `https://www.googleapis.com/auth/tasks`
   (requested at connect time via the incremental-scopes mechanism, issue #102).
 
+## Module events (ADR-0103, #664)
+
+Emitted on the module event spine (`epicurus_core.module_events.emit_event`), not a raw
+`EventBus.publish` — see [the event catalog](../reference/events.md#the-event-catalog) for the
+full envelope shape, payload discipline, and `dedup_key` convention. Base subject shown; the
+wire subject gains the spine's `events.` prefix and is tenant-scoped.
+
+| Event | Emitted from | Condition |
+| --- | --- | --- |
+| `tasks.task_created` | `TasksRouter.add_task` | A new task was created through this module. |
+| `tasks.task_completed` | `TasksRouter.complete_task` | A task was marked done. |
+| `tasks.task_updated` | `TasksRouter.update_task` | An existing task was edited (not a cross-list move — see `task_moved`). `dedup_key` includes a change hash of the task's mutable fields, same posture as `calendar.event_updated`: a genuinely different edit gets its own log entry; a retried write with identical resulting state dedups. |
+| `tasks.task_moved` | `TasksRouter._move_task` | A task moved between lists (the ADR-0038/#257 cross-list seam — Google Tasks has no move API, so a move recreates in the target then deletes the source). Fires instead of `task_updated`, not alongside it. |
+| `tasks.task_due_soon` | The lead-time scheduler (`epicurus_tasks.scheduler`) | An open task is within its configured lead time of its due date (tenant setting, default 1 day) — fires at most once per task via a durable marker. |
+| `tasks.task_overdue` | The lead-time scheduler | An open task's due date has passed — fires at most once per task. |
+
+**A recurring task's auto-materialized successor does not emit `task_created`.** The overdue
+sweep and on-complete materialization (`TasksRouter._materialize`, ADR-0082) call the *inner*
+provider's `add_task` directly, bypassing this router's own `add_task` — a known, deliberate
+scope limit for this PR, not an oversight.
+
+**The lead-time scheduler** (`epicurus_tasks.scheduler`) is tasks' first periodic background
+job — the same pattern as calendar's new one (#664), a poll loop started/stopped with the app
+lifespan, ticking every `SCHEDULER_POLL_INTERVAL_S` (default 300s — day-granular leads don't
+need calendar's minute-level polling). Unlike calendar's pure-instant lead math, a task's `due`
+is a **date**: "due within N days" is evaluated against the *operator's local calendar day*
+(ADR-0039), reusing the exact `operator_clock` the overdue-recurrence sweep already resolves —
+the scheduler and the sweep can never disagree about what day it is. Fire-once state lives in
+the `tasks_fired_markers` table (below), keyed `(tenant, task_id, marker)` with a database
+uniqueness constraint deciding races, not a read-then-write check — proven to survive a process
+restart. The lead time itself is a tenant setting (`tasks_lead_time_prefs`, below) — storage
+only in this PR, no operator-facing settings UI yet.
+
 ## Configuration
 
 `TasksSettings` extends [`CoreSettings`](../reference/config.md). There is **no
@@ -416,6 +449,7 @@ and routes to the connected Google list the operator selects, which lives in the
 | --- | --- | --- |
 | `PLATFORM_URL` | `http://core-app:8080` | Core service URL for OAuth token, collection prefs, and platform API calls. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Postgres DSN for the local default store. |
+| `SCHEDULER_POLL_INTERVAL_S` | `300` | How often the lead-time scheduler ticks (#664) — `task_due_soon`/`task_overdue`. |
 
 ## Data model
 
@@ -476,10 +510,21 @@ OpenBao by the core's OAuth subsystem under `oauth/tokens/google` (tenant-scoped
 Google task's rule is the exception: it lives in the module's `task_repeats` table above
 (Google Tasks has no recurrence field), keyed by the provider list + task id (ADR-0082).
 
+### Lead-time scheduler (#664)
+
+Two more tables, in the same shared Postgres:
+
+| Table | Scope | Holds |
+| --- | --- | --- |
+| `tasks_lead_time_prefs` | `(tenant)` PK | The `task_due_soon` lead time in days; `NULL`/missing falls back to `DEFAULT_LEAD_DAYS` (1). |
+| `tasks_fired_markers` | `(tenant, task_id, marker)` unique | A fire-once claim — `task_id` is provider-qualified (`"local:<id>"` / `"google:<id>"`, inferred from `Task.list_id` the same way `TasksRouter._stamp` distinguishes local from external), `marker` is `"due_soon"` or `"overdue"`, `fired_at_ns` (`BigInteger`, nanosecond epoch) records when. A row's mere existence is the claim; a second insert attempt for the same key violates the unique constraint and is read as "already fired," not an error. |
+
 ## Dependencies
 
 core-app (OAuth token endpoint) · Postgres (`local` provider + the `task_repeats` recurrence
-side table) · NATS · `python-dateutil` (RRULE expansion for materialization, #471).
+side table + the lead-time scheduler tables, #664) · NATS (module event spine: `task_created`/
+`task_completed`/`task_updated`/`task_moved`/`task_due_soon`/`task_overdue`) ·
+`python-dateutil` (RRULE expansion for materialization, #471).
 
 ## Run & extend
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -25,10 +25,11 @@ from epicurus_core import (
 )
 from epicurus_notes.attachments import NotesAttachments, create_attachments_router
 from epicurus_notes.db import NoteFolderStore, NotesStore
+from epicurus_notes.events import NoteEventEmitter
 from epicurus_notes.indexer import NotesIndexer
 from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
-from epicurus_notes.service import MODULE_NAME, SAVED_SUBJECT, build_module
+from epicurus_notes.service import MODULE_NAME, build_module
 from epicurus_notes.settings import NotesSettings
 from epicurus_notes.suggestions import (
     NoteSuggestionAuditStore,
@@ -70,9 +71,10 @@ def create_app() -> FastAPI:
     suggestion_audit = NoteSuggestionAuditStore(engine)
     folders = NoteFolderStore(engine)
 
-    async def _on_saved(slug: str) -> None:
-        """Announce a saved note on NATS (tenant-scoped) for downstream consumers."""
-        await bus.publish(SAVED_SUBJECT, {"slug": slug}, tenant_id=tenant)
+    # Spine emitters (#665): created/deleted immediate, updated debounced to settled saves.
+    # Replaces the legacy bare `notes.saved` publish, which had no consumer — the same
+    # migration mail.sent made onto the spine (#663).
+    events = NoteEventEmitter(bus, tenant=tenant, debounce_s=settings.notes_events_debounce_s)
 
     # Tenant-scope the file tree (constraint #1): <files-root>/<tenant>/notes. The mirror now
     # writes through the core file API (ADR-0065) — notes mounts no shared volume; notes_root
@@ -83,9 +85,7 @@ def create_app() -> FastAPI:
     mirror = NotesMirror(
         notes_root, store, tenant=tenant, platform=platform, core_prefix=settings.notes_root.name
     )
-    pages = NotesPages(
-        store, indexer, tenant=tenant, on_saved=_on_saved, mirror=mirror, folders=folders
-    )
+    pages = NotesPages(store, indexer, tenant=tenant, events=events, mirror=mirror, folders=folders)
     attachments = NotesAttachments(store, tenant=tenant)
     # Applies/discards agent-proposed note changes on the operator's word (ADR-0033).
     review = NoteSuggestionReview(
@@ -106,10 +106,18 @@ def create_app() -> FastAPI:
             # One-time copy of pre-existing notes into the shared file space (#KB-refactor).
             await mirror.backfill()
             await bus.connect()
+            # Sweeps debounced note_updated events to settledness (#665).
+            sweeper = asyncio.create_task(events.run())
             log.info("notes service ready", tenant=tenant)
             try:
                 yield
             finally:
+                sweeper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sweeper
+                # Emit anything still pending while the bus is open — a restart must not
+                # swallow a settled-but-unswept editing session. Best-effort inside.
+                await events.flush_all()
                 await bus.close()
                 await engine.dispose()
                 await qdrant.close()

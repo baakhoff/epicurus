@@ -25,9 +25,11 @@ from epicurus_core import (
     PlatformClient,
     UiSection,
     WritesDocument,
+    event_subject,
     tool_envelope,
 )
 from epicurus_notes.db import NotesStore
+from epicurus_notes.events import NOTE_CREATED, NOTE_DELETED, NOTE_UPDATED
 from epicurus_notes.pages import NOTES_PAGE_ID
 from epicurus_notes.suggestions import (
     REVIEW_PAGE_ID,
@@ -37,9 +39,6 @@ from epicurus_notes.suggestions import (
 )
 
 MODULE_NAME = "notes"
-
-# Published after a note is saved and (best-effort) indexed. Tenant-scoped at runtime.
-SAVED_SUBJECT = "notes.saved"
 
 _MAX_SLUG = 512
 
@@ -67,7 +66,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.8.0",
+        version="0.9.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -106,7 +105,22 @@ def build_module(
         ),
     )
 
-    module.emits(SAVED_SUBJECT, "published after a note is saved and indexed")
+    # Spine emitters (#665) — replaces the legacy bare `notes.saved` subject, which had no
+    # consumer (the same migration mail.sent made, #663). Updates are debounced to settled
+    # saves; created/deleted fire immediately.
+    module.emits(
+        event_subject(NOTE_CREATED),
+        "a note came into existence (editor or approved suggestion)",
+    )
+    module.emits(
+        event_subject(NOTE_UPDATED),
+        "a note's editing session settled — debounced, one event per quiet window, "
+        "carrying the last save's timestamp",
+    )
+    module.emits(
+        event_subject(NOTE_DELETED),
+        "a note was deleted (editor or approved suggestion)",
+    )
 
     # ── Read-only structure (titles only — never bodies; notes are private) ──────
 

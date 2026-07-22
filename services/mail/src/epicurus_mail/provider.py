@@ -58,6 +58,12 @@ class MailMessage(BaseModel):
     # Attachments carried by the message (ADR-0087). Populated only on a full read
     # (``read`` / ``get_thread``); a metadata-only search/list leaves it empty.
     attachments: list[MailAttachment] = Field(default_factory=list)
+    # The folders/labels this specific message carries (#663) — narrower than a thread's
+    # aggregate ``MailThreadSummary.label_ids``, since one message in a multi-message thread
+    # may not carry every label the thread as a whole does. Populated on a full read; used to
+    # derive the ``folder`` on a ``mail.received`` event so it reflects the message's own
+    # placement rather than whichever label happened to trigger the reconcile that found it.
+    label_ids: list[str] = Field(default_factory=list)
 
 
 class MailLabel(BaseModel):
@@ -170,9 +176,15 @@ class ThreadChanges(BaseModel):
     week, an IMAP ``UIDVALIDITY`` rotation drops the namespace — signalling the orchestrator to
     fall back to a full resync. An empty ``changed_thread_ids`` with a fresh ``next_cursor``
     means "nothing changed" (the cheap common case).
+
+    ``new_message_ids`` (#663) is message-granular, unlike ``changed_thread_ids``: the strict
+    subset of this delta that is a message genuinely *arriving*, not a flag flip (read/unread,
+    archived) or a message leaving. It is what a ``mail.received`` emission iterates — a flag
+    flip on an existing message must never fire it, only a new one.
     """
 
     changed_thread_ids: set[str] = Field(default_factory=set)
+    new_message_ids: set[str] = Field(default_factory=set)
     next_cursor: MailCursor = Field(default_factory=MailCursor)
 
 

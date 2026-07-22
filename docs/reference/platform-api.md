@@ -474,6 +474,11 @@ is composed into this feed explicitly (it has no base URL to fan out to), with t
 best-effort tolerance. To every consumer it is just another entry — the point of conforming to
 the existing contract rather than inventing a second one.
 
+Because the core's queue is dispatched in-process rather than over HTTP, its best-effort
+tolerance catches any exception, not just the `HTTPException` a probed module's failed request
+would raise — a storage error (e.g. a degraded startup that left `playbook_proposals` uninitialized)
+is logged and skipped rather than 500ing the whole feed (#657).
+
 ```json
 [
   {
@@ -538,6 +543,11 @@ The per-module **review on/off** toggle (#KB-refactor) — `{ "enabled": true }`
 through the normal apply path). The review-page header reads `GET` and writes `PUT`; `PUT`
 **404**s an unknown module. Persisted in `module_prefs`. Generic across any module with a
 `review` page — today knowledge and notes.
+
+Both verbs **403** for the reserved `core` pseudo-module — review of the agent's own
+instructions/playbooks is mandatory (ADR-0093) and can never be switched off, so there is no
+toggle state for `GET` to report either (#657). The shell already knows this and never queries
+the endpoint for `core` (`reviewIsMandatory`).
 
 **Except `core`**, where `PUT` is a **403**: review of the agent's own instructions and playbooks
 is mandatory (ADR-0093's hard rule — agent-proposed guidance never self-applies and no path

@@ -114,6 +114,20 @@ this Compose project, never core-app / web / a data-plane service — that scopi
 grant, it doesn't replace treating it as privileged. Full tradeoff and rationale in
 `services/core-app/compose.docker-socket.yaml`'s header comment.
 
+**Persisting the opt-in across reconciles (#655).** `task up` / `docker compose up` alone never
+picks up the overlay (that's the point of it not being named `compose.override.yaml`), and
+neither does the pull-based [auto-deploy](auto-deploy.md) reconcile — *unless* `DOCKER_GID` is
+set in the root `.env`, the same file `EPICURUS_VERSION`/`EPICURUS_TRACK_BRANCH` already live in.
+Add it once:
+
+```env
+DOCKER_GID=999   # from `getent group docker | cut -d: -f3` / `stat -c '%g' /var/run/docker.sock`
+```
+
+and every subsequent `task reconcile` includes the overlay automatically. Leave it unset (the
+default) and reconcile stays fail-safe — the socket mount reverts to off on the next run, exactly
+like a fresh `docker compose up`.
+
 ## Ollama (local LLM runtime)
 
 Runs **as a container** (ADR-0011), CPU by default and GPU opt-in via an overlay

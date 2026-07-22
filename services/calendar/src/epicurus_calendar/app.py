@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -12,11 +13,13 @@ from fastapi import FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
+from epicurus_calendar.lead_time_prefs import LeadTimePrefsStore
 from epicurus_calendar.models import Event
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.google import GoogleCalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
 from epicurus_calendar.providers.router import CollectionRouter
+from epicurus_calendar.scheduler import FiredMarkerStore, run_periodic
 from epicurus_calendar.service import (
     CALENDAR_PAGE_ID,
     EVENT_KIND,
@@ -64,16 +67,21 @@ def create_app() -> FastAPI:
 
     engine = create_async_engine(settings.database_url)
     store = LocalEventStore(engine)
+    # The lead-time scheduler's own tables (#664) — same engine/database as the event store,
+    # separate tables (the module owns all three, no shared-DB coupling with another service).
+    lead_prefs = LeadTimePrefsStore(engine)
+    markers = FiredMarkerStore(engine)
 
+    bus = EventBus.from_settings(settings)
     # Hold every backend at once and route per the operator's selection (ADR-0030): the
     # silent local default plus each connectable external provider. The router reads the
     # stored enabled/active collections from the core via the PlatformClient — there is no
-    # longer a single provider chosen at startup.
+    # longer a single provider chosen at startup. `bus` wires the event-spine emission seam
+    # (#664) directly into the router, the one place every write already passes through.
     local_provider = LocalCalendarProvider(store=store)
     external: dict[str, CalendarProvider] = {"google": GoogleCalendarProvider(platform=platform)}
-    provider = CollectionRouter(local=local_provider, external=external, prefs=platform)
+    provider = CollectionRouter(local=local_provider, external=external, prefs=platform, bus=bus)
 
-    bus = EventBus.from_settings(settings)
     # Naive (offset-less) start/end inputs are read in the operator's configured
     # timezone (ADR-0039) rather than UTC, so "3 PM" is the operator's 3 PM (#433).
     module = build_module(
@@ -87,11 +95,28 @@ def create_app() -> FastAPI:
             # The local store always backs the module now (it is the silent default), so
             # it is always initialised — not only when "local" was the chosen provider.
             await store.init()
+            await lead_prefs.init()
+            await markers.init()
             await bus.connect()
+            # The lead-time scheduler (#664) — calendar's first periodic background job.
+            # Started/cancelled around the app lifetime like knowledge's vault watcher.
+            scheduler_task = asyncio.create_task(
+                run_periodic(
+                    tenant=settings.default_tenant_id,
+                    provider=provider,
+                    lead_prefs=lead_prefs,
+                    markers=markers,
+                    bus=bus,
+                    poll_interval_s=settings.scheduler_poll_interval_s,
+                )
+            )
             log.info("calendar service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
+                scheduler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scheduler_task
                 await bus.close()
                 await engine.dispose()
 

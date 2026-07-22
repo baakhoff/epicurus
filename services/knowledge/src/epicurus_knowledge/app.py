@@ -23,6 +23,7 @@ from epicurus_core import (
 )
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex, VersionStore
+from epicurus_knowledge.events import KnowledgeEventEmitter
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
@@ -119,6 +120,15 @@ def create_app() -> FastAPI:
     )
 
     bus = EventBus.from_settings(settings)
+    # Spine emitters (#665): doc created/deleted immediate, updated debounced to settled
+    # saves, one batch event per vault-sync pass, index failures rate-limited. Replaces the
+    # declared-but-never-published legacy `knowledge.index.completed` subject.
+    events = KnowledgeEventEmitter(
+        bus,
+        tenant=settings.default_tenant_id,
+        debounce_s=settings.knowledge_events_debounce_s,
+        failure_cooldown_s=settings.knowledge_index_failed_cooldown_s,
+    )
     # Watch mode (#232, ADR-0035) marks the vault externally owned: the editor goes
     # read-only and agent suggestions can't be applied, so Obsidian stays the sole author.
     vault_read_only = settings.vault_read_only
@@ -136,6 +146,7 @@ def create_app() -> FastAPI:
         docs_path=settings.docs_path,
         versions=version_store,
         tenant=settings.default_tenant_id,
+        events=events,
     )
     suggestion_review = SuggestionReview(
         suggestion_store,
@@ -170,6 +181,10 @@ def create_app() -> FastAPI:
         max_attempts=settings.index_retry_max_attempts,
         base_delay_seconds=settings.index_retry_base_delay_seconds,
         max_delay_seconds=settings.index_retry_max_delay_seconds,
+        # Terminal give-up announces `knowledge.index_failed` (rate-limited, #665). The
+        # success side deliberately emits nothing: an initial index is not a sync pass,
+        # and a first load must not read as "N new documents" (the no-firehose rule).
+        on_failed=events.index_failed,
     )
 
     # Live vault sync (#232): when an externally-synced vault is mounted, watch it and
@@ -180,6 +195,10 @@ def create_app() -> FastAPI:
             vault_root,
             vault_indexer,
             debounce_ms=settings.vault_watch_debounce_ms,
+            # One `knowledge.vault_synced` per pass with the pass's counts; failures
+            # surface as rate-limited `knowledge.index_failed` (#665).
+            on_synced=events.vault_synced,
+            on_failed=events.index_failed,
         )
         if settings.vault_watch
         else None
@@ -208,6 +227,8 @@ def create_app() -> FastAPI:
             watch_task = (
                 asyncio.create_task(vault_watcher.run()) if vault_watcher is not None else None
             )
+            # Sweeps debounced doc_updated events to settledness (#665).
+            sweeper = asyncio.create_task(events.run())
             try:
                 yield
             finally:
@@ -219,6 +240,12 @@ def create_app() -> FastAPI:
                     watch_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await watch_task
+                sweeper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sweeper
+                # Emit anything still pending while the bus is open — a restart must not
+                # swallow a settled-but-unswept editing session. Best-effort inside.
+                await events.flush_all()
                 await bus.close()
                 await engine.dispose()
                 await qdrant.close()

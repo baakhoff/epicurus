@@ -212,6 +212,20 @@ def test_parse_message_unread_defaults_false_without_labels() -> None:
     assert msg.unread is False
 
 
+def test_parse_message_carries_its_own_label_ids() -> None:
+    # #663: a mail.received event's "folder" is derived from the message's own labels, not
+    # the thread's aggregate — so _parse_message must not discard them the way it used to.
+    data = _gmail_msg(label_ids=["INBOX", "IMPORTANT"])
+    msg = _parse_message(data, full=False)
+    assert msg.label_ids == ["INBOX", "IMPORTANT"]
+
+
+def test_parse_message_label_ids_defaults_empty() -> None:
+    data = _gmail_msg()
+    msg = _parse_message(data, full=False)
+    assert msg.label_ids == []
+
+
 # ── _reply_subject ───────────────────────────────────────────────────────────
 
 

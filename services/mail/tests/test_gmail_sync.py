@@ -19,6 +19,7 @@ from epicurus_core import PlatformClient
 from epicurus_mail.gmail import (
     GmailProvider,
     _as_int,
+    _history_added_message_ids,
     _history_thread_ids,
     _thread_summary,
 )
@@ -84,6 +85,30 @@ def test_history_thread_ids_walks_every_change_array() -> None:
     assert _history_thread_ids(record) == {"t0", "t1", "t2", "t3"}
 
 
+def test_history_added_message_ids_is_narrower_than_thread_ids() -> None:
+    """#663: only `messagesAdded` is a message genuinely arriving. `messagesDeleted` /
+    `labelsAdded` / `labelsRemoved` are real thread changes (still in `_history_thread_ids`,
+    so the cached row is rebuilt) but never new mail — a flag flip must not fire
+    `mail.received`."""
+    record = {
+        "messagesAdded": [
+            {"message": {"id": "m1", "threadId": "t1"}},
+            {"message": {"id": "m2", "threadId": "t1"}},  # two adds, same thread
+        ],
+        "messagesDeleted": [{"message": {"id": "m3", "threadId": "t2"}}],
+        "labelsAdded": [{"message": {"id": "m4", "threadId": "t3"}}],
+        "labelsRemoved": [{"message": {"id": "m5", "threadId": "t4"}}],
+    }
+    assert _history_added_message_ids(record) == {"m1", "m2"}
+    # The broader set still covers every thread touched, added messages included.
+    assert _history_thread_ids(record) == {"t1", "t2", "t3", "t4"}
+
+
+def test_history_added_message_ids_empty_when_nothing_was_added() -> None:
+    record = {"labelsRemoved": [{"message": {"id": "m1", "threadId": "t1"}}]}
+    assert _history_added_message_ids(record) == set()
+
+
 def test_thread_summary_sets_sort_ts_and_label_union() -> None:
     data = {
         "id": "thread-1",
@@ -138,6 +163,9 @@ async def test_changed_threads_since_collects_and_paginates() -> None:
     changes = await provider.changed_threads_since(MailCursor(history_id=1000))
     assert changes is not None
     assert changes.changed_thread_ids == {"tA", "tB"}
+    # Page 1's messagesAdded is genuinely-new mail; page 2's labelsRemoved (m2) is a flag
+    # flip on tB, not new mail — new_message_ids stays narrower (#663).
+    assert changes.new_message_ids == {"m1"}
     assert changes.next_cursor.history_id == 1002  # advanced to the last page's historyId
 
 

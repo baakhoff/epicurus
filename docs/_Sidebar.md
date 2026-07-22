@@ -31,6 +31,7 @@
 - [events (spine + catalog)](reference/events.md)
 - [automations](reference/automations.md)
 - [messaging (inbox contract)](reference/messaging.md)
+- [push notifications & the notification center (#670, #671)](reference/notifications.md)
 - [secrets](reference/secrets.md)
 - [observability, tracing & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)

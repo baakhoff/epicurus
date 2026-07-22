@@ -16,16 +16,35 @@ and routes per the operator's stored selection (ADR-0030), fetched from the core
 It satisfies :class:`CalendarProvider`, so the module's tools and page treat it like
 any other backend; the per-call ``calendar_id`` argument is resolved internally from
 the selection, so a value passed in is ignored.
+
+``create_event``/``update_event``/``delete_event`` are also the module-event-spine emission
+seam (#664, ADR-0103): ``event_created``/``event_updated``/``event_cancelled`` fire here, the
+one place every operator/agent-driven write already passes through regardless of which backend
+handles it. This is the *provider-write* seam only — a change made directly in Google Calendar's
+UI, outside epicurus, is never observed (calendar has no sync/reconcile layer analogous to
+mail's ADR-0096, #623; building one is out of scope for this PR — see the event catalog's
+provider-caveats section).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Protocol
 
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider, EditScope
-from epicurus_core import LOCAL_ACCOUNT, Collection, CollectionPrefs, CollectionRef, get_logger
+from epicurus_core import (
+    LOCAL_ACCOUNT,
+    Collection,
+    CollectionPrefs,
+    CollectionRef,
+    EntityRef,
+    EventBus,
+    emit_event,
+    get_logger,
+)
 
 log = get_logger("epicurus_calendar.router")
 
@@ -67,10 +86,12 @@ class CollectionRouter(CalendarProvider):
         local: CalendarProvider,
         external: dict[str, CalendarProvider],
         prefs: CollectionPrefsSource,
+        bus: EventBus | None = None,
     ) -> None:
         self._local = local
         self._external = external
         self._prefs = prefs
+        self._bus = bus
 
     def _provider_for(self, account: str) -> CalendarProvider | None:
         """The provider backing *account*, or ``None`` if it isn't configured/connected."""
@@ -193,7 +214,7 @@ class CollectionRouter(CalendarProvider):
             else await self._active_ref(tenant_id=tenant_id)
         )
         provider = self._provider_for(ref.account) or self._local
-        return await provider.create_event(
+        event = await provider.create_event(
             tenant_id=tenant_id,
             title=title,
             start=start,
@@ -207,6 +228,8 @@ class CollectionRouter(CalendarProvider):
             add_meet=add_meet,
             recurrence_timezone=recurrence_timezone,
         )
+        await self._emit_created(tenant_id, event)
+        return event
 
     async def update_event(
         self,
@@ -225,6 +248,12 @@ class CollectionRouter(CalendarProvider):
         recurrence_timezone: str | None = None,
         edit_scope: EditScope = "this",
     ) -> Event | None:
+        # Snapshot the prior state before mutating — event_updated's payload flags whether the
+        # TIME changed (#664), which only a before/after comparison can answer accurately. A
+        # miss here (get_event doesn't accept the `first` hint update_event does, so a narrow
+        # case can disagree on which source answers) degrades to inferring the flag from
+        # whether start/end were actually passed.
+        before = await self.get_event(tenant_id=tenant_id, event_id=event_id)
         # Edit the event wherever it lives: the caller-supplied home calendar first
         # (``calendar_id`` is an ``account[:collection]`` token here, as in create),
         # then the active collection, the rest of the enabled set, and local — the
@@ -260,6 +289,12 @@ class CollectionRouter(CalendarProvider):
                 )
                 continue
             if event is not None:
+                await self._emit_updated(
+                    tenant_id,
+                    before=before,
+                    after=event,
+                    requested_time_change=start is not None or end is not None,
+                )
                 return event
         return None
 
@@ -271,6 +306,10 @@ class CollectionRouter(CalendarProvider):
         calendar_id: str | None = None,
         edit_scope: EditScope = "this",
     ) -> bool:
+        # Snapshot before deleting — a cancellation event needs the event's own data (title,
+        # etc.) to be a useful payload/EntityRef, and there is nothing left to read once the
+        # delete actually succeeds.
+        before = await self.get_event(tenant_id=tenant_id, event_id=event_id)
         # Delete the event wherever it lives (#208); a supplied home-calendar token is
         # tried first (#435), mirroring update_event.
         first = decode_collection_token(calendar_id) if calendar_id else None
@@ -286,6 +325,7 @@ class CollectionRouter(CalendarProvider):
                     calendar_id=ref.collection or None,
                     edit_scope=edit_scope,
                 ):
+                    await self._emit_cancelled(tenant_id, before, fallback_id=event_id)
                     return True
             except Exception as exc:
                 log.warning(
@@ -296,6 +336,80 @@ class CollectionRouter(CalendarProvider):
                 )
                 continue
         return False
+
+    # ── event spine (#664) ──────────────────────────────────────────────────
+
+    async def _emit_created(self, tenant_id: str, event: Event) -> None:
+        if self._bus is None:
+            return
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="calendar",
+                event_type="calendar.event_created",
+                dedup_key=f"{event.provider}:{event.id}",
+                payload=_event_summary_payload(event),
+                entity_ref=EntityRef(
+                    ref_id=event.id, module="calendar", kind="event", title=event.title
+                ),
+            )
+        except Exception as exc:  # a spine hiccup must never fail an already-completed write
+            log.warning("calendar.event_created emit failed", event_id=event.id, error=str(exc))
+
+    async def _emit_updated(
+        self, tenant_id: str, *, before: Event | None, after: Event, requested_time_change: bool
+    ) -> None:
+        if self._bus is None:
+            return
+        time_changed = (
+            before.start != after.start or before.end != after.end
+            if before is not None
+            else requested_time_change
+        )
+        payload = _event_summary_payload(after)
+        payload["time_changed"] = time_changed
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="calendar",
+                event_type="calendar.event_updated",
+                # "dedup per provider id + change hash" — the SAME update re-observed twice
+                # (e.g. a retried write) dedups in the core's log; a genuinely different edit
+                # gets its own dedup_key so it is logged as its own entry, not merged away.
+                dedup_key=f"{after.provider}:{after.id}:{_event_change_hash(after)}",
+                payload=payload,
+                entity_ref=EntityRef(
+                    ref_id=after.id, module="calendar", kind="event", title=after.title
+                ),
+            )
+        except Exception as exc:
+            log.warning("calendar.event_updated emit failed", event_id=after.id, error=str(exc))
+
+    async def _emit_cancelled(
+        self, tenant_id: str, event: Event | None, *, fallback_id: str
+    ) -> None:
+        if self._bus is None:
+            return
+        title = event.title[:200] if event is not None else "(unknown)"
+        provider_name = event.provider if event is not None else "unknown"
+        try:
+            await emit_event(
+                self._bus,
+                tenant_id=tenant_id,
+                module="calendar",
+                event_type="calendar.event_cancelled",
+                dedup_key=f"{provider_name}:{fallback_id}",
+                payload={"title": title},
+                entity_ref=EntityRef(
+                    ref_id=fallback_id, module="calendar", kind="event", title=title
+                ),
+            )
+        except Exception as exc:
+            log.warning(
+                "calendar.event_cancelled emit failed", event_id=fallback_id, error=str(exc)
+            )
 
     async def find_free_slots(
         self,
@@ -359,3 +473,32 @@ class CollectionRouter(CalendarProvider):
         except Exception as exc:
             log.warning("collection prefs unavailable; using local default", error=str(exc))
             return CollectionPrefs()
+
+
+def _event_summary_payload(event: Event) -> dict[str, object]:
+    """Pointers + minimal metadata for a calendar event — never attendee emails or the
+    description body (#664, mirrors mail's payload discipline)."""
+    return {
+        "title": event.title[:200],
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "all_day": event.all_day,
+    }
+
+
+def _event_change_hash(event: Event) -> str:
+    """A short, stable fingerprint of an event's mutable fields (#664's "dedup provider id +
+    change hash"). Deliberately not Python's ``hash()`` — it is salted per-process
+    (``PYTHONHASHSEED``), so the same content would hash differently across restarts, breaking
+    the log's dedup guarantee for an update that straddles one.
+    """
+    fingerprint = {
+        "title": event.title,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "description": event.description,
+        "location": event.location,
+        "all_day": event.all_day,
+    }
+    digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
+    return digest[:12]

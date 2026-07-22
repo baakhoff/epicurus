@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core-app"
-version = "0.85.1"
+version = "0.88.1"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
@@ -23,6 +23,9 @@ dependencies = [
     # The core owns the file space (ADR-0052); aioboto3 powers the S3 FileStore backend so the
     # operator can select it (FILES_BACKEND=s3) with no separate install. Local FS is default.
     "aioboto3>=13.0",
+    # Web Push send path (#670, ADR-0102): VAPID signing (RFC 8292) + the aes128gcm payload
+    # encryption (RFC 8291), so the core signs/encrypts pushes itself rather than shelling out.
+    "pywebpush>=2.0",
 ]
 
 [build-system]

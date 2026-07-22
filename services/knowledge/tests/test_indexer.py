@@ -458,7 +458,10 @@ async def test_manifest_declares_tool_and_event(
     tool_names = {t.name for t in manifest.tools}
     assert "knowledge_reindex" in tool_names
     assert "knowledge_search" in tool_names
-    assert any(e.subject == "knowledge.index.completed" for e in manifest.events_emitted)
+    # Spine events (#665) — the legacy declared-but-never-published subject is gone.
+    subjects = {e.subject for e in manifest.events_emitted}
+    assert "events.knowledge.vault_synced" in subjects
+    assert "knowledge.index.completed" not in subjects
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
 

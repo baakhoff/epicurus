@@ -171,9 +171,25 @@ the newest **50** versions per note. **Restore is client-side** — the shell fe
 version and re-saves its content through the normal save path; the module exposes **no
 restore endpoint**.
 
-### Events (NATS)
+### Events (the module event spine, #665)
 
-Emits **`<tenant>.notes.saved`** (`{slug}`) after a note is saved and indexed.
+Notes announces content changes on the [module event spine](../reference/events.md) —
+see the event catalog for payloads and dedup keys:
+
+- **`events.notes.note_created`** — immediate, at the save that brings a note into
+  existence (editor save or an approved suggestion).
+- **`events.notes.note_updated`** — **debounced to settled saves**: the editor auto-saves
+  on every ~4s idle pause (ADR-0042), so each save re-arms a per-note quiet window
+  (`NOTES_EVENTS_DEBOUNCE_S`, default 120s) and one event fires when the window passes
+  untouched, carrying the last save's timestamp and the number of saves coalesced. A
+  background sweeper task (started in the lifespan) flushes settled entries; anything
+  still pending is flushed on graceful shutdown. A delete cancels the pending update; a
+  rename re-keys it.
+- **`events.notes.note_deleted`** — immediate.
+
+All emission is best-effort: a spine hiccup never fails the save or delete that already
+landed. The legacy bare **`notes.saved`** subject is gone — it had no consumer, and the
+spine events replace it (the same migration `mail.sent` made, #663).
 
 ### Web UI (manifest, ADR-0007 Tier 1)
 
@@ -190,7 +206,7 @@ data flows through the core.
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, the `notes.saved` event, `attachable: true`, `reindexable: true`, `pages`, UI). |
+| `GET /manifest` | Module manifest (tools, the spine events (#665), `attachable: true`, `reindexable: true`, `pages`, UI). |
 | `GET /status` | Live stats `{note_count, last_updated_at}`. Proxied at `GET /platform/v1/modules/notes/status`. |
 | `POST /reindex` | **Force a full re-embed** of every note with the current embedding model → `{status: "started"}` (#332, ADR-0054). Drops the `<tenant>__notes` collection and re-embeds each note (notes are otherwise indexed only on save), so vectors built with a previous model are rebuilt. Runs in the background. Called by the core's re-embed fan-out (the manifest sets `reindexable`). |
 | `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files: true}` (page id `notes`). Dir nodes (`type: "dir"`) come from `note_folders` ∪ slug prefixes, emitted parent-first before file nodes. |
@@ -226,7 +242,7 @@ data flows through the core.
    **embeds** each chunk via the core's [`PlatformClient`](../reference/platform-client.md)
    (`POST /platform/v1/embed`, **no model key here**), and **upserts** the vectors into
    `<tenant>__notes` (stale vectors for the slug are dropped first).
-5. On success it publishes `notes.saved`. If the embed round-trip fails (e.g. the core is
+5. It announces the change on the event spine (#665) — `note_created` immediately for a new slug, else a debounced `note_updated`. If the embed round-trip fails (e.g. the core is
    paused), the save still succeeds with `indexed: false`; the next save retries.
 
 The `<tenant>__notes` collection is written so notes are immediately RAG-ready, but **no
@@ -245,6 +261,7 @@ collection exists so a future, opt-in retrieval feature needs no re-index.
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Note bodies + the suggestion queue (source of truth). |
 | `NOTES_ROOT` | `/data/notes` | The **logical** base for the mirror's path mapping — **not a mount** (#357/ADR-0065). A note slug maps to the core file-API path `notes/<slug>.md` (the `/data` prefix is stripped); the **core** writes it into its read-write `<files-root>/<tenant>/notes` (`<tenant>` = `DEFAULT_TENANT_ID`). Each saved note is mirrored as `<slug>.md` so it shows in the unified Files view (#KB-refactor). Postgres stays the source of truth; the mirror is write-only output. |
 | `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk before a hard split. |
+| `NOTES_EVENTS_DEBOUNCE_S` | `120` | Quiet window (s) a note must sit unsaved before `notes.note_updated` fires on the event spine (#665) — one event per editing session, not per auto-save. |
 | `NOTES_PORT` | `8092` | Host port (loopback-bound by default). |
 
 Postgres remains the source of truth — notes are authored in-app, so their bodies are
@@ -299,7 +316,7 @@ name, and the NATS subject.
 
 core-app (embeddings + **the file API for the `.md` mirror**, `PlatformClient.files_*` — plus
 status/page/attachment/suggestion proxy, all via the platform API) · Qdrant (vectors) · Postgres
-(note bodies + suggestion queue) · NATS (the `notes.saved` event). Notes **mounts no `/data`
+(note bodies + suggestion queue) · NATS (the spine events, #665). Notes **mounts no `/data`
 volume** (#357/ADR-0065): its only file output goes through the core, which owns the file space;
 the mirror is read back through the unified Files surface.
 
@@ -320,6 +337,6 @@ Package `epicurus_notes`:
 | `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + version snapshot + re-index), `delete_doc`, the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following), and `list_versions`/`get_version` (ADR-0046). |
 | `suggestions.py` | The `review` page surface (ADR-0033; edit-before-approve + audit, ADR-0090): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional edited `content`), the `notes_suggestion_decisions` audit store (`NoteSuggestionAuditStore`, capped at `MAX_DECISIONS`), and `create_note_review_router`. The shared wire contract is imported from `epicurus_core.review`, not locally redefined. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |
-| `service.py` | The manifest — `pages` (editor + review), `attachable`, the `notes.saved` event, and the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no read tool**). |
+| `service.py` | The manifest — `pages` (editor + review), `attachable`, the spine event declarations (#665), and the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no read tool**). |
 | `app.py` | Lifespan (incl. the suggestion-store + folder-store init + mirror backfill), `GET /status`, the review router (registered first) + the `/pages/*` and `/attachments/*` routers, event publish. |
 | `settings.py` | `NotesSettings` (adds Qdrant, DB, platform URL, chunk size, `notes_root`). |

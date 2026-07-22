@@ -73,9 +73,28 @@ and clicking a knowledge-base note opens it in the Knowledge page (see *Hover-ca
 Platform-docs citations are shown with a `docs/` path prefix so the agent can tell them
 apart from knowledge-base notes.
 
-### Events (NATS)
+### Events (the module event spine, #665)
 
-Emits **`<tenant>.knowledge.index.completed`** after each incremental index run.
+Knowledge announces its world changes on the [module event spine](../reference/events.md) —
+see the event catalog for payloads and dedup keys:
+
+- **`events.knowledge.doc_created`** / **`events.knowledge.doc_deleted`** — immediate, at
+  the editor save / file-tree action / approved suggestion that creates or removes a vault
+  document. A whole-base removal (#340) emits no per-doc events (one operator action).
+- **`events.knowledge.doc_updated`** — **debounced to settled saves** (the ADR-0042
+  auto-save fires every ~4s idle pause): each save re-arms a per-doc quiet window
+  (`KNOWLEDGE_EVENTS_DEBOUNCE_S`, default 120s) and one event fires when it passes
+  untouched. A background sweeper flushes settled entries; pending ones flush on shutdown.
+- **`events.knowledge.vault_synced`** — **one batch event per watcher pass** (#232) with
+  the pass's counts (`indexed` merges added+updated); a no-op pass emits nothing, and the
+  startup/initial index emits nothing (no-firehose).
+- **`events.knowledge.index_failed`** — rate-limited
+  (`KNOWLEDGE_INDEX_FAILED_COOLDOWN_S`, default 900s): the initial index giving up after
+  its retry budget (#230), or a watcher pass failing.
+
+All emission is best-effort — a spine hiccup never fails the change that already landed.
+The legacy **`knowledge.index.completed`** declaration is gone: no code ever published it,
+and the manifest now only advertises events that actually fire.
 
 ### Web UI (manifest, ADR-0007 Tier 1)
 
@@ -439,6 +458,8 @@ platform services read these docs if needed.
 | `INDEX_RETRY_MAX_DELAY_SECONDS` | `30.0` | Upper bound on the retry backoff. |
 | `VAULT_WATCH` | `false` | Watch the vault and re-index on change (#232). Enabling it makes the vault **externally owned** — the editor page goes read-only and Obsidian becomes the sole author (ADR-0035). See [Obsidian sync](../developer/obsidian-sync.md). |
 | `VAULT_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of vault changes before a re-index is triggered. |
+| `KNOWLEDGE_EVENTS_DEBOUNCE_S` | `120` | Quiet window (s) a document must sit unsaved before `knowledge.doc_updated` fires on the event spine (#665) — one event per editing session, not per auto-save. |
+| `KNOWLEDGE_INDEX_FAILED_COOLDOWN_S` | `900` | Minimum gap (s) between `knowledge.index_failed` emissions — a stuck vault must not storm the spine once per watcher wake (#665). |
 
 Knowledge documents live at `/data/<tenant>/knowledge` in the **shared file space** — bound
 into the **core** via `EPICURUS_FILES_ROOT` (the env var that mounts the `/data` tree; it
@@ -516,7 +537,7 @@ indexes over those files.
 
 core-app (embeddings, the **file API** for all reads *and* writes — `PlatformClient.files_*`,
 #356/ADR-0064 for writes + #346/ADR-0070 for reads — and the status proxy, all via the platform
-API) · Qdrant (vectors) · Postgres (file tracking) · NATS (the index-completed event) · bundled
+API) · Qdrant (vectors) · Postgres (file tracking) · NATS (the spine events, #665) · bundled
 docs (an image mount). In **watch mode** only (#232), also a disk mount of the external vault
 for the inotify watcher + its reads.
 

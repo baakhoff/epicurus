@@ -13,9 +13,20 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_notes.db import NoteFolderStore, NotesStore
+from epicurus_notes.events import NoteEventEmitter
 from epicurus_notes.pages import NotesPages, create_pages_router, derive_title
 
 TENANT = "test"
+
+
+class _FakeBus:
+    """Records spine publishes — the repo-standard EventBus stand-in."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict, str | None]] = []
+
+    async def publish(self, subject: str, data: dict, tenant_id: str | None = None) -> None:
+        self.published.append((subject, data, tenant_id))
 
 
 class _FakeIndexer:
@@ -84,19 +95,18 @@ async def test_list_empty_and_can_manage_files() -> None:
 async def test_write_creates_note_and_indexes() -> None:
     store = await _store()
     indexer = _FakeIndexer()
-    saved: list[str] = []
+    bus = _FakeBus()
 
-    async def on_saved(slug: str) -> None:
-        saved.append(slug)
-
-    pages = NotesPages(store, indexer, tenant=TENANT, on_saved=on_saved)
+    emitter = NoteEventEmitter(bus, tenant=TENANT)  # type: ignore[arg-type]
+    pages = NotesPages(store, indexer, tenant=TENANT, events=emitter)
     result = await pages.write_doc("my-note", "# My Note\n\nbody")
 
     assert result.path == "my-note"
     assert result.indexed is True
     assert result.chunk_count == 2
     assert indexer.calls == ["my-note"]
-    assert saved == ["my-note"]
+    # A brand-new note announces itself immediately on the spine (#665).
+    assert [s for s, _, _ in bus.published] == ["events.notes.note_created"]
     # The note is now listable, titled from its first heading.
     doc = await pages.read_doc("my-note")
     assert doc.title == "My Note"

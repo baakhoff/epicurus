@@ -70,6 +70,14 @@ keep `main` for vetted code and treat the testing box as disposable.
 from the repo root (or `task reconcile`, the same script).  Schedule it with **Windows Task
 Scheduler** so it runs while you sleep — or run it by hand for an immediate deploy.
 
+**Docker-socket opt-in survives reconcile only if `DOCKER_GID` is in `.env` (#655).** A manual
+`task docker-socket-up` mounts the socket for that one `up`, but the next scheduled reconcile
+recreates `core-app` from plain `compose.yaml` with no overlay, silently reverting to degraded
+mode (fails safe, but the opt-in doesn't stick). Set `DOCKER_GID` in `.env` alongside
+`EPICURUS_VERSION` and every reconcile includes
+`services/core-app/compose.docker-socket.yaml` automatically — see
+[Docker-socket access](index.md#docker-socket-access-opt-in-622) for the value to use.
+
 ### One-time GHCR login
 
 Images on a private repo require authentication.  Run this once (Docker caches the

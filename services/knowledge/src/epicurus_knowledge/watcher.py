@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -83,6 +83,12 @@ class VaultWatcher:
         debounce_ms: Coalescing window for a burst of changes before a pass fires.
         watch: Optional change-stream factory (defaults to ``watchfiles.awatch`` over
             the vault). Injected in tests so the loop can be driven deterministically.
+        on_synced: Optional async callback invoked with the pass's counts
+            (``{indexed, deleted, unchanged}``) after each successful re-index — the
+            spine's one-batch-event-per-pass hook (#665). Failures are swallowed.
+        on_failed: Optional async callback invoked with the error string when a pass
+            fails — the spine's rate-limited ``index_failed`` hook (#665). Failures
+            are swallowed.
     """
 
     def __init__(
@@ -92,12 +98,16 @@ class VaultWatcher:
         *,
         debounce_ms: int = 1500,
         watch: WatchSource | None = None,
+        on_synced: Callable[[dict[str, int]], Awaitable[None]] | None = None,
+        on_failed: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._vault = vault_path
         self._indexer = indexer
         self._debounce_ms = max(1, debounce_ms)
         self._stop = asyncio.Event()
         self._watch = watch
+        self._on_synced = on_synced
+        self._on_failed = on_failed
 
     def _default_watch(self) -> AsyncIterator[set[FileChange]]:
         """The real change stream: ``awatch`` over the vault, filtered and debounced."""
@@ -143,8 +153,20 @@ class VaultWatcher:
                 "watch-triggered re-index failed; will retry on next change",
                 error=str(exc),
             )
+            if self._on_failed is not None:
+                try:
+                    await self._on_failed(str(exc))
+                except Exception as cb_exc:  # observability only — never break the loop
+                    _log.warning("watcher on_failed callback raised", error=str(cb_exc))
             return
         _log.info("watch re-index complete", **result)
+        # One batch announcement per pass (#665) — the callback (the spine emitter) skips
+        # no-op passes itself; a callback failure never breaks the watch loop.
+        if self._on_synced is not None:
+            try:
+                await self._on_synced(dict(result))
+            except Exception as cb_exc:
+                _log.warning("watcher on_synced callback raised", error=str(cb_exc))
 
     def stop(self) -> None:
         """Signal the watch loop to stop (the lifespan also cancels the task as a backstop)."""

@@ -18,3 +18,8 @@ class CalendarSettings(CoreSettings):
 
     # Core service base URL (platform API). On the Docker network: http://core-app:8080.
     platform_url: str = "http://localhost:8080"
+
+    # How often the lead-time scheduler ticks (#664) — event_starting_soon/event_ended. 60s
+    # keeps a 15-minute default lead accurate to within about a minute without hammering the
+    # provider (Google Calendar) every few seconds.
+    scheduler_poll_interval_s: float = 60.0

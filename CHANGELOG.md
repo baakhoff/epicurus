@@ -100,6 +100,35 @@ images to GHCR.
   siblings. IMAP does not exist in this codebase yet (only `GmailProvider` is implemented,
   despite the module's provider-neutral design); the catalog's provider-caveats section notes
   what a future IMAP provider would need to fill. `mail` 0.13.0→0.14.0 (MINOR).
+- **Calendar & Tasks: lifecycle + lead-time events** (#664, stacked on #663) — "two modules,
+  one pattern," including the new lead-time scheduler both now share the shape of. **Calendar**
+  gains `event_created`/`event_updated`/`event_cancelled` on `CollectionRouter`'s
+  create/update/delete_event — the **provider-write** seam only, since calendar has no
+  sync/reconcile layer analogous to mail's (ADR-0096); a change made directly in Google
+  Calendar's own UI is never observed. `event_updated`'s `time_changed` flag is a real
+  before/after comparison (the router snapshots prior state first), and its `dedup_key` folds
+  in a change hash of the event's mutable fields, so a genuinely different edit is its own log
+  entry while a retried write with identical resulting state dedups — the same "dedup provider
+  id + change hash" posture `tasks.task_updated` now also uses. `invitation_received` /
+  `attendee_responded` (Google-only, ADR-0030) are **deliberately not implemented**: both need
+  the same kind of external-change detection a sync layer would provide, a materially larger
+  feature than wiring emission into an existing seam — declaring either without actually
+  publishing it would repeat mail's own "declared but never emitted" mistake rather than avoid
+  it. **Tasks** gains `task_created`/`task_completed`/`task_updated` on `TasksRouter`'s
+  add/complete/update_task, and `task_moved` on the ADR-0038/#257 cross-list seam (fired
+  instead of `task_updated`, never alongside it — Google Tasks has no move API, so a move
+  recreates in the target and deletes the source). A recurring task's auto-materialized
+  successor (`_materialize`, ADR-0082) calls the inner provider directly, bypassing the
+  router's own `add_task` — a deliberate scope limit, so it does not currently emit
+  `task_created`. **The lead-time scheduler** is a new periodic background job — the first for
+  either module — durably fire-once via a `(tenant, entity_id, marker)`-unique marker table
+  (`BigInteger` epoch column) proven to survive a restart; each module also gains a
+  settings-primitives-shaped tenant preference for its own lead (calendar: minutes, default
+  15; tasks: days, default 1 — storage only, no settings UI yet). Calendar's lead is pure
+  instant math; tasks' `task_due_soon`/`task_overdue` evaluate against the *operator's local
+  calendar day* (ADR-0039), reusing the exact `operator_clock` the overdue-recurrence sweep
+  already resolves, so the two can never disagree about what day it is. `calendar`
+  0.16.0→0.17.0 (MINOR) · `tasks` 0.16.0→0.17.0 (MINOR).
 
 - **Notes, Knowledge, Files: content events + suggestion-decision events** (#665, stacked on
   #662) — the operator-content half of the emitter sweep. **Notes/knowledge doc events**:

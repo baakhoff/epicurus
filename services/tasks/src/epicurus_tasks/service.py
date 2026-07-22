@@ -31,6 +31,7 @@ from epicurus_core import (
     PageSpec,
     UiSection,
     capped_listing,
+    event_subject,
     get_logger,
     tool_envelope,
 )
@@ -186,6 +187,32 @@ def build_module(
         # The Google API scope the shell requests when connecting an account (#241); the
         # core adds the default identity scopes. Without this, the Google Tasks API 403s.
         oauth_scopes={"google": ["https://www.googleapis.com/auth/tasks"]},
+    )
+
+    # Module event spine (#664, ADR-0103).
+    module.emits(
+        event_subject("tasks.task_created"),
+        "A new task was created through this module (#664).",
+    )
+    module.emits(
+        event_subject("tasks.task_completed"),
+        "A task was marked done (#664).",
+    )
+    module.emits(
+        event_subject("tasks.task_updated"),
+        "An existing task was edited (#664).",
+    )
+    module.emits(
+        event_subject("tasks.task_moved"),
+        "A task moved between lists (ADR-0038, #664).",
+    )
+    module.emits(
+        event_subject("tasks.task_due_soon"),
+        "An open task is within its configured lead time of its due date (default 1 day, #664).",
+    )
+    module.emits(
+        event_subject("tasks.task_overdue"),
+        "An open task's due date has passed (#664).",
     )
 
     @module.tool()

@@ -43,6 +43,7 @@ from epicurus_core import (
     PageSpec,
     UiSection,
     capped_listing,
+    event_subject,
     get_logger,
     tool_envelope,
 )
@@ -250,6 +251,32 @@ def build_module(
         # core adds the default identity scopes. Without this, connecting grants only an
         # identity token and the Calendar API returns 403.
         oauth_scopes={"google": ["https://www.googleapis.com/auth/calendar"]},
+    )
+
+    # Module event spine (#664, ADR-0103). invitation_received / attendee_responded are
+    # deliberately NOT declared here: they would need a sync/diff layer calendar doesn't have
+    # (see router.py's module docstring) — declaring an event this module never actually
+    # publishes would repeat mail's own "declared but never emitted" mistake (docs/services/
+    # mail.md), not avoid it.
+    module.emits(
+        event_subject("calendar.event_created"),
+        "A new event was created through this module (provider-write seam, #664).",
+    )
+    module.emits(
+        event_subject("calendar.event_updated"),
+        "An existing event was edited; payload flags whether the time changed (#664).",
+    )
+    module.emits(
+        event_subject("calendar.event_cancelled"),
+        "An event was deleted through this module (#664).",
+    )
+    module.emits(
+        event_subject("calendar.event_starting_soon"),
+        "An event is within its configured lead time of starting (default 15m, #664).",
+    )
+    module.emits(
+        event_subject("calendar.event_ended"),
+        "An event's end time has passed (#664).",
     )
 
     @module.tool()

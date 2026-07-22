@@ -48,8 +48,11 @@ def create_app() -> FastAPI:
     settings = CoreSettings(service_name="echo")
     configure_logging(settings)
     log = get_logger("echo")
-    module = build_module()
     bus = EventBus.from_settings(settings)
+    # The bus is handed to the module so its ping tool can emit on the spine. It is not
+    # connected yet — `create_app` builds, `lifespan` connects — which is fine: the tool
+    # only touches it per call, long after startup.
+    module = build_module(bus, tenant=settings.default_tenant_id)
     mcp_app = module.http_app()
 
     @asynccontextmanager

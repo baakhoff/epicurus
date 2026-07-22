@@ -35,6 +35,7 @@ import {
   ModelSettings,
   ModelVariants,
   ModuleAttachmentItem,
+  ModuleEvent,
   ModuleSnapshot,
   NotificationCenterItem,
   NotificationsUnreadCount,
@@ -61,7 +62,7 @@ import {
   type PowerState,
 } from "@/lib/contracts";
 import { epFetch } from "@/lib/http";
-import { parseFrame } from "@/lib/sse";
+import { parseFrame, sseRequest } from "@/lib/sse";
 
 export class ApiError extends Error {
   constructor(
@@ -916,5 +917,40 @@ export async function* logStream(
     }
   } finally {
     reader.releaseLock();
+  }
+}
+
+/**
+ * Stream module events from the core's durable log as an async generator.
+ *
+ * The raw feed behind the Observability screen's Events tab. The core replays recent
+ * history (oldest first) then trickles live events; the caller aborts via `signal`.
+ *
+ * Unlike `logStream` above — which predates `sseRequest` and hand-rolls its own reader —
+ * this goes through the shared SSE reader, so frame parsing lives in one place.
+ *
+ * @param module  Optional exact module filter ("mail").
+ * @param type    Optional exact event-type filter ("mail.received").
+ * @param signal  AbortSignal used to stop the stream.
+ */
+export async function* eventStream(
+  module?: string,
+  type?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<ModuleEvent> {
+  const params = new URLSearchParams();
+  if (module) params.set("module", module);
+  if (type) params.set("type", type);
+  const query = params.size ? `?${params}` : "";
+  for await (const msg of sseRequest(`/platform/v1/events/stream${query}`, {
+    method: "GET",
+    signal,
+  })) {
+    if (msg.event !== "module_event") continue;
+    try {
+      yield ModuleEvent.parse(JSON.parse(msg.data));
+    } catch {
+      /* malformed frame — skip, exactly as the log stream does */
+    }
   }
 }

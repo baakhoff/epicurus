@@ -164,6 +164,11 @@ Each frame has `event: log` and `data` containing a JSON `LogEntry`:
 contains `token`, `key`, `secret`, `password`, `credential`, or `auth` are
 **stripped** before any entry leaves the buffer.
 
+That rule now lives in `epicurus_core.redaction` rather than privately in `log_stream`
+(ADR-0103 §6): the [events feed](#raw-events-feed) is its second surface, and a security
+rule kept in two places is one that drifts. Behaviour here is unchanged — same list, same
+blunt case-insensitive substring match on key *names*, one source.
+
 ### Behaviour
 
 - The server replays up to **200** buffered history entries first (so a freshly
@@ -184,13 +189,81 @@ def configure_logging(
 `extra_processors` are inserted after the shared chain and **before** the
 renderer, so they see the full, structured event dict.
 
-### Web surface
+---
 
-The Observability screen (`/observability`) renders a live log console backed by
-this endpoint. It:
+## Raw events feed (ADR-0103)
 
-- Replays the history buffer on connect.
-- Reconnects automatically on disconnect (3 s back-off).
-- Filters by minimum level and service prefix without a page reload.
-- Supports context expansion (click ▼ on a log row with extra fields).
-- Shows a health summary from `GET /platform/v1/readiness` at the top.
+The second live feed: what the *modules* announced happened, as recorded in the core's
+durable `module_events` log. Where the log stream is the core narrating itself, this is the
+world changing — mail arriving, an event moving. See [events](events.md) for the envelope,
+the emit helper, and the catalog.
+
+```
+GET /platform/v1/events/stream     # SSE tail
+GET /platform/v1/events            # the same data as a plain page
+```
+
+Both are **core-app–only**. Unlike the log stream (an in-memory ring buffer), these read a
+Postgres table, so history survives a restart.
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `tenant_id` | string | the default tenant | Which tenant's events to read. |
+| `module` | string | — | Exact module filter (e.g. `mail`). |
+| `type` | string | — | Exact event-type filter (e.g. `mail.received`). |
+| `limit` | int | `200` | Snapshot endpoint only; 1–1000. |
+
+### SSE event format
+
+Each frame has `event: module_event` and `data` containing a JSON `LoggedEvent`:
+
+```json
+{
+  "id": 42,
+  "tenant": "local",
+  "module": "mail",
+  "type": "mail.received",
+  "occurred_at": "2026-07-17T12:00:00Z",
+  "received_at": "2026-07-17T12:00:01Z",
+  "dedup_key": "gmail:18f2c1",
+  "entity_ref": { "ref_id": "18f2c1", "module": "mail", "kind": "message", "title": "Re: lunch" },
+  "payload": { "message_id": "18f2c1", "unread": 1 },
+  "schema_version": 1
+}
+```
+
+`occurred_at` is the emitter's clock (when the change happened); `received_at` is the
+core's (when it heard about it) — not the same thing, and the feed orders by the latter.
+
+### Behaviour
+
+- History replays **oldest-first** (up to 200), then live events follow.
+- The subscriber queue registers *before* the history query, so an event landing mid-replay
+  is queued rather than lost. It may then appear twice; clients de-duplicate on `id`. A
+  duplicated row is cosmetic, a missing one is not.
+- Each subscription holds an asyncio Queue (maxsize 500); a slow consumer drops frames.
+- The payload is safe to render verbatim: credential-shaped keys are rejected at emit and
+  redacted again here (rows outlive the rule that let them in).
+- The stream never closes on its own — clients reconnect after any disconnect.
+
+---
+
+## Web surface
+
+The Observability screen (`/observability`) shows a health summary from
+`GET /platform/v1/readiness`, then a tab strip over the core's live feeds. Only the visible
+tab's console is mounted, so a hidden tab holds no open subscription.
+
+**Logs** — the live log console backed by `/platform/v1/logs/stream`. It replays the
+history buffer on connect, filters by minimum level and service prefix without a page
+reload, and expands a row's `context` on click (▼).
+
+**Events** — the raw events feed backed by `/platform/v1/events/stream`. It replays recent
+history, filters by module and event type, shows each row's `entity_ref` title, and expands
+a row's `payload` on click (▼).
+
+Both reconnect automatically on disconnect (3 s back-off) via the shared `useSseFeed` hook,
+cap the DOM at 500 entries, and follow the tail only while the reader is already at it —
+scrolling up to read something is not yanked back by the next arriving entry.

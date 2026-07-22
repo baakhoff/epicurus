@@ -189,6 +189,17 @@ class CoreAppSettings(CoreSettings):
     # 60s keeps the worst-case delivery lag under a minute without meaningfully polling Postgres.
     scheduled_turns_poll_interval_s: int = 60
 
+    # ── Module event spine ───────────────────────────────────────────────────────
+    # The core records every module event in a durable log (the bus keeps no history), so the
+    # log grows with the chattiest emitter and needs a bound. Days, not rows: the log answers
+    # "what happened recently", and an operator reasons in days. 30 covers a monthly digest
+    # window and comfortable debugging; 0 or negative disables pruning entirely — keep
+    # everything, and mind the disk.
+    events_retention_days: int = 30
+    # How often the pruner sweeps. Retention is a window, not a deadline — an event lingering
+    # an extra hour past the cutoff costs nothing — so this is hourly, not tight.
+    events_prune_interval_s: int = 3600
+
     # ── File space (ADR-0052) ───────────────────────────────────────────────────
     # The core owns the per-tenant user file space behind a swappable backend (constraint #3).
     # "local" serves the shared volume at FILES_ROOT/<tenant>; "s3" serves a per-tenant

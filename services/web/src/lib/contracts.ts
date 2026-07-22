@@ -1270,6 +1270,33 @@ export const LogEntry = z.object({
   context: z.record(z.string(), z.unknown()).default({}),
 });
 export type LogEntry = z.infer<typeof LogEntry>;
+
+/* ── Module event spine ──────────────────────────────────────────────────── */
+
+/**
+ * One world-change a module announced, as the core's durable log recorded it.
+ *
+ * `payload` is pointers and metadata only — never content, never credentials (the core
+ * enforces that on the way in and redacts again on the way out), so a feed row is safe to
+ * render verbatim. `entity_ref` is what lets a row show an ADR-0019 hover-card chip with
+ * no per-module code in the shell.
+ */
+export const ModuleEvent = z.object({
+  id: z.number(),
+  tenant: z.string(),
+  module: z.string(),
+  type: z.string(),
+  /** When the change happened in the world (the emitting module's clock). */
+  occurred_at: z.string(),
+  /** When the core recorded it — not the same thing, and the feed orders by this. */
+  received_at: z.string(),
+  dedup_key: z.string(),
+  entity_ref: EntityRef.nullish(),
+  payload: z.record(z.string(), z.unknown()).default({}),
+  schema_version: z.number().default(1),
+});
+export type ModuleEvent = z.infer<typeof ModuleEvent>;
+
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;
 
 /** A registered maintenance job advertised to the UI (#383). */

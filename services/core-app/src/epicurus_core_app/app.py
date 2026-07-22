@@ -58,6 +58,8 @@ from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStat
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.docker_control import DockerController
+from epicurus_core_app.event_log import EventIntake, EventLogStore, EventRetention
+from epicurus_core_app.event_log_routes import create_event_log_router
 from epicurus_core_app.file_index import FileIndex
 from epicurus_core_app.file_scan import scan as scan_file_space
 from epicurus_core_app.file_watch import FileWatcher
@@ -269,6 +271,17 @@ def create_app() -> FastAPI:
     # Recurring prompts that run unattended and deliver into a session (ADR-0092): the
     # tenant-scoped row store; the scheduler poll loop is built below, once `agent` exists.
     scheduled_turns = ScheduledTurnStore(engine)
+    # The module event spine: modules announce world changes on the bus, and the core keeps
+    # the copy of record (the bus is fire-and-forget and replays nothing). The store is the
+    # log, the intake is the one cross-tenant subscription that fills it, and retention bounds
+    # it. Consumers (the automations engine) attach to the intake via `on_event`.
+    event_log = EventLogStore(engine)
+    event_intake = EventIntake(event_log, bus)
+    event_retention = EventRetention(
+        event_log,
+        retention_days=settings.events_retention_days,
+        interval_s=settings.events_prune_interval_s,
+    )
     # Named playbooks (ADR-0093 §3): independent, enable-able blocks of guidance beside the base
     # prompt, versioned ADR-0046-style. Composed into the prompt by the instructions store below.
     agent_playbooks = PlaybookStore(engine)
@@ -603,6 +616,10 @@ def create_app() -> FastAPI:
         except Exception as exc:  # store down → scheduled turns degrade; chat is unaffected
             log.error("scheduled-turns init failed; scheduled turns disabled", error=str(exc))
         try:
+            await event_log.init()
+        except Exception as exc:  # log down → events aren't recorded; chat is unaffected
+            log.error("event log init failed; the module event spine is off", error=str(exc))
+        try:
             await profile_store.init()
         except Exception as exc:  # profile down → static injection degrades; recall still runs
             log.error("standing-profile store init failed; profile injection off", error=str(exc))
@@ -648,6 +665,15 @@ def create_app() -> FastAPI:
                 await inbound_messaging.start()
             except Exception as exc:
                 log.error("inbound messaging consumer failed to start", error=str(exc))
+        # Record every module event (the spine's durable intake). Best-effort like the consumer
+        # above: a NATS hiccup costs the event log, not the core.
+        try:
+            await event_intake.start()
+        except Exception as exc:
+            log.error("event intake failed to start; events will not be recorded", error=str(exc))
+        # Bound the event log to its retention window. Fire-and-forget, same shape as the
+        # loops around it.
+        event_retention_task = asyncio.create_task(event_retention.run_periodic())
         # Coordinated maintenance batch on an opt-in nightly schedule (ADR-0060) — a no-op task when
         # the schedule is disabled; the manual trigger stays available either way.
         maintenance_task = asyncio.create_task(maintenance.run_periodic())
@@ -657,6 +683,8 @@ def create_app() -> FastAPI:
         finally:
             # Stop accepting new inbound messages first, so no turn starts mid-teardown.
             await inbound_messaging.stop()
+            await event_intake.stop()
+            event_retention_task.cancel()
             catalog_task.cancel()
             catalog_size_task.cancel()
             extraction_task.cancel()
@@ -678,6 +706,8 @@ def create_app() -> FastAPI:
                 await live_run_reaper
             with suppress(asyncio.CancelledError):
                 await maintenance_task
+            with suppress(asyncio.CancelledError):
+                await event_retention_task
             # The nightly-schedule loop above is separate from an in-flight batch it (or a manual
             # trigger) may have started — cancel that too so it isn't orphaned against infra about
             # to close (#561).
@@ -810,6 +840,10 @@ def create_app() -> FastAPI:
         )
     )
     app.include_router(create_log_stream_router(log_buffer))
+    # The raw events feed beside the log console (ADR-0031's second surface).
+    app.include_router(
+        create_event_log_router(event_intake, event_log, default_tenant=settings.default_tenant_id)
+    )
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:

@@ -204,19 +204,10 @@ class EventBus:
             )
             return Event(subject=msg.subject, data=msg.data)
 
-    async def subscribe(
-        self,
-        subject: str,
-        handler: EventHandler,
-        *,
-        tenant_id: str | None = None,
-        queue: str = "",
-    ) -> Subscription:
-        """Invoke ``handler`` for every message on the tenant-scoped ``subject``.
-
-        A raising handler is logged and skipped; the subscription keeps
-        delivering subsequent messages.
-        """
+    def _consumer_cb(
+        self, subject: str, handler: EventHandler, tenant_id: str | None
+    ) -> Callable[[Msg], Awaitable[None]]:
+        """The traced, never-breaking callback every ``subscribe`` variant delivers through."""
 
         async def _cb(msg: Msg) -> None:
             ctx = extract_trace_context(msg.headers)
@@ -231,7 +222,56 @@ class EventBus:
                     span.record_exception(exc)
                     log.exception("event handler raised", subject=msg.subject)
 
-        return await self.client.subscribe(scope_subject(subject, tenant_id), queue=queue, cb=_cb)
+        return _cb
+
+    async def subscribe(
+        self,
+        subject: str,
+        handler: EventHandler,
+        *,
+        tenant_id: str | None = None,
+        queue: str = "",
+    ) -> Subscription:
+        """Invoke ``handler`` for every message on the tenant-scoped ``subject``.
+
+        A raising handler is logged and skipped; the subscription keeps
+        delivering subsequent messages.
+        """
+        return await self.client.subscribe(
+            scope_subject(subject, tenant_id),
+            queue=queue,
+            cb=self._consumer_cb(subject, handler, tenant_id),
+        )
+
+    async def subscribe_any_tenant(
+        self,
+        subject: str,
+        handler: EventHandler,
+        *,
+        queue: str = "",
+    ) -> Subscription:
+        """Invoke ``handler`` for every message on ``subject`` **across all tenants**.
+
+        Subscribes to ``*.<subject>`` — the single-token wildcard sits exactly where
+        :func:`~epicurus_core.tenancy.scope_subject` puts the tenant, so this matches
+        every tenant's copy of the subject and nothing else (application subjects are
+        always tenant-scoped, so they always have that leading token).
+
+        For the **core only**: on the bus the core authenticates with unrestricted pub/sub
+        while a module is confined to its own tenant-scoped subjects (ADR-0066), and a
+        module reaching across tenants would be a boundary violation, not a feature. The
+        core needs it because a per-tenant subscription list means a tenant added at
+        runtime is silently unheard until restart — an intake that quietly drops a
+        tenant's events is worse than one that never had them.
+
+        The handler must read the tenant off the message (``Event.subject``'s first token)
+        or its payload, and should trust neither without checking the other agrees.
+        """
+        return await self.client.subscribe(
+            f"*.{subject}",
+            queue=queue,
+            cb=self._consumer_cb(subject, handler, None),
+        )
 
     async def reply(
         self,

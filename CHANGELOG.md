@@ -44,6 +44,40 @@ images to GHCR.
   **echo** gains `echo_ping` / a "Ping the spine" action emitting `echo.pinged` — the reference
   emitter — and `task smoke` now asserts the whole chain end-to-end on a fresh stack: emit →
   NATS → intake → durable log → feed, plus the log's idempotency. `docs/reference/events.md`
+  starts **the event catalog**; real module emitters extend it.
+- **Notes, Knowledge, Files: content events + suggestion-decision events** (#665, stacked on
+  #662) — the operator-content half of the emitter sweep. **Notes/knowledge doc events**:
+  `note_created`/`doc_created` and `note_deleted`/`doc_deleted` fire immediately at the change
+  (editor, file tree, or an approved suggestion — both authors converge on the same pages
+  seams), but `note_updated`/`doc_updated` are **debounced to settled saves**: the ADR-0042
+  auto-save fires a PUT on every ~4s idle pause, so each save re-arms a per-document quiet
+  window (`NOTES_EVENTS_DEBOUNCE_S` / `KNOWLEDGE_EVENTS_DEBOUNCE_S`, default **120s**) and one
+  event fires when it passes untouched — carrying the *last save's* timestamp as `occurred_at`
+  and the count of saves coalesced. The debounce is a swept dict driven by a pure
+  `flush_due(now)` (the ADR-0092/0098 test idiom), duplicated per module rather than landed in
+  the high-contention core lib (rule of three; the engine PR is already bumping it); pending
+  entries flush on shutdown, deletes cancel them, renames re-key them (knowledge folder moves
+  re-key by prefix). `knowledge.vault_synced` is **one batch event per watcher pass** with the
+  pass's honest counts (`indexed` merges added+updated — the walk doesn't distinguish); no-op
+  passes and the startup index emit nothing (no-firehose). `knowledge.index_failed` is
+  rate-limited (`KNOWLEDGE_INDEX_FAILED_COOLDOWN_S`, 900s, the mail.sync_failed posture) and
+  fires on the initial index giving up (#230's retry budget) or a watcher pass failing.
+  **Files events are core-emitted** (the core owns the file space, #434) at the file-API seam:
+  `files.file_added` (upload, or a module/agent write of a genuinely-new path),
+  `files.file_deleted` (one per API action — a folder is one event), `files.file_moved`
+  (file-space + object-store fallbacks). Deliberately **no `file_updated`**: an overwrite emits
+  nothing, so mirrored module content doesn't double-signal its own `*_updated` here.
+  **Suggestion decisions are core-emitted at the one review funnel**
+  (`ModuleRegistry.review_action`): `core.suggestion_approved` / `core.suggestion_rejected`
+  fire once per decision whether the operator used a module's review page (HTTP-proxied) or
+  the core-hosted pseudo-module surface (ADR-0093 §2), with `operation`/`path` lifted from the
+  surface's `ApplyResult`. Two legacy subjects retire: notes' bare `notes.saved` publish (no
+  consumer — the mail.sent migration, #663) and knowledge's declared-but-never-published
+  `knowledge.index.completed` (the manifest now only advertises events that fire). All emission
+  is best-effort — a spine hiccup never fails the save, delete, or decision that already
+  landed. `notes` 0.8.0→0.9.0 (MINOR) · `knowledge` 0.23.0→0.24.0 (MINOR) · `core-app`
+  0.86.0→0.87.0 (MINOR).
+
   starts **the event catalog**; real module emitters extend it. `epicurus-core` 0.28.0→0.29.0
   (MINOR), `core-app` 0.85.0→0.86.0 (MINOR), `web` 0.113.0→0.114.0 (MINOR), `echo`
   0.3.0→0.4.0 (MINOR).

@@ -57,6 +57,7 @@ from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.event_log import EventIntake, EventLogStore, EventRetention
 from epicurus_core_app.event_log_routes import create_event_log_router
@@ -146,6 +147,10 @@ def create_app() -> FastAPI:
     configure_logging(settings, extra_processors=[log_buffer.processor])
     log = get_logger(SERVICE_NAME)
     bus = EventBus.from_settings(settings)
+    # The core's own spine emitters (#665): files.* at the file-API seam and
+    # core.suggestion_* at the review funnel. Emitting over the bus (not writing the log
+    # directly) keeps one intake path for every event, the core's included.
+    core_events = CoreEventEmitter(bus)
     power = PowerController()
     secrets = SecretStore.from_settings(settings)
     engine = create_async_engine(settings.database_url)
@@ -345,6 +350,7 @@ def create_app() -> FastAPI:
         docker=docker,
         docker_unavailable_reason=docker_availability.reason,
         core=core_review,
+        events=core_events,
     )
     ollama_runtime = OllamaRuntime(
         docker,
@@ -747,6 +753,7 @@ def create_app() -> FastAPI:
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
             locked_prefixes=frozenset(settings.module_hostnames),
+            events=core_events,
         )
     )
     app.include_router(

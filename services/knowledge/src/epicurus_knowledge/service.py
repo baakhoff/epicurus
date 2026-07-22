@@ -37,7 +37,15 @@ from epicurus_core import (
     UiAction,
     UiSection,
     WritesDocument,
+    event_subject,
     tool_envelope,
+)
+from epicurus_knowledge.events import (
+    DOC_CREATED,
+    DOC_DELETED,
+    DOC_UPDATED,
+    INDEX_FAILED,
+    VAULT_SYNCED,
 )
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.module_docs import ModuleDocsIndexer
@@ -61,8 +69,6 @@ from epicurus_knowledge.suggestions import (
 )
 
 MODULE_NAME = "knowledge"
-
-INDEX_COMPLETE_SUBJECT = "knowledge.index.completed"
 
 # Usage documentation served at GET /module-docs (#215).
 _DOCS: list[dict[str, Any]] = [
@@ -251,7 +257,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.23.0",
+        version="0.24.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -322,7 +328,28 @@ def build_module(
         reindexable=True,
     )
 
-    module.emits(INDEX_COMPLETE_SUBJECT, "published after each incremental index run")
+    # Spine emitters (#665) — replaces the legacy `knowledge.index.completed` declaration,
+    # which no code ever published (the manifest now only advertises events that fire).
+    module.emits(
+        event_subject(DOC_CREATED),
+        "a vault document came into existence (editor, file tree, or approved suggestion)",
+    )
+    module.emits(
+        event_subject(DOC_UPDATED),
+        "a document's editing session settled — debounced, one event per quiet window",
+    )
+    module.emits(
+        event_subject(DOC_DELETED),
+        "a vault document was deleted (editor, file tree, or approved suggestion)",
+    )
+    module.emits(
+        event_subject(VAULT_SYNCED),
+        "one batch event per external vault sync pass (#232), carrying the pass's counts",
+    )
+    module.emits(
+        event_subject(INDEX_FAILED),
+        "indexing failed (initial index gave up, or a sync pass failed) — rate-limited",
+    )
 
     async def _finalize(sid: str, applied_msg: str, pending_msg: str) -> str:
         """Leave a staged change pending under review, or auto-apply it when review is off.

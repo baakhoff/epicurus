@@ -203,7 +203,15 @@ class EventLogStore:
                 # (the session is unusable otherwise) and report the no-op to the caller.
                 await session.rollback()
                 return None
-            await session.refresh(row)
+            # Deliberately no ``session.refresh(row)``. Every column is either set above or
+            # carries a Python-side ``default=``, there is no ``server_default`` on this table,
+            # and the sessionmaker is ``expire_on_commit=False`` — so the flushed row, ``id``
+            # included, is already complete in memory. Re-reading it cost a round-trip per event
+            # on the spine's hot path and, worse, could fail outright: two events arriving close
+            # together run two ``append`` calls concurrently, and once their sessions interleave
+            # the refresh cannot see its own row and raises "Could not refresh instance". That
+            # surfaced inside the intake handler, where the bus logs and drops it (core NATS has
+            # no redelivery), so the event was lost with nothing but a log line to say so.
             return _to_value(row)
 
     async def recent(

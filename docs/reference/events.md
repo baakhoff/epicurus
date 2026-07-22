@@ -246,24 +246,28 @@ operator (and the agent, via the indexed docs) reads to know what the system can
 | Event | Module | Payload | `dedup_key` | Notes |
 | --- | --- | --- | --- | --- |
 | `echo.pinged` | `echo` | `{note?: str}` — a short crumb, truncated to 200 chars | fresh per ping, or caller-supplied | The reference emitter ([echo](../services/echo.md)). Fired by the `echo_ping` tool / the "Ping the spine" action. Carries an `EntityRef` of kind `ping`. Pass an explicit `dedup_key` to demonstrate the log's idempotency: two pings, one event. |
+| `notes.note_created` | `notes` | `{slug, title (≤200)}` | `<slug>:created:<ISO>` | Immediate, at the save that brings the note into existence — editor or approved suggestion ([notes](../services/notes.md), #665). Carries an `EntityRef` of kind `note` (notes has no resolver; the chip falls back to the ref's own title). |
+| `notes.note_updated` | `notes` | `{slug, title (≤200), saves}` | `<slug>:updated:<last-save ISO>` | **Debounced to settled saves**: the editor auto-saves on every ~4s idle pause (ADR-0042), so each save re-arms a per-note quiet window (`NOTES_EVENTS_DEBOUNCE_S`, default 120s) and one event fires when it passes untouched. `occurred_at` is the *last save's* time; `saves` counts what the window coalesced. A delete cancels the pending update; a rename re-keys it. |
+| `notes.note_deleted` | `notes` | `{slug}` | `<slug>:deleted:<ISO>` | Immediate (editor or approved suggestion). |
+| `knowledge.doc_created` | `knowledge` | `{path, title (≤200)}` | `<path>:created:<ISO>` | Immediate, at the save/file-tree action that brings the document into existence ([knowledge](../services/knowledge.md), #665). Carries the same resolvable `EntityRef` (kind `knowledge`) that `knowledge_search` cites. |
+| `knowledge.doc_updated` | `knowledge` | `{path, title (≤200), saves}` | `<path>:updated:<last-save ISO>` | Debounced exactly like `notes.note_updated` (`KNOWLEDGE_EVENTS_DEBOUNCE_S`, default 120s). |
+| `knowledge.doc_deleted` | `knowledge` | `{path}` | `<path>:deleted:<ISO>` | Immediate. A whole-base removal (#340) emits **no** per-doc events — one operator action is not N deletions; pending debounced updates under it are dropped. |
+| `knowledge.vault_synced` | `knowledge` | `{indexed, deleted, unchanged}` | `vault-synced:<ISO>` | **One batch event per watcher pass** (#232) — never per-file storms. A pass that changed nothing emits nothing. `indexed` merges added+updated (the incremental walk does not distinguish). The startup/initial index emits nothing (no-firehose: a first load is not news). |
+| `knowledge.index_failed` | `knowledge` | `{error (≤200)}` | `index-failed:<ISO>` | Rate-limited per instance (`KNOWLEDGE_INDEX_FAILED_COOLDOWN_S`, default 900s): the initial index giving up after its retry budget, or a watcher pass failing. Per-save index misses are *not* spine events — the editor surfaces them inline and the next save retries. Time-based key: each emission clearing the cooldown is a fresh observation. |
+| `files.file_added` | `files` | `{path, size?}` | `<path>:added:<ISO>` | **Core-emitted** (the core owns the file space, #434) at the file-API seam: an operator upload, or a module/agent write of a genuinely-new path. There is deliberately **no `file_updated`** — an overwrite emits nothing, so mirrored module content (notes' `.md` mirror, knowledge's vault) does not double-signal its own `*_updated` here. A *new* note/doc still yields both its module event **and** a `file_added` for the mirror file — filter on `path` if you want one side only. Out-of-band disk changes (the file watcher's territory) are not emitted. |
+| `files.file_deleted` | `files` | `{path}` | `<path>:deleted:<ISO>` | Core-emitted, one event per API action — deleting a folder is one event for the folder, not one per file inside. Covers both file-space entries and object-store (chat upload) entries. |
+| `files.file_moved` | `files` | `{from_path, to_path}` | `<src>-><dst>:<ISO>` | Core-emitted; covers file-space moves and the object-store fallback. |
+| `core.suggestion_approved` | `core` | `{module, page, sid, operation, path?}` | `<module>:<sid>:<status>` | **Core-emitted at the one review funnel** (`ModuleRegistry.review_action`), so every surface is covered by a single emission point: module review pages over HTTP *and* the core-hosted pseudo-module surface (ADR-0093 §2). `page` names the queue (the suggestion kind); `operation`/`path` are lifted from the surface's `ApplyResult`. Carries an `EntityRef` of kind `suggestion`. |
+| `core.suggestion_rejected` | `core` | `{module, page, sid, operation, path?}` | `<module>:<sid>:<status>` | Same seam and shape as `core.suggestion_approved`. |
 | `mail.received` | `mail` | `{message_id, from, subject (≤200 chars), folder, has_attachments: bool, provider}` | the provider message id | The first provider-backed emitter ([mail](../services/mail.md)). Fired from the cache reconcile (ADR-0096, #623) once per genuinely-new message — **never** on an initial or full resync (no-firehose). Carries an `EntityRef` of kind `message`. See *Provider caveats* below. |
 | `mail.sent` | `mail` | `{to (≤200 chars), subject (≤200 chars)}` | the provider's sent message id | Fired after a confirmed send succeeds (`POST /send` / `POST /pages/mailbox/send`, ADR-0085) — best-effort, a spine hiccup never fails a completed send. Carries an `EntityRef` of kind `message`. |
 | `mail.sync_failed` | `mail` | `{reason: "provider_error" \| "cursor_expired", provider}` | `"<reason>:<ISO timestamp>"` | Fired on a reconcile failure — a provider/auth error, or an expired sync cursor forcing a full resync. Rate-limited per running instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s) so a flapping account can't storm the bus; each emission that clears the cooldown is a fresh observation, not a repeat, so the key is time-based rather than derived from the failure itself. |
 
-Real module emitters (calendar, tasks, notes, knowledge, files) are companion issues and append
-their rows as they land.
+Real module emitters (mail, calendar, tasks) are companion issues and append their rows as
+they land.
 
 ### Provider caveats
 
 Notes on emitters whose truth depends on an external provider — polling granularity,
-missing change feeds, provider-side dedup quirks.
-
-**Mail / Gmail.** `changed_threads_since` (Gmail's `users.history.list`) reports most changes at
-**thread** granularity, but its `messagesAdded` history-record type already carries the specific
-message id, which is what `mail.received`'s message-level detection is built on — it is not
-inferred from a thread-level diff. IMAP does not exist in this codebase yet (only `GmailProvider`
-is implemented, despite the `MailProvider` seam being provider-neutral by design); a future IMAP
-provider would derive new-message ids from the UIDs above the last-seen `UIDNEXT` on a
-`UID FETCH`, and a `UIDVALIDITY` rotation would report through the same "cursor too old to
-replay" path Gmail's expired-history 404 already uses — `mail.sync_failed(reason="cursor_expired")`
-needs no provider-specific handling on the reconcile side.
+missing change feeds, provider-side dedup quirks. Empty until the first provider-backed
+emitter lands; it is a section rather than a footnote because it *will* fill up.

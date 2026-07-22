@@ -7,7 +7,7 @@
  * gets in the turn's way.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,12 @@ import { usePanel } from "@/stores/panel";
 vi.mock("@/lib/api", () => ({
   api: { modules: vi.fn(), suggestionsEnabled: vi.fn() },
 }));
+
+const mockNavigate = vi.fn();
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return { ...actual, useNavigate: () => mockNavigate };
+});
 
 // The editor archetype is a page-sized component with its own queries; the pane's job is to
 // decide *whether* to hand over to it, which is what these tests are about.
@@ -81,6 +87,7 @@ beforeEach(() => {
   vi.mocked(api.suggestionsEnabled).mockResolvedValue({ enabled: true });
   usePanel.setState({ stack: [] });
   useChat.setState({ liveDocument: null });
+  mockNavigate.mockReset();
 });
 
 describe("The document pane while the agent writes (#541)", () => {
@@ -112,6 +119,40 @@ describe("The document pane once the write settles (#541, ADR-0033)", () => {
     expect(panel().getByText(/nothing is written until you approve/i)).toBeInTheDocument();
     // The document does not exist yet — an editor over it would be fiction.
     expect(panel().queryByTestId("editor")).not.toBeInTheDocument();
+  });
+
+  it("resolves the review-state query under the shared kebab-case key (#659)", async () => {
+    // Was `["suggestionsEnabled", module]` — a duplicate cache entry the review toggle's
+    // own `["suggestions-enabled", module]` invalidation never reached. Asserting the exact
+    // key (not just that the mock was called) pins the fix specifically.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    openPane(doc());
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <PanelHost />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await panel().findByRole("button", { name: "Review & approve" });
+    expect(qc.getQueryData(["suggestions-enabled", "knowledge"])).toEqual({ enabled: true });
+    expect(qc.getQueryData(["suggestionsEnabled", "knowledge"])).toBeUndefined();
+  });
+
+  it("Review & approve navigates in-app and dismisses the pane, without a hard reload (#659)", async () => {
+    // This was the app's only SPA-internal hard `window.location.assign` — it dropped the
+    // live SSE stream for no reason. Asserting `navigate()` (not a real page load) and that
+    // the pane's own state clears pins both halves of the fix in one place.
+    useChat.setState({ liveDocument: doc() });
+    openPane(doc());
+    render(<PanelHost />, { wrapper });
+
+    fireEvent.click(await panel().findByRole("button", { name: "Review & approve" }));
+
+    expect(mockNavigate).toHaveBeenCalledWith("/m/knowledge/review");
+    await waitFor(() => expect(usePanel.getState().stack).toHaveLength(0));
+    // Dismissed, not just closed — otherwise the chat's re-open effect would reopen it.
+    expect(useChat.getState().liveDocument?.dismissed).toBe(true);
   });
 
   it("becomes the real editor when the write actually landed", async () => {

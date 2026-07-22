@@ -65,6 +65,9 @@ class IndexRunner:
         max_delay_seconds: Upper bound on the backoff delay.
         on_complete: Optional async callback invoked with the summed counts after a
             successful pass (e.g. to emit a NATS event); its failures are swallowed.
+        on_failed: Optional async callback invoked with the last error once every
+            attempt is exhausted (the spine's ``knowledge.index_failed`` hook, #665);
+            its failures are swallowed.
     """
 
     def __init__(
@@ -75,12 +78,16 @@ class IndexRunner:
         base_delay_seconds: float = 1.0,
         max_delay_seconds: float = 30.0,
         on_complete: Callable[[Counts], Awaitable[None]] | None = None,
+        on_failed: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._indexers = list(indexers)
         self._max_attempts = max(1, max_attempts)
         self._base = max(0.0, base_delay_seconds)
         self._cap = max(0.0, max_delay_seconds)
         self._on_complete = on_complete
+        # Invoked with the last error when the whole retry budget is exhausted — the
+        # spine's rate-limited `knowledge.index_failed` hook (#665). Best-effort.
+        self._on_failed = on_failed
         self.state = IndexState()
 
     async def run_once(self) -> Counts:
@@ -157,3 +164,8 @@ class IndexRunner:
             attempts=self._max_attempts,
             error=self.state.error,
         )
+        if self._on_failed is not None:
+            try:
+                await self._on_failed(self.state.error or "initial index failed")
+            except Exception as exc:  # callback is best-effort, never mask the give-up
+                _log.warning("index on_failed callback failed", error=str(exc))

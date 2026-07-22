@@ -82,7 +82,7 @@ tasks:
       - sh infra/ci/smoke.sh
 
   reconcile:
-    desc: 'Deploy on the box: pull GHCR images for the tracked tag and restart changed containers (data volumes preserved; EPICURUS_VERSION in .env selects release/pinned/testing)'
+    desc: 'Deploy on the box: pull GHCR images for the tracked tag and restart changed containers (data volumes preserved; EPICURUS_VERSION in .env selects release/pinned/testing; DOCKER_GID in .env persists the docker-socket opt-in, #655)'
     cmds:
       - sh infra/cd/reconcile.sh
 

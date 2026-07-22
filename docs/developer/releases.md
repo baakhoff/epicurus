@@ -40,8 +40,8 @@ Omitting the variable (the default) resolves to `:latest`, which is fine for
 local development where you always want the freshest build. For staging and
 production, always set it — this ensures every `docker compose up` pulls the same
 immutable image that was verified in CI, satisfying the immutable-image principle
-in `DEPLOYMENT.md` (same image through staging → prod, no surprise updates from a
-bad push to `:latest`).
+described in **[Auto-deploy (CD)](../infrastructure/auto-deploy.md)** (same image
+through staging → prod, no surprise updates from a bad push to `:latest`).
 
 ## Automatic deployment to the operator's box
 

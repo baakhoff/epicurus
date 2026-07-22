@@ -7,7 +7,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, WifiOff, X } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useNavigate } from "react-router-dom";
 
+import { modulePagePath } from "@/app/registry";
 import { CardLink } from "@/components/CardLink";
 import { EditorView } from "@/components/archetypes/EditorView";
 import { MailMessageView } from "@/components/MailMessageView";
@@ -212,6 +214,8 @@ function DocReaderView({ payload }: { payload: unknown }) {
  */
 function DocumentView({ payload }: { payload: unknown }) {
   const doc = payload as LiveDocument;
+  const navigate = useNavigate();
+  const closePanel = useClosePanel();
   // Which module page hosts the document, and which reviews it — from the module's own
   // manifest, never a name check. Warm: the Shell already holds this query.
   const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
@@ -222,8 +226,12 @@ function DocumentView({ payload }: { payload: unknown }) {
   // Did the write land, or is it waiting for review? The module asked the core this same
   // question to decide (ADR-0033), so the core's answer is what actually happened. Only
   // resolved once the call settles — mid-write the pane is read-only either way.
+  //
+  // Kebab-case, matching ReviewView/SuggestionsScreen's key (#659) — the pane previously used
+  // its own camelCase key, missing the invalidation the review toggle fires under the shared
+  // hyphenated key.
   const review = useQuery({
-    queryKey: ["suggestionsEnabled", doc.module],
+    queryKey: ["suggestions-enabled", doc.module],
     queryFn: () => api.suggestionsEnabled(doc.module),
     enabled: !doc.writing && !doc.failed,
   });
@@ -259,8 +267,14 @@ function DocumentView({ payload }: { payload: unknown }) {
           <Button
             variant="primary"
             onClick={() => {
-              usePanel.getState().close();
-              window.location.assign(`/m/${encodeURIComponent(doc.module)}/${encodeURIComponent(reviewPage.id)}`);
+              // In-app navigation (#659) — this was the only SPA-internal hard reload in the
+              // app, dropping the live SSE stream for no reason (it recovers via ADR-0055
+              // re-attach, but there's nothing to recover from if we just don't reload).
+              // The document pane persists across route changes (PanelHost is Shell-global,
+              // not scoped to ChatScreen), so it must be explicitly dismissed here — unlike
+              // the reload it replaces, nothing implicitly clears it.
+              closePanel();
+              navigate(modulePagePath(doc.module, reviewPage.id));
             }}
           >
             Review &amp; approve

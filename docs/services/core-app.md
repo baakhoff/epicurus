@@ -774,6 +774,28 @@ The feed is at `GET /platform/v1/events[/stream]` — the Observability screen's
 tab (see [observability](../reference/observability.md#raw-events-feed)). The event catalog
 lives in [events](../reference/events.md#the-event-catalog).
 
+### Core-emitted spine events (#665)
+
+The core also **emits** (`core_events.py`, `CoreEventEmitter`) — over its own bus, exactly
+like a module would, so its events flow through the same intake → log → feed path as
+everyone else's:
+
+- **`files.file_added` / `files.file_deleted` / `files.file_moved`** — at the file-API
+  seam (`files_routes.py`): the core owns the file space (#434), and every mutation —
+  operator upload/delete, module-bridge write/delete/move (`PlatformClient.files_*`), the
+  object-store fallbacks — passes through those handlers. There is deliberately **no
+  `file_updated`** (an overwrite emits nothing — content owners announce their own
+  `*_updated`), and out-of-band disk changes seen only by the file watcher are not emitted.
+- **`core.suggestion_approved` / `core.suggestion_rejected`** — at
+  `ModuleRegistry.review_action`, the one funnel every review surface passes through:
+  module review pages proxied over HTTP *and* the in-process core pseudo-module
+  (ADR-0093 §2). One decision, one event, whichever surface the operator used; the
+  payload lifts `operation`/`path` from the surface's `ApplyResult`.
+
+Every emission is best-effort — a spine hiccup is logged and never fails the mutation or
+decision that already landed. Payload shapes and dedup keys are in the
+[event catalog](../reference/events.md#the-event-catalog).
+
 ## Configuration
 
 `CoreAppSettings` extends the shared [`CoreSettings`](../reference/config.md). Key fields

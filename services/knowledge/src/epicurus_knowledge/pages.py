@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import PlatformClient, get_logger
 from epicurus_knowledge.db import VersionStore
+from epicurus_knowledge.events import KnowledgeEventEmitter
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.reader import ApiVaultReader, DiskVaultReader, VaultReader
 from epicurus_knowledge.refs import (
@@ -179,6 +180,7 @@ class VaultPages:
         docs_path: Path | None = None,
         versions: VersionStore | None = None,
         tenant: str = "default",
+        events: KnowledgeEventEmitter | None = None,
     ) -> None:
         self._vault = vault_path
         self._indexer = indexer
@@ -205,6 +207,9 @@ class VaultPages:
         # disables snapshotting — the editor still works.
         self._versions = versions
         self._tenant = tenant
+        # Announces content changes on the module event spine (#665). None disables
+        # emission (tests / no NATS); every emit is best-effort inside the emitter.
+        self._events = events
 
     def _ensure_writable(self) -> None:
         """Reject a mutating operation when the vault is externally owned (#232, ADR-0035)."""
@@ -324,6 +329,11 @@ class VaultPages:
         # segment, so its vault-relative path is just its name; documents under it are `<name>/…`.
         removed = await self._indexer.remove_under(f"{target.name}/")
         await self._platform.files_delete(self._core_path(target))
+        # Forget any pending debounced updates under the removed base — their docs are
+        # gone, so a later `doc_updated` for them would be a ghost. Per-doc delete events
+        # are deliberately not emitted for a whole-base removal (one operator action).
+        if self._events is not None:
+            self._events.drop_prefix(f"{target.name}/")
         log.info("knowledge base deleted", name=target.name, deindexed=removed)
         return removed
 
@@ -358,8 +368,17 @@ class VaultPages:
         self._ensure_writable()
         self._reject_docs_write(rel)
         target = safe_relative(self._vault, rel)
+        core = self._core_path(target)
+        # Whether this save brings the document into existence — decides doc_created
+        # (immediate) vs. doc_updated (debounced to the settled save, #665).
+        created = self._events is not None and await self._platform.files_stat(core) is None
         # The core owns the write (creating parents) — knowledge no longer writes /data (ADR-0064).
-        await self._platform.files_write(self._core_path(target), content)
+        await self._platform.files_write(core, content)
+        # Announce the change on the spine (#665) once the source of truth is written —
+        # deliberately before the index attempt, since the event reports the save, not
+        # the embed. Emission is best-effort inside the emitter.
+        if self._events is not None:
+            await self._events.doc_saved(rel, created=created)
         indexed = True
         chunk_count = 0
         try:
@@ -417,6 +436,9 @@ class VaultPages:
         if st is None or st.kind != "file":
             raise HTTPException(status_code=404, detail=f"no such document: {rel}")
         await self._platform.files_delete(core)
+        # The file is gone — announce it (#665); a pending debounced update is moot.
+        if self._events is not None:
+            await self._events.doc_deleted(rel)
         log.info("document deleted", path=rel)
 
     async def delete_folder(self, rel: str) -> None:
@@ -475,6 +497,11 @@ class VaultPages:
                     status_code=409, detail=f"destination already exists: {to_rel}"
                 ) from exc
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        # No move event in v1 (#665 names created/updated/deleted) — but an in-flight
+        # debounced update must settle under a path that still exists. Folder moves
+        # re-key everything pending under the old prefix.
+        if self._events is not None:
+            self._events.doc_moved(from_rel, to_rel)
         log.info("item moved", from_path=from_rel, to_path=to_rel)
         indexed = await self._indexer.move_path(from_rel, to_rel)
         return MoveResult(path=to_rel, indexed=indexed)

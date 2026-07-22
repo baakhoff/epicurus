@@ -67,6 +67,68 @@ images to GHCR.
   siblings. IMAP does not exist in this codebase yet (only `GmailProvider` is implemented,
   despite the module's provider-neutral design); the catalog's provider-caveats section notes
   what a future IMAP provider would need to fill. `mail` 0.13.0→0.14.0 (MINOR).
+
+- **Notes, Knowledge, Files: content events + suggestion-decision events** (#665, stacked on
+  #662) — the operator-content half of the emitter sweep. **Notes/knowledge doc events**:
+  `note_created`/`doc_created` and `note_deleted`/`doc_deleted` fire immediately at the change
+  (editor, file tree, or an approved suggestion — both authors converge on the same pages
+  seams), but `note_updated`/`doc_updated` are **debounced to settled saves**: the ADR-0042
+  auto-save fires a PUT on every ~4s idle pause, so each save re-arms a per-document quiet
+  window (`NOTES_EVENTS_DEBOUNCE_S` / `KNOWLEDGE_EVENTS_DEBOUNCE_S`, default **120s**) and one
+  event fires when it passes untouched — carrying the *last save's* timestamp as `occurred_at`
+  and the count of saves coalesced. The debounce is a swept dict driven by a pure
+  `flush_due(now)` (the ADR-0092/0098 test idiom), duplicated per module rather than landed in
+  the high-contention core lib (rule of three; the engine PR is already bumping it); pending
+  entries flush on shutdown, deletes cancel them, renames re-key them (knowledge folder moves
+  re-key by prefix). `knowledge.vault_synced` is **one batch event per watcher pass** with the
+  pass's honest counts (`indexed` merges added+updated — the walk doesn't distinguish); no-op
+  passes and the startup index emit nothing (no-firehose). `knowledge.index_failed` is
+  rate-limited (`KNOWLEDGE_INDEX_FAILED_COOLDOWN_S`, 900s, the mail.sync_failed posture) and
+  fires on the initial index giving up (#230's retry budget) or a watcher pass failing.
+  **Files events are core-emitted** (the core owns the file space, #434) at the file-API seam:
+  `files.file_added` (upload, or a module/agent write of a genuinely-new path),
+  `files.file_deleted` (one per API action — a folder is one event), `files.file_moved`
+  (file-space + object-store fallbacks). Deliberately **no `file_updated`**: an overwrite emits
+  nothing, so mirrored module content doesn't double-signal its own `*_updated` here.
+  **Suggestion decisions are core-emitted at the one review funnel**
+  (`ModuleRegistry.review_action`): `core.suggestion_approved` / `core.suggestion_rejected`
+  fire once per decision whether the operator used a module's review page (HTTP-proxied) or
+  the core-hosted pseudo-module surface (ADR-0093 §2), with `operation`/`path` lifted from the
+  surface's `ApplyResult`. Two legacy subjects retire: notes' bare `notes.saved` publish (no
+  consumer — the mail.sent migration, #663) and knowledge's declared-but-never-published
+  `knowledge.index.completed` (the manifest now only advertises events that fire). All emission
+  is best-effort — a spine hiccup never fails the save, delete, or decision that already
+  landed. `notes` 0.8.0→0.9.0 (MINOR) · `knowledge` 0.23.0→0.24.0 (MINOR) · `core-app`
+  0.86.0→0.87.0 (MINOR).
+
+  starts **the event catalog**; real module emitters extend it. `epicurus-core` 0.28.0→0.29.0
+  (MINOR), `core-app` 0.85.0→0.86.0 (MINOR), `web` 0.113.0→0.114.0 (MINOR), `echo`
+  0.3.0→0.4.0 (MINOR).
+- **Push: web push end-to-end** (#670) — VAPID-signed browser push, the "push alerts" half of
+  event-driven proactivity. A tenant's VAPID keypair is generated on first send and stored in
+  OpenBao — no operator provisioning step. Per-category + quiet-hours preferences
+  (`push_prefs`, shared with the notification center, #671) gate every send: category off
+  skips it, quiet hours (tenant timezone, ADR-0039) queue it for one summary digest once the
+  window ends rather than dropping it, and an in-memory per-tenant rate cap is the last gate.
+  A subscription the push service reports Gone (404/410) is pruned automatically.
+  `services/web/src/sw.ts` gains `push`/`notificationclick` handlers; a new Settings → Push
+  notifications card handles this-device subscribe/unsubscribe, per-device management,
+  category toggles, quiet hours, and a test-notification button. `PushService.notify()` is a
+  core-internal contract (no HTTP route) for the automations engine's future push sink and
+  system notices — today's only caller is the settings UI's test button. Desktop Chrome/Edge
+  and installed Android/iOS PWA (16.4+) both work. Implements ADR-0102. `core-app`
+  0.83.0→0.84.0 (MINOR), `web` 0.111.0→0.112.0 (MINOR).
+- **Push: in-app notification center** (#671) — the durable record every push-worthy
+  notification lands in, written by `PushService.notify()` itself the instant a category's
+  `center` toggle is on — independent of whether push delivery fires, queues for quiet
+  hours, or is itself disabled, so a quiet-hours-suppressed push still appears in the center
+  immediately rather than waiting for the digest. A new **Notifications** page (list, category
+  filter, unread-only filter, mark read / mark all read, `EntityRef` hover-cards + deep links
+  via the existing `CardLink`) and a live unread-count badge on its own nav entry (polled every
+  15s, the same shape as the #492 "finished while you were away" watcher). Retention is a
+  per-tenant row cap (500), not time-based. Stacks on #670's shared `{push, center}` prefs
+  object — no second settings surface. Implements ADR-0104. `core-app` 0.84.0→0.85.0 (MINOR),
+  `web` 0.112.0→0.113.0 (MINOR).
 - **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
   governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
   job on the maintenance orchestrator's nightly batch (additive — one entry appended to the
@@ -110,6 +172,82 @@ images to GHCR.
   §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
 
 ### Fixed
+
+- **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
+  but that file doesn't exist in the public tree** (#661). The real document was always the
+  gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the
+  Modules page's Docker-status card (#652/#622) or the `docker-socket` compose comment to
+  `docs/DEPLOYMENT.md` got a 404. Both now point at `docs/infrastructure/index.md`'s
+  "Docker-socket access" section, which #652's own docs already established as the real home for
+  that content. Also swept two conceptual "DEPLOYMENT.md" mentions (`.env.example`,
+  `docs/developer/releases.md`) that cited the same gone file for the image-pinning /
+  immutable-image principle — retargeted at `docs/infrastructure/auto-deploy.md`, mirroring the
+  link `releases.md` already uses two sections below for the same document. `web` 0.111.2→0.111.3
+  (PATCH — the Modules page string). `core-app`'s `compose.yaml` touch is comment-only, no
+  runtime effect — no bump.
+
+- **Web: confirming a mid-history edit could trim the transcript to a state the server was never
+  asked to produce** (#660). Editing a user message further back than the last turn discards every
+  real turn since it, so `saveEdit()` confirms the count first — but it only guards
+  `chat.streaming`/a dropped connection at the moment the dialog *opens*. A run starting elsewhere
+  (another tab, a scheduled turn) or the connection dropping while the dialog sat open went
+  unchecked: clicking **Resend** still applied the optimistic trim and re-ran the edit regardless.
+  The dialog's own confirm now re-checks both at click time, the same guard `saveEdit()` already
+  applies — blocked exactly like Cancel, leaving the inline editor open with the draft intact to
+  retry. `web` 0.111.1→0.111.2 (PATCH).
+
+- **Web: the document pane's "Review & approve" hard-reloaded the SPA, and its review-state
+  query key missed the toggle's own invalidation** (#659). `Panel.tsx`'s `DocumentView` was the
+  only SPA-internal hard navigation in the app (`window.location.assign`) — it dropped the live
+  SSE stream for no reason (recoverable via ADR-0055 re-attach, but nothing to recover *from* if
+  it just doesn't reload); now it navigates in-app via `useNavigate()` and explicitly dismisses
+  the pane first (the panel is Shell-global and persists across routes, so — unlike the reload
+  it replaces — nothing implicitly clears it). Separately, the pane's `["suggestionsEnabled",
+  module]` query key was a duplicate camelCase cache entry alongside `ReviewView`/
+  `SuggestionsScreen`'s established `["suggestions-enabled", module]`, so toggling review while
+  the pane was open missed the invalidation the toggle fires — self-healed on refetch, but could
+  leave the pane's "applied vs. staged" branch briefly stale. Also fixed while in the area: the
+  panel store's `replace()` accepted a title update, but silently discarded it; and `EditorView`'s
+  `doc` prop (the pane's applied→editor handover) had no direct test coverage. `web` 0.111.0→
+  0.111.1 (PATCH).
+
+- **Infra: `task reconcile` silently reverted the docker-socket opt-in on every deploy** (#655) —
+  the #622 opt-in (`services/core-app/compose.docker-socket.yaml` + `DOCKER_GID`) only lasted
+  until the next pull-based reconcile: `infra/cd/reconcile.sh` ran plain
+  `docker compose up -d` with no overlay, so `core-app` was recreated without the socket mount,
+  silently dropping back to deferred-teardown mode (fails safe, but the opt-in didn't stick — the
+  pull-based reconcile is the actual deploy path, not a one-off `docker compose up`). Now
+  `reconcile.sh` reads `DOCKER_GID` the same way it already reads `EPICURUS_VERSION` /
+  `EPICURUS_TRACK_BRANCH` (env, falling back to `.env`) and includes the overlay on both the pull
+  and the up when it's set — unset stays exactly as fail-safe as before. `docs/infrastructure/`
+  updated to cover persisting the opt-in, not just the fresh-deploy default. Infra-only; no
+  component version change.
+
+- **Agent: nightly reflection never showed the model the document it was asked to rewrite**
+  (#658) — the `update` path's system prompt demanded "the FULL new text… it replaces what is
+  there," but `_build_prompt` passed only transcripts and recent rejections, and `list_playbooks`
+  was used for names only; `get_base` was never called. Since `instructions` is always an
+  `update` (there's nothing to create), that path asked for a full regeneration of text the model
+  had no access to — mostly rejectable noise, at the cost of a real gateway call per tenant per
+  night. Now the prompt includes the current base instructions (`get_base`) and every existing
+  playbook's current content — the model edits real text instead of reconstructing from nothing.
+  Folded in from the same review: the out-of-window `continue` in the session scan is now a
+  `break` (`sessions()` is DESC-ordered, so the first miss guarantees the rest miss), and
+  `test_reflection.py`'s model-override test now constructs the reflector with `model=` instead
+  of poking the private attribute, so `settings.playbook_reflection_model` reaching the
+  constructor is actually covered. `core-app` 0.83.1→0.83.2 (PATCH).
+
+- **Core: a DB error on the reserved review page emptied the entire Suggestions inbox** (#657) —
+  `ModuleRegistry._core_suggestions` caught only `HTTPException`, but the core review page is
+  dispatched **in-process** (no loopback HTTP), so a storage failure — e.g. a degraded startup
+  that left `playbook_proposals` uninitialized — surfaced as the driver's own exception and
+  escaped the handler, 500ing `GET /platform/v1/suggestions` and taking every module's pending
+  suggestions down with it, not just the core's own. Now catches bare `Exception` and logs a
+  warning instead, matching the precedent in `agent/instructions.py`'s enrichment fallback — a
+  broken core queue drops only its own entry, everything else in the feed survives. Also closed
+  the matching read/write asymmetry: `GET .../core/suggestions-enabled` now 403s like `PUT`
+  already did, rather than answering `true` for a toggle that can never exist (review of the
+  agent's own instructions/playbooks is mandatory, ADR-0093). `core-app` 0.83.0→0.83.1 (PATCH).
 
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never

@@ -109,7 +109,9 @@ async def test_subscriber_disconnect_does_not_lose_the_answer() -> None:
             yield StreamEvent(result=ChatResult(model="m", content="partial"))
 
     class _NoMcp:
-        async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        async def discover(
+            self, *, allow: frozenset[str] | None = None
+        ) -> tuple[list[dict[str, Any]], dict[str, str]]:
             return [], {}
 
     class _Mem:

@@ -94,6 +94,12 @@ class UsageEvent(BaseModel):
     completion_tokens: int | None = None
     latency_ms: int
     tenant: str
+    # Set only when an automation run made the call (ADR-0105): the second half of the dual
+    # attribution the SaaS overlay meters on. ``tenant`` answers "who is billed"; this
+    # answers "which of their automations spent it" — without it, an automation quietly
+    # burning tokens is indistinguishable from the operator's own chatting. Additive and
+    # optional, so an existing consumer is unaffected and an ordinary turn omits it.
+    automation_id: str | None = None
 
 
 class PowerState(StrEnum):

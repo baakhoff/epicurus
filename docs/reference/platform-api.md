@@ -347,6 +347,94 @@ Driven by the Observability screen's **Events** tab
 
 ---
 
+## Automations (ADR-0105)
+
+Core-owned Settings/page territory, shell-facing (not `PlatformClient`). The full model,
+the autonomy dial, and the safety rules are in [automations](automations.md); the
+Automations page itself is a companion issue (#668).
+
+All take `tenant_id` (default: the default tenant).
+
+### `GET /platform/v1/automations` · `POST /platform/v1/automations`
+
+List, or create. The create body:
+
+```json
+{
+  "name": "Tell me about invoices",
+  "prompt": "Summarize the invoice that just arrived.",
+  "autonomy": "notify",
+  "event_trigger": {
+    "module": "mail",
+    "event_type": "mail.received",
+    "matchers": [{ "field": "subject", "op": "contains", "value": "invoice" }],
+    "window_start_hour": 9, "window_end_hour": 17
+  },
+  "model": null,
+  "sinks": ["chat"],
+  "chat_mode": "rolling",
+  "rate_cap_per_hour": 0,
+  "digest_window_minutes": 0
+}
+```
+
+**400** on a blank name, an unknown autonomy level or sink, a malformed `source`, an
+out-of-range hour, a negative cap, or anything other than **exactly one** trigger (pass
+`schedule_trigger: {"cadence": "daily", "hour": 7}` instead for a scheduled one).
+
+The response adds `allowed_tool_classes` — what this automation's turns may actually reach,
+**derived, never stored**, so the UI shows the same allowance the tool surface enforces
+rather than its own guess.
+
+### `POST /platform/v1/automations/{id}/enabled` · `DELETE /platform/v1/automations/{id}`
+
+Pause/resume (`{"enabled": bool}`), or remove. **404** if unknown; **204** on delete.
+
+### `POST /platform/v1/automations/{id}/run`
+
+Run it now — the "try it" button. An automation you cannot try is an automation you cannot
+trust, and waiting until 7am to find out the prompt was wrong is not a development loop.
+
+Goes through the **same runner** as a real trigger, so it honours the kill switch, the rate
+cap, and the autonomy dial: a test run that behaved differently would be worse than none.
+Recorded with a `manual` verdict. **409** when the tenant's kill switch is on; **404** if
+unknown.
+
+### `GET /platform/v1/automations/runs`
+
+The run ledger, newest first. Query: `automation_id` · `limit` (1–500, default 100).
+
+```json
+[
+  {
+    "id": "…", "automation_id": "…", "started_at": "…",
+    "trigger_refs": [42], "filter_verdict": "matched",
+    "model": "qwen2.5:7b", "prompt_tokens": 812, "completion_tokens": 96,
+    "duration_ms": 4210, "outcome": "ok", "error": null,
+    "output": "An invoice from Acme arrived.", "sinks_fired": ["chat"]
+  }
+]
+```
+
+Written for **every** run at every level — for `silent_act` it is the only trace.
+
+### `GET` · `PUT /platform/v1/automations/kill-switch`
+
+`{"halted": bool}` — stop or resume **every** automation for the tenant. Persisted, unlike
+the runtime power pause: a stop a restart silently undoes is not a stop.
+
+### `GET /platform/v1/automations/templates`
+
+Every enabled module's preset automations — **never auto-instantiated**. Each carries
+`{module, key, name, description, trigger, prompt, autonomy, sinks}`.
+
+### `GET /platform/v1/automations/vocabulary`
+
+`{autonomy_levels, sinks, matcher_ops}` — the closed vocabularies, so the UI never
+hardcodes them.
+
+---
+
 ## Knowledge-base / notes / suggestions endpoints (shell-facing)
 
 These are consumed by the web shell, not the `PlatformClient`. The full module-registry

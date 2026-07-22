@@ -19,7 +19,8 @@ A typical service wires the building blocks in this order:
 3. **[`tenancy`](tenancy.md)** — bind the current tenant; every resource name is
    scoped by it.
 4. Use the capability clients as needed:
-   - **[`events`](events.md)** — `EventBus` for NATS publish / subscribe / request.
+   - **[`events`](events.md)** — `EventBus` for NATS publish / subscribe / request, plus
+     the module event **spine**: `emit_event` to announce a world change (ADR-0103).
    - **[`secrets`](secrets.md)** — `SecretStore` for tenant-scoped secrets in OpenBao.
    - **[`modules`](modules.md)** — `EpicurusModule` to expose MCP tools + a manifest.
 5. **[`observability`](observability.md)** — mount `/health` + `/metrics`, and
@@ -42,9 +43,11 @@ log.info("service starting", service=settings.service_name)
 | [`config`](config.md) | `CoreSettings`, `Environment`, `LogLevel` |
 | [`logging`](logging.md) | `configure_logging`, `get_logger` |
 | [`tenancy`](tenancy.md) | tenant validation, `scope_*` helpers, current-tenant context |
-| [`events`](events.md) | `EventBus`, `Event` (+ `Payload`, `EventHandler`, `Replier`) |
+| [`events`](events.md) | `EventBus`, `Event` (+ `Payload`, `EventHandler`, `Replier`); the module event spine — `EventEnvelope`, `emit_event`, `event_subject`, `EVENTS_WILDCARD` (ADR-0103) — and **the event catalog** |
+| [`redaction`](events.md#redaction) | `is_secret_key`, `redact_mapping`, `secret_keys_in`, `REDACTED_KEYS` — the one credential-screening rule every surfaced-data surface shares (ADR-0031/0103) |
+| [`automations`](automations.md) | The engine that acts on events: the autonomy dial, triggers, sinks, the run ledger (ADR-0105). Core-owned; a module contributes `ToolSpec.side_effect` + `AutomationTemplate` |
 | [`messaging`](messaging.md) | `InboundMessage`, `OutboundMessage`, `MessageAttachment`, `MESSAGING_INBOUND/OUTBOUND`, `session_id_for` — the chat-bridge inbox contract (ADR-0058) |
-| [`modules`](modules.md) | `EpicurusModule`, `ModuleManifest`, `ToolSpec`, `EventSpec`, `CONTRACT_VERSION` |
+| [`modules`](modules.md) | `EpicurusModule`, `ModuleManifest`, `ToolSpec` (+ `side_effect`), `EventSpec`, `AutomationTemplate`, `CONTRACT_VERSION` |
 | [`observability`](observability.md) | `add_ops_routes`, `create_ops_router`, `HealthResponse` |
 | [`tracing`](observability.md#tracing-57-adr-0068) | `setup_tracing`, `get_tracer` — optional OpenTelemetry traces to Tempo (#57) |
 | [`secrets`](secrets.md) | `SecretStore`, `SecretError` |

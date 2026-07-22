@@ -9,10 +9,16 @@ modeled on. Host port **8080**.
 
 ### MCP tools (agent-facing)
 
-| Tool | Purpose |
-| --- | --- |
-| `echo(message)` | Return the given message unchanged. |
-| `echo_ping(note="", dedup_key="")` | Announce an `echo.pinged` event on the module event spine. Returns the dedup key it was filed under. |
+| Tool | Purpose | `side_effect` |
+| --- | --- | --- |
+| `echo(message)` | Return the given message unchanged. | `read` |
+| `echo_ping(note="", dedup_key="")` | Announce an `echo.pinged` event on the module event spine. Returns the dedup key it was filed under. | `write` |
+
+`side_effect` classifies a tool for the [automations](../reference/automations.md#tool-side-effects)
+autonomy dial (ADR-0105), and echo is the reference for that too: `echo` observes and changes
+nothing, while `echo_ping` puts an event on the bus that other things react to. Unannotated
+would mean `write` for both — safe, but it would leave a Notify automation with no echo tool
+at all, which is exactly what annotating a read tool buys you.
 
 ### Events (NATS)
 
@@ -46,6 +52,14 @@ A summary, a `greeting` config field, and two actions — **Send an echo** and *
 spine** — the minimal example of a manifest-driven module UI (ADR-0007). echo also declares an **Echoes** left-nav page
 (`browser` archetype) — the reference for the core-rendered page vocabulary (ADR-0018):
 the module supplies only data, the shell renders it.
+
+### Automation template (manifest)
+
+echo declares one preset automation — *"Tell me when the spine is pinged"*, a Notify-level
+turn triggered by `echo.pinged` — the reference for the
+[Templates](../reference/automations.md#templates) contract (ADR-0105). Declaring it creates
+**nothing**: the operator instantiates it from the Templates tab, so installing echo never
+makes the assistant start doing anything on its own.
 
 ### Resolver (manifest)
 

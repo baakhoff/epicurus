@@ -57,6 +57,19 @@ from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.automations.migration import migrate_scheduled_turns
+from epicurus_core_app.automations.routes import create_automations_router
+from epicurus_core_app.automations.runner import (
+    AutomationMatcher,
+    AutomationRunner,
+    AutomationScheduler,
+)
+from epicurus_core_app.automations.sinks import SinkDispatcher
+from epicurus_core_app.automations.store import (
+    AutomationQueue,
+    AutomationStore,
+    KillSwitchStore,
+)
 from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.event_log import EventIntake, EventLogStore, EventRetention
@@ -287,6 +300,16 @@ def create_app() -> FastAPI:
         retention_days=settings.events_retention_days,
         interval_s=settings.events_prune_interval_s,
     )
+    # Automations (ADR-0105): the engine that decides whether a world change deserves an
+    # action. The stores are built here; the matcher/runner/scheduler are wired below, once
+    # `agent` and `power` exist.
+    automations = AutomationStore(engine)
+    automation_queue = AutomationQueue(engine)
+    automation_kill_switch = KillSwitchStore(engine)
+    # The sink seam. Push/chat/notes/kb are companion issues, so nothing is registered yet:
+    # a configured-but-unregistered sink is recorded as unavailable and the run's output
+    # still lands on the ledger, which is what makes the degradation graceful (ADR-0105).
+    automation_sinks = SinkDispatcher()
     # Named playbooks (ADR-0093 §3): independent, enable-able blocks of guidance beside the base
     # prompt, versioned ADR-0046-style. Composed into the prompt by the instructions store below.
     agent_playbooks = PlaybookStore(engine)
@@ -363,6 +386,11 @@ def create_app() -> FastAPI:
     # Per-tool disable filter (#213): tools the operator has individually turned off are
     # skipped in discover even when their module's URL is included.
     mcp_host.set_tool_filter(registry.disabled_tools_set)
+    # Tool classification (ADR-0105): the automations autonomy dial derives its allowance
+    # from each tool's declared side effect, and MCP's list_tools doesn't carry the manifest
+    # annotation — so discover resolves it here, exactly as the document-pane lookup does.
+    # Only consulted when a turn passes `allow`, so ordinary chat never pays for it.
+    mcp_host.set_side_effect_provider(registry.tool_side_effects)
 
     # Core `now` built-in tool (ADR-0039): reports the operator's configured timezone, and
     # best-effort the connected calendar's timezone when it differs. Registered after the
@@ -382,20 +410,44 @@ def create_app() -> FastAPI:
             lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
             _calendar_timezone,
         ),
+        # Reads a clock. The purest read there is, and the one a Notify automation most
+        # needs — "is this event today?" is unanswerable without it.
+        side_effect="read",
     )
     # Core `remember` built-in tool (ADR-0045): the agent's explicit path for saving a durable
     # fact about the user to long-term memory; background extraction covers the implicit path.
-    mcp_host.register_builtin("remember", REMEMBER_SPEC, make_remember_handler(memory))
+    mcp_host.register_builtin(
+        "remember",
+        REMEMBER_SPEC,
+        make_remember_handler(memory),
+        # Writes to durable memory. It looks harmless — it is only a note — but a Notify
+        # automation firing hourly and remembering something each time would rewrite the
+        # user's memory without ever being asked to touch anything (ADR-0105).
+        side_effect="write",
+    )
     # Core `memory_search` built-in tool (ADR-0089): deliberate recall over the fact store and
     # past conversations — the agent-initiated complement to the ambient recall `_assemble`
     # injects each turn. Tenant-scoped (built-ins receive the tenant), best-effort like recall.
     mcp_host.register_builtin(
-        MEMORY_SEARCH_TOOL, MEMORY_SEARCH_SPEC, make_memory_search_handler(memory)
+        MEMORY_SEARCH_TOOL,
+        MEMORY_SEARCH_SPEC,
+        make_memory_search_handler(memory),
+        side_effect="read",
     )
     # Core `ask_user` built-in tool (ADR-0053): lets the model pause the turn to ask a
     # clarifying question. The agent loop intercepts the call to suspend; this handler is a
     # safety net (the spec reaches the model via the same discovery path as now/remember).
-    mcp_host.register_builtin(ASK_USER_TOOL, ASK_USER_SPEC, make_ask_user_handler())
+    mcp_host.register_builtin(
+        ASK_USER_TOOL,
+        ASK_USER_SPEC,
+        make_ask_user_handler(),
+        # Withheld from every automation, at every level: it suspends the turn waiting for
+        # an answer in the chat UI, and nobody is sitting there. An automation that called
+        # it would hang until its run was reaped — so "write" keeps it out of Notify and
+        # Propose, and the levels that do get it produce a suspended run the operator can
+        # at least see. Making automations answerable is a separate design question.
+        side_effect="write",
+    )
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -457,6 +509,32 @@ def create_app() -> FastAPI:
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         poll_interval_s=settings.scheduled_turns_poll_interval_s,
     )
+    # The automations engine (ADR-0105). The matcher attaches to the event intake's
+    # `on_event` seam below, so the spine stays unaware anything consumes it; the scheduler
+    # drains the trigger queue and fires schedule triggers on the same poll shape the
+    # scheduled-turns loop used — which it replaces, once the migration has run.
+    automation_runner = AutomationRunner(
+        automations,
+        automation_queue,
+        agent,
+        power,
+        automation_kill_switch,
+        automation_sinks,
+        bus=bus,
+    )
+    automation_matcher = AutomationMatcher(
+        automations,
+        automation_queue,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+    )
+    automation_scheduler = AutomationScheduler(
+        automations,
+        automation_queue,
+        automation_runner,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        poll_interval_s=settings.automations_poll_interval_s,
+    )
+    event_intake.on_event(automation_matcher.on_event)
     oauth = OAuthService(
         secrets,
         redirect_base_url=settings.oauth_redirect_base_url,
@@ -626,6 +704,18 @@ def create_app() -> FastAPI:
         except Exception as exc:  # log down → events aren't recorded; chat is unaffected
             log.error("event log init failed; the module event spine is off", error=str(exc))
         try:
+            await automations.init()
+            await automation_queue.init()
+            await automation_kill_switch.init()
+            # Fold #614's scheduled turns in (ADR-0105). Idempotent and non-destructive:
+            # migrated rows are marked, never deleted, so a second boot is a no-op and a
+            # bad migration is recoverable.
+            moved = await migrate_scheduled_turns(scheduled_turns, automations)
+            if moved:
+                log.info("scheduled turns migrated into automations", count=moved)
+        except Exception as exc:  # store down → automations degrade; chat is unaffected
+            log.error("automations init failed; automations disabled", error=str(exc))
+        try:
             await profile_store.init()
         except Exception as exc:  # profile down → static injection degrades; recall still runs
             log.error("standing-profile store init failed; profile injection off", error=str(exc))
@@ -680,6 +770,8 @@ def create_app() -> FastAPI:
         # Bound the event log to its retention window. Fire-and-forget, same shape as the
         # loops around it.
         event_retention_task = asyncio.create_task(event_retention.run_periodic())
+        # Drain the automation trigger queue (digest windows) and fire schedule triggers.
+        automation_task = asyncio.create_task(automation_scheduler.run_periodic())
         # Coordinated maintenance batch on an opt-in nightly schedule (ADR-0060) — a no-op task when
         # the schedule is disabled; the manual trigger stays available either way.
         maintenance_task = asyncio.create_task(maintenance.run_periodic())
@@ -691,6 +783,7 @@ def create_app() -> FastAPI:
             await inbound_messaging.stop()
             await event_intake.stop()
             event_retention_task.cancel()
+            automation_task.cancel()
             catalog_task.cancel()
             catalog_size_task.cancel()
             extraction_task.cancel()
@@ -714,6 +807,8 @@ def create_app() -> FastAPI:
                 await maintenance_task
             with suppress(asyncio.CancelledError):
                 await event_retention_task
+            with suppress(asyncio.CancelledError):
+                await automation_task
             # The nightly-schedule loop above is separate from an in-flight batch it (or a manual
             # trigger) may have started — cancel that too so it isn't orphaned against infra about
             # to close (#561).
@@ -850,6 +945,18 @@ def create_app() -> FastAPI:
     # The raw events feed beside the log console (ADR-0031's second surface).
     app.include_router(
         create_event_log_router(event_intake, event_log, default_tenant=settings.default_tenant_id)
+    )
+    # Automations CRUD, the run ledger, the kill switch, and the module templates the
+    # Automations page (#668) will render. The templates lookup is injected as a bare
+    # callable, so the router never learns the registry exists.
+    app.include_router(
+        create_automations_router(
+            automations,
+            automation_kill_switch,
+            automation_runner,
+            templates=registry.automation_templates,
+            default_tenant=settings.default_tenant_id,
+        )
     )
 
     @app.exception_handler(GatewayPausedError)

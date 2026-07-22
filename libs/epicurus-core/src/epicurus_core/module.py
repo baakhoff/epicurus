@@ -18,11 +18,13 @@ from starlette.applications import Starlette
 
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
+    AutomationTemplate,
     CollectionsSpec,
     EventSpec,
     ModelSlot,
     ModuleManifest,
     PageSpec,
+    SideEffect,
     ToolSpec,
     UiSection,
     WritesDocument,
@@ -61,6 +63,7 @@ class EpicurusModule:
         oauth_scopes: dict[str, list[str]] | None = None,
         docs_url: str | None = None,
         reindexable: bool = False,
+        automation_templates: list[AutomationTemplate] | None = None,
     ) -> None:
         self._name = name
         self._version = version
@@ -77,6 +80,10 @@ class EpicurusModule:
         self._oauth_scopes = dict(oauth_scopes or {})
         self._docs_url = docs_url
         self._reindexable = reindexable
+        # Preset automations offered on the shell's Templates tab (ADR-0105). Declaring one
+        # never creates anything: the operator instantiates it, so installing a module can
+        # never make the assistant start acting on its own.
+        self._automation_templates = list(automation_templates or [])
         self._mcp = FastMCP(
             name,
             instructions=instructions,
@@ -93,6 +100,7 @@ class EpicurusModule:
         # Document-pane annotations by tool name (#541, ADR-0100) — folded into the ToolSpecs
         # in ``manifest()``, since FastMCP owns the tool registry and knows nothing of them.
         self._writes_documents: dict[str, WritesDocument] = {}
+        self._side_effects: dict[str, SideEffect] = {}
 
     @property
     def name(self) -> str:
@@ -109,6 +117,7 @@ class EpicurusModule:
         description: str | None = None,
         *,
         writes_document: WritesDocument | None = None,
+        side_effect: SideEffect | None = None,
     ) -> Decorator:
         """Register a tool (decorator). Delegates to FastMCP.
 
@@ -117,14 +126,25 @@ class EpicurusModule:
         describes, and attached to its :class:`ToolSpec` when the manifest is built. The names
         are checked against the tool's generated input schema then, so a typo fails at
         manifest-build time rather than surfacing as a pane that never fills.
+
+        ``side_effect`` declares what the tool does to the world — ``read`` / ``propose`` /
+        ``write`` (ADR-0105). An automation's autonomy level derives its tool allowance from
+        it, enforced at the turn's tool surface. Omitting it means ``write``: the most
+        restrictive reading, so an unannotated tool is withheld from a read-only automation
+        rather than trusted by one. **Annotate your read tools** — that is what makes them
+        usable by a Notify automation.
         """
         registered = self._mcp.tool(name=name, description=description)
-        if writes_document is None:
+        if writes_document is None and side_effect is None:
             return registered
 
         def annotate(fn: Callable[..., Any]) -> Callable[..., Any]:
             # Key by the name FastMCP will publish: the explicit one, else the function's.
-            self._writes_documents[name or fn.__name__] = writes_document
+            key = name or fn.__name__
+            if writes_document is not None:
+                self._writes_documents[key] = writes_document
+            if side_effect is not None:
+                self._side_effects[key] = side_effect
             return registered(fn)
 
         return annotate
@@ -153,17 +173,33 @@ class EpicurusModule:
                 description=t.description or "",
                 input_schema=t.inputSchema,
                 writes_document=self._writes_documents.get(t.name),
+                # Absent → "write", the ToolSpec default: the most restrictive reading.
+                **(
+                    {"side_effect": self._side_effects[t.name]}
+                    if t.name in self._side_effects
+                    else {}
+                ),
             )
             for t in await self._mcp.list_tools()
         ]
         # An annotation whose tool never registered would be silently dropped here, leaving the
         # pane mysteriously dead; say so instead. Catches a renamed tool that outran its
         # annotation, or a name that didn't survive FastMCP's registration.
-        unregistered = sorted(self._writes_documents.keys() - {t.name for t in tools})
+        registered_names = {t.name for t in tools}
+        unregistered = sorted(self._writes_documents.keys() - registered_names)
         if unregistered:
             raise ValueError(
                 f"module {self._name!r}: writes_document declared for unregistered tool(s) "
                 f"{unregistered}"
+            )
+        # Same reasoning for side_effect, and it matters more: a read annotation that silently
+        # missed its tool would quietly demote that tool to "write" and drop it out of every
+        # Notify automation's reach — a feature failing shut, invisibly.
+        unclassified = sorted(self._side_effects.keys() - registered_names)
+        if unclassified:
+            raise ValueError(
+                f"module {self._name!r}: side_effect declared for unregistered tool(s) "
+                f"{unclassified}"
             )
         return ModuleManifest(
             name=self._name,
@@ -185,6 +221,7 @@ class EpicurusModule:
             oauth_scopes=dict(self._oauth_scopes),
             docs_url=self._docs_url,
             reindexable=self._reindexable,
+            automation_templates=list(self._automation_templates),
         )
 
     def http_app(self) -> Starlette:

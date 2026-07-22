@@ -404,6 +404,7 @@ class LlmGateway:
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None,
         tenant_id: str | None,
+        automation_id: str | None = None,
     ) -> ChatResult:
         config = await self._call_config(model, tenant_id)
         messages = await self._fit_to_context(model, messages, tools, tenant_id)
@@ -439,6 +440,7 @@ class LlmGateway:
             completion_tokens=result.completion_tokens,
             latency_ms=latency_ms,
             tenant_id=tenant_id,
+            automation_id=automation_id,
         )
         return result
 
@@ -449,6 +451,7 @@ class LlmGateway:
         model: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         tenant_id: str | None = None,
+        automation_id: str | None = None,
     ) -> ChatResult:
         """Return a completion, walking the fallback chain on failure."""
         resolved = model or await self.effective_default(tenant_id)
@@ -457,7 +460,7 @@ class LlmGateway:
             if not self._is_available(candidate):
                 continue
             try:
-                return await self._complete(candidate, messages, tools, tenant_id)
+                return await self._complete(candidate, messages, tools, tenant_id, automation_id)
             except Exception as exc:  # provider/call error -> try the next candidate
                 last_error = exc
                 log.warning("llm call failed; trying next", model=candidate, error=str(exc))
@@ -613,8 +616,16 @@ class LlmGateway:
         completion_tokens: int | None,
         latency_ms: float,
         tenant_id: str | None,
+        automation_id: str | None = None,
     ) -> None:
-        """Publish a usage event on NATS. Best-effort — never breaks inference."""
+        """Publish a usage event on NATS. Best-effort — never breaks inference.
+
+        ``automation_id`` carries the **second** attribution (ADR-0105): a run's inference
+        is billed to the tenant *and* to the automation that caused it. Constraint #1 asks
+        that every metering path name its tenant; an automation adds the only other thing
+        an operator (or the SaaS overlay) needs to answer "what is this costing me, and
+        which of my automations is doing it?". ``None`` on every ordinary turn.
+        """
         tenant = tenant_id or self._default_tenant
         event = UsageEvent(
             model=model,
@@ -622,6 +633,7 @@ class LlmGateway:
             completion_tokens=completion_tokens,
             latency_ms=round(latency_ms),
             tenant=tenant,
+            automation_id=automation_id,
         )
         try:
             await self._bus.publish(USAGE_SUBJECT, event.model_dump(), tenant_id=tenant)

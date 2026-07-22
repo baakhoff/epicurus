@@ -105,6 +105,10 @@ class LoggedEvent(BaseModel):
     entity_ref: EntityRef | None = None
     payload: dict[str, Any]
     schema_version: int
+    # Set only on an event an automation run produced (ADR-0105). The automations matcher
+    # refuses to trigger on these — the loop guard — so it must survive the round trip
+    # through the log, not just the wire.
+    causation_id: str | None = None
 
 
 class _Base(DeclarativeBase):
@@ -134,6 +138,10 @@ class _StoredEvent(_Base):
     entity_ref: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    # The automations loop guard (ADR-0105): the run that produced this event, if any. A
+    # module emitter always leaves it NULL — a change in the world has no cause inside the
+    # system. Indexed because the matcher checks it on every single event.
+    causation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 def _to_value(row: _StoredEvent) -> LoggedEvent:
@@ -156,6 +164,7 @@ def _to_value(row: _StoredEvent) -> LoggedEvent:
         entity_ref=EntityRef.model_validate(row.entity_ref) if row.entity_ref else None,
         payload=redact_mapping(row.payload or {}),
         schema_version=row.schema_version,
+        causation_id=row.causation_id,
     )
 
 
@@ -194,6 +203,7 @@ class EventLogStore:
                 entity_ref=envelope.entity_ref.model_dump() if envelope.entity_ref else None,
                 payload=envelope.payload,
                 schema_version=envelope.schema_version,
+                causation_id=envelope.causation_id,
             )
             session.add(row)
             try:

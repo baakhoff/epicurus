@@ -8,9 +8,9 @@ Each candidate is **staged** as a ``ReviewSuggestion`` on the core's own review 
 nothing else (ADR-0093 §1 + its hard non-goal).
 
 **That constraint is enforced structurally, not by discipline**: the reflector is handed a
-proposal *sink* and a read-only playbook *lookup* (the Protocols below), never the stores that
-own the documents. There is no code path from here to ``agent_instructions`` /
-``agent_playbooks`` — the only way in is the operator's Approve.
+proposal *sink* and read-only playbook and base-instructions *lookups* (the Protocols below),
+never the stores that own the documents. There is no code path from here to
+``agent_instructions`` / ``agent_playbooks`` — the only way in is the operator's Approve.
 
 **Rejection feedback (ADR-0093 §6).** Recently rejected proposals are digested into the prompt as
 explicit negative context, read from the same audit trail #542 shipped, so the pass doesn't
@@ -72,6 +72,8 @@ You may propose changes to two kinds of document:
 Rules:
 - Propose ONLY what the transcripts actually support. If nothing durable emerged, propose nothing.
 - Prefer a playbook for anything task-specific; reserve the base instructions for general rules.
+- For an update to a document shown below, START from its current text and edit it — keep \
+everything that still applies; do not regenerate it from scratch.
 - Give the FULL new text of the document, not a diff or a fragment — it replaces what is there.
 - Never propose a change that was already rejected below, unless the transcripts show the \
 pattern has meaningfully changed.
@@ -183,6 +185,16 @@ class _PlaybookLookup(Protocol):
     ) -> Sequence[AgentPlaybook]: ...
 
 
+class _BaseInstructionsLookup(Protocol):
+    """The **read-only** slice of the instructions store — the current base prompt only.
+
+    Deliberately no write method, same rationale as :class:`_PlaybookLookup`: this pass may read
+    the base prompt to show the model what an ``update`` would replace, never change it itself.
+    """
+
+    async def get_base(self, tenant: str) -> str: ...
+
+
 class _ProposalSink(Protocol):
     """The staging surface: add a proposal, and read what was already staged or declined.
 
@@ -221,6 +233,7 @@ class PlaybookReflector:
         sessions: _SessionSource,
         proposals: _ProposalSink,
         playbooks: _PlaybookLookup,
+        instructions: _BaseInstructionsLookup,
         state: ReflectionStateStore,
         *,
         tenants: Callable[[], Awaitable[list[str]]] | None = None,
@@ -231,6 +244,7 @@ class PlaybookReflector:
         self._sessions = sessions
         self._proposals = proposals
         self._playbooks = playbooks
+        self._instructions = instructions
         self._state = state
         self._tenants = tenants or sessions.distinct_tenants
         self._model = model
@@ -278,14 +292,21 @@ class PlaybookReflector:
         rejected = await self._proposals.decisions(
             tenant=tenant, limit=MAX_REJECTIONS, decision="rejected"
         )
+        # Fetched up front, before the gateway call: the model must see what it's editing, and
+        # `known` (below) reuses this same read rather than querying the store a second time (#658).
+        playbooks = await self._playbooks.list_playbooks(tenant)
+        base = await self._instructions.get_base(tenant)
         messages = [
             ChatMessage(role="system", content=_SYSTEM_PROMPT),
-            ChatMessage(role="user", content=self._build_prompt(transcripts, rejected)),
+            ChatMessage(
+                role="user", content=self._build_prompt(transcripts, rejected, base, playbooks)
+            ),
         ]
         # The scanned tenant, never the default — an off-hours job's usage belongs to whoever owns
         # the data it read (ADR-0093 §5 / the ADR-0051 precedent). Constraints #1 and #8.
         result = await self._chat.chat(messages, model=self._model, tenant_id=tenant)
-        staged = await self._stage(tenant=tenant, content=result.content or "")
+        known = {p.name for p in playbooks}
+        staged = await self._stage(tenant=tenant, content=result.content or "", known=known)
         await self._state.mark_run(tenant, started)
         return staged
 
@@ -300,7 +321,8 @@ class PlaybookReflector:
         out: list[tuple[str, list[tuple[str, str]]]] = []
         for summary in await self._sessions.sessions(tenant=tenant):
             if since is not None and _as_utc(summary.last_at) <= since:
-                continue
+                # DESC-ordered: this miss guarantees every remaining session also misses.
+                break
             history = await self._sessions.history(tenant=tenant, session_id=summary.id)
             if history:
                 out.append((summary.title, list(history[-MAX_MESSAGES_PER_SESSION:])))
@@ -312,9 +334,23 @@ class PlaybookReflector:
         self,
         transcripts: list[tuple[str, list[tuple[str, str]]]],
         rejected: list[ReviewDecision],
+        base_instructions: str,
+        playbooks: Sequence[AgentPlaybook],
     ) -> str:
-        """The user turn: the recent transcripts, plus what the operator has already declined."""
+        """The user turn: the documents an update would replace, the recent transcripts, and
+        what the operator has already declined.
+
+        The current documents come first — an ``update`` proposal is only as good as what it's
+        edited from, and without this the "instructions" path (always an update, never a create)
+        asked the model to regenerate the whole base prompt from nothing (#658).
+        """
         parts: list[str] = []
+        docs = [f'### "instructions" (base system prompt)\n{base_instructions}']
+        docs += [f'### "playbook" named {p.name!r}\n{p.content}' for p in playbooks]
+        parts.append(
+            "Current documents. Propose an update against one of these by name, or a create for "
+            "a new playbook not listed here:\n\n" + "\n\n".join(docs)
+        )
         if rejected:
             # Negative context first, so it frames the reading rather than trailing it
             # (ADR-0093 §6).
@@ -333,12 +369,16 @@ class PlaybookReflector:
         parts.append(f"Recent conversations to learn from:\n\n{convo}")
         return "\n\n---\n\n".join(parts)
 
-    async def _stage(self, *, tenant: str, content: str) -> int:
-        """Parse the model's reply and stage each valid, non-duplicate proposal."""
+    async def _stage(self, *, tenant: str, content: str, known: set[str]) -> int:
+        """Parse the model's reply and stage each valid, non-duplicate proposal.
+
+        ``known`` is the set of playbook names already shown to the model in this same pass
+        (:meth:`reflect`) — reused rather than re-queried, so create-vs-update stays consistent
+        with what the prompt actually displayed.
+        """
         proposals = _parse_proposals(content)
         if not proposals:
             return 0
-        known = {p.name for p in await self._playbooks.list_playbooks(tenant)}
         pending = {p.path for p in await self._proposals.list_pending(tenant=tenant)}
         staged = 0
         for raw in proposals:

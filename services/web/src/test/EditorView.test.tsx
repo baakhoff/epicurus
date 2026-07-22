@@ -312,6 +312,52 @@ describe("EditorView", () => {
     expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
   });
 
+  it("opens the document named by the `doc` prop — the pane's handover with no ?doc= of its own (#541, #659)", async () => {
+    // The applied -> editor handover (ADR-0101 §1) hands the pane's `target` straight to
+    // this prop rather than a URL, since the pane shares the chat's route. Untested before
+    // #659 — every other case here drives selection via the ?doc= query param instead.
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "# From pane" });
+    render(<EditorView module="knowledge" pageId="vault" doc="a.md" />, { wrapper });
+
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# From pane");
+    expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "a.md");
+  });
+
+  it("splits a scope-prefixed `doc` prop into the active scope + selected path (#659)", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    mockModulePageDoc.mockResolvedValue({ path: "kb/alpha.md", title: "alpha", content: "# A" });
+    render(<EditorView module="knowledge" pageId="vault" doc="kb/alpha.md" />, { wrapper });
+
+    // The switcher reflects the scope split out of the prop, not just the module's default.
+    expect(await screen.findByRole("button", { name: "kb" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockModulePageDoc).toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md"),
+    );
+  });
+
+  it("prefers the `doc` prop over a stale ?doc= param when both are present (#659)", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "a.md", title: "a", path: "a.md" },
+        { id: "b.md", title: "b", path: "b.md" },
+      ],
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      Promise.resolve({ path, title: path, content: `# ${path}` }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/knowledge/vault?doc=a.md"]}>
+          <EditorView module="knowledge" pageId="vault" doc="b.md" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# b.md");
+    expect(mockModulePageDoc).not.toHaveBeenCalledWith("knowledge", "vault", "a.md");
+  });
+
   it("browses, views, and restores a past version (ADR-0046)", async () => {
     mockModulePage.mockResolvedValue({
       docs: [{ id: "a.md", title: "a", path: "a.md" }],

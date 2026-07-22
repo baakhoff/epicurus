@@ -7,6 +7,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ChatBridgesCard } from "@/components/ChatBridgesCard";
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
+import { PushNotificationsCard } from "@/components/PushNotificationsCard";
 import { ScheduledTurnsCard } from "@/components/ScheduledTurnsCard";
 import {
   Button,
@@ -803,6 +804,8 @@ export function SettingsScreen() {
         <AssistantInstructionsCard />
 
         <ScheduledTurnsCard />
+
+        <PushNotificationsCard />
 
         <MaintenanceCard />
 

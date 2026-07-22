@@ -48,7 +48,8 @@ services:
     # reach it regardless. Without it, module removal still fully works (ADR-0056/#382
     # decoupled the two) — only the container teardown + KV-cache restart defer to the next
     # restart, and the Modules page says so plainly. To opt in (immediate teardown), layer
-    # compose.docker-socket.yaml on top — see docs/DEPLOYMENT.md.
+    # compose.docker-socket.yaml on top — see
+    # docs/infrastructure/index.md#docker-socket-access-opt-in-622.
     volumes:
       # KV-cache apply (#307): the core writes ollama.env here; Ollama mounts it read-only and
       # sources it on (re)start. A named volume, so the choice persists across reconciles.

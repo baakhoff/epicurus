@@ -30,6 +30,7 @@ import { FilesScreen } from "@/screens/FilesScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
 import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
+import { AutomationsScreen } from "@/screens/AutomationsScreen";
 import { NotificationsScreen } from "@/screens/NotificationsScreen";
 import { ObservabilityScreen } from "@/screens/ObservabilityScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
@@ -352,6 +353,7 @@ export function Shell() {
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/files" element={<FilesScreen />} />
             <Route path="/settings" element={<SettingsScreen />} />
+            <Route path="/automations" element={<AutomationsScreen />} />
             <Route path="/observability" element={<ObservabilityScreen />} />
             <Route path="/m/:moduleName/:pageId" element={<ModulePageScreen />} />
           </Routes>

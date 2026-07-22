@@ -123,6 +123,26 @@ class CreateAutomationRequest(BaseModel):
     digest_window_minutes: int = 0
 
 
+class UpdateAutomationRequest(BaseModel):
+    """The Automations page's save (#668) — every editable field, in one write.
+
+    ``source`` is deliberately absent (provenance is not editable), and ``enabled`` rides
+    along so the editor's toggle and its Save are one consistent state.
+    """
+
+    name: str
+    prompt: str
+    autonomy: str = "notify"
+    event_trigger: EventTriggerBody | None = None
+    schedule_trigger: ScheduleTriggerBody | None = None
+    model: str | None = None
+    sinks: list[str] = Field(default_factory=list)
+    chat_mode: Literal["rolling", "per_run"] = "rolling"
+    rate_cap_per_hour: int = 0
+    digest_window_minutes: int = 0
+    enabled: bool = True
+
+
 class SetEnabledBody(BaseModel):
     enabled: bool
 
@@ -411,6 +431,63 @@ def create_automations_router(
             digest_window_minutes=body.digest_window_minutes,
         )
         return _view(automation)
+
+    @router.put("/{automation_id}", response_model=AutomationView)
+    async def update_automation(
+        automation_id: str, body: UpdateAutomationRequest, tenant_id: str | None = Query(None)
+    ) -> AutomationView:
+        """Replace an automation's editable fields — the Automations page's save (#668).
+
+        Same validation as create (**400** on an incoherent shape, before any write), so a
+        rejected edit leaves the stored row untouched. ``source`` is deliberately not in
+        the body: provenance is not editable — an instantiated template stays
+        ``template:<module>``. **404** if unknown.
+        """
+        tenant = tenant_id or default_tenant
+        current = await store.get(tenant=tenant, automation_id=automation_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="no such automation")
+        event_trigger = _to_event_trigger(body.event_trigger) if body.event_trigger else None
+        schedule_trigger = (
+            ScheduleTrigger(
+                cadence=body.schedule_trigger.cadence,  # type: ignore[arg-type]  # validated below
+                hour=body.schedule_trigger.hour,
+                weekday=body.schedule_trigger.weekday,
+            )
+            if body.schedule_trigger
+            else None
+        )
+        try:
+            validate_automation(
+                name=body.name,
+                source=current.source,  # provenance is kept, but still shape-checked
+                autonomy=body.autonomy,
+                sinks=body.sinks,
+                event_trigger=event_trigger,
+                schedule_trigger=schedule_trigger,
+                rate_cap_per_hour=body.rate_cap_per_hour,
+                digest_window_minutes=body.digest_window_minutes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updated = await store.update(
+            tenant=tenant,
+            automation_id=automation_id,
+            name=body.name.strip(),
+            prompt=body.prompt,
+            autonomy=body.autonomy,  # type: ignore[arg-type]  # validated above
+            event_trigger=event_trigger,
+            schedule_trigger=schedule_trigger,
+            model=body.model,
+            sinks=list(body.sinks),  # type: ignore[arg-type]  # validated above
+            chat_mode=body.chat_mode,
+            rate_cap_per_hour=body.rate_cap_per_hour,
+            digest_window_minutes=body.digest_window_minutes,
+            enabled=body.enabled,
+        )
+        if updated is None:  # deleted between the read and the write — still a 404
+            raise HTTPException(status_code=404, detail="no such automation")
+        return _view(updated)
 
     @router.post("/{automation_id}/enabled", response_model=dict[str, object])
     async def set_enabled(

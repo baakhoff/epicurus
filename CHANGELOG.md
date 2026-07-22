@@ -14,6 +14,33 @@ images to GHCR.
 
 ### Added
 
+- **Web: the Automations page** (#668, stacked on #669) — the operator's controls for the
+  engine, a first-class core surface beside Settings. The list reads each row **in words**
+  ("When mail.received arrives, matching subject contains invoice, between 09:00–17:00" ·
+  "Weekly on Tuesday at 09:00") with an autonomy badge, sink icons, an enabled toggle that
+  takes effect without a reload, and last-run status; the tenant-wide **kill switch** is
+  pinned above everything. One Sheet editor serves create / edit / instantiate-a-template and
+  edits **every field the engine stores** — instructions, a per-automation model
+  (core-default fall-through, local + hosted lists), an event trigger whose type picker is
+  driven by the live event catalog (module manifests' declared `events.*` subjects, with a
+  free-text escape hatch for the core's own `files.*`/`core.*` families) plus the matcher
+  builder and active-hours window, or a schedule in the ADR-0092 cadence/hour/weekday
+  vocabulary; sinks + chat mode; the 4-level autonomy dial with its reach spelled out; rate
+  cap and digest window. Saved **explicitly** (the fields are interdependent — the ADR-0098
+  posture), and a server-rejected save shows its reason inline with the sheet still open.
+  The **Templates** tab groups module presets by module; *Use* prefills the editor and
+  saving creates an independent `source="template:<module>"` row — **enabled on save** (the
+  editor pass is the review; owner-decided) and never retro-edited by later template
+  changes (provenance is not editable, enforced server-side). Per-row **Run history** reads
+  the ledger and deep-links into the runs feed (`/observability?tab=runs&automation=<id>` —
+  the observability screen learned to open on a requested tab), and the feed's automation
+  badge now links back. **Run now** exercises the real runner. The engine gains the missing
+  management endpoint — `PUT /platform/v1/automations/{id}`, create-shape validation before
+  any write, `source`/`chat_session_id`/`created_at`/last-run stamps never touched — and
+  `AutomationStore.update`. The old **scheduled-turns Settings card is absorbed**: the card,
+  its api client and contract are gone (the engine already migrated the rows and keeps the
+  old endpoints answering); migrated rows simply appear as automations. `web`
+  0.115.0→0.116.0 (MINOR) · `core-app` 0.88.1→0.89.0 (MINOR — the management endpoint).
 - **Observability: the Automation runs feed** (#669, stacked on #666) — the third live tab,
   and the engine's glass: a triggered run is traceable end-to-end in one place, fire → filter
   verdict → run (model, tokens, duration) → sinks delivered / error. **Skips are the point**:

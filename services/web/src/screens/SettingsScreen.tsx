@@ -8,7 +8,6 @@ import { ChatBridgesCard } from "@/components/ChatBridgesCard";
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
 import { PushNotificationsCard } from "@/components/PushNotificationsCard";
-import { ScheduledTurnsCard } from "@/components/ScheduledTurnsCard";
 import {
   Button,
   Card,
@@ -803,7 +802,6 @@ export function SettingsScreen() {
 
         <AssistantInstructionsCard />
 
-        <ScheduledTurnsCard />
 
         <PushNotificationsCard />
 

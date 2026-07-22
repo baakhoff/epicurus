@@ -12,6 +12,7 @@
  */
 import { Check, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { EntityRefChip } from "@/components/EntityRef";
 import { Badge, Button, Select, Spinner, Tabs, TextInput, cn } from "@/components/ui";
@@ -415,9 +416,13 @@ function RunRow({ run, automationName }: { run: AutomationRun; automationName: s
     <li className="flex flex-col gap-0.5 py-1 text-ink">
       <div className="flex flex-wrap items-baseline gap-2 font-mono text-[11px]">
         <span className="shrink-0 text-ink-faint">{shortTime(run.started_at)}</span>
-        <Badge tone="dim" className="shrink-0 font-mono">
-          {automationName}
-        </Badge>
+        {/* The cross-link to the Automations page (#668) — where this run's automation
+            is edited and its full history lives. */}
+        <Link to="/automations" className="shrink-0" aria-label={`Open ${automationName} on the Automations page`}>
+          <Badge tone="dim" className="font-mono hover:text-accent-strong">
+            {automationName}
+          </Badge>
+        </Link>
         <span className="shrink-0 text-ink-dim">{run.filter_verdict}</span>
         <Badge tone={outcomeTone(run.outcome)} className="shrink-0 font-mono uppercase">
           {run.outcome}
@@ -458,8 +463,8 @@ function RunRow({ run, automationName }: { run: AutomationRun; automationName: s
   );
 }
 
-function RunsConsole() {
-  const [automationFilter, setAutomationFilter] = useState("");
+function RunsConsole({ initialAutomation = "" }: { initialAutomation?: string }) {
+  const [automationFilter, setAutomationFilter] = useState(initialAutomation);
   const [outcomeFilter, setOutcomeFilter] = useState("");
   const [moduleFilter, setModuleFilter] = useState("");
   const [automations, setAutomations] = useState<Automation[]>([]);
@@ -561,7 +566,14 @@ function RunsConsole() {
 /* ── main screen ─────────────────────────────────────────────────────────── */
 
 export function ObservabilityScreen() {
-  const [tab, setTab] = useState<TabId>("logs");
+  // Deep-linkable (#668's cross-links): `?tab=runs&automation=<id>` opens the runs feed
+  // pre-filtered to one automation. Read once as initial state — the tab strip and the
+  // filter dropdowns own the state from there.
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const [tab, setTab] = useState<TabId>(
+    requestedTab === "events" || requestedTab === "runs" ? requestedTab : "logs",
+  );
   const [readiness, setReadiness] = useState<Readiness | null>(null);
 
   useEffect(() => {
@@ -591,7 +603,7 @@ export function ObservabilityScreen() {
           subscription open — the feeds are live, not cached. */}
       {tab === "logs" && <LogsConsole />}
       {tab === "events" && <EventsConsole />}
-      {tab === "runs" && <RunsConsole />}
+      {tab === "runs" && <RunsConsole initialAutomation={searchParams.get("automation") ?? ""} />}
     </div>
   );
 }

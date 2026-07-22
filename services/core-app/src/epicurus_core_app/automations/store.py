@@ -337,6 +337,55 @@ class AutomationStore:
             rows = await session.scalars(stmt)
             return [_run_to_value(row) for row in rows]
 
+    async def update(
+        self,
+        *,
+        tenant: str,
+        automation_id: str,
+        name: str,
+        prompt: str,
+        autonomy: AutonomyLevel,
+        event_trigger: EventTrigger | None = None,
+        schedule_trigger: ScheduleTrigger | None = None,
+        model: str | None = None,
+        sinks: list[Sink] | None = None,
+        chat_mode: ChatMode = "rolling",
+        rate_cap_per_hour: int = 0,
+        digest_window_minutes: int = 0,
+        enabled: bool = True,
+    ) -> Automation | None:
+        """Replace an automation's editable fields (#668). Validate before calling.
+
+        The Automations page's save: every field the operator edits, in one write, so a
+        half-applied edit can't leave a row the runner half-recognises. What it never
+        touches: ``source`` (provenance — an instantiated template stays
+        ``template:<module>`` however much it is edited), ``chat_session_id`` (the rolling
+        chat sink's continuity), ``created_at``, and the last-run stamps (runtime history,
+        not configuration). ``None`` if the row does not exist.
+        """
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredAutomation).where(
+                    _StoredAutomation.tenant == tenant, _StoredAutomation.id == automation_id
+                )
+            )
+            if row is None:
+                return None
+            row.name = name
+            row.enabled = enabled
+            row.event_trigger = _trigger_to_json(event_trigger) if event_trigger else None
+            row.schedule_trigger = _schedule_to_json(schedule_trigger) if schedule_trigger else None
+            row.prompt = prompt
+            row.model = model
+            row.autonomy = autonomy
+            row.sinks = list(sinks or [])
+            row.chat_mode = chat_mode
+            row.rate_cap_per_hour = rate_cap_per_hour
+            row.digest_window_minutes = digest_window_minutes
+            await session.commit()
+            await session.refresh(row)
+            return _to_value(row)
+
     async def list(self, *, tenant: str) -> list[Automation]:
         """All of a tenant's automations, oldest first."""
         async with self._session() as session:

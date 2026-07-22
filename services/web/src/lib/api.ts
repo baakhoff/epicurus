@@ -11,7 +11,11 @@ import {
   AgentInstructions,
   AttachmentUploaded,
   Automation,
+  type AutomationDraft,
+  AutomationKillSwitch,
   AutomationRun,
+  AutomationTemplate,
+  AutomationVocabulary,
   BridgeStatus,
   CalendarFeedItem,
   CatalogResponse,
@@ -56,7 +60,6 @@ import {
   Readiness,
   ReviewAuditData,
   SavedModelsResponse,
-  ScheduledTurn,
   SessionSummary,
   SystemInfo,
   TimezonePrefs,
@@ -227,29 +230,42 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ timezone }),
     }),
-  // Recurring prompts that run unattended and deliver into their own session (ADR-0092).
-  scheduledTurns: () => request(z.array(ScheduledTurn), "/platform/v1/scheduled-turns"),
-  createScheduledTurn: (body: {
-    prompt: string;
-    cadence: "daily" | "weekly";
-    hour: number;
-    weekday?: number | null;
-  }) =>
-    request(ScheduledTurn, "/platform/v1/scheduled-turns", {
+  // Automations (ADR-0105): the engine's rows, its run ledger (#669), and the page's
+  // management surface (#668).
+  automations: () => request(z.array(Automation), "/platform/v1/automations"),
+  automationRuns: (opts: { automationId?: string; outcome?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.automationId) params.set("automation_id", opts.automationId);
+    if (opts.outcome) params.set("outcome", opts.outcome);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const query = params.size ? `?${params}` : "";
+    return request(z.array(AutomationRun), `/platform/v1/automations/runs${query}`);
+  },
+  automationVocabulary: () =>
+    request(AutomationVocabulary, "/platform/v1/automations/vocabulary"),
+  automationTemplates: () =>
+    request(z.array(AutomationTemplate), "/platform/v1/automations/templates"),
+  createAutomation: (body: AutomationDraft & { source?: string }) =>
+    request(Automation, "/platform/v1/automations", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  setScheduledTurnEnabled: (id: string, enabled: boolean) =>
+  updateAutomation: (id: string, body: AutomationDraft) =>
+    request(Automation, `/platform/v1/automations/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  setAutomationEnabled: (id: string, enabled: boolean) =>
     request(
       z.record(z.string(), z.unknown()),
-      `/platform/v1/scheduled-turns/${encodeURIComponent(id)}/enabled`,
+      `/platform/v1/automations/${encodeURIComponent(id)}/enabled`,
       { method: "POST", body: JSON.stringify({ enabled }) },
     ),
-  deleteScheduledTurn: async (id: string): Promise<void> => {
-    const response = await epFetch(
-      `/platform/v1/scheduled-turns/${encodeURIComponent(id)}`,
-      { method: "DELETE", headers: { "Content-Type": "application/json" } },
-    );
+  deleteAutomation: async (id: string): Promise<void> => {
+    const response = await epFetch(`/platform/v1/automations/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    });
     if (!response.ok) {
       let detail = response.statusText;
       try {
@@ -260,17 +276,20 @@ export const api = {
       throw new ApiError(response.status, detail);
     }
   },
+  runAutomationNow: (id: string) =>
+    request(
+      z.record(z.string(), z.unknown()),
+      `/platform/v1/automations/${encodeURIComponent(id)}/run`,
+      { method: "POST" },
+    ),
+  automationKillSwitch: () =>
+    request(AutomationKillSwitch, "/platform/v1/automations/kill-switch"),
+  setAutomationKillSwitch: (halted: boolean) =>
+    request(AutomationKillSwitch, "/platform/v1/automations/kill-switch", {
+      method: "PUT",
+      body: JSON.stringify({ halted }),
+    }),
 
-  // Automations (ADR-0105): the engine's rows and its run ledger (#669).
-  automations: () => request(z.array(Automation), "/platform/v1/automations"),
-  automationRuns: (opts: { automationId?: string; outcome?: string; limit?: number } = {}) => {
-    const params = new URLSearchParams();
-    if (opts.automationId) params.set("automation_id", opts.automationId);
-    if (opts.outcome) params.set("outcome", opts.outcome);
-    if (opts.limit) params.set("limit", String(opts.limit));
-    const query = params.size ? `?${params}` : "";
-    return request(z.array(AutomationRun), `/platform/v1/automations/runs${query}`);
-  },
   // Web push (#670, ADR-0102): VAPID-signed browser push + per-category toggles + quiet
   // hours. Prefs are shared with the notification center (#671, the `center` half of
   // each ChannelPrefs).

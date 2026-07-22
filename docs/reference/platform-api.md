@@ -386,6 +386,16 @@ The response adds `allowed_tool_classes` — what this automation's turns may ac
 **derived, never stored**, so the UI shows the same allowance the tool surface enforces
 rather than its own guess.
 
+### `PUT /platform/v1/automations/{id}`
+
+Replace an automation's editable fields — the Automations page's save (#668). The body is
+the create shape **without `source`** (provenance is not editable — an instantiated
+template stays `template:<module>` however much it is edited) **plus `enabled`**, so the
+editor's toggle and its Save are one consistent state. Same validation as create (**400**
+on an incoherent shape, before any write — a rejected edit leaves the stored row
+untouched); what it never touches: `source`, `chat_session_id` (the rolling chat sink's
+continuity), `created_at`, and the last-run stamps. **404** if unknown.
+
 ### `POST /platform/v1/automations/{id}/enabled` · `DELETE /platform/v1/automations/{id}`
 
 Pause/resume (`{"enabled": bool}`), or remove. **404** if unknown; **204** on delete.

@@ -15,9 +15,6 @@ vi.mock("@/components/ChatBridgesCard", () => ({
 vi.mock("@/components/MemorySection", () => ({
   MemorySection: () => null,
 }));
-vi.mock("@/components/ScheduledTurnsCard", () => ({
-  ScheduledTurnsCard: () => null,
-}));
 
 const mockModules = vi.fn();
 vi.mock("@/lib/api", async () => {

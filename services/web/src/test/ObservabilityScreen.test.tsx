@@ -6,6 +6,7 @@
  * feeds — so the extraction is pinned, not just the new tab.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,12 +62,15 @@ vi.mock("@/lib/api", () => ({
 
 import { ObservabilityScreen } from "@/screens/ObservabilityScreen";
 
-/** The runs tab's entity-ref chips need a query client; the other tabs don't mind one. */
-function renderScreen() {
+/** The screen reads `?tab=`/`?automation=` and the runs tab renders Links + entity-ref
+ * chips, so every render needs a router and a query client. */
+function renderScreen(route = "/observability") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <ObservabilityScreen />
+      <MemoryRouter initialEntries={[route]}>
+        <ObservabilityScreen />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -165,7 +169,7 @@ afterEach(() => {
 describe("ObservabilityScreen", () => {
   it("opens on the Logs tab and streams log entries", async () => {
     logEntries = [logEntry({ message: "core runtime ready" })];
-    render(<ObservabilityScreen />);
+    renderScreen();
 
     expect(await screen.findByText("core runtime ready")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
@@ -174,7 +178,7 @@ describe("ObservabilityScreen", () => {
 
   it("switches to the Events tab and streams module events", async () => {
     moduleEvents = [moduleEvent({ type: "echo.pinged", module: "echo" })];
-    render(<ObservabilityScreen />);
+    renderScreen();
 
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
 
@@ -185,7 +189,7 @@ describe("ObservabilityScreen", () => {
 
   it("only subscribes to the visible tab's feed", async () => {
     // A hidden tab holding an SSE connection open is a live subscription nobody reads.
-    render(<ObservabilityScreen />);
+    renderScreen();
     await waitFor(() => expect(logCalls.length).toBe(1));
     expect(eventCalls).toHaveLength(0);
 
@@ -202,7 +206,7 @@ describe("ObservabilityScreen", () => {
         entity_ref: { ref_id: "m1", module: "mail", kind: "message", title: "Re: lunch" },
       }),
     ];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
 
     expect(await screen.findByText("mail.received")).toBeInTheDocument();
@@ -212,7 +216,7 @@ describe("ObservabilityScreen", () => {
 
   it("expands an event payload on demand", async () => {
     moduleEvents = [moduleEvent({ payload: { note: "hello" } })];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
 
     const toggle = await screen.findByLabelText("Expand payload");
@@ -223,7 +227,7 @@ describe("ObservabilityScreen", () => {
 
   it("offers no payload toggle when there is nothing to show", async () => {
     moduleEvents = [moduleEvent({ payload: {} })];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
 
     await screen.findByText("echo.pinged");
@@ -232,7 +236,7 @@ describe("ObservabilityScreen", () => {
 
   it("re-subscribes with the module filter and clears what was shown", async () => {
     moduleEvents = [moduleEvent({ module: "echo", type: "echo.pinged" })];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
     await screen.findByText("echo.pinged");
 
@@ -245,7 +249,7 @@ describe("ObservabilityScreen", () => {
 
   it("clears the events console on demand", async () => {
     moduleEvents = [moduleEvent()];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
     await screen.findByText("echo.pinged");
 
@@ -255,14 +259,14 @@ describe("ObservabilityScreen", () => {
 
   it("counts events with the right noun", async () => {
     moduleEvents = [moduleEvent({ id: 1, dedup_key: "a" }), moduleEvent({ id: 2, dedup_key: "b" })];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await userEvent.click(screen.getByRole("tab", { name: "Events" }));
     expect(await screen.findByText("2 events")).toBeInTheDocument();
   });
 
   it("keeps the log console's filters working after the extraction", async () => {
     logEntries = [logEntry()];
-    render(<ObservabilityScreen />);
+    renderScreen();
     await waitFor(() => expect(logCalls.length).toBe(1));
     expect(logCalls[0]).toEqual({ level: "info", service: undefined });
 
@@ -271,7 +275,7 @@ describe("ObservabilityScreen", () => {
   });
 
   it("moves between tabs with the arrow keys", async () => {
-    render(<ObservabilityScreen />);
+    renderScreen();
     const logsTab = screen.getByRole("tab", { name: "Logs" });
     logsTab.focus();
 
@@ -289,7 +293,7 @@ describe("ObservabilityScreen", () => {
   });
 
   it("shows system health", async () => {
-    render(<ObservabilityScreen />);
+    renderScreen();
     expect(await screen.findByText("qwen2.5:7b")).toBeInTheDocument();
   });
 });

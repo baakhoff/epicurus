@@ -158,6 +158,21 @@ class ScheduledTurnStore:
             )
             return [_to_value(row) for row in rows]
 
+    async def list_all(self) -> list[ScheduledTurn]:
+        """Every scheduled turn across all tenants, enabled or not — the migration's input.
+
+        ``list_enabled`` is not enough for the automations fold-in (ADR-0105): a *disabled*
+        turn must migrate too, as a disabled automation. Dropping it would silently delete
+        a paused thing the operator deliberately kept.
+
+        Defined before ``list()`` for the same reason as ``list_enabled`` above.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredScheduledTurn).order_by(_StoredScheduledTurn.pk)
+            )
+            return [_to_value(row) for row in rows]
+
     async def list(self, *, tenant: str) -> list[ScheduledTurn]:
         """All of a tenant's scheduled turns, oldest first."""
         async with self._session() as session:

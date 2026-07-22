@@ -774,6 +774,47 @@ The feed is at `GET /platform/v1/events[/stream]` — the Observability screen's
 tab (see [observability](../reference/observability.md#raw-events-feed)). The event catalog
 lives in [events](../reference/events.md#the-event-catalog).
 
+### Automations engine (ADR-0105)
+
+The spine's first consumer, and what the whole event-driven block exists for: the core
+decides whether a world change deserves an action, does it at an autonomy level the operator
+chose, and writes down what it did. Full reference: [automations](../reference/automations.md).
+
+`AutomationMatcher` attaches to the intake's `on_event` seam — so the spine stays unaware
+anything consumes it — and drops matched triggers on a durable Postgres queue (the ADR-0051
+pattern). `AutomationScheduler` is one poll loop draining that queue (closing digest
+windows) and firing schedule triggers; it **replaces** the scheduled-turns loop.
+`AutomationRunner` runs one automation: an agent turn, then a deterministic sink fan-out,
+then a ledger entry — always a ledger entry.
+
+**The autonomy dial is enforced here, not requested.** An automation's level derives a set
+of allowed tool *classes* (`read` / `propose` / `write`, declared on each
+[`ToolSpec`](../reference/modules.md#side_effect--what-a-tool-does-to-the-world-adr-0105)),
+and `Agent.run(allow=…)` passes it to `McpHost.discover`, which filters **both** the specs
+the model sees **and** the `route` the agent dispatches on. A withheld tool is unroutable:
+a model that names it anyway gets `error: unknown tool`, and nothing runs. This is the same
+posture as the draft-first guarantee — *"the guarantee is the contract, not a prompt"*.
+
+Because MCP's `list_tools` carries no manifest annotation, the classification is resolved
+registry-side (`ModuleRegistry.tool_side_effects`, over the TTL-cached snapshot) — the same
+reason `document_tool` exists — and only when a turn actually passes `allow`, so ordinary
+chat pays nothing. The four core built-ins are classified at registration: `now` and
+`memory_search` read; `remember` and `ask_user` write.
+
+**Safety:** a **persisted** per-tenant kill switch (unlike `PowerController`, which resets
+on restart — a stop a restart undoes is not a stop), rate caps, digest windows, a
+rate-limited `core.automation_failed`, and a **depth-1 loop guard**: an event a run produces
+carries a `causation_id`, and the matcher refuses any event that carries one, so automations
+cannot spiral.
+
+**Metering is dual:** `automation_runs` and `UsageEvent` both name the tenant *and* the
+automation — without the second, an automation quietly burning tokens is indistinguishable
+from the operator's own chatting.
+
+**Scheduled turns folded in** at startup (idempotent, non-destructive): #614's rows became
+schedule-triggered automations with a rolling chat sink, keeping their cadence, session,
+enabled flag, and last-run stamp. `ScheduledTurnScheduler` still exists for the un-migrated
+path but new work creates an automation.
 ### Core-emitted spine events (#665)
 
 The core also **emits** (`core_events.py`, `CoreEventEmitter`) — over its own bus, exactly
@@ -819,6 +860,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
 | `EVENTS_RETENTION_DAYS` | `30` | How long a module event stays in the durable log (ADR-0103). `0` disables pruning — keep everything, and mind the disk. |
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
+| `AUTOMATIONS_POLL_INTERVAL_S` | `60` | How often the automations loop drains the trigger queue and checks schedules (ADR-0105). |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
@@ -852,6 +894,24 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `memory_search` built-in's *sessions* half (ADR-0089) runs a tenant-scoped case-insensitive
   content match here (portable `ILIKE`, no full-text index — a single operator's history is
   small; FTS is a future optimization), joined back to each session's opening-message title.
+- **Postgres `automations`** — the automations engine's definitions (ADR-0105), tenant-scoped:
+  `id` (opaque uuid hex) + internal `pk`, `name`, `enabled`, `source` (`user` /
+  `template:<module>` / `agent`), JSON `event_trigger` **or** `schedule_trigger` (exactly one),
+  `prompt`, `model`, `autonomy`, JSON `sinks`, `chat_mode`, `chat_session_id`,
+  `rate_cap_per_hour`, `digest_window_minutes`, timestamps, `last_run_at` / `last_status`. The
+  triggers are JSON rather than flattened columns: a trigger is a closed vocabulary the core
+  owns and always reads whole, so flattening would buy nothing and cost a migration per new
+  matcher op.
+- **Postgres `automation_runs`** — the run ledger. Written for **every** run at **every**
+  autonomy level; for `silent_act` it is the only record that anything happened. Carries
+  **both** attributions (`tenant` + `automation_id` — the SaaS metering point), `trigger_refs`
+  (the `module_events` ids that caused it), `filter_verdict`, `model`, token counts, duration,
+  outcome, error, the `output`, and `sinks_fired`.
+- **Postgres `automation_queue`** — matched triggers awaiting a run (the ADR-0051 durable-queue
+  pattern). The matcher runs on intake, the run may be much later (an open digest window), and
+  a restart in between must lose nothing.
+- **Postgres `automation_kill_switch`** — one row per tenant. Postgres, not memory: a safety
+  stop that forgets itself on restart is not a safety stop.
 - **Postgres `module_events`** — the module event spine's durable log (ADR-0103), the core's
   copy of record for every world change a module announced: `id`, `tenant`, `module`, `type`,
   `occurred_at` (the emitter's clock — when the change happened), `received_at` (ours — what

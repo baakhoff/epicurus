@@ -88,10 +88,68 @@ app = module.http_app()
 | `oauth_scopes` | `dict[str, list[str]]` | `{}` | OAuth API scopes the module needs per provider (#241), e.g. `{"google": ["https://www.googleapis.com/auth/calendar"]}`. The shell unions these across modules and requests them at connect (`?scope=`); the core always adds the default identity scopes. Empty = only identity scopes needed |
 | `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/module-docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
 | `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054) |
+| `automation_templates` | `list[AutomationTemplate]` | `[]` | preset automations the module suggests, offered on the shell's Templates tab — **never auto-instantiated** (ADR-0105); see *Automation templates* below |
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema) ·
-`writes_document: WritesDocument | None = None` (below).
+`writes_document: WritesDocument | None = None` (below) ·
+`side_effect: "read" | "propose" | "write" = "write"` (below).
+
+### `side_effect` — what a tool does to the world (ADR-0105)
+
+The vocabulary the [automations](automations.md#the-autonomy-dial) autonomy dial gates on.
+Declared beside the tool, and **enforced at the turn's tool surface** — a read-only
+automation is handed no tool that can write, rather than being asked not to.
+
+```python
+@module.tool(side_effect="read")
+def mail_search(query: str) -> str: ...
+```
+
+| Class | Meaning |
+| --- | --- |
+| `read` | Observes; changes nothing. |
+| `propose` | **Stages for human approval by construction** — a draft-first send (ADR-0085), a propose tool that files a suggestion (#305). It cannot commit even if the model wants it to. |
+| `write` | Applies directly. |
+
+**The default is `write`** — the most restrictive reading. Forgetting to annotate a read
+tool costs it its availability to a Notify automation, never the guarantee. **Annotate your
+read tools**; that is what makes them usable by one.
+
+Declared, not inferred, because inference is unsound here: `mail_mark_read` contains "read"
+and mutates, and `writes_document` is a rendering hint (not a write bit) that `mail_send`
+does not carry. A `side_effect` naming a tool that never registered raises at
+manifest-build time — a silent miss would demote that tool to `write` and drop it out of
+every Notify automation's reach, a feature failing shut, invisibly.
+
+### `AutomationTemplate` — suggest a preset automation (ADR-0105)
+
+`key: str` · `name: str` · `description: str = ""` · `trigger: dict = {}` ·
+`prompt: str = ""` · `autonomy: str = "notify"` · `sinks: list[str] = []`.
+
+A module knows what is worth automating about itself better than the core does. Declaring a
+template surfaces it as a **starting point the operator instantiates** — never a live
+automation. The contract enforces that by carrying **no `enabled` field**: installing a
+module must never make the assistant start doing things unasked.
+
+`trigger` and `sinks` are deliberately loose: the core owns that vocabulary and validates
+on instantiation, so a module pinned to an older library cannot break the core's parse.
+
+```python
+EpicurusModule(
+    "echo",
+    automation_templates=[
+        AutomationTemplate(
+            key="on-ping",
+            name="Tell me when the spine is pinged",
+            trigger={"module": "echo", "event_type": "echo.pinged"},
+            prompt="An echo ping arrived. Say so in one short sentence.",
+            autonomy="notify",
+            sinks=["chat"],
+        )
+    ],
+)
+```
 
 ### `WritesDocument` — opt a tool into the live document pane (#541, ADR-0100)
 

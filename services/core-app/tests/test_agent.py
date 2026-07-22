@@ -68,6 +68,7 @@ class _FakeGateway:
         self._results = list(results)
         self.calls: list[list[ChatMessage]] = []
         self.tools_seen: list[Any] = []
+        self.automation_ids: list[str | None] = []
         self._supports_tools = supports_tools
         self._supports_vision = supports_vision
 
@@ -78,9 +79,13 @@ class _FakeGateway:
         model: str | None = None,
         tools: Any = None,
         tenant_id: str | None = None,
+        automation_id: str | None = None,
     ) -> ChatResult:
         self.calls.append(list(messages))
         self.tools_seen.append(tools)
+        # Recorded so a test can assert the dual metering attribution reaches the gateway
+        # (ADR-0105); None on every ordinary turn.
+        self.automation_ids.append(automation_id)
         return self._results.pop(0)
 
     async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
@@ -101,8 +106,14 @@ class _FakeMcp:
         self._route = route or {}
         self._outputs = outputs or {}
         self.called: list[tuple[str, dict[str, Any]]] = []
+        self.allow_seen: list[frozenset[str] | None] = []
 
-    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    async def discover(
+        self, *, allow: frozenset[str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        # Recorded so a test can assert an automation's autonomy allowance reaches the
+        # tool surface (ADR-0105). The real filtering is tested against McpHost itself.
+        self.allow_seen.append(allow)
         return self._specs, self._route
 
     async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
@@ -124,6 +135,79 @@ async def test_agent_answers_without_tools() -> None:
     assert turn.content == "hello"
     assert turn.stopped == "completed"
     assert turn.tools_used == []
+
+
+# ── automations: the dial and the metering reach the turn (ADR-0105) ─────────
+
+
+async def test_an_ordinary_turn_applies_no_dial_and_no_attribution() -> None:
+    # Everything about automations is opt-in: a normal turn passes neither, so the tool
+    # surface is unfiltered and the usage event carries no automation.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    mcp = _FakeMcp()
+    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    assert mcp.allow_seen == [None]
+    assert gw.automation_ids == [None]
+
+
+async def test_a_turns_allowance_reaches_the_tool_surface() -> None:
+    # The dial is enforced where the tools are assembled, not in the prompt.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    mcp = _FakeMcp()
+    await Agent(gateway=gw, mcp=mcp).run(
+        [ChatMessage(role="user", content="hi")], allow=frozenset({"read"})
+    )
+    assert mcp.allow_seen == [frozenset({"read"})]
+
+
+async def test_the_automation_attribution_reaches_the_gateway() -> None:
+    # The dual metering point: every gateway call a run makes is attributed to it, so the
+    # usage event names the tenant *and* which automation spent it.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    await Agent(gateway=gw, mcp=_FakeMcp()).run(
+        [ChatMessage(role="user", content="hi")], automation_id="auto-1"
+    )
+    assert gw.automation_ids == ["auto-1"]
+
+
+async def test_a_turn_reports_what_it_cost() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi", prompt_tokens=11, completion_tokens=4)])
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    assert turn.usage.prompt_tokens == 11
+    assert turn.usage.completion_tokens == 4
+    assert turn.usage.steps == 1
+
+
+async def test_usage_is_summed_across_a_multi_step_turn() -> None:
+    # A turn is one *or more* completions — every tool round is another. The ledger wants
+    # the total, not the last one.
+    gw = _FakeGateway(
+        [
+            ChatResult(
+                model="m",
+                content="",
+                tool_calls=[_tool_call("t", "{}")],
+                prompt_tokens=10,
+                completion_tokens=2,
+            ),
+            ChatResult(model="m", content="done", prompt_tokens=20, completion_tokens=3),
+        ]
+    )
+    mcp = _FakeMcp(specs=[{"type": "function", "function": {"name": "t"}}], route={"t": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    assert turn.usage.prompt_tokens == 30
+    assert turn.usage.completion_tokens == 5
+    assert turn.usage.steps == 2
+
+
+async def test_unreported_usage_stays_none_rather_than_zero() -> None:
+    # A provider that reports no usage must read as "unknown", not as "free" — reporting 0
+    # would quietly understate every bill that depends on it.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    assert turn.usage.prompt_tokens is None
+    assert turn.usage.completion_tokens is None
+    assert turn.usage.steps == 1
 
 
 async def test_agent_non_streaming_does_not_send_a_composed_draft() -> None:

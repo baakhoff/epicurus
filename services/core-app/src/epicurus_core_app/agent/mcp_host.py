@@ -16,7 +16,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 
-from epicurus_core import get_logger
+from epicurus_core import SideEffect, get_logger
 
 log = get_logger("epicurus_core_app.agent.mcp")
 
@@ -35,7 +35,9 @@ _CALL_TIMEOUT_S = 30.0
 #: A built-in tool: its OpenAI function spec + an async handler ``(arguments, tenant) -> text``.
 #: The tenant is passed so a built-in can read or write tenant-scoped state (e.g. ``remember``).
 BuiltinHandler = Callable[[dict[str, Any], str], Awaitable[str]]
-BuiltinTool = tuple[dict[str, Any], BuiltinHandler]
+#: ``(spec, handler, side effect)`` — the classification is carried here because a built-in has
+#: no module manifest to declare it on (ADR-0105).
+BuiltinTool = tuple[dict[str, Any], BuiltinHandler, SideEffect]
 
 
 class ToolCallError(Exception):
@@ -90,17 +92,34 @@ class McpHost:
         # across all enabled modules (#213). Tools in the set are skipped regardless of
         # whether their module URL is included.
         self._tool_filter: Callable[[], Awaitable[set[str]]] | None = None
-        # Core built-in tools (ADR-0039): name -> (spec, handler), offered alongside the
-        # modules' tools and dispatched in-process (no HTTP). Empty by default.
+        # When set, discovery asks this for {tool name -> side effect} across every enabled
+        # module, so an ``allow`` class filter can be applied (ADR-0105). MCP's own
+        # ``list_tools`` does not carry manifest annotations, so the classification has to be
+        # resolved registry-side — the same reason ``DocumentToolLookup`` exists.
+        self._side_effects: Callable[[], Awaitable[dict[str, SideEffect]]] | None = None
+        # Core built-in tools (ADR-0039): name -> (spec, handler, side effect), offered
+        # alongside the modules' tools and dispatched in-process (no HTTP). Empty by default.
         self._builtins: dict[str, BuiltinTool] = {}
 
-    def register_builtin(self, name: str, spec: dict[str, Any], handler: BuiltinHandler) -> None:
+    def register_builtin(
+        self,
+        name: str,
+        spec: dict[str, Any],
+        handler: BuiltinHandler,
+        *,
+        side_effect: SideEffect = "write",
+    ) -> None:
         """Register a core built-in tool (ADR-0039).
 
         A setter (like ``set_url_provider``) so wiring that needs the registry — e.g. the
         ``now`` tool's calendar-timezone lookup — can be attached after construction.
+
+        ``side_effect`` classifies it for the automations autonomy dial, exactly as a module
+        declares one on its :class:`~epicurus_core.manifest.ToolSpec`. It defaults to the
+        same restrictive ``write``, so a built-in added later is withheld from a read-only
+        automation until someone states otherwise.
         """
-        self._builtins[name] = (spec, handler)
+        self._builtins[name] = (spec, handler, side_effect)
 
     def set_url_provider(self, provider: Callable[[], Awaitable[list[str]]]) -> None:
         """Wire the live enabled-modules URL source.
@@ -119,14 +138,53 @@ class McpHost:
         """
         self._tool_filter = provider
 
-    async def discover(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    def set_side_effect_provider(
+        self, provider: Callable[[], Awaitable[dict[str, SideEffect]]]
+    ) -> None:
+        """Wire the ``{tool name -> side effect}`` source (ADR-0105).
+
+        A setter for the same reason as ``set_url_provider``: the registry that resolves the
+        classification needs this host. Only consulted when ``discover`` is given an
+        ``allow`` set, so an ordinary chat turn never pays for it.
+        """
+        self._side_effects = provider
+
+    async def discover(
+        self, *, allow: frozenset[SideEffect] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         """Return ``(OpenAI tool specs, tool-name -> module-URL route)``.
 
         Only **enabled** modules are scanned when a ``url_provider`` is wired (#126).
         Individually disabled tools are skipped when a ``tool_filter`` is wired (#213).
+
+        ``allow`` restricts the surface to tools whose declared side effect is in the set —
+        how an automation's autonomy level is enforced (ADR-0105). ``None`` (an ordinary
+        chat turn) means no class filtering.
+
+        Note *what* it filters: both ``specs`` **and** ``route``. ``specs`` is only what the
+        model is told about; ``route`` is what :meth:`call` will dispatch. Filtering specs
+        alone would leave a dial that a determined model can talk its way past — a
+        withheld tool must be *unroutable*, not merely unmentioned. A tool missing from
+        ``route`` already answers ``error: unknown tool``, which is exactly the right
+        refusal: it never ran, and the model is told so plainly.
         """
         urls = await self._url_provider() if self._url_provider is not None else self._module_urls
         disabled = await self._tool_filter() if self._tool_filter is not None else set()
+        classes: dict[str, SideEffect] = {}
+        if allow is not None and self._side_effects is not None:
+            classes = await self._side_effects()
+
+        def _withheld(name: str) -> bool:
+            """Whether *name* is outside the allowed classes.
+
+            Unclassified → ``write`` (the ToolSpec default), so a tool whose module never
+            declared one is withheld from a read-only automation rather than trusted by it.
+            The cost of a forgotten annotation is availability, never containment.
+            """
+            if allow is None:
+                return False
+            return classes.get(name, "write") not in allow
+
         specs: list[dict[str, Any]] = []
         route: dict[str, str] = {}
         for url in urls:
@@ -138,7 +196,7 @@ class McpHost:
                     await session.initialize()
                     listing = await session.list_tools()
                     for tool in listing.tools:
-                        if tool.name in disabled:
+                        if tool.name in disabled or _withheld(tool.name):
                             continue
                         specs.append(
                             {
@@ -157,8 +215,10 @@ class McpHost:
         # Offer core built-in tools alongside the modules' (ADR-0039). They respect the same
         # disabled-tools filter; a module tool of the same name would already own the route,
         # so built-ins never shadow a module.
-        for name, (spec, _handler) in self._builtins.items():
+        for name, (spec, _handler, builtin_class) in self._builtins.items():
             if name in disabled or name in route:
+                continue
+            if allow is not None and builtin_class not in allow:
                 continue
             specs.append(spec)
             route[name] = _BUILTIN_URL

@@ -172,6 +172,7 @@ message, not once anything consumes it.
 | `dedup_key` | `str` | The emitter's idempotency key for the *change*. 1–255 chars. |
 | `entity_ref` | `EntityRef \| None` | The entity this is about ([ADR-0019](../services/core-app.md)) — a feed row or notification renders a hover-card chip from it with no per-module code. |
 | `payload` | `dict[str, Any]` | Pointers + minimal metadata. Capped and credential-screened. |
+| `causation_id` | `str \| None` | **Core-only.** The automation run that produced this event ([automations](automations.md#the-loop-guard), ADR-0105). A module emitter always leaves it unset — a change in the world has no cause inside the system — and the automations matcher refuses any event carrying one. |
 
 Helpers: `envelope.subject()` and `event_subject(type)` both return the *base* subject
 (`events.<type>`); the bus tenant-scopes it at publish time. `EVENTS_WILDCARD`

@@ -12,11 +12,15 @@ any good" is not a development loop.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from epicurus_core import EntityRef
+from epicurus_core_app.automations.feed import RunFeed, valid_outcome
 from epicurus_core_app.automations.model import (
     AUTONOMY_LEVELS,
     SINKS,
@@ -29,6 +33,12 @@ from epicurus_core_app.automations.model import (
 )
 from epicurus_core_app.automations.runner import AutomationRunner
 from epicurus_core_app.automations.store import AutomationStore, KillSwitchStore
+from epicurus_core_app.event_log import EventLogStore
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
 
 # ── wire shapes ──────────────────────────────────────────────────────────────
 
@@ -93,6 +103,10 @@ class AutomationRunView(BaseModel):
     error: str | None = None
     output: str
     sinks_fired: list[str]
+    #: The triggering events' entity refs (#669), resolved from the event log by row id so
+    #: the feed renders source-entity hover-card chips with no per-module code. Empty for
+    #: schedule/manual runs, and for trigger events retention has since pruned.
+    trigger_entity_refs: list[EntityRef] = Field(default_factory=list)
 
 
 class CreateAutomationRequest(BaseModel):
@@ -183,7 +197,9 @@ def _view(automation: Automation) -> AutomationView:
     )
 
 
-def _run_view(run: AutomationRun) -> AutomationRunView:
+def _run_view(
+    run: AutomationRun, *, trigger_entity_refs: list[EntityRef] | None = None
+) -> AutomationRunView:
     return AutomationRunView(
         id=run.id,
         automation_id=run.automation_id,
@@ -198,7 +214,35 @@ def _run_view(run: AutomationRun) -> AutomationRunView:
         error=run.error,
         output=run.output,
         sinks_fired=list(run.sinks_fired),
+        trigger_entity_refs=trigger_entity_refs or [],
     )
+
+
+async def _trigger_refs_for(
+    events: EventLogStore | None, *, tenant: str, run: AutomationRun
+) -> list[EntityRef]:
+    """The distinct entity refs of *run*'s triggering events, in event order (#669).
+
+    Best-effort: no event-log store wired, an empty ``trigger_refs`` (schedule/manual
+    runs), or pruned rows all yield ``[]`` — the feed row then simply shows no chips.
+    """
+    if events is None or not run.trigger_refs:
+        return []
+    try:
+        logged = await events.by_ids(tenant=tenant, ids=list(run.trigger_refs))
+    except Exception:  # enrichment must never fail the feed
+        return []
+    refs: list[EntityRef] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in sorted(logged, key=lambda e: e.id):
+        if entry.entity_ref is None:
+            continue
+        key = (entry.entity_ref.module, entry.entity_ref.kind, entry.entity_ref.ref_id)
+        if key in seen:  # a digest run may batch several events about one entity
+            continue
+        seen.add(key)
+        refs.append(entry.entity_ref)
+    return refs
 
 
 def create_automations_router(
@@ -208,11 +252,15 @@ def create_automations_router(
     *,
     templates: Any = None,
     default_tenant: str = "local",
+    feed: RunFeed | None = None,
+    events: EventLogStore | None = None,
 ) -> APIRouter:
     """CRUD + ledger + kill switch + templates (Settings surface, no module page).
 
     ``templates`` is the module registry's ``automation_templates`` lookup, injected as a
-    bare callable so this router never imports the registry.
+    bare callable so this router never imports the registry. *feed* backs the live runs
+    tail (#669; without it ``GET /runs/stream`` 404s), and *events* resolves each run's
+    ``trigger_refs`` into entity-ref chips (without it rows carry no chips).
     """
     router = APIRouter(prefix="/platform/v1/automations", tags=["automations"])
 
@@ -265,13 +313,57 @@ def create_automations_router(
     async def list_all_runs(
         tenant_id: str | None = Query(None),
         automation_id: str | None = Query(None),
+        outcome: str | None = Query(None),
         limit: int = Query(100, ge=1, le=500),
     ) -> list[AutomationRunView]:
-        """The run ledger, newest first — what the runs feed renders."""
+        """The run ledger, newest first — what the runs feed renders.
+
+        ``outcome`` narrows to one ledger state (``ok`` / ``error`` / ``skipped``);
+        skipped runs are first-class here — a rate-capped or paused run being visible
+        is the tab's whole point (#669).
+        """
+        if outcome is not None and not valid_outcome(outcome):
+            raise HTTPException(status_code=400, detail=f"unknown outcome: {outcome!r}")
+        tenant = tenant_id or default_tenant
         runs = await store.runs(
-            tenant=tenant_id or default_tenant, automation_id=automation_id, limit=limit
+            tenant=tenant, automation_id=automation_id, outcome=outcome, limit=limit
         )
-        return [_run_view(r) for r in runs]
+        return [
+            _run_view(r, trigger_entity_refs=await _trigger_refs_for(events, tenant=tenant, run=r))
+            for r in runs
+        ]
+
+    @router.get("/runs/stream")
+    async def run_stream(
+        tenant_id: str | None = Query(None),
+        automation_id: str | None = Query(None),
+        outcome: str | None = Query(None),
+    ) -> StreamingResponse:
+        """Tail the run ledger as SSE (#669) — the ADR-0031 console pattern.
+
+        Each frame is ``event: automation_run`` with an ``AutomationRunView`` JSON body.
+        Recent history replays oldest-first, then live runs follow as the runner records
+        them — skips included. Filters apply server-side, matching ``GET /runs``.
+        Client-disconnect handling matches the events feed: the generator's 1-second
+        live-queue poll lets ``StreamingResponse`` notice a closed tab within ~1s.
+        """
+        if feed is None:
+            raise HTTPException(status_code=404, detail="the runs feed is not wired")
+        if outcome is not None and not valid_outcome(outcome):
+            raise HTTPException(status_code=400, detail=f"unknown outcome: {outcome!r}")
+        tenant = tenant_id or default_tenant
+
+        async def frames() -> AsyncGenerator[str, None]:
+            async for run in feed.stream(
+                tenant=tenant, automation_id=automation_id, outcome=outcome
+            ):
+                view = _run_view(
+                    run,
+                    trigger_entity_refs=await _trigger_refs_for(events, tenant=tenant, run=run),
+                )
+                yield f"event: automation_run\ndata: {view.model_dump_json()}\n\n"
+
+        return StreamingResponse(frames(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     @router.get("", response_model=list[AutomationView])
     async def list_automations(tenant_id: str | None = Query(None)) -> list[AutomationView]:

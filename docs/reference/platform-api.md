@@ -402,7 +402,8 @@ unknown.
 
 ### `GET /platform/v1/automations/runs`
 
-The run ledger, newest first. Query: `automation_id` · `limit` (1–500, default 100).
+The run ledger, newest first. Query: `automation_id` · `outcome` (`ok` \| `error` \|
+`skipped`; 400 on anything else) · `limit` (1–500, default 100).
 
 ```json
 [
@@ -411,12 +412,26 @@ The run ledger, newest first. Query: `automation_id` · `limit` (1–500, defaul
     "trigger_refs": [42], "filter_verdict": "matched",
     "model": "qwen2.5:7b", "prompt_tokens": 812, "completion_tokens": 96,
     "duration_ms": 4210, "outcome": "ok", "error": null,
-    "output": "An invoice from Acme arrived.", "sinks_fired": ["chat"]
+    "output": "An invoice from Acme arrived.", "sinks_fired": ["chat"],
+    "trigger_entity_refs": [
+      { "ref_id": "…", "module": "mail", "kind": "message", "title": "Re: invoice" }
+    ]
   }
 ]
 ```
 
 Written for **every** run at every level — for `silent_act` it is the only trace.
+`trigger_entity_refs` (#669) are the triggering events' `EntityRef`s, resolved from the
+event log by row id so a feed renders source-entity hover-card chips; empty for
+schedule/manual runs and for trigger events retention has pruned.
+
+### `GET /platform/v1/automations/runs/stream`
+
+The ledger as an SSE tail (#669) — the
+[runs feed](observability.md#automation-runs-feed-669). Query: `automation_id` ·
+`outcome`, matching `GET /runs`. Each frame is `event: automation_run` with the run-view
+JSON above; recent history replays oldest-first, then live runs follow as the runner
+records them — skips included.
 
 ### `GET` · `PUT /platform/v1/automations/kill-switch`
 

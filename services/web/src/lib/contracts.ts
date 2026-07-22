@@ -1297,6 +1297,80 @@ export const ModuleEvent = z.object({
 });
 export type ModuleEvent = z.infer<typeof ModuleEvent>;
 
+/* ── automations (ADR-0105) ─────────────────────────────────────────────── */
+
+/** One deterministic payload matcher in an event trigger (AND-combined). */
+export const AutomationMatcher = z.object({
+  field: z.string(),
+  op: z.enum(["eq", "ne", "contains", "exists", "gt", "lt"]),
+  value: z.unknown().nullish(),
+});
+export type AutomationMatcher = z.infer<typeof AutomationMatcher>;
+
+export const AutomationEventTrigger = z.object({
+  module: z.string(),
+  event_type: z.string(),
+  matchers: z.array(AutomationMatcher).default([]),
+  window_start_hour: z.number().nullish(),
+  window_end_hour: z.number().nullish(),
+});
+export type AutomationEventTrigger = z.infer<typeof AutomationEventTrigger>;
+
+/** The ADR-0092 schedule vocabulary the engine reuses (weekday 0=Monday). */
+export const AutomationScheduleTrigger = z.object({
+  cadence: z.string(),
+  hour: z.number(),
+  weekday: z.number().nullish(),
+});
+export type AutomationScheduleTrigger = z.infer<typeof AutomationScheduleTrigger>;
+
+/** One automation, as `GET /platform/v1/automations` returns it. */
+export const Automation = z.object({
+  id: z.string(),
+  name: z.string(),
+  enabled: z.boolean(),
+  /** `user` · `agent` · `template:<module>` — where the row came from. */
+  source: z.string(),
+  event_trigger: AutomationEventTrigger.nullish(),
+  schedule_trigger: AutomationScheduleTrigger.nullish(),
+  prompt: z.string(),
+  /** Blank/null = the tenant's default model (the ADR-0029 fall-through). */
+  model: z.string().nullish(),
+  autonomy: z.string(),
+  sinks: z.array(z.string()).default([]),
+  chat_mode: z.string(),
+  rate_cap_per_hour: z.number(),
+  digest_window_minutes: z.number(),
+  created_at: z.string(),
+  last_run_at: z.string().nullish(),
+  last_status: z.string().nullish(),
+  /** Derived server-side from the autonomy dial — never stored, never guessed here. */
+  allowed_tool_classes: z.array(z.string()).default([]),
+});
+export type Automation = z.infer<typeof Automation>;
+
+/** One run-ledger entry, as the runs feed renders it (#669). */
+export const AutomationRun = z.object({
+  id: z.string(),
+  automation_id: z.string(),
+  started_at: z.string(),
+  /** The `module_events` row ids that caused it (empty for schedule/manual runs). */
+  trigger_refs: z.array(z.number()).default([]),
+  filter_verdict: z.string(),
+  model: z.string().nullish(),
+  prompt_tokens: z.number().nullish(),
+  completion_tokens: z.number().nullish(),
+  duration_ms: z.number().nullish(),
+  /** `ok` · `error` · `skipped` — skips are first-class (rate cap, paused). */
+  outcome: z.string(),
+  error: z.string().nullish(),
+  output: z.string().default(""),
+  sinks_fired: z.array(z.string()).default([]),
+  /** The triggering events' entity refs, server-resolved for hover-card chips. */
+  trigger_entity_refs: z.array(EntityRef).default([]),
+});
+export type AutomationRun = z.infer<typeof AutomationRun>;
+
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;
 
 /** A registered maintenance job advertised to the UI (#383). */

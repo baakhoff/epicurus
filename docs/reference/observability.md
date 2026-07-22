@@ -250,6 +250,47 @@ core's (when it heard about it) — not the same thing, and the feed orders by t
 
 ---
 
+## Automation runs feed (#669)
+
+The third live feed: what the automations engine **did** about the world changing — fire →
+filter verdict → run (model, tokens, duration) → sinks delivered / error, straight from the
+`automation_runs` ledger ([automations](automations.md#the-run-ledger)). Skips are
+first-class: a rate-capped or paused run appears with its *why* in `error`, because a cap
+being hit should be visible, not inferred from silence.
+
+```
+GET /platform/v1/automations/runs/stream   # SSE tail
+GET /platform/v1/automations/runs          # the same data as a plain page
+```
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `tenant_id` | string | the default tenant | Which tenant's runs to read. |
+| `automation_id` | string | — | Exact automation filter. |
+| `outcome` | string | — | `ok` · `error` · `skipped` (400 on anything else). |
+| `limit` | int | `100` | Snapshot endpoint only; 1–500. |
+
+### SSE event format
+
+Each frame is `event: automation_run` with an `AutomationRunView` JSON body — the ledger
+entry plus `trigger_entity_refs`: the triggering events' `EntityRef`s, resolved server-side
+from the event log by row id so the feed renders source-entity hover-card chips with no
+per-module code (empty for schedule/manual runs, and for trigger events retention has since
+pruned).
+
+### Behaviour
+
+Identical to the events feed: history replays oldest-first (up to 200) with the subscriber
+queue registered first (clients de-duplicate on `id`), a slow consumer drops frames past a
+500-deep queue, and the stream never closes on its own. The live half is fed by the
+runner's `on_recorded` hook the moment a ledger entry is written — at **every** autonomy
+level, so even a `silent_act` run is visible here (the ledger and this feed are its only
+trace).
+
+---
+
 ## Web surface
 
 The Observability screen (`/observability`) shows a health summary from
@@ -264,6 +305,13 @@ reload, and expands a row's `context` on click (▼).
 history, filters by module and event type, shows each row's `entity_ref` title, and expands
 a row's `payload` on click (▼).
 
-Both reconnect automatically on disconnect (3 s back-off) via the shared `useSseFeed` hook,
-cap the DOM at 500 entries, and follow the tail only while the reader is already at it —
-scrolling up to read something is not yanked back by the next arriving entry.
+**Automation runs** (#669) — the run ledger backed by `/platform/v1/automations/runs/stream`.
+Each row reads fire → verdict → outcome (a skip's *why* inline) → model, tokens, duration,
+sinks fired, with the triggering events' `EntityRef` hover-card chips beneath and the run's
+`output` expandable on click (▼). Filterable by automation and outcome (server-side, they
+re-subscribe) and by trigger module (a client-side view over the automations list — a run
+itself carries no module — so switching it never tears the stream down).
+
+All three reconnect automatically on disconnect (3 s back-off) via the shared `useSseFeed`
+hook, cap the DOM at 500 entries, and follow the tail only while the reader is already at
+it — scrolling up to read something is not yanked back by the next arriving entry.

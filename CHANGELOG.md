@@ -14,6 +14,24 @@ images to GHCR.
 
 ### Added
 
+- **Observability: the Automation runs feed** (#669, stacked on #666) — the third live tab,
+  and the engine's glass: a triggered run is traceable end-to-end in one place, fire → filter
+  verdict → run (model, tokens, duration) → sinks delivered / error. **Skips are the point**:
+  a rate-capped or paused run appears as loudly as a real one with its *why* inline ("rate cap
+  reached (4/hour)", "runtime paused") — a cap being hit should be visible, not inferred from
+  an automation that mysteriously went quiet — and a `silent_act` run, whose only trace is the
+  ledger, is visible here too. Backed by `GET /platform/v1/automations/runs/stream` (SSE,
+  history-then-live per the ADR-0031 console shape; a new `RunFeed` fans out every ledger entry
+  the moment the runner's new `on_recorded` hook records it) and an `outcome` filter on the
+  list endpoint (`ok`/`error`/`skipped`, server-side). Each run's `trigger_refs` come back as
+  `trigger_entity_refs` — the triggering events' `EntityRef`s resolved from the event log
+  (`EventLogStore.by_ids`) — so rows carry ADR-0019 hover-card chips to the source entities
+  with no per-module code. The tab filters by automation and outcome server-side (they
+  re-subscribe) and by trigger module client-side over the automations list (a run itself
+  carries no module), reusing `useSseFeed` exactly as the Logs and Events tabs do; the
+  automations list also names each run. `web` 0.114.0→0.115.0 (MINOR) · `core-app`
+  0.88.0→0.88.1 (PATCH — endpoints and hook exist to serve the new surface, per the issue's
+  own bump call).
 - **Automations: the engine** (#666, ADR-0105) — the centerpiece of event-driven proactivity,
   and what the event spine exists to feed: modules announce that the world changed, and this
   decides whether the assistant should do anything about it. A tenant-scoped `automations` row

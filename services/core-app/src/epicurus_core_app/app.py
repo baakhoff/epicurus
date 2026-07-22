@@ -57,6 +57,7 @@ from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.automations.feed import RunFeed
 from epicurus_core_app.automations.migration import migrate_scheduled_turns
 from epicurus_core_app.automations.routes import create_automations_router
 from epicurus_core_app.automations.runner import (
@@ -513,6 +514,9 @@ def create_app() -> FastAPI:
     # `on_event` seam below, so the spine stays unaware anything consumes it; the scheduler
     # drains the trigger queue and fires schedule triggers on the same poll shape the
     # scheduled-turns loop used — which it replaces, once the migration has run.
+    # The live runs feed (#669): the runner hands every recorded ledger entry — skips
+    # included — to the feed, which the observability page tails over SSE.
+    automation_run_feed = RunFeed(automations)
     automation_runner = AutomationRunner(
         automations,
         automation_queue,
@@ -521,6 +525,7 @@ def create_app() -> FastAPI:
         automation_kill_switch,
         automation_sinks,
         bus=bus,
+        on_recorded=automation_run_feed.publish,
     )
     automation_matcher = AutomationMatcher(
         automations,
@@ -956,6 +961,9 @@ def create_app() -> FastAPI:
             automation_runner,
             templates=registry.automation_templates,
             default_tenant=settings.default_tenant_id,
+            # The live runs tail + the trigger-ref → entity-ref chip lookup (#669).
+            feed=automation_run_feed,
+            events=event_log,
         )
     )
 

@@ -247,6 +247,22 @@ class EventLogStore:
             rows = await session.scalars(stmt)
             return [_to_value(row) for row in rows]
 
+    async def by_ids(self, *, tenant: str, ids: list[int]) -> list[LoggedEvent]:
+        """The events with the given row ids (tenant-scoped; missing ids are skipped).
+
+        The runs feed's trigger lookup (#669): a ledger entry names its triggering
+        events by row id, and the feed renders their ``EntityRef`` chips. A pruned or
+        foreign-tenant id simply doesn't come back — retention outliving a run's refs
+        is normal, not an error.
+        """
+        if not ids:
+            return []
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredEvent).where(_StoredEvent.tenant == tenant, _StoredEvent.id.in_(ids))
+            )
+            return [_to_value(row) for row in rows]
+
     async def prune(self, *, older_than: datetime) -> int:
         """Drop events received before *older_than*; returns how many rows went."""
         async with self._session() as session:

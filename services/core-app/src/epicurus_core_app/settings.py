@@ -219,6 +219,20 @@ class CoreAppSettings(CoreSettings):
     # many files at once is grouped into one incremental pass. Passed to the watcher's debounce.
     files_watch_debounce_ms: int = 1500
 
+    # ── Push notifications (ADR-0102) ───────────────────────────────────────────
+    # The contact identity presented in the VAPID JWT (RFC 8292) — a mailto: or https: URL
+    # a push service can use to reach the operator about this application server. The
+    # default is a neutral placeholder, not a working inbox; set it for a real deployment.
+    push_vapid_subject: str = "mailto:admin@example.com"
+    # Max push notifications delivered per tenant per hour, across every category and
+    # device — a blunt, in-memory (single-instance v1) safety valve independent of quiet
+    # hours. A notification beyond the cap is still recorded (#671's durable center) but
+    # not pushed. 0 disables the cap.
+    push_rate_cap_per_hour: int = 30
+    # How often the quiet-hours digest scheduler checks whether a tenant's quiet window has
+    # just ended (a plain poll, mirroring maintenance/scheduled-turns — see their settings).
+    push_quiet_poll_interval_s: int = 60
+
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.
     # Must exactly match the URI registered with each OAuth provider.

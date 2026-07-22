@@ -105,12 +105,22 @@ from epicurus_core_app.modules import (
     create_modules_router,
     create_suggestions_router,
 )
+from epicurus_core_app.notifications import NotificationStore
+from epicurus_core_app.notifications_routes import create_notifications_router
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.object_backend import StorageObjectBackend
 from epicurus_core_app.page_order_prefs import PageOrderStore
 from epicurus_core_app.page_order_routes import create_page_order_router
 from epicurus_core_app.platform_api import create_platform_router
+from epicurus_core_app.push import (
+    PushDigestScheduler,
+    PushPrefsStore,
+    PushQueueStore,
+    PushService,
+    PushSubscriptionStore,
+    create_push_router,
+)
 from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.scheduled_turns import ScheduledTurnScheduler, ScheduledTurnStore
 from epicurus_core_app.scheduled_turns_routes import create_scheduled_turns_router
@@ -223,6 +233,35 @@ def create_app() -> FastAPI:
     )
     module_prefs = ModulePrefsStore(engine)
     timezone_prefs = TimezonePrefsStore(engine, default=settings.default_timezone)
+    # Web push (#670, ADR-0102): a tenant's VAPID keypair is generated lazily (first send)
+    # and stored in OpenBao by the service itself; these stores + the service are built
+    # here so both the digest scheduler below and the routes registered later share them.
+    push_subscriptions = PushSubscriptionStore(engine)
+    push_prefs = PushPrefsStore(engine)
+    push_queue = PushQueueStore(engine)
+    # The notification center (#671): the durable record every push-worthy event lands in,
+    # written by push_service.notify() itself whenever a category's `center` toggle is on —
+    # independent of whether push delivery fires, queues, or skips (ADR-0102 §4).
+    notifications = NotificationStore(engine)
+    push_service = PushService(
+        subscriptions=push_subscriptions,
+        prefs=push_prefs,
+        queue=push_queue,
+        notifications=notifications,
+        secrets=secrets,
+        bus=bus,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        default_tenant=settings.default_tenant_id,
+        vapid_subject=settings.push_vapid_subject,
+        rate_cap_per_hour=settings.push_rate_cap_per_hour,
+    )
+    push_digest_scheduler = PushDigestScheduler(
+        push_queue,
+        push_prefs,
+        push_service.send_digest,
+        timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
+        poll_interval_s=settings.push_quiet_poll_interval_s,
+    )
     # The maintenance orchestrator's schedule (#621): one row per tenant, falling back to the env
     # defaults until an operator sets their own via PUT. Read by both the orchestrator's poll loop
     # (below) and the maintenance routes; written only by the routes.
@@ -261,14 +300,15 @@ def create_app() -> FastAPI:
     playbook_proposals = PlaybookProposalStore(engine)
     # The nightly pass that *proposes* those edits (ADR-0093 §1): one gateway call per active
     # tenant over the sessions it saw since its last run, metered under that tenant (§5). It is
-    # handed the proposal sink and a read-only playbook lookup — never the stores that own the
-    # documents — so it is structurally incapable of applying anything itself.
+    # handed the proposal sink and read-only playbook + base-instructions lookups — never the
+    # stores that own the documents — so it is structurally incapable of applying anything itself.
     playbook_reflection_state = ReflectionStateStore(engine)
     playbook_reflector = PlaybookReflector(
         gateway,
         conversation_store,
         playbook_proposals,
         agent_playbooks,
+        agent_instructions,
         playbook_reflection_state,
         tenants=conversation_store.distinct_tenants,
         model=settings.playbook_reflection_model or None,
@@ -504,6 +544,24 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
         try:
+            await push_subscriptions.init()
+        except Exception as exc:
+            log.error("push subscriptions init failed; push notifications disabled", error=str(exc))
+        try:
+            await push_prefs.init()
+        except Exception as exc:
+            log.error("push prefs init failed; push notifications use defaults", error=str(exc))
+        try:
+            await push_queue.init()
+        except Exception as exc:
+            log.error(
+                "push queue init failed; quiet-hours digest queueing disabled", error=str(exc)
+            )
+        try:
+            await notifications.init()
+        except Exception as exc:
+            log.error("notification center init failed; notifications disabled", error=str(exc))
+        try:
             await maintenance_schedule_prefs.init()
         except Exception as exc:
             log.error(
@@ -597,6 +655,9 @@ def create_app() -> FastAPI:
         # Scheduled turns (ADR-0092): a plain poll loop finding due rows and delivering each as
         # a headless agent turn. Fire-and-forget, same shape as the tasks around it.
         scheduled_turns_task = asyncio.create_task(scheduled_turn_scheduler.run_periodic())
+        # Push quiet-hours digest (ADR-0102): a plain poll loop flushing any tenant whose
+        # quiet window just ended. Fire-and-forget, same shape as the tasks around it.
+        push_digest_task = asyncio.create_task(push_digest_scheduler.run_periodic())
         # Evict finished in-flight runs past their grace window (#376), even with no new traffic.
         live_run_reaper = asyncio.create_task(live_runs.reap_periodically())
         # Keep the file index live: re-walk on a debounced change (local backend only, ADR-0063).
@@ -634,6 +695,7 @@ def create_app() -> FastAPI:
             catalog_size_task.cancel()
             extraction_task.cancel()
             scheduled_turns_task.cancel()
+            push_digest_task.cancel()
             live_run_reaper.cancel()
             maintenance_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -644,6 +706,8 @@ def create_app() -> FastAPI:
                 await extraction_task
             with suppress(asyncio.CancelledError):
                 await scheduled_turns_task
+            with suppress(asyncio.CancelledError):
+                await push_digest_task
             with suppress(asyncio.CancelledError):
                 await live_run_reaper
             with suppress(asyncio.CancelledError):
@@ -723,6 +787,17 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         create_scheduled_turns_router(scheduled_turns, default_tenant=settings.default_tenant_id)
+    )
+    app.include_router(
+        create_push_router(
+            push_service,
+            subscriptions=push_subscriptions,
+            prefs=push_prefs,
+            default_tenant=settings.default_tenant_id,
+        )
+    )
+    app.include_router(
+        create_notifications_router(notifications, default_tenant=settings.default_tenant_id)
     )
     app.include_router(create_power_router(gateway, power))
     app.include_router(

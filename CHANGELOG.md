@@ -45,6 +45,29 @@ images to GHCR.
   emitter — and `task smoke` now asserts the whole chain end-to-end on a fresh stack: emit →
   NATS → intake → durable log → feed, plus the log's idempotency. `docs/reference/events.md`
   starts **the event catalog**; real module emitters extend it.
+- **Mail: the first real module emitters — `mail.received` / `mail.sent` / `mail.sync_failed`**
+  (#663, stacked on #662) — mail's cache reconcile (ADR-0096, #623) is the one place a
+  genuinely-new message, as opposed to a flag flip, is already known, so that's where all three
+  now fire. `mail.received` needed message-granular detection the sync seam never had: Gmail's
+  `changed_threads_since` was thread-granular only (`_history_thread_ids` conflates
+  `messagesAdded`/`messagesDeleted`/`labelsAdded`/`labelsRemoved` into one set), so
+  `ThreadChanges` gains a narrower `new_message_ids` field, filled from `messagesAdded` history
+  records specifically — a flag flip on an existing message never fires it. Each new message gets
+  one `provider.read()` (thread-summary data reflects only a thread's *latest* message, wrong the
+  moment two new messages land in the same thread within one reconcile window) for an accurate
+  `from`/`subject` (capped)/`folder`/`has_attachments` payload — `MailMessage` gains its own
+  `label_ids` so `folder` reflects the message's real placement, not whichever label triggered the
+  poll. **No-firehose, by construction, not by a special case**: a cold cache and an
+  expired-cursor forced resync both already route through the same `_full_sync` path, which the
+  reconcile loop never touches for `mail.received` — the initial/full-sync case costs no new code.
+  `mail.sync_failed` fires on a provider/auth error or an expired sync cursor, rate-limited per
+  instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s) so a flapping account can't storm the
+  bus. `mail.sent` — previously declared but publishing on the bare `mail.sent` subject via a raw
+  `EventBus.publish` with an ad-hoc, uncapped payload — now rides the same spine as its two new
+  siblings. IMAP does not exist in this codebase yet (only `GmailProvider` is implemented,
+  despite the module's provider-neutral design); the catalog's provider-caveats section notes
+  what a future IMAP provider would need to fill. `mail` 0.13.0→0.14.0 (MINOR).
+
 - **Notes, Knowledge, Files: content events + suggestion-decision events** (#665, stacked on
   #662) — the operator-content half of the emitter sweep. **Notes/knowledge doc events**:
   `note_created`/`doc_created` and `note_deleted`/`doc_deleted` fire immediately at the change

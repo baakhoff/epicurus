@@ -13,3 +13,7 @@ class MailSettings(CoreSettings):
     # Postgres DSN for the tenant-scoped local mail cache (ADR-0096, #623). On the Docker
     # network: the shared ``postgres`` service. The module owns its own tables; no shared DB.
     database_url: str = "postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus"
+    # Minimum seconds between mail.sync_failed emissions (#663) — every mailbox page open can
+    # trigger a reconcile, so an account stuck failing must not storm the event spine once per
+    # open. 15 minutes is frequent enough to notice, sparse enough not to be noise.
+    mail_sync_failed_cooldown_s: float = 900.0

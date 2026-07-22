@@ -341,6 +341,7 @@ class GmailProvider(MailProvider):
             return None
         token = await self._get_token()
         changed: set[str] = set()
+        new_messages: set[str] = set()
         latest = start
         page_token: str | None = None
         async with self._make_client(token) as client:
@@ -355,11 +356,16 @@ class GmailProvider(MailProvider):
                 data = resp.json()
                 for record in data.get("history", []):
                     changed.update(_history_thread_ids(record))
+                    new_messages.update(_history_added_message_ids(record))
                 latest = _as_int(data.get("historyId")) or latest
                 page_token = data.get("nextPageToken")
                 if not page_token:
                     break
-        return ThreadChanges(changed_thread_ids=changed, next_cursor=MailCursor(history_id=latest))
+        return ThreadChanges(
+            changed_thread_ids=changed,
+            new_message_ids=new_messages,
+            next_cursor=MailCursor(history_id=latest),
+        )
 
     async def get_thread_summary(self, thread_id: str) -> MailThreadSummary | None:
         """One thread's list row, or ``None`` if it was deleted (a 404) (ADR-0096, #623)."""
@@ -411,7 +417,8 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         attachments = _extract_attachments(payload)
     # Gmail flags an unread message with the system ``UNREAD`` label; ``labelIds`` is
     # returned for both the ``metadata`` and ``full`` formats, so search and read agree.
-    unread = "UNREAD" in data.get("labelIds", [])
+    label_ids = [str(lid) for lid in data.get("labelIds", [])]
+    unread = "UNREAD" in label_ids
     return MailMessage(
         id=data["id"],
         thread_id=data.get("threadId", ""),
@@ -424,6 +431,7 @@ def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:
         body_html=body_html,
         unread=unread,
         attachments=attachments,
+        label_ids=label_ids,
     )
 
 
@@ -531,6 +539,22 @@ def _history_thread_ids(record: dict[str, Any]) -> set[str]:
             message = entry.get("message", {}) if isinstance(entry, dict) else {}
             if isinstance(message, dict) and message.get("threadId"):
                 ids.add(str(message["threadId"]))
+    return ids
+
+
+def _history_added_message_ids(record: dict[str, Any]) -> set[str]:
+    """Message ids genuinely *added* by one ``users.history.list`` record (#663).
+
+    Narrower than :func:`_history_thread_ids` on purpose: only ``messagesAdded`` entries are a
+    message arriving. ``messagesDeleted`` / ``labelsAdded`` / ``labelsRemoved`` are real thread
+    changes (so the cache row still needs rebuilding, via ``_history_thread_ids``) but never a
+    reason to fire ``mail.received`` — a flag flip is not new mail.
+    """
+    ids: set[str] = set()
+    for entry in record.get("messagesAdded", []):
+        message = entry.get("message", {}) if isinstance(entry, dict) else {}
+        if isinstance(message, dict) and message.get("id"):
+            ids.add(str(message["id"]))
     return ids
 
 

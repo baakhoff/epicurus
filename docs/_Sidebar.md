@@ -30,6 +30,7 @@
 - [tenancy](reference/tenancy.md)
 - [events](reference/events.md)
 - [messaging (inbox contract)](reference/messaging.md)
+- [push notifications & the notification center (#670, #671)](reference/notifications.md)
 - [secrets](reference/secrets.md)
 - [observability, tracing & log stream](reference/observability.md)
 - [modules & manifest](reference/modules.md)

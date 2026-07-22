@@ -110,6 +110,53 @@ async def test_on_complete_failure_does_not_fail_run() -> None:
     assert runner.state.phase == "ready"
 
 
+async def test_on_failed_called_once_when_retries_are_exhausted() -> None:
+    """The spine hook (#665): the terminal give-up reports its last error, once."""
+    failures: list[str] = []
+
+    async def _capture(error: str) -> None:
+        failures.append(error)
+
+    indexer = _FakeIndexer(fail_times=99, exc=RuntimeError("connection refused"))
+    runner = IndexRunner(
+        [indexer],
+        max_attempts=3,
+        base_delay_seconds=0.0,
+        max_delay_seconds=0.0,
+        on_failed=_capture,
+    )
+    await runner.run_with_retry()
+    assert failures == ["connection refused"]
+    assert runner.state.phase == "error"
+
+
+async def test_on_failed_not_called_on_eventual_success() -> None:
+    failures: list[str] = []
+
+    async def _capture(error: str) -> None:
+        failures.append(error)
+
+    indexer = _FakeIndexer(fail_times=1)
+    runner = IndexRunner(
+        [indexer], max_attempts=3, base_delay_seconds=0.0, max_delay_seconds=0.0, on_failed=_capture
+    )
+    await runner.run_with_retry()
+    assert failures == []
+    assert runner.state.phase == "ready"
+
+
+async def test_on_failed_failure_does_not_mask_the_give_up() -> None:
+    async def _boom(_: str) -> None:
+        raise RuntimeError("event bus down")
+
+    indexer = _FakeIndexer(fail_times=99, exc=RuntimeError("connection refused"))
+    runner = IndexRunner(
+        [indexer], max_attempts=2, base_delay_seconds=0.0, max_delay_seconds=0.0, on_failed=_boom
+    )
+    await runner.run_with_retry()  # must not raise
+    assert runner.state.phase == "error"
+
+
 async def test_backoff_is_capped_exponential() -> None:
     runner = IndexRunner([_FakeIndexer()], base_delay_seconds=1.0, max_delay_seconds=10.0)
     assert runner._backoff(1) == 1.0

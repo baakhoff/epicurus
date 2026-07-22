@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -10,12 +10,14 @@ vi.mock("virtual:pwa-register/react", () => ({
   useRegisterSW: () => ({ needRefresh: [false], updateServiceWorker: vi.fn() }),
 }));
 
+const mockUnreadCount = vi.fn();
 // The layout is the unit under test; keep the data plane quiet and deterministic.
 vi.mock("@/lib/api", () => ({
   api: {
     modules: vi.fn().mockResolvedValue([]),
     power: vi.fn().mockResolvedValue({ state: "idle" }),
     setPower: vi.fn().mockResolvedValue({ state: "idle" }),
+    notificationsUnreadCount: (...a: unknown[]) => mockUnreadCount(...a),
   },
   logStream: vi.fn(),
 }));
@@ -58,5 +60,34 @@ describe("Shell scroll containment", () => {
     renderShell();
     const rail = screen.getByRole("navigation", { name: "Primary" });
     expect(rail.className).toContain("overflow-y-auto");
+  });
+});
+
+// The Notifications nav entry is the one surface with a live unread badge (#671) — every
+// other Surface stays plain.
+describe("Notifications unread badge", () => {
+  it("shows no badge when there are no unread notifications", async () => {
+    mockUnreadCount.mockReset().mockResolvedValue({ count: 0 });
+    renderShell();
+    const rail = await screen.findByRole("navigation", { name: "Primary" });
+    const link = within(rail).getByRole("link", { name: /notifications/i });
+    await waitFor(() => expect(mockUnreadCount).toHaveBeenCalled());
+    expect(within(link).queryByText(/^\d+$/)).not.toBeInTheDocument();
+  });
+
+  it("shows the unread count on the Notifications nav entry", async () => {
+    mockUnreadCount.mockReset().mockResolvedValue({ count: 3 });
+    renderShell();
+    const rail = await screen.findByRole("navigation", { name: "Primary" });
+    const link = within(rail).getByRole("link", { name: /notifications/i });
+    expect(await within(link).findByText("3")).toBeInTheDocument();
+  });
+
+  it("caps the displayed count at 99+", async () => {
+    mockUnreadCount.mockReset().mockResolvedValue({ count: 150 });
+    renderShell();
+    const rail = await screen.findByRole("navigation", { name: "Primary" });
+    const link = within(rail).getByRole("link", { name: /notifications/i });
+    expect(await within(link).findByText("99+")).toBeInTheDocument();
   });
 });

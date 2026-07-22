@@ -87,6 +87,65 @@ async def test_empty_batch_does_not_reindex(tmp_path: Path) -> None:
     assert idx.runs == 0
 
 
+async def test_each_successful_pass_reports_its_counts_once(tmp_path: Path) -> None:
+    """The spine hook (#665): one on_synced call per pass, carrying the pass's counts."""
+    synced: list[dict[str, int]] = []
+
+    async def on_synced(counts: dict[str, int]) -> None:
+        synced.append(counts)
+
+    watcher = VaultWatcher(
+        tmp_path,
+        _RecordingIndexer(),
+        watch=_stream(
+            {(Change.modified, str(tmp_path / "a.md"))},
+            {(Change.modified, str(tmp_path / "b.md"))},
+        ),
+        on_synced=on_synced,
+    )
+    await watcher.run()
+    assert synced == [{"indexed": 1, "deleted": 0, "unchanged": 2}] * 2
+
+
+async def test_failed_pass_reports_the_error_and_the_loop_survives(tmp_path: Path) -> None:
+    failures: list[str] = []
+
+    async def on_failed(error: str) -> None:
+        failures.append(error)
+
+    idx = _RecordingIndexer(fail_times=1)
+    watcher = VaultWatcher(
+        tmp_path,
+        idx,
+        watch=_stream(
+            {(Change.modified, str(tmp_path / "a.md"))},
+            {(Change.modified, str(tmp_path / "b.md"))},
+        ),
+        on_failed=on_failed,
+    )
+    await watcher.run()
+    assert failures == ["core paused"]
+    assert idx.runs == 2  # the loop retried the next batch
+
+
+async def test_callback_failure_never_breaks_the_watch_loop(tmp_path: Path) -> None:
+    async def bad_callback(_: dict[str, int]) -> None:
+        raise RuntimeError("emitter blew up")
+
+    idx = _RecordingIndexer()
+    watcher = VaultWatcher(
+        tmp_path,
+        idx,
+        watch=_stream(
+            {(Change.modified, str(tmp_path / "a.md"))},
+            {(Change.modified, str(tmp_path / "b.md"))},
+        ),
+        on_synced=bad_callback,
+    )
+    await watcher.run()  # does not raise
+    assert idx.runs == 2
+
+
 async def test_reindex_failure_is_swallowed_and_retried(tmp_path: Path) -> None:
     # The first pass fails (e.g. the core is paused mid-embed); the watcher must not die,
     # and the next change must still trigger a fresh pass.

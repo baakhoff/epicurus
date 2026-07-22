@@ -24,3 +24,7 @@ class NotesSettings(CoreSettings):
     platform_url: str = "http://localhost:8080"
     # Upper bound on characters per chunk before hard-splitting at paragraph boundaries.
     chunk_max_chars: int = 2000
+    # Quiet window (seconds) a note must sit unsaved before `notes.note_updated` fires on
+    # the event spine (#665). The editor auto-saves on every ~4s idle pause (ADR-0042), so
+    # this is minutes, not milliseconds — one event per editing session, not per save.
+    notes_events_debounce_s: float = 120.0

@@ -4,14 +4,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
-import { SURFACES, modulePageNavs, sortByPageOrder, type ModulePageNav } from "@/app/registry";
+import {
+  NOTIFICATIONS_PATH,
+  SURFACES,
+  modulePageNavs,
+  sortByPageOrder,
+  type ModulePageNav,
+} from "@/app/registry";
 import { CommandPalette, shortcutLabel } from "@/components/CommandPalette";
 import { CornerStack } from "@/components/CornerStack";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
 import { PowerOrb } from "@/components/PowerOrb";
 import { PanelHost } from "@/components/Panel";
 import { Toaster } from "@/components/Toaster";
-import { Button, cn } from "@/components/ui";
+import { Badge, Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import { useViewportMirror } from "@/lib/viewport";
@@ -24,9 +30,53 @@ import { FilesScreen } from "@/screens/FilesScreen";
 import { ModelsScreen } from "@/screens/ModelsScreen";
 import { ModulePageScreen } from "@/screens/ModulePageScreen";
 import { ModulesScreen } from "@/screens/ModulesScreen";
+import { NotificationsScreen } from "@/screens/NotificationsScreen";
 import { ObservabilityScreen } from "@/screens/ObservabilityScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { SuggestionsScreen } from "@/screens/SuggestionsScreen";
+
+/**
+ * The notification center's live unread badge (#671) — polled like `useAwayFinishedWatch`
+ * (React Query already pauses `refetchInterval` while the tab is hidden, so this costs
+ * nothing extra backgrounded). A tiny standalone hook (not a store) since nothing else in
+ * the shell needs this count — every consumer just calls it directly.
+ */
+function useNotificationsUnreadCount(): number {
+  const { data } = useQuery({
+    queryKey: ["notifications-unread-count"],
+    queryFn: api.notificationsUnreadCount,
+    refetchInterval: 15_000,
+  });
+  return data?.count ?? 0;
+}
+
+/** The badge rendered next to the Notifications nav entry only — every other `Surface` is
+ *  plain (see the registry's `NOTIFICATIONS_PATH` note); a generic per-surface badge slot
+ *  would be speculative for the one entry that needs it. For the side rail's horizontal
+ *  row layout, a trailing count pill. */
+function NavBadge({ path }: { path: string }) {
+  const count = useNotificationsUnreadCount();
+  if (path !== NOTIFICATIONS_PATH || count === 0) return null;
+  return (
+    <Badge tone="accent" className="ml-auto">
+      {count > 99 ? "99+" : count}
+    </Badge>
+  );
+}
+
+/** The mobile tab bar's vertical icon-over-label layout has no room for a trailing pill —
+ *  a small corner dot (no count, matching the away-finished title-dot's own restraint) is
+ *  the space this layout actually has. */
+function UnreadDot() {
+  const count = useNotificationsUnreadCount();
+  if (count === 0) return null;
+  return (
+    <span
+      aria-label={`${count} unread notification${count === 1 ? "" : "s"}`}
+      className="absolute -top-0.5 -right-1 size-2 rounded-full bg-accent"
+    />
+  );
+}
 
 /** Shared NavLink class logic so core surfaces + module pages render identically. */
 const railLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -89,7 +139,10 @@ export function MobileTabBar({ modulePages }: { modulePages: ModulePageNav[] }) 
       <div ref={scrollerRef} onScroll={update} className="flex overflow-x-auto pb-safe">
         {SURFACES.map(({ path, label, icon: Icon }) => (
           <NavLink key={path} to={path} end={path === "/"} className={tabLinkClass}>
-            <Icon size={20} />
+            <span className="relative">
+              <Icon size={20} />
+              {path === NOTIFICATIONS_PATH && <UnreadDot />}
+            </span>
             {label}
           </NavLink>
         ))}
@@ -253,6 +306,7 @@ export function Shell() {
           <NavLink key={path} to={path} end={path === "/"} className={railLinkClass}>
             <Icon size={17} />
             {label}
+            <NavBadge path={path} />
           </NavLink>
         ))}
         {modulePages.length > 0 && (
@@ -293,6 +347,7 @@ export function Shell() {
           <Routes>
             <Route path="/" element={<ChatScreen />} />
             <Route path="/suggestions" element={<SuggestionsScreen />} />
+            <Route path={NOTIFICATIONS_PATH} element={<NotificationsScreen />} />
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/modules" element={<ModulesScreen />} />
             <Route path="/files" element={<FilesScreen />} />

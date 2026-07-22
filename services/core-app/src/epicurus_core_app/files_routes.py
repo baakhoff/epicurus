@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from epicurus_core import FileEntry, FileStore
 from epicurus_core.files import normalize_rel
 from epicurus_core.tenancy import TenantError, validate_tenant_id
+from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.file_index import FileIndex
 from epicurus_core_app.object_backend import ObjectBackend
 from epicurus_core_app.upload_limits import (
@@ -161,6 +162,7 @@ def create_files_router(
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
     locked_prefixes: frozenset[str] = frozenset(),
+    events: CoreEventEmitter | None = None,
 ) -> APIRouter:
     """Build the ``/platform/v1/files`` router over a :class:`FileStore`.
 
@@ -170,6 +172,9 @@ def create_files_router(
     ``max_upload_bytes`` / ``allowed_upload_types`` bound the upload route (the shared #175
     caps). *locked_prefixes* names the top-level folders modules own (by convention their
     hostnames, ADR-0063): files under them are not movable in the UI and not upload targets.
+    *events* announces mutations on the spine (``files.*``, #665): the API is the one seam
+    every file mutation passes through — operator doors and module bridges alike — so this
+    router is where the core emits them. ``None`` disables emission (tests).
     """
     router = APIRouter(prefix="/platform/v1/files", tags=["files"])
 
@@ -264,10 +269,17 @@ def create_files_router(
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
         _safe(path)
+        # Whether this write brings the path into existence — an overwrite emits nothing
+        # (#665: there is deliberately no file_updated; content owners emit their own
+        # *.updated events, so a mirror save must not double-signal here).
+        created = events is not None and await store.stat(tenant=tenant, path=path) is None
         try:
-            return await store.write_text(tenant=tenant, path=path, content=body.content)
+            entry = await store.write_text(tenant=tenant, path=path, content=body.content)
         except ValueError as exc:  # e.g. writing to the tenant root itself
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if created and events is not None:
+            await events.file_added(tenant, entry.path, size=entry.size)
+        return entry
 
     @router.delete("", response_model=FileDeleteResponse)
     async def delete_file(
@@ -280,6 +292,8 @@ def create_files_router(
             deleted = await store.delete(tenant=tenant, path=path)
         except ValueError as exc:  # deleting the tenant root is rejected
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if deleted and events is not None:
+            await events.file_deleted(tenant, normalize_rel(path))
         return FileDeleteResponse(deleted=deleted)
 
     @router.post("/dir", response_model=FileEntry)
@@ -319,6 +333,8 @@ def create_files_router(
             # Not a file-space entry — try the object store (a movable upload/agent object).
             if objects is not None:
                 entry = await objects.move(tenant=tenant, src=src, dst=dst)
+                if events is not None:
+                    await events.file_moved(tenant, src, entry.path)
                 return FileEntry(path=entry.path, name=entry.name, kind=entry.kind, size=entry.size)
             raise HTTPException(status_code=404, detail="source not found") from None
         except FileExistsError as exc:
@@ -341,6 +357,8 @@ def create_files_router(
                         }
                     ],
                 )
+        if events is not None:
+            await events.file_moved(tenant, src, moved.path)
         return moved
 
     # ── Operator-facing Files UI (Phase 2) ───────────────────────────────────────
@@ -403,6 +421,10 @@ def create_files_router(
         _reject_pathological(name)
         target = await _unused_path(tenant=tenant, rel_dir=rel_dir, name=name)
         entry = await store.write_bytes(tenant=tenant, path=target, data=data, content_type=kind)
+        # An upload always lands at an unused path (collisions get a suffix), so it is
+        # always a genuinely-new file (#665).
+        if events is not None:
+            await events.file_added(tenant, entry.path, size=entry.size)
         # Keep the index in step immediately so the upload is searchable at once (the
         # watcher would also catch it, debounced). Best-effort: the write already stands.
         if index is not None:
@@ -464,10 +486,15 @@ def create_files_router(
             if index is not None:
                 with suppress(Exception):  # de-index is best-effort; the delete already stands
                     await index.remove_subtree(tenant=tenant, path=rel)
+            if events is not None:
+                await events.file_deleted(tenant, rel)
             return FileDeleteResponse(deleted=True)
         # Not in the file space — it may be an object-store entry (chat upload / agent object).
         if objects is not None:
-            return FileDeleteResponse(deleted=await objects.delete(tenant=tenant, path=rel))
+            object_deleted = await objects.delete(tenant=tenant, path=rel)
+            if object_deleted and events is not None:
+                await events.file_deleted(tenant, rel)
+            return FileDeleteResponse(deleted=object_deleted)
         return FileDeleteResponse(deleted=False)
 
     @router.get("/page")

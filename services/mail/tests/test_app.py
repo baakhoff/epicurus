@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core import EventEnvelope
 from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
@@ -280,7 +281,20 @@ class TestSend:
         client = self._send_client(provider, bus)
         client.post("/send", json={"to": "bob@x.com", "subject": "Hi", "body": "Hello"})
         bus.publish.assert_awaited_once()
-        assert bus.publish.call_args.args[0] == "mail.sent"
+        # mail.sent now rides the module event spine (#663): the wire subject gains the
+        # events. prefix, and the payload is a validated EventEnvelope, not an ad-hoc dict.
+        subject, data, tenant_id = (
+            bus.publish.call_args.args[0],
+            bus.publish.call_args.args[1],
+            (bus.publish.call_args.kwargs.get("tenant_id")),
+        )
+        assert subject == "events.mail.sent"
+        envelope = EventEnvelope.model_validate(data)
+        assert envelope.type == "mail.sent"
+        assert envelope.module == "mail"
+        assert envelope.dedup_key == "sent-123"
+        assert envelope.payload == {"to": "bob@x.com", "subject": "Hi"}
+        assert tenant_id is not None
 
     def test_403_returns_reconnect_hint(self) -> None:
         provider = AsyncMock(spec=MailProvider)

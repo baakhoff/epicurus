@@ -43,6 +43,8 @@ import {
   ModuleAttachmentItem,
   ModuleEvent,
   ModuleSnapshot,
+  NotificationCenterItem,
+  NotificationsUnreadCount,
   OAuthClientStatus,
   OAuthConnectResponse,
   OAuthStatus,
@@ -52,12 +54,16 @@ import {
   PowerStatus,
   ProfileView,
   ProviderInfo,
+  PushDeviceRecord,
+  PushPrefs,
+  PushTestResult,
   Readiness,
   ReviewAuditData,
   SavedModelsResponse,
   SessionSummary,
   SystemInfo,
   TimezonePrefs,
+  type ChannelPrefs,
   type PowerState,
 } from "@/lib/contracts";
 import { epFetch } from "@/lib/http";
@@ -282,6 +288,89 @@ export const api = {
     request(AutomationKillSwitch, "/platform/v1/automations/kill-switch", {
       method: "PUT",
       body: JSON.stringify({ halted }),
+    }),
+
+  // Web push (#670, ADR-0102): VAPID-signed browser push + per-category toggles + quiet
+  // hours. Prefs are shared with the notification center (#671, the `center` half of
+  // each ChannelPrefs).
+  pushVapidPublicKey: () =>
+    request(z.object({ public_key: z.string() }), "/platform/v1/push/vapid-public-key"),
+  pushSubscriptions: () =>
+    request(z.array(PushDeviceRecord), "/platform/v1/push/subscriptions"),
+  createPushSubscription: (body: {
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+    device_label?: string;
+  }) =>
+    request(PushDeviceRecord, "/platform/v1/push/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deletePushSubscription: async (id: string): Promise<void> => {
+    const response = await epFetch(
+      `/platform/v1/push/subscriptions/${encodeURIComponent(id)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  pushPrefs: () => request(PushPrefs, "/platform/v1/push/prefs"),
+  setPushPrefs: (update: {
+    categories?: Record<string, ChannelPrefs>;
+    quiet_hours_enabled?: boolean;
+    quiet_hours_start?: string;
+    quiet_hours_end?: string;
+  }) =>
+    request(PushPrefs, "/platform/v1/push/prefs", {
+      method: "PUT",
+      body: JSON.stringify(update),
+    }),
+  sendTestPushNotification: (category = "system") =>
+    request(PushTestResult, "/platform/v1/push/test", {
+      method: "POST",
+      body: JSON.stringify({ category }),
+    }),
+
+  // In-app notification center (#671) — the durable record every push-worthy event lands
+  // in, written by the core's send path regardless of whether push itself delivered.
+  notifications: (filter?: { category?: string; unreadOnly?: boolean }) => {
+    const params = new URLSearchParams();
+    if (filter?.category) params.set("category", filter.category);
+    if (filter?.unreadOnly) params.set("unread_only", "true");
+    const qs = params.toString();
+    return request(
+      z.array(NotificationCenterItem),
+      `/platform/v1/notifications${qs ? `?${qs}` : ""}`,
+    );
+  },
+  notificationsUnreadCount: () =>
+    request(NotificationsUnreadCount, "/platform/v1/notifications/unread-count"),
+  markNotificationRead: async (id: string): Promise<void> => {
+    const response = await epFetch(`/platform/v1/notifications/${encodeURIComponent(id)}/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(response.status, detail);
+    }
+  },
+  markAllNotificationsRead: () =>
+    request(z.object({ marked: z.number() }), "/platform/v1/notifications/read-all", {
+      method: "POST",
     }),
 
   // The operator's drag-and-drop left-nav page order (#543), reordered on the Modules page.

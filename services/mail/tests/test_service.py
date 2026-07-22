@@ -455,12 +455,14 @@ async def test_manifest_mail_send_and_reply_are_compose_actions_not_danger() -> 
     assert all(a.confirm is None for a in actions.values())
 
 
-async def test_manifest_emits_mail_sent_event() -> None:
+async def test_manifest_emits_the_spine_events() -> None:
+    # mail.sent/received/sync_failed all ride the module event spine (#663) — the manifest
+    # subject carries the events. prefix (event_subject), not the bare event type.
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
     subjects = {e.subject for e in manifest.events_emitted}
-    assert "mail.sent" in subjects
+    assert {"events.mail.sent", "events.mail.received", "events.mail.sync_failed"} <= subjects
 
 
 async def test_manifest_declares_resolver() -> None:

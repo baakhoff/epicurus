@@ -28,8 +28,9 @@ interface PanelState {
   stack: PanelEntry[];
   /** Push a view onto the panel (opening it if closed). */
   open: (view: PanelView, payload: unknown, title?: string) => void;
-  /** Swap the on-screen entry's payload in place (keeps its view/title/back-stack). */
-  replace: (payload: unknown) => void;
+  /** Swap the on-screen entry's payload in place (keeps its view/back-stack; `title`
+   *  defaults to the current entry's own title when omitted). */
+  replace: (payload: unknown, title?: string) => void;
   /** Step back one entry; closes the panel when the stack empties. */
   back: () => void;
   /** Close the panel and clear its history. */
@@ -40,11 +41,16 @@ export const usePanel = create<PanelState>()((set, get) => ({
   stack: [],
   open: (view, payload, title = "") =>
     set({ stack: [...get().stack, { view, payload, title }] }),
-  replace: (payload) =>
+  replace: (payload, title) =>
     set((s) => {
       if (s.stack.length === 0) return s;
       const stack = s.stack.slice();
-      stack[stack.length - 1] = { ...stack[stack.length - 1], payload };
+      const prev = stack[stack.length - 1];
+      // A caller passing a fresh title (e.g. a later frame's own heading) must actually
+      // reach the header — the naive `{...prev, payload}` silently kept the *original*
+      // entry's title forever (#659). `title ?? prev.title` preserves today's every-caller
+      // omits it behavior exactly (still moot: no adopter currently passes one).
+      stack[stack.length - 1] = { ...prev, payload, title: title ?? prev.title };
       return { stack };
     }),
   back: () => set({ stack: get().stack.slice(0, -1) }),

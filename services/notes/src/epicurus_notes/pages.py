@@ -26,13 +26,12 @@ save contract (ADR-0022) needs no title field.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from epicurus_core import get_logger
 from epicurus_notes.db import NoteFolderStore, NotesStore
+from epicurus_notes.events import NoteEventEmitter
 from epicurus_notes.indexer import NotesIndexer
 from epicurus_notes.mirror import NotesMirror
 
@@ -186,14 +185,16 @@ class NotesPages:
         indexer: NotesIndexer,
         *,
         tenant: str,
-        on_saved: Callable[[str], Awaitable[None]] | None = None,
+        events: NoteEventEmitter | None = None,
         mirror: NotesMirror | None = None,
         folders: NoteFolderStore | None = None,
     ) -> None:
         self._store = store
         self._indexer = indexer
         self._tenant = tenant
-        self._on_saved = on_saved
+        # Announces content changes on the module event spine (#665). None disables
+        # emission (tests / no NATS); every emit is best-effort inside the emitter.
+        self._events = events
         # Writes a read-only .md copy into the shared file space so notes show in Files
         # (#KB-refactor, req 7). None disables it (tests / no mount).
         self._mirror = mirror
@@ -286,6 +287,10 @@ class NotesPages:
         if self._mirror is not None:
             await self._mirror.write(dst, note.content)
             await self._mirror.delete(src)
+        # No move event in v1 (#665 names created/updated/deleted) — but an in-flight
+        # debounced update must settle under the slug that still exists.
+        if self._events is not None:
+            self._events.note_moved(src, dst)
         log.info("note moved", from_=src, to=dst)
         return {"path": dst}
 
@@ -306,6 +311,9 @@ class NotesPages:
         """
         slug = _clean_slug(slug)
         title = derive_title(content)
+        # Whether this save brings the note into existence — decides notes.note_created
+        # (immediate) vs. notes.note_updated (debounced to the settled save, #665).
+        created = await self._store.get(tenant=self._tenant, slug=slug) is None
         await self._store.upsert(tenant=self._tenant, slug=slug, title=title, content=content)
         # Mirror to the shared file space so the note shows in Files (#KB-refactor, req 7).
         # Best-effort and never raises; runs before indexing so the file reflects the saved
@@ -321,16 +329,16 @@ class NotesPages:
             )
         except Exception as exc:  # the note is saved; the snapshot is best-effort
             log.warning("note saved but version snapshot failed", slug=slug, error=str(exc))
+        # Announce the change on the spine (#665) once the source of truth is written —
+        # deliberately before the index attempt, since the event reports the save, not
+        # the embed. Emission is best-effort inside the emitter.
+        if self._events is not None:
+            await self._events.note_saved(slug, title, created=created)
         try:
             chunk_count = await self._indexer.index_note(slug, content)
         except Exception as exc:  # the note is saved; indexing is best-effort
             log.warning("note saved but re-index failed", slug=slug, error=str(exc))
             return EditorSaveResult(path=slug, indexed=False)
-        if self._on_saved is not None:
-            try:
-                await self._on_saved(slug)
-            except Exception as exc:  # observability only — never fail a save on it
-                log.warning("notes.saved publish failed", slug=slug, error=str(exc))
         return EditorSaveResult(path=slug, indexed=True, chunk_count=chunk_count)
 
     async def delete_doc(self, slug: str) -> None:
@@ -349,6 +357,9 @@ class NotesPages:
             log.warning("note deleted but de-index failed", slug=slug, error=str(exc))
         if self._mirror is not None:
             await self._mirror.delete(slug)
+        # The row is gone — announce it (#665); a pending debounced update is moot.
+        if self._events is not None:
+            await self._events.note_deleted(slug)
 
     async def list_versions(self, slug: str) -> EditorVersionList:
         """A note's past versions, newest first (no bodies) — ADR-0046."""

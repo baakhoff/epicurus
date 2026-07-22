@@ -761,8 +761,9 @@ export function ModulesScreen() {
               To enable immediate cleanup: set <code className="font-mono">DOCKER_GID</code> to
               your host's docker-socket group id and bring the stack up with the opt-in{" "}
               <code className="font-mono">compose.docker-socket.yaml</code> override (see{" "}
-              <code className="font-mono">docs/DEPLOYMENT.md</code>) — the socket is
-              root-equivalent, so this is a deliberate grant, not a default.
+              <code className="font-mono">docs/infrastructure/index.md</code>, "Docker-socket
+              access") — the socket is root-equivalent, so this is a deliberate grant, not a
+              default.
             </p>
           </Card>
         )}

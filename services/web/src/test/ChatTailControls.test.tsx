@@ -194,12 +194,48 @@ describe("Editing any user message in history (#552)", () => {
     const editor = await openEditor(0);
     fireEvent.change(editor, { target: { value: "reworded" } });
     fireEvent.click(screen.getByRole("button", { name: "Resend" }));
-    // The dialog's own Resend — the inline editor's is gone once the confirm is up.
+    // The dialog's Resend, not the inline editor's (both are on screen — #660).
     const dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Resend" }));
 
     // id 1 — the message actually clicked, not id 3 (the last user turn #302 would have hit).
     expect(editAndRerun).toHaveBeenCalledWith("reworded", null, expect.any(Function), 1);
+  });
+
+  // saveEdit() guards on streaming/connectionLost before ever opening this dialog — but the
+  // dialog can sit open for a while, and either can change in the meantime (another tab or a
+  // scheduled turn starts a run; the connection drops). Confirming must re-check at click time,
+  // or it trims the transcript to a state the server was never asked to produce (#660).
+  it("blocks the resend if a run started while the dialog was open, instead of trimming past it", async () => {
+    render(<ChatScreen />, { wrapper });
+    const editor = await openEditor(0);
+    fireEvent.change(editor, { target: { value: "reworded" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resend" }));
+    const dialog = await screen.findByRole("alertdialog");
+
+    act(() => useChat.setState({ streaming: true }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resend" }));
+
+    expect(editAndRerun).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    // Blocked exactly like Cancel — the inline editor stays open with the draft intact to retry.
+    expect((await screen.findByLabelText("Edit message")) as HTMLTextAreaElement).toHaveValue(
+      "reworded",
+    );
+  });
+
+  it("blocks the resend if the connection dropped while the dialog was open", async () => {
+    render(<ChatScreen />, { wrapper });
+    const editor = await openEditor(0);
+    fireEvent.change(editor, { target: { value: "reworded" } });
+    fireEvent.click(screen.getByRole("button", { name: "Resend" }));
+    const dialog = await screen.findByRole("alertdialog");
+
+    act(() => useConnection.getState().reportUnreachable());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resend" }));
+
+    expect(editAndRerun).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("edits the last user message with no confirm, exactly as before (#302)", async () => {

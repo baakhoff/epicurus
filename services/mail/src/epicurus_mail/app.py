@@ -15,11 +15,13 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from epicurus_core import (
+    EntityRef,
     EventBus,
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
     configure_logging,
+    emit_event,
     get_logger,
 )
 from epicurus_mail.cache import CachedMailbox
@@ -114,7 +116,14 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
     # Postgres (constraint #2).
     engine = engine or create_async_engine(settings.database_url)
     cache = MailCache(engine)
-    mailbox = CachedMailbox(provider, cache, tenant_id=settings.default_tenant_id)
+    mailbox = CachedMailbox(
+        provider,
+        cache,
+        tenant_id=settings.default_tenant_id,
+        bus=bus,
+        provider_name="gmail",
+        sync_failed_cooldown_s=settings.mail_sync_failed_cooldown_s,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -230,21 +239,29 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
                 raise HTTPException(status_code=exc.response.status_code, detail=hint) from exc
             raise
         # Fulfil the declared ``mail.sent`` contract at the one point a message is actually sent.
-        # Tenant-scoped (constraint #1); best-effort — the mail already went out, so a bus hiccup
-        # must not fail the send or the resuming turn.
+        # Tenant-scoped (constraint #1); best-effort — the mail already went out, so a spine
+        # hiccup must not fail the send or the resuming turn.
         await _publish_sent(sent_id, message.to, message.subject)
         return {"id": sent_id}
 
     async def _publish_sent(sent_id: str, to: str, subject: str) -> None:
-        """Publish ``mail.sent`` best-effort — a bus hiccup never fails a completed send."""
+        """Emit ``mail.sent`` (#663) on the module event spine — a spine hiccup never fails an
+        already-completed send."""
+        clean_subject = (subject or "(no subject)")[:200]
         try:
-            await bus.publish(
-                "mail.sent",
-                {"id": sent_id, "to": to, "subject": subject},
+            await emit_event(
+                bus,
                 tenant_id=settings.default_tenant_id,
+                module="mail",
+                event_type="mail.sent",
+                dedup_key=sent_id,
+                payload={"to": to[:200], "subject": clean_subject},
+                entity_ref=EntityRef(
+                    ref_id=sent_id, module="mail", kind="message", title=clean_subject, summary=to
+                ),
             )
-        except Exception as exc:  # a bus failure never fails a completed send
-            log.warning("mail.sent publish failed", error=str(exc), message_id=sent_id)
+        except Exception as exc:  # a spine hiccup never fails a completed send
+            log.warning("mail.sent emit failed", error=str(exc), message_id=sent_id)
 
     # ── mailbox page (ADR-0087) ──────────────────────────────────────────────
     # The list/thread reads are served here and reached through the core's generic page

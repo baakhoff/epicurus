@@ -40,7 +40,7 @@ images to GHCR.
   `AutomationStore.update`. The old **scheduled-turns Settings card is absorbed**: the card,
   its api client and contract are gone (the engine already migrated the rows and keeps the
   old endpoints answering); migrated rows simply appear as automations. `web`
-  0.113.0→0.114.0 (MINOR) · `core-app` 0.85.1→0.86.0 (MINOR — the management endpoint).
+  0.115.0→0.116.0 (MINOR) · `core-app` 0.88.1→0.89.0 (MINOR — the management endpoint).
 - **Observability: the Automation runs feed** (#669, stacked on #666) — the third live tab,
   and the engine's glass: a triggered run is traceable end-to-end in one place, fire → filter
   verdict → run (model, tokens, duration) → sinks delivered / error. **Skips are the point**:
@@ -56,8 +56,8 @@ images to GHCR.
   with no per-module code. The tab filters by automation and outcome server-side (they
   re-subscribe) and by trigger module client-side over the automations list (a run itself
   carries no module), reusing `useSseFeed` exactly as the Logs and Events tabs do; the
-  automations list also names each run. `web` 0.112.0→0.113.0 (MINOR) · `core-app`
-  0.85.0→0.85.1 (PATCH — endpoints and hook exist to serve the new surface, per the issue's
+  automations list also names each run. `web` 0.114.0→0.115.0 (MINOR) · `core-app`
+  0.88.0→0.88.1 (PATCH — endpoints and hook exist to serve the new surface, per the issue's
   own bump call).
 - **Automations: the engine** (#666, ADR-0105) — the centerpiece of event-driven proactivity,
   and what the event spine exists to feed: modules announce that the world changed, and this
@@ -84,7 +84,7 @@ images to GHCR.
   a **Postgres-persisted** kill switch (unlike the in-memory power pause — a stop a restart
   undoes is not a stop), rate caps that a *failing* run also consumes, a rate-limited
   `core.automation_failed`, and a **depth-1 loop guard** — an event a run produces carries a
-  `causation_id` and the matcher refuses *any* event carrying one, because A→B→A is a loop too.
+  `causation_id` and the matcher refuses *any* event carrying one, because A→B→A is a loop too. `core-app` 0.87.0→0.88.0, `epicurus-core` 0.29.0→0.30.0, `echo` 0.4.0→0.5.0 (all MINOR).
   `automation_runs` always records, at every level, with **dual metering**: tenant *and*
   automation, on the ledger and on `UsageEvent`, since an automation quietly burning tokens is
   otherwise indistinguishable from the operator's own chatting. **Scheduled turns (#614) fold
@@ -123,6 +123,119 @@ images to GHCR.
   emitter — and `task smoke` now asserts the whole chain end-to-end on a fresh stack: emit →
   NATS → intake → durable log → feed, plus the log's idempotency. `docs/reference/events.md`
   starts **the event catalog**; real module emitters extend it.
+- **Mail: the first real module emitters — `mail.received` / `mail.sent` / `mail.sync_failed`**
+  (#663, stacked on #662) — mail's cache reconcile (ADR-0096, #623) is the one place a
+  genuinely-new message, as opposed to a flag flip, is already known, so that's where all three
+  now fire. `mail.received` needed message-granular detection the sync seam never had: Gmail's
+  `changed_threads_since` was thread-granular only (`_history_thread_ids` conflates
+  `messagesAdded`/`messagesDeleted`/`labelsAdded`/`labelsRemoved` into one set), so
+  `ThreadChanges` gains a narrower `new_message_ids` field, filled from `messagesAdded` history
+  records specifically — a flag flip on an existing message never fires it. Each new message gets
+  one `provider.read()` (thread-summary data reflects only a thread's *latest* message, wrong the
+  moment two new messages land in the same thread within one reconcile window) for an accurate
+  `from`/`subject` (capped)/`folder`/`has_attachments` payload — `MailMessage` gains its own
+  `label_ids` so `folder` reflects the message's real placement, not whichever label triggered the
+  poll. **No-firehose, by construction, not by a special case**: a cold cache and an
+  expired-cursor forced resync both already route through the same `_full_sync` path, which the
+  reconcile loop never touches for `mail.received` — the initial/full-sync case costs no new code.
+  `mail.sync_failed` fires on a provider/auth error or an expired sync cursor, rate-limited per
+  instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s) so a flapping account can't storm the
+  bus. `mail.sent` — previously declared but publishing on the bare `mail.sent` subject via a raw
+  `EventBus.publish` with an ad-hoc, uncapped payload — now rides the same spine as its two new
+  siblings. IMAP does not exist in this codebase yet (only `GmailProvider` is implemented,
+  despite the module's provider-neutral design); the catalog's provider-caveats section notes
+  what a future IMAP provider would need to fill. `mail` 0.13.0→0.14.0 (MINOR).
+- **Calendar & Tasks: lifecycle + lead-time events** (#664, stacked on #663) — "two modules,
+  one pattern," including the new lead-time scheduler both now share the shape of. **Calendar**
+  gains `event_created`/`event_updated`/`event_cancelled` on `CollectionRouter`'s
+  create/update/delete_event — the **provider-write** seam only, since calendar has no
+  sync/reconcile layer analogous to mail's (ADR-0096); a change made directly in Google
+  Calendar's own UI is never observed. `event_updated`'s `time_changed` flag is a real
+  before/after comparison (the router snapshots prior state first), and its `dedup_key` folds
+  in a change hash of the event's mutable fields, so a genuinely different edit is its own log
+  entry while a retried write with identical resulting state dedups — the same "dedup provider
+  id + change hash" posture `tasks.task_updated` now also uses. `invitation_received` /
+  `attendee_responded` (Google-only, ADR-0030) are **deliberately not implemented**: both need
+  the same kind of external-change detection a sync layer would provide, a materially larger
+  feature than wiring emission into an existing seam — declaring either without actually
+  publishing it would repeat mail's own "declared but never emitted" mistake rather than avoid
+  it. **Tasks** gains `task_created`/`task_completed`/`task_updated` on `TasksRouter`'s
+  add/complete/update_task, and `task_moved` on the ADR-0038/#257 cross-list seam (fired
+  instead of `task_updated`, never alongside it — Google Tasks has no move API, so a move
+  recreates in the target and deletes the source). A recurring task's auto-materialized
+  successor (`_materialize`, ADR-0082) calls the inner provider directly, bypassing the
+  router's own `add_task` — a deliberate scope limit, so it does not currently emit
+  `task_created`. **The lead-time scheduler** is a new periodic background job — the first for
+  either module — durably fire-once via a `(tenant, entity_id, marker)`-unique marker table
+  (`BigInteger` epoch column) proven to survive a restart; each module also gains a
+  settings-primitives-shaped tenant preference for its own lead (calendar: minutes, default
+  15; tasks: days, default 1 — storage only, no settings UI yet). Calendar's lead is pure
+  instant math; tasks' `task_due_soon`/`task_overdue` evaluate against the *operator's local
+  calendar day* (ADR-0039), reusing the exact `operator_clock` the overdue-recurrence sweep
+  already resolves, so the two can never disagree about what day it is. `calendar`
+  0.16.0→0.17.0 (MINOR) · `tasks` 0.16.0→0.17.0 (MINOR).
+
+- **Notes, Knowledge, Files: content events + suggestion-decision events** (#665, stacked on
+  #662) — the operator-content half of the emitter sweep. **Notes/knowledge doc events**:
+  `note_created`/`doc_created` and `note_deleted`/`doc_deleted` fire immediately at the change
+  (editor, file tree, or an approved suggestion — both authors converge on the same pages
+  seams), but `note_updated`/`doc_updated` are **debounced to settled saves**: the ADR-0042
+  auto-save fires a PUT on every ~4s idle pause, so each save re-arms a per-document quiet
+  window (`NOTES_EVENTS_DEBOUNCE_S` / `KNOWLEDGE_EVENTS_DEBOUNCE_S`, default **120s**) and one
+  event fires when it passes untouched — carrying the *last save's* timestamp as `occurred_at`
+  and the count of saves coalesced. The debounce is a swept dict driven by a pure
+  `flush_due(now)` (the ADR-0092/0098 test idiom), duplicated per module rather than landed in
+  the high-contention core lib (rule of three; the engine PR is already bumping it); pending
+  entries flush on shutdown, deletes cancel them, renames re-key them (knowledge folder moves
+  re-key by prefix). `knowledge.vault_synced` is **one batch event per watcher pass** with the
+  pass's honest counts (`indexed` merges added+updated — the walk doesn't distinguish); no-op
+  passes and the startup index emit nothing (no-firehose). `knowledge.index_failed` is
+  rate-limited (`KNOWLEDGE_INDEX_FAILED_COOLDOWN_S`, 900s, the mail.sync_failed posture) and
+  fires on the initial index giving up (#230's retry budget) or a watcher pass failing.
+  **Files events are core-emitted** (the core owns the file space, #434) at the file-API seam:
+  `files.file_added` (upload, or a module/agent write of a genuinely-new path),
+  `files.file_deleted` (one per API action — a folder is one event), `files.file_moved`
+  (file-space + object-store fallbacks). Deliberately **no `file_updated`**: an overwrite emits
+  nothing, so mirrored module content doesn't double-signal its own `*_updated` here.
+  **Suggestion decisions are core-emitted at the one review funnel**
+  (`ModuleRegistry.review_action`): `core.suggestion_approved` / `core.suggestion_rejected`
+  fire once per decision whether the operator used a module's review page (HTTP-proxied) or
+  the core-hosted pseudo-module surface (ADR-0093 §2), with `operation`/`path` lifted from the
+  surface's `ApplyResult`. Two legacy subjects retire: notes' bare `notes.saved` publish (no
+  consumer — the mail.sent migration, #663) and knowledge's declared-but-never-published
+  `knowledge.index.completed` (the manifest now only advertises events that fire). All emission
+  is best-effort — a spine hiccup never fails the save, delete, or decision that already
+  landed. `notes` 0.8.0→0.9.0 (MINOR) · `knowledge` 0.23.0→0.24.0 (MINOR) · `core-app`
+  0.86.0→0.87.0 (MINOR).
+
+  starts **the event catalog**; real module emitters extend it. `epicurus-core` 0.28.0→0.29.0
+  (MINOR), `core-app` 0.85.0→0.86.0 (MINOR), `web` 0.113.0→0.114.0 (MINOR), `echo`
+  0.3.0→0.4.0 (MINOR).
+- **Push: web push end-to-end** (#670) — VAPID-signed browser push, the "push alerts" half of
+  event-driven proactivity. A tenant's VAPID keypair is generated on first send and stored in
+  OpenBao — no operator provisioning step. Per-category + quiet-hours preferences
+  (`push_prefs`, shared with the notification center, #671) gate every send: category off
+  skips it, quiet hours (tenant timezone, ADR-0039) queue it for one summary digest once the
+  window ends rather than dropping it, and an in-memory per-tenant rate cap is the last gate.
+  A subscription the push service reports Gone (404/410) is pruned automatically.
+  `services/web/src/sw.ts` gains `push`/`notificationclick` handlers; a new Settings → Push
+  notifications card handles this-device subscribe/unsubscribe, per-device management,
+  category toggles, quiet hours, and a test-notification button. `PushService.notify()` is a
+  core-internal contract (no HTTP route) for the automations engine's future push sink and
+  system notices — today's only caller is the settings UI's test button. Desktop Chrome/Edge
+  and installed Android/iOS PWA (16.4+) both work. Implements ADR-0102. `core-app`
+  0.83.0→0.84.0 (MINOR), `web` 0.111.0→0.112.0 (MINOR).
+- **Push: in-app notification center** (#671) — the durable record every push-worthy
+  notification lands in, written by `PushService.notify()` itself the instant a category's
+  `center` toggle is on — independent of whether push delivery fires, queues for quiet
+  hours, or is itself disabled, so a quiet-hours-suppressed push still appears in the center
+  immediately rather than waiting for the digest. A new **Notifications** page (list, category
+  filter, unread-only filter, mark read / mark all read, `EntityRef` hover-cards + deep links
+  via the existing `CardLink`) and a live unread-count badge on its own nav entry (polled every
+  15s, the same shape as the #492 "finished while you were away" watcher). Retention is a
+  per-tenant row cap (500), not time-based. Stacks on #670's shared `{push, center}` prefs
+  object — no second settings surface. Implements ADR-0104. `core-app` 0.84.0→0.85.0 (MINOR),
+  `web` 0.112.0→0.113.0 (MINOR).
 - **Agent: nightly reflection proposes playbook/instruction edits** (#615) — the other half of
   governed playbooks: what actually notices a lesson worth keeping. A new `playbook-reflection`
   job on the maintenance orchestrator's nightly batch (additive — one entry appended to the
@@ -166,6 +279,82 @@ images to GHCR.
   §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
 
 ### Fixed
+
+- **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
+  but that file doesn't exist in the public tree** (#661). The real document was always the
+  gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the
+  Modules page's Docker-status card (#652/#622) or the `docker-socket` compose comment to
+  `docs/DEPLOYMENT.md` got a 404. Both now point at `docs/infrastructure/index.md`'s
+  "Docker-socket access" section, which #652's own docs already established as the real home for
+  that content. Also swept two conceptual "DEPLOYMENT.md" mentions (`.env.example`,
+  `docs/developer/releases.md`) that cited the same gone file for the image-pinning /
+  immutable-image principle — retargeted at `docs/infrastructure/auto-deploy.md`, mirroring the
+  link `releases.md` already uses two sections below for the same document. `web` 0.111.2→0.111.3
+  (PATCH — the Modules page string). `core-app`'s `compose.yaml` touch is comment-only, no
+  runtime effect — no bump.
+
+- **Web: confirming a mid-history edit could trim the transcript to a state the server was never
+  asked to produce** (#660). Editing a user message further back than the last turn discards every
+  real turn since it, so `saveEdit()` confirms the count first — but it only guards
+  `chat.streaming`/a dropped connection at the moment the dialog *opens*. A run starting elsewhere
+  (another tab, a scheduled turn) or the connection dropping while the dialog sat open went
+  unchecked: clicking **Resend** still applied the optimistic trim and re-ran the edit regardless.
+  The dialog's own confirm now re-checks both at click time, the same guard `saveEdit()` already
+  applies — blocked exactly like Cancel, leaving the inline editor open with the draft intact to
+  retry. `web` 0.111.1→0.111.2 (PATCH).
+
+- **Web: the document pane's "Review & approve" hard-reloaded the SPA, and its review-state
+  query key missed the toggle's own invalidation** (#659). `Panel.tsx`'s `DocumentView` was the
+  only SPA-internal hard navigation in the app (`window.location.assign`) — it dropped the live
+  SSE stream for no reason (recoverable via ADR-0055 re-attach, but nothing to recover *from* if
+  it just doesn't reload); now it navigates in-app via `useNavigate()` and explicitly dismisses
+  the pane first (the panel is Shell-global and persists across routes, so — unlike the reload
+  it replaces — nothing implicitly clears it). Separately, the pane's `["suggestionsEnabled",
+  module]` query key was a duplicate camelCase cache entry alongside `ReviewView`/
+  `SuggestionsScreen`'s established `["suggestions-enabled", module]`, so toggling review while
+  the pane was open missed the invalidation the toggle fires — self-healed on refetch, but could
+  leave the pane's "applied vs. staged" branch briefly stale. Also fixed while in the area: the
+  panel store's `replace()` accepted a title update, but silently discarded it; and `EditorView`'s
+  `doc` prop (the pane's applied→editor handover) had no direct test coverage. `web` 0.111.0→
+  0.111.1 (PATCH).
+
+- **Infra: `task reconcile` silently reverted the docker-socket opt-in on every deploy** (#655) —
+  the #622 opt-in (`services/core-app/compose.docker-socket.yaml` + `DOCKER_GID`) only lasted
+  until the next pull-based reconcile: `infra/cd/reconcile.sh` ran plain
+  `docker compose up -d` with no overlay, so `core-app` was recreated without the socket mount,
+  silently dropping back to deferred-teardown mode (fails safe, but the opt-in didn't stick — the
+  pull-based reconcile is the actual deploy path, not a one-off `docker compose up`). Now
+  `reconcile.sh` reads `DOCKER_GID` the same way it already reads `EPICURUS_VERSION` /
+  `EPICURUS_TRACK_BRANCH` (env, falling back to `.env`) and includes the overlay on both the pull
+  and the up when it's set — unset stays exactly as fail-safe as before. `docs/infrastructure/`
+  updated to cover persisting the opt-in, not just the fresh-deploy default. Infra-only; no
+  component version change.
+
+- **Agent: nightly reflection never showed the model the document it was asked to rewrite**
+  (#658) — the `update` path's system prompt demanded "the FULL new text… it replaces what is
+  there," but `_build_prompt` passed only transcripts and recent rejections, and `list_playbooks`
+  was used for names only; `get_base` was never called. Since `instructions` is always an
+  `update` (there's nothing to create), that path asked for a full regeneration of text the model
+  had no access to — mostly rejectable noise, at the cost of a real gateway call per tenant per
+  night. Now the prompt includes the current base instructions (`get_base`) and every existing
+  playbook's current content — the model edits real text instead of reconstructing from nothing.
+  Folded in from the same review: the out-of-window `continue` in the session scan is now a
+  `break` (`sessions()` is DESC-ordered, so the first miss guarantees the rest miss), and
+  `test_reflection.py`'s model-override test now constructs the reflector with `model=` instead
+  of poking the private attribute, so `settings.playbook_reflection_model` reaching the
+  constructor is actually covered. `core-app` 0.83.1→0.83.2 (PATCH).
+
+- **Core: a DB error on the reserved review page emptied the entire Suggestions inbox** (#657) —
+  `ModuleRegistry._core_suggestions` caught only `HTTPException`, but the core review page is
+  dispatched **in-process** (no loopback HTTP), so a storage failure — e.g. a degraded startup
+  that left `playbook_proposals` uninitialized — surfaced as the driver's own exception and
+  escaped the handler, 500ing `GET /platform/v1/suggestions` and taking every module's pending
+  suggestions down with it, not just the core's own. Now catches bare `Exception` and logs a
+  warning instead, matching the precedent in `agent/instructions.py`'s enrichment fallback — a
+  broken core queue drops only its own entry, everything else in the feed survives. Also closed
+  the matching read/write asymmetry: `GET .../core/suggestions-enabled` now 403s like `PUT`
+  already did, rather than answering `true` for a toggle that can never exist (review of the
+  agent's own instructions/playbooks is mandatory, ADR-0093). `core-app` 0.83.0→0.83.1 (PATCH).
 
 - **Infra: the "docker socket unavailable" message overstated the impact, and the socket was
   mounted by default without ever actually working** (#622, ADR-0099). Module removal was never

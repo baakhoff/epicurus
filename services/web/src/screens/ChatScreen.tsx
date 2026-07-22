@@ -1559,7 +1559,14 @@ export function ChatScreen() {
         confirmLabel="Resend"
         danger
         onConfirm={() => {
-          if (confirmingEdit) applyEdit(confirmingEdit.idx, confirmingEdit.content);
+          // Re-check streaming/connectionLost at click time, same guard saveEdit applies
+          // before ever opening this dialog (#660) — a run can start (or the connection can
+          // drop) in the time the dialog sits open, and applying the trim regardless would
+          // show a truncation the server was never asked to make. Blocked exactly like
+          // Cancel: the inline editor stays open with the draft intact to retry.
+          if (confirmingEdit && !chat.streaming && !connectionLost) {
+            applyEdit(confirmingEdit.idx, confirmingEdit.content);
+          }
           setConfirmingEdit(null);
         }}
         onCancel={() => setConfirmingEdit(null)}

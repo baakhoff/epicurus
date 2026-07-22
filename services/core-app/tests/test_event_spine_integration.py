@@ -7,16 +7,25 @@ tenant-scoped envelope subject, across *every* tenant, and nothing else.
 
 That matters because the failure mode is silent. A wildcard that does not match produces
 no error, no log, and no event — an intake that appears healthy and records nothing.
+
+The store is a *file-backed* SQLite, not the in-memory + ``StaticPool`` one the unit tests
+use. Here the intake writes from the NATS callback task while the test polls ``count()``
+from its own task, and ``StaticPool`` hands both sessions the *same* DBAPI connection —
+the pool's reset-``ROLLBACK`` on each poll checkout can then land inside ``append``'s
+``BEGIN…COMMIT`` and silently erase the insert (the append still returns a row, and the
+next insert re-uses its id). A file database gives every session its own connection, which
+is also what production Postgres does; the unit tests keep the in-memory store because
+they never touch it from two tasks at once.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 
@@ -34,15 +43,15 @@ def nats_url() -> Iterator[str]:
         yield f"nats://{container.get_container_host_ip()}:{container.get_exposed_port(4222)}"
 
 
-async def _fresh_store() -> EventLogStore:
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+@pytest.fixture
+async def store(tmp_path: Path) -> AsyncIterator[EventLogStore]:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
     store = EventLogStore(engine)
     await store.init()
-    return store
+    yield store
+    # Dispose before the test's loop closes: aiosqlite connections each own a worker
+    # thread, and an undisposed engine leaves them raising "Event loop is closed" at GC.
+    await engine.dispose()
 
 
 async def _wait_for_count(store: EventLogStore, expected: int, *, timeout: float = 5.0) -> int:
@@ -61,9 +70,10 @@ async def _wait_for_count(store: EventLogStore, expected: int, *, timeout: float
         return await store.count()
 
 
-async def test_emit_reaches_the_durable_log_over_the_wire(nats_url: str) -> None:
+async def test_emit_reaches_the_durable_log_over_the_wire(
+    nats_url: str, store: EventLogStore
+) -> None:
     """The chain the whole spine exists for: emit → NATS → intake → durable log."""
-    store = await _fresh_store()
     async with EventBus(nats_url) as bus:
         intake = EventIntake(store, bus)
         await intake.start()
@@ -86,13 +96,12 @@ async def test_emit_reaches_the_durable_log_over_the_wire(nats_url: str) -> None
     assert rows[0].type == "echo.pinged"
 
 
-async def test_the_wildcard_spans_every_tenant(nats_url: str) -> None:
+async def test_the_wildcard_spans_every_tenant(nats_url: str, store: EventLogStore) -> None:
     """One subscription, every tenant — the reason intake does not take a tenant list.
 
     A per-tenant subscription set would record the first tenant and silently ignore the
     second, which is indistinguishable from "the second tenant emitted nothing".
     """
-    store = await _fresh_store()
     async with EventBus(nats_url) as bus:
         intake = EventIntake(store, bus)
         await intake.start()
@@ -113,7 +122,7 @@ async def test_the_wildcard_spans_every_tenant(nats_url: str) -> None:
     assert [r.dedup_key for r in await store.recent(tenant="second-tenant")] == ["second-tenant-1"]
 
 
-async def test_the_wildcard_ignores_non_spine_traffic(nats_url: str) -> None:
+async def test_the_wildcard_ignores_non_spine_traffic(nats_url: str, store: EventLogStore) -> None:
     """``*.events.>`` must not swallow the bus's existing per-module subjects.
 
     ``notes.saved``, ``llm.usage``, and ``echo.request`` all share the tenant-scoped shape
@@ -121,7 +130,6 @@ async def test_the_wildcard_ignores_non_spine_traffic(nats_url: str) -> None:
     failures. This is why the spine took its own ``events.`` namespace instead of matching
     ``*.>``.
     """
-    store = await _fresh_store()
     async with EventBus(nats_url) as bus:
         intake = EventIntake(store, bus)
         await intake.start()
@@ -146,9 +154,10 @@ async def test_the_wildcard_ignores_non_spine_traffic(nats_url: str) -> None:
     assert [r.dedup_key for r in rows] == ["only-me"]
 
 
-async def test_duplicate_emission_is_stored_once_over_the_wire(nats_url: str) -> None:
+async def test_duplicate_emission_is_stored_once_over_the_wire(
+    nats_url: str, store: EventLogStore
+) -> None:
     """The acceptance criterion, end to end: same dedup_key twice → one row."""
-    store = await _fresh_store()
     async with EventBus(nats_url) as bus:
         intake = EventIntake(store, bus)
         await intake.start()
@@ -169,9 +178,8 @@ async def test_duplicate_emission_is_stored_once_over_the_wire(nats_url: str) ->
     assert await store.count() == 1
 
 
-async def test_a_live_listener_sees_the_event(nats_url: str) -> None:
+async def test_a_live_listener_sees_the_event(nats_url: str, store: EventLogStore) -> None:
     """The seam the automations engine plugs into, proven over the wire."""
-    store = await _fresh_store()
     seen: list[str] = []
     heard = asyncio.Event()
 

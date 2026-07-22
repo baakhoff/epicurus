@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EpicurusModule, PlatformClient
 from epicurus_notes.db import NotesStore
+from epicurus_notes.events import NOTE_CREATED, NOTE_DELETED, NOTE_UPDATED
 from epicurus_notes.indexer import NotesIndexer
 from epicurus_notes.pages import NotesPages
-from epicurus_notes.service import SAVED_SUBJECT, build_module
+from epicurus_notes.service import build_module
 from epicurus_notes.suggestions import (
     NoteSuggestionAuditStore,
     NoteSuggestionReview,
@@ -38,7 +39,7 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.8.0"
+    assert manifest.version == "0.9.0"
 
 
 async def test_exposes_write_and_list_tools_but_no_read() -> None:
@@ -69,11 +70,15 @@ async def test_declares_editor_and_review_pages() -> None:
     assert by_id["review"].archetype == "review"
 
 
-async def test_has_ui_and_emits_saved_event() -> None:
+async def test_has_ui_and_declares_spine_events() -> None:
     manifest = await _module().manifest()
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
-    assert any(e.subject == SAVED_SUBJECT for e in manifest.events_emitted)
+    subjects = {e.subject for e in manifest.events_emitted}
+    # Spine events (#665) — the legacy bare `notes.saved` declaration is gone.
+    expected = {f"events.{t}" for t in (NOTE_CREATED, NOTE_UPDATED, NOTE_DELETED)}
+    assert expected <= subjects
+    assert "notes.saved" not in subjects
 
 
 async def test_full_body_writes_open_the_document_pane() -> None:

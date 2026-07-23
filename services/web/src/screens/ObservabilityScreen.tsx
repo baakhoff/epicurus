@@ -454,6 +454,15 @@ function RunRow({ run, automationName }: { run: AutomationRun; automationName: s
           ))}
         </span>
       )}
+      {run.artifacts.length > 0 && (
+        <span className="flex flex-wrap items-center gap-1 pl-2 text-[10px] text-ink-faint">
+          {/* What the run wrote via the notes/kb sinks (#672) — links to the produced document. */}
+          <span className="uppercase tracking-wide">wrote</span>
+          {run.artifacts.map((ref) => (
+            <EntityRefChip key={`artifact:${ref.module}:${ref.ref_id}`} entref={ref} />
+          ))}
+        </span>
+      )}
       {expanded && run.output && (
         <pre className="ml-2 whitespace-pre-wrap rounded-(--radius-field) border border-edge bg-surface-2 p-2 font-mono text-[10px] leading-relaxed text-ink-dim">
           {run.output}

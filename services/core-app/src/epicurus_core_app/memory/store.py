@@ -41,6 +41,13 @@ class SessionSummary(BaseModel):
     title: str
     message_count: int
     last_at: datetime
+    # Set when this session belongs to an automation's chat sink (#672): the chat list badges it
+    # with the automation's icon + name, and groups a per-run automation's sessions under it. The
+    # ConversationStore leaves these None — the agent route enriches from the automation-session
+    # metadata, so this store stays automations-agnostic.
+    automation_id: str | None = None
+    automation_name: str | None = None
+    chat_mode: str | None = None
 
 
 class MessageRecord(BaseModel):

@@ -56,6 +56,8 @@ def _update_body(**overrides: Any) -> dict[str, Any]:
         "schedule_trigger": {"cadence": "daily", "hour": 7},
         "model": "qwen2.5:7b",
         "sinks": ["chat", "notes"],
+        # The notes sink needs a document target (#672); a sink without one is a 400.
+        "notes_target": {"path_pattern": "Automations/Report {date}", "mode": "append"},
         "chat_mode": "per_run",
         "rate_cap_per_hour": 3,
         "digest_window_minutes": 15,
@@ -96,6 +98,7 @@ async def test_update_replaces_every_editable_field(tmp_path: Path) -> None:
     assert data["schedule_trigger"] == {"cadence": "daily", "hour": 7, "weekday": None}
     assert data["model"] == "qwen2.5:7b"
     assert sorted(data["sinks"]) == ["chat", "notes"]
+    assert data["notes_target"] == {"path_pattern": "Automations/Report {date}", "mode": "append"}
     assert data["chat_mode"] == "per_run"
     assert data["rate_cap_per_hour"] == 3
     assert data["digest_window_minutes"] == 15

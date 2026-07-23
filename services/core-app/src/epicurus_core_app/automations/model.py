@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-from epicurus_core import SideEffect
+from epicurus_core import EntityRef, SideEffect
 
 __all__ = [
     "AUTONOMY_LEVELS",
@@ -41,6 +41,8 @@ __all__ = [
     "AutomationRun",
     "AutonomyLevel",
     "Cadence",
+    "DocumentMode",
+    "DocumentTarget",
     "EventTrigger",
     "PayloadMatcher",
     "ScheduleTrigger",
@@ -48,6 +50,7 @@ __all__ = [
     "Source",
     "allowed_side_effects",
     "matches_event",
+    "render_document_path",
     "sinks_fire_for",
     "validate_automation",
 ]
@@ -64,6 +67,38 @@ Cadence = Literal["daily", "weekly"]
 CADENCES: tuple[Cadence, ...] = ("daily", "weekly")
 
 ChatMode = Literal["rolling", "per_run"]
+
+DocumentMode = Literal["create", "append"]
+
+
+@dataclass(frozen=True)
+class DocumentTarget:
+    """Where a notes/kb sink writes a run's output (#672, ADR-0108).
+
+    The routing is **deterministic and post-run**: the model produced an answer, and the operator's
+    configured target decides where it lands — the model never chooses. ``path_pattern`` is the
+    module-relative document path with ``{date}`` / ``{datetime}`` / ``{time}`` substituted at run
+    time (e.g. ``"Automations/Mail report {date}"``); ``mode`` chooses whether each run
+    **create**s (overwrites) that document or **append**s to it — the difference between a daily
+    report keyed by date and a running log one document accretes.
+    """
+
+    path_pattern: str
+    mode: DocumentMode = "append"
+
+
+def render_document_path(pattern: str, *, now: datetime) -> str:
+    """Substitute the date/time tokens in a target's ``path_pattern`` (pure — the caller clocks).
+
+    ``{datetime}`` → ``YYYY-MM-DD HH:MM``, ``{date}`` → ``YYYY-MM-DD``, ``{time}`` → ``HH:MM``.
+    ``{datetime}`` is replaced first so it is not clipped by the ``{date}`` pass.
+    """
+    return (
+        pattern.replace("{datetime}", now.strftime("%Y-%m-%d %H:%M"))
+        .replace("{date}", now.strftime("%Y-%m-%d"))
+        .replace("{time}", now.strftime("%H:%M"))
+    )
+
 
 # "user" | "agent" | "template:<module>" — the module token matches the manifest's own
 # name rules (see epicurus_core.module_events), so a source is always a safe identifier.
@@ -208,6 +243,9 @@ class Automation:
     created_at: datetime
     last_run_at: datetime | None = None
     last_status: str | None = None
+    # Where the notes/kb sinks route a run's output (#672); None = that sink is unconfigured.
+    notes_target: DocumentTarget | None = None
+    kb_target: DocumentTarget | None = None
 
     def allowed(self) -> frozenset[SideEffect]:
         """The tool classes this automation's turn may reach."""
@@ -236,6 +274,9 @@ class AutomationRun:
     error: str | None
     output: str  # the turn's answer — recorded even when no sink fires
     sinks_fired: list[str]
+    # EntityRefs for documents this run produced via the notes/kb sinks (#672) — so the runs
+    # feed links what was created. Empty when nothing was written.
+    artifacts: list[EntityRef] = field(default_factory=list)
 
 
 def validate_automation(

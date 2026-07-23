@@ -817,6 +817,16 @@ windows) and firing schedule triggers; it **replaces** the scheduled-turns loop.
 `AutomationRunner` runs one automation: an agent turn, then a deterministic sink fan-out,
 then a ledger entry — always a ledger entry.
 
+**The sinks (#672).** The **chat** sink is *turn-time*: the run persists into a session — so a
+rolling chat is reply-able and the next run sees the reply — **only** when chat is configured,
+never otherwise (the owner rule: an unchecked chat sink makes zero sessions). Its session→automation
+mapping (`automation_sessions`) is what badges and groups automation chats in the list; the post-run
+dispatcher therefore **skips** chat and the runner records it fired. The **notes**/**kb** sinks route
+a run's output into a module document through the *existing* `ModuleRegistry.save_page_doc` (the #541
+no-second-write-path rule), at a per-automation `DocumentTarget` (`{path_pattern, mode}`), recording
+an `EntityRef` on the run's `artifacts` so the runs feed links what was written. **push** stays its
+own issue.
+
 **The autonomy dial is enforced here, not requested.** An automation's level derives a set
 of allowed tool *classes* (`read` / `propose` / `write`, declared on each
 [`ToolSpec`](../reference/modules.md#side_effect--what-a-tool-does-to-the-world-adr-0105)),

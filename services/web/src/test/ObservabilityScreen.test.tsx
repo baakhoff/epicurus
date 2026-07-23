@@ -118,6 +118,7 @@ function automationRun(overrides: Partial<AutomationRun> = {}): AutomationRun {
     output: "An invoice from Acme arrived.",
     sinks_fired: ["chat"],
     trigger_entity_refs: [],
+    artifacts: [],
     ...overrides,
   };
 }

@@ -64,6 +64,12 @@ Suggestions page:
 | `knowledge_propose_folder(path, note="")` | `path`: `<project>/<folder>`; optional `note` | A confirmation that a folder create was staged. |
 | `knowledge_propose_project(name, note="")` | `name`: a single folder name (no slashes); optional `note` | A confirmation that a new knowledge base create was staged. |
 
+A rejected proposal (a path `safe_vault_rel` refuses, `knowledge_create_document` targeting an
+existing path, or an operation `knowledge_propose_edit` doesn't handle) **fails the call** — a
+raised error, MCP `isError` — rather than returning a success-shaped result: the live document
+pane keys off that structural signal, not the reply text, so a rejected write must never look
+like a staged suggestion (#690).
+
 `knowledge_search` merges results from the operator's knowledge bases (`<tenant>__knowledge`)
 and the platform-docs (`<tenant>__docs`) collections, re-ranked by cosine similarity score, so
 the agent sees the most relevant content regardless of source. It returns a **`ToolEnvelope`**
@@ -219,7 +225,10 @@ When **on** (the default) proposals stage here for approval. When **off**, the p
 review is off, immediately approves its own staged suggestion through the same apply path
 (so a content op still re-indexes, a structural op still relocates). If the setting can't be
 read the module defaults to the safe path (review on). A watched read-only vault still 409s
-on apply regardless of the toggle.
+on apply regardless of the toggle — when that self-apply 409s (or fails any other way), the
+suggestion stays staged (nothing is lost) but the *tool call* fails structurally (a raised
+error, MCP `isError`) rather than reporting success: the caller asked for an immediate write
+and it did not happen, so the live document pane must not treat it as applied (#690).
 
 With a **watched external vault** (`VAULT_WATCH=true`, #232) the vault is read-only to
 epicurus, so **approve returns 409** — applying would write a vault Obsidian owns. The agent

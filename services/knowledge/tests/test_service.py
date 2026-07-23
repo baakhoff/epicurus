@@ -5,14 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import EpicurusModule
+from epicurus_core import EpicurusModule, PlatformClient
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.refs import SOURCE_DOC, SOURCE_NOTE, decode_ref
 from epicurus_knowledge.service import build_module
-from epicurus_knowledge.suggestions import SuggestionStore
+from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore
 
 
 def _hit(note_path: str, text: str, score: float, heading: str | None = None) -> SearchHit:
@@ -223,3 +225,60 @@ async def test_read_document_rejects_traversal(tmp_path: Path) -> None:
     module = _nav_module(tmp_path)
     content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "../escape.md"})
     assert "cannot read" in _text(content).lower()
+
+
+# ── rejected writes raise, not a success envelope (#690) ─────────────────────
+#
+# `writes_document`-annotated tools ride the live document pane: the pane keys `doc.failed`
+# off the MCP call's structural `isError`, not the returned text (core-app's `_invoke`
+# docstring). Before #690 these guard clauses returned a normal `tool_envelope`, so a
+# rejected write left `is_error=False` and the pane opened an editor on content that was
+# never written. `pytest.raises(ToolError)` is how FastMCP surfaces a raised exception
+# from inside a `@module.tool()` function (proven pattern: calendar's
+# `test_calendar_update_event_tool_unknown_raises`).
+
+
+async def test_create_document_rejects_bad_path_by_raising(tmp_path: Path) -> None:
+    """`knowledge_propose_edit`'s equivalent rejections are covered in test_suggestions.py
+    (bad operation / traversal / non-.md / existing path / structural operation) — this one
+    exercises `knowledge_create_document`, the other `writes_document`-annotated caller of
+    the shared `_stage_doc_write`."""
+    module = _nav_module(tmp_path)
+    with pytest.raises(ToolError, match="Cannot propose change"):
+        await module.mcp.call_tool(
+            "knowledge_create_document", {"path": "notes.txt", "content": "x"}
+        )
+
+
+async def test_finalize_apply_failure_raises_not_a_success_envelope(tmp_path: Path) -> None:
+    """Review off + a failed direct-apply must fail the call. The suggestion stays staged
+    either way (`_finalize`'s docstring) — but the pane must not treat `doc.target` as
+    written when the apply it asked for did not happen."""
+    from epicurus_knowledge.module_docs import ModuleDocsIndexer
+    from epicurus_knowledge.reader import DiskVaultReader
+
+    vault = AsyncMock(spec=KnowledgeIndexer)
+    docs = AsyncMock(spec=KnowledgeIndexer)
+    module_docs = AsyncMock(spec=ModuleDocsIndexer)
+    suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await suggestions.init()
+    reader = DiskVaultReader(tmp_path)
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=False)  # review is off
+    review = AsyncMock(spec=SuggestionReview)
+    review.approve = AsyncMock(side_effect=RuntimeError("disk full"))
+    module = build_module(
+        vault,
+        docs,
+        module_docs,
+        suggestions,
+        review,
+        platform,
+        tenant="test",
+        vault_path=tmp_path,
+        reader=reader,
+    )
+    with pytest.raises(ToolError, match=r"applying failed.*disk full"):
+        await module.mcp.call_tool(
+            "knowledge_create_document", {"path": "kb/new.md", "content": "hello"}
+        )

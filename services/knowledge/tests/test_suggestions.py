@@ -24,6 +24,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core.contracts import ToolEnvelope
@@ -525,38 +526,37 @@ async def test_propose_edit_stages_a_suggestion(tmp_path: Path) -> None:
 
 
 async def test_propose_edit_rejects_bad_operation(tmp_path: Path) -> None:
+    """A rejection raises (#690) rather than returning a success envelope, so the call is
+    structurally an error and the live document pane never opens on unstaged content."""
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
-        "knowledge_propose_edit",
-        {"path": "a.md", "content": "x", "operation": "rename"},
-    )
-    env = _envelope(content)
-    assert "operation must be one of" in env.text
+    with pytest.raises(ToolError, match="operation must be one of"):
+        await module.mcp.call_tool(
+            "knowledge_propose_edit",
+            {"path": "a.md", "content": "x", "operation": "rename"},
+        )
     assert await store.list(tenant=TENANT) == []  # nothing staged
 
 
 async def test_propose_edit_rejects_traversal_path(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
-        "knowledge_propose_edit",
-        {"path": "../escape.md", "content": "x", "operation": "create"},
-    )
-    env = _envelope(content)
-    assert "cannot propose change" in env.text.lower()
+    with pytest.raises(ToolError, match=r"(?i)cannot propose change"):
+        await module.mcp.call_tool(
+            "knowledge_propose_edit",
+            {"path": "../escape.md", "content": "x", "operation": "create"},
+        )
     assert await store.list(tenant=TENANT) == []
 
 
 async def test_propose_edit_rejects_non_md_path(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
-        "knowledge_propose_edit",
-        {"path": "notes.txt", "content": "x", "operation": "create"},
-    )
-    env = _envelope(content)
-    assert "cannot propose change" in env.text.lower()
+    with pytest.raises(ToolError, match=r"(?i)cannot propose change"):
+        await module.mcp.call_tool(
+            "knowledge_propose_edit",
+            {"path": "notes.txt", "content": "x", "operation": "create"},
+        )
     assert await store.list(tenant=TENANT) == []
 
 
@@ -583,12 +583,11 @@ async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     (vault_dir(tmp_path) / "existing.md").write_text("# Already here\n", encoding="utf-8")
-    content, _ = await module.mcp.call_tool(
-        "knowledge_create_document",
-        {"path": "existing.md", "content": "# New\n"},
-    )
-    env = _envelope(content)
-    assert "already exists" in env.text.lower()
+    with pytest.raises(ToolError, match=r"(?i)already exists"):
+        await module.mcp.call_tool(
+            "knowledge_create_document",
+            {"path": "existing.md", "content": "# New\n"},
+        )
     assert await store.list(tenant=TENANT) == []  # nothing staged
 
 
@@ -777,11 +776,10 @@ async def test_propose_project_rejects_bad_name(tmp_path: Path) -> None:
 async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
-        "knowledge_propose_edit", {"path": "kb/a.md", "content": "x", "operation": "move"}
-    )
-    env = _envelope(content)
-    assert "structural" in env.text.lower()
+    with pytest.raises(ToolError, match=r"(?i)structural"):
+        await module.mcp.call_tool(
+            "knowledge_propose_edit", {"path": "kb/a.md", "content": "x", "operation": "move"}
+        )
     assert await store.list(tenant=TENANT) == []
 
 

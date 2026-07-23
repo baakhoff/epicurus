@@ -157,6 +157,21 @@ jobs:
           done < <(git ls-files -z '*.sh')
           exit "$status"
 
+  # #661 existed because a docs page path was referenced from shipped operator-facing UI copy
+  # and a compose comment while the page it named didn't exist in the public tree — nothing
+  # caught it, and a generic markdown-link checker wouldn't catch the next one either; it
+  # never looks inside a .tsx or a compose comment (#692). scripts/check_docs_links.py checks
+  # (1) every relative link between docs pages, anchors included, and (2) repo-relative doc
+  # paths quoted in shipped source (web UI copy, compose comments, other top-level READMEs,
+  # .env.example). Stdlib-only — no uv sync needed.
+  docs-linkcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check docs/ links, anchors, and source references
+        run: python3 scripts/check_docs_links.py
+
   images:
     runs-on: ubuntu-latest
     steps:

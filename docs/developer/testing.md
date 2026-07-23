@@ -67,8 +67,8 @@ uv run pytest
 ```
 
 CI additionally runs a secret scan (gitleaks), validates the compose file, lints
-every shell script (see below), lints the observability config (see below), and
-boots the whole stack (see below).
+every shell script (see below), checks every docs cross-reference (see below),
+lints the observability config (see below), and boots the whole stack (see below).
 
 ## Observability lint gate
 
@@ -121,6 +121,32 @@ To run it locally:
 uvx --from shellcheck-py shellcheck.exe --shell=bash infra/backups/backup.sh
 uvx --from shellcheck-py shellcheck.exe --shell=sh infra/cd/reconcile.sh
 # ...or just: dash -n <script> for a syntax-only check with no shellcheck install.
+```
+
+## Docs link-check gate
+
+A docs page path was once referenced from shipped, operator-facing web UI copy and
+a compose comment while the page it named didn't exist in the public tree — nothing
+caught it, and a generic markdown-link checker wouldn't catch the next one either;
+it never looks inside a `.tsx` file or a compose comment (#692). `scripts/check_docs_links.py`
+(the **docs-linkcheck** CI job) checks, over the whole repo:
+
+1. every relative markdown link between pages under `docs/` resolves to a real
+   file, anchors (`#heading-slug`) included — slugs approximate GitHub's
+   heading-to-anchor algorithm;
+2. a repo-relative doc path quoted in shipped source (web UI copy, compose
+   comments, other top-level READMEs, `.env.example`) resolves to a real file.
+
+Test fixtures commonly use plausible-looking-but-synthetic doc-shaped paths (a
+mocked file-move target, a fake storage key) that were never meant to resolve —
+anything under a `test`/`tests` path, or named `*.test.*`/`test_*.py`/`*_test.py`,
+is excluded from the second check. `CHANGELOG.md` narrates *past* fixes (a now-gone
+path mentioned as history, not a live reference) and is excluded too.
+
+To run it locally (stdlib-only, no dependencies):
+
+```bash
+python3 scripts/check_docs_links.py
 ```
 
 ## Runtime smoke gate

@@ -472,7 +472,7 @@ Before the module can access Gmail the operator must:
    tools return a reconnect hint (the core accumulates scopes, so reconnecting is non-destructive).
 
 2. Ensure the Gmail API is enabled in the Google Cloud project associated with
-   the OAuth client credentials (see [OAuth operator setup](../reference/oauth.md#operator-setup-google)).
+   the OAuth client credentials (see [OAuth operator setup](../reference/oauth.md#google-cloud-setup)).
 
 ### Adding a provider
 

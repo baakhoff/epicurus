@@ -32,6 +32,7 @@ from epicurus_core import (
     get_logger,
     setup_tracing,
 )
+from epicurus_core.manifest import UiSection
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander
@@ -52,13 +53,23 @@ from epicurus_core_app.agent.instructions_routes import create_instructions_rout
 from epicurus_core_app.agent.live_runs import LiveRunRegistry
 from epicurus_core_app.agent.mcp_host import McpHost
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
-from epicurus_core_app.agent.playbook_review import CoreReviewPage, PlaybookProposalStore
+from epicurus_core_app.agent.playbook_review import (
+    CORE_MODULE_NAME,
+    CoreReviewPage,
+    PlaybookProposalStore,
+)
 from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.feed import RunFeed
 from epicurus_core_app.automations.migration import migrate_scheduled_turns
+from epicurus_core_app.automations.review import (
+    PROPOSE_AUTOMATION_SPEC,
+    AutomationProposalStore,
+    CoreAutomationReviewPage,
+    make_propose_automation_handler,
+)
 from epicurus_core_app.automations.routes import create_automations_router
 from epicurus_core_app.automations.runner import (
     AutomationMatcher,
@@ -72,6 +83,7 @@ from epicurus_core_app.automations.store import (
     KillSwitchStore,
 )
 from epicurus_core_app.core_events import CoreEventEmitter
+from epicurus_core_app.core_review import CorePages
 from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.event_log import EventIntake, EventLogStore, EventRetention
 from epicurus_core_app.event_log_routes import create_event_log_router
@@ -307,6 +319,10 @@ def create_app() -> FastAPI:
     automations = AutomationStore(engine)
     automation_queue = AutomationQueue(engine)
     automation_kill_switch = KillSwitchStore(engine)
+    # Staged, not-yet-approved automations the `propose_automation` built-in drafts by
+    # conversation (#667, ADR-0107). The tool only stages here; approving on the core review
+    # page is the one path that creates an automation, and it creates it enabled.
+    automation_proposals = AutomationProposalStore(engine)
     # The sink seam. Push/chat/notes/kb are companion issues, so nothing is registered yet:
     # a configured-but-unregistered sink is recorded as unavailable and the run's output
     # still lands on the ledger, which is what makes the degradation graceful (ADR-0105).
@@ -337,15 +353,33 @@ def create_app() -> FastAPI:
         tenants=conversation_store.distinct_tenants,
         model=settings.playbook_reflection_model or None,
     )
-    # The reserved ``core`` pseudo-module: the core's own ``review`` page, answered in-process by
-    # the registry rather than probed over HTTP (ADR-0093 §2). Approving here is the *only* path
-    # that writes agent instructions/playbooks on the agent's behalf — nothing self-applies.
+    # The reserved ``core`` pseudo-module: the core's own ``review`` pages, answered in-process by
+    # the registry rather than probed over HTTP (ADR-0093 §2, ADR-0107). Approving on one of these
+    # pages is the *only* path that writes agent instructions/playbooks, or creates an automation,
+    # on the agent's behalf — nothing self-applies.
     core_review = CoreReviewPage(
         store=playbook_proposals,
         instructions=agent_instructions,
         playbooks=agent_playbooks,
         tenant=settings.default_tenant_id,
         version=_service_version(),
+    )
+    # The second core review page (#667): the automations the agent drafts by conversation. Its
+    # approve is the one path that creates an automation from a proposal, enabled.
+    core_automation_review = CoreAutomationReviewPage(
+        store=automation_proposals,
+        automations=automations,
+        tenant=settings.default_tenant_id,
+    )
+    # Both pages ride the one reserved name; the registry fans out over the manifest's pages, so
+    # this composite needs no registry change (ADR-0107). It is one more page in the single
+    # Suggestions inbox, never a second review surface.
+    core_pages = CorePages(
+        name=CORE_MODULE_NAME,
+        version=_service_version(),
+        description="The agent's playbooks and the automations it proposes.",
+        ui=UiSection(icon="book-open", summary="Agent guidance and proposed automations."),
+        pages=[core_review, core_automation_review],
     )
     # Durable state behind ask_user pause/resume (ADR-0053): a paused turn lives here until
     # the operator answers (or it expires).
@@ -373,7 +407,7 @@ def create_app() -> FastAPI:
         prefs=module_prefs,
         docker=docker,
         docker_unavailable_reason=docker_availability.reason,
-        core=core_review,
+        core=core_pages,
         events=core_events,
     )
     ollama_runtime = OllamaRuntime(
@@ -448,6 +482,18 @@ def create_app() -> FastAPI:
         # Propose, and the levels that do get it produce a suspended run the operator can
         # at least see. Making automations answerable is a separate design question.
         side_effect="write",
+    )
+    # Core `propose_automation` built-in tool (#667, ADR-0107): drafts an automation from the
+    # user's ask and stages it on the core review page for approval. It can *only* stage — no
+    # path here creates or enables an automation. Classified "propose" (it stages for approval
+    # by construction, like knowledge_propose_*): available in ordinary chat, withheld from a
+    # Notify automation, and even at Act it still only stages — the guardrail is in the handler,
+    # not the dial.
+    mcp_host.register_builtin(
+        "propose_automation",
+        PROPOSE_AUTOMATION_SPEC,
+        make_propose_automation_handler(automation_proposals, automations),
+        side_effect="propose",
     )
     agent = Agent(
         gateway=gateway,
@@ -712,6 +758,7 @@ def create_app() -> FastAPI:
             await automations.init()
             await automation_queue.init()
             await automation_kill_switch.init()
+            await automation_proposals.init()
             # Fold #614's scheduled turns in (ADR-0105). Idempotent and non-destructive:
             # migrated rows are marked, never deleted, so a second boot is a no-op and a
             # bad migration is recoverable.

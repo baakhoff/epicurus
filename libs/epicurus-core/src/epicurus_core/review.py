@@ -16,6 +16,30 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class AutomationPreview(BaseModel):
+    """A human-readable rendering of a proposed automation, for the review modal (#667).
+
+    The small additive extension the automations review page needs (ADR-0107): a text diff
+    reads badly for a structured object, so an automation suggestion carries this alongside
+    the shared ``ReviewSuggestion`` fields and the shell renders the automation *understandably*
+    — trigger in words, filter, what the agent will do, autonomy, sinks — plus a **model
+    picker** the operator can change before approving. Every non-automation review page leaves
+    :attr:`ReviewSuggestion.automation` ``None`` and this is never constructed.
+
+    ``model`` is the drafted per-automation model (``None`` = the tenant's default chat model);
+    it is the one field editable before approval, sent back as the approve ``content``.
+    """
+
+    name: str
+    trigger: str  # "When mail arrives from …" / "Every Monday at 09:00"
+    filter: str = ""  # "importance = high", or "" when the trigger has no filter
+    action: str  # what the agent is asked to do (the automation's prompt)
+    autonomy: str  # notify | propose | act | silent_act
+    autonomy_label: str  # the level in words, e.g. "Notify — look, don't touch"
+    sinks: list[str] = Field(default_factory=list)
+    model: str | None = None  # the drafted model; None = the tenant's default
+
+
 class ReviewSuggestion(BaseModel):
     """One pending change in a review queue, with a server-computed unified diff."""
 
@@ -32,6 +56,10 @@ class ReviewSuggestion(BaseModel):
     # live document (empty for a create), ``content`` is the proposal (empty for a delete).
     current: str = ""
     content: str = ""
+    # Present only for an automation proposal (#667/ADR-0107): the structured, human-readable
+    # rendering the modal shows instead of a raw text diff, with the pre-approval model picker.
+    # ``None`` for every document-shaped suggestion (knowledge, notes, playbooks).
+    automation: AutomationPreview | None = None
 
 
 class ReviewData(BaseModel):
@@ -88,6 +116,7 @@ class ReviewAuditData(BaseModel):
 __all__ = [
     "ApplyResult",
     "ApproveBody",
+    "AutomationPreview",
     "ReviewAuditData",
     "ReviewData",
     "ReviewDecision",

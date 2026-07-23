@@ -874,7 +874,7 @@ dev = [
 
 [[package]]
 name = "epicurus-calendar"
-version = "0.16.0"
+version = "0.17.0"
 source = { editable = "services/calendar" }
 dependencies = [
     { name = "asyncpg" },
@@ -899,7 +899,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-core"
-version = "0.30.0"
+version = "0.31.0"
 source = { editable = "libs/epicurus-core" }
 dependencies = [
     { name = "fastapi" },
@@ -947,7 +947,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.89.0"
+version = "0.90.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },
@@ -1028,7 +1028,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-mail"
-version = "0.13.0"
+version = "0.14.0"
 source = { editable = "services/mail" }
 dependencies = [
     { name = "asyncpg" },
@@ -1122,7 +1122,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-tasks"
-version = "0.16.0"
+version = "0.17.0"
 source = { editable = "services/tasks" }
 dependencies = [
     { name = "asyncpg" },

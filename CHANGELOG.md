@@ -280,6 +280,25 @@ images to GHCR.
 
 ### Fixed
 
+- **CI: no gate ever parsed a shell script with a POSIX shell** (#691). #675 shipped a bash
+  array in `infra/cd/reconcile.sh` — invoked as `sh infra/cd/reconcile.sh` everywhere (its own
+  header comment, the `task reconcile` Taskfile entry, and both scheduled-task lines in
+  `docs/infrastructure/auto-deploy.md`), and on the deploy box's real `/bin/sh` (dash) a bash
+  array is a parse error — but every check, CI included, ran under Git Bash's `sh`, which *is*
+  bash, so the bug was invisible everywhere but production. New **shell-lint** CI job runs
+  `shellcheck` over every `*.sh` (discovered via `git ls-files`, not a hardcoded list), with the
+  shell it checks against inferred from each script's own shebang. Fixed the live mismatch this
+  surfaced: `reconcile.sh`'s shebang said `bash` while every invocation and its own content
+  (already rewritten to POSIX positional parameters, no arrays) said `sh` — corrected the
+  shebang to match, and dropped `pipefail` from its `set` line (undefined in POSIX sh; Debian
+  dash rejects it outright, which would have been the exact same silent-until-production
+  failure this gate exists to catch). Also cleaned up the two other findings the gate's first
+  real run turned up: `infra/backups/backup.sh`'s `ls | grep` (rewritten as a plain Python
+  `os.listdir` filter) and a few intentional-but-unflagged-until-now `infra/ci/smoke.sh`
+  patterns (a deliberately unquoted service-name word list standing in for POSIX sh's missing
+  arrays, `CDPATH= cd`, sourcing a `mktemp` path) marked with `# shellcheck disable=SCxxxx` /
+  `# shellcheck source=/dev/null` naming why. No component bump (CI/docs only).
+
 - **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
   but that file doesn't exist in the public tree** (#661). The real document was always the
   gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the

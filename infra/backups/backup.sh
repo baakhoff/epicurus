@@ -80,7 +80,7 @@ cat > "${DEST}/manifest.json" <<EOF
   "timestamp": "${TIMESTAMP}",
   "project": "${PROJECT}",
   "host": "$(hostname)",
-  "files": $(ls "${DEST}" | grep -v manifest.json | python3 -c "import sys, json; print(json.dumps([l.rstrip() for l in sys.stdin]))")
+  "files": $(cd "${DEST}" && python3 -c "import json, os; print(json.dumps(sorted(f for f in os.listdir('.') if f != 'manifest.json')))")
 }
 EOF
 

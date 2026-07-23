@@ -24,6 +24,7 @@
 #   SMOKE_SKIP_BUILD=1 sh infra/ci/smoke.sh  # images already built (CI builds first)
 set -eu
 
+# shellcheck disable=SC1007 # intentional: clears CDPATH so `cd` can't print an unexpected path
 ROOT="$(CDPATH= cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
@@ -114,10 +115,13 @@ ok "no duplicate published host ports"
 
 if [ "${SMOKE_SKIP_BUILD:-0}" != "1" ]; then
   log "Building service images from this checkout"
+  # shellcheck disable=SC2086 # $APP is a deliberate space-separated service-name list (no
+  # arrays in POSIX sh — positional-style word splitting is the portable stand-in, #691)
   $DC build $APP
 fi
 
 log "Starting the data plane"
+# shellcheck disable=SC2086 # $DATA_PLANE: same deliberate word list as $APP above
 $DC up -d $DATA_PLANE
 
 log "Running the real OpenBao bootstrap (infra/compose/scripts/openbao-bootstrap.sh)"
@@ -136,6 +140,7 @@ ok "OpenBao bootstrapped, unsealed, healthy"
 
 log "Starting the auto-unseal sidecar, core, and modules"
 $DC up -d openbao-unseal
+# shellcheck disable=SC2086 # $APP: same deliberate word list as above
 $DC up -d $APP
 for s in core-app $EXPECT_MODULES; do
   wait_state "$s"
@@ -341,6 +346,7 @@ printf '%s' "$ledger" | grep -q "$AUTO_ID" || die "the run ledger is empty: $led
 ok "an automation ran and the ledger recorded it, with both attributions (#666)"
 
 # OpenBao secret persistence across a vault (and core) restart.
+# shellcheck source=/dev/null # a mktemp path — nothing to statically follow
 . "$SECRETS_FILE"
 http -X PUT "http://core-app:8080/platform/v1/llm/providers/claude/key" \
   -H 'Content-Type: application/json' -d '{"api_key":"ci-smoke-DO-NOT-USE"}' \

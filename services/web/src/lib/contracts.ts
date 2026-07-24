@@ -996,6 +996,24 @@ export type EditorVersionContent = z.infer<typeof EditorVersionContent>;
  * renders it and the approve/reject controls. Approve applies + indexes; reject
  * discards — nothing the agent proposes lands without the operator's approval.
  */
+/**
+ * The structured face of an automation proposal (#667/ADR-0107). Present only when a
+ * suggestion targets an automation; the modal renders this — trigger in words, filter, action,
+ * autonomy, sinks — with a model picker, instead of a raw text diff. `model` is the drafted
+ * per-automation model (null = the operator's default) and the one field editable pre-approval.
+ */
+export const AutomationPreview = z.object({
+  name: z.string(),
+  trigger: z.string(),
+  filter: z.string().default(""),
+  action: z.string(),
+  autonomy: z.string(),
+  autonomy_label: z.string(),
+  sinks: z.array(z.string()).default([]),
+  model: z.string().nullable().default(null),
+});
+export type AutomationPreview = z.infer<typeof AutomationPreview>;
+
 export const ReviewSuggestion = z.object({
   id: z.string(),
   title: z.string(),
@@ -1013,6 +1031,8 @@ export const ReviewSuggestion = z.object({
    *  (empty for a create), `content` is the proposal (empty for a delete). */
   current: z.string().default(""),
   content: z.string().default(""),
+  /** Set for an automation proposal (#667): render this preview + a model picker, not a diff. */
+  automation: AutomationPreview.nullish(),
 });
 export type ReviewSuggestion = z.infer<typeof ReviewSuggestion>;
 

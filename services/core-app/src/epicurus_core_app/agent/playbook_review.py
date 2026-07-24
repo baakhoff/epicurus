@@ -340,25 +340,31 @@ class CoreReviewPage:
         self._tenant = tenant
         self._version = version
 
+    def page_spec(self) -> PageSpec:
+        """This page's nav/review descriptor — what :class:`CorePages` folds into the manifest."""
+        return PageSpec(
+            id=CORE_REVIEW_PAGE_ID,
+            title="Playbooks",
+            archetype="review",
+            icon="book-open",
+        )
+
     def manifest(self) -> ModuleManifest:
         """The pseudo-module's manifest — one ``review`` page, no tools, no MCP, no config.
 
         Declares no ``tools``/``events``/``config``/``secrets`` and leaves ``reindexable`` False:
         the core is not a module and contributes nothing to the agent's tool surface. The ``ui``
         section exists only so the Suggestions inbox has an icon for the group heading.
+
+        Retained for standalone use (and its own tests); when this page rides the ``core``
+        pseudo-module alongside the automations page, :class:`CorePages` builds the aggregate
+        manifest from each page's :meth:`page_spec` instead.
         """
         return ModuleManifest(
             name=CORE_MODULE_NAME,
             version=self._version,
             description="The agent's own base instructions and named playbooks.",
-            pages=[
-                PageSpec(
-                    id=CORE_REVIEW_PAGE_ID,
-                    title="Playbooks",
-                    archetype="review",
-                    icon="book-open",
-                )
-            ],
+            pages=[self.page_spec()],
             ui=UiSection(icon="book-open", summary="Agent instructions and playbooks."),
         )
 

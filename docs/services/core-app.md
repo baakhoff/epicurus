@@ -219,6 +219,27 @@ agent-authored edit against a body never saved through this path, and recording 
 content would leave the original unrecoverable — exactly the undo the ADR says an agent-proposed
 edit needs. A save that changes nothing records no version.
 
+### Governed automations (#667, ADR-0107)
+
+The core hosts a **second in-process review page** beside playbooks: staged automations. The
+`propose_automation` built-in (below) drafts an automation from a chat request and stages it here;
+the operator reviews it — trigger in words, filter, action, autonomy, sinks, and an editable
+**model picker** — and **approves** (which creates the automation *enabled*; approval is the
+consent) or **rejects** (audit trail only — the `#687` suggestion-decision events fire at that
+seam). The tool never creates or enables anything itself; only an approval does.
+
+Both pages ride the one reserved `core` pseudo-module (ADR-0093 §2): a small `CorePages` composite
+(`core_review.py`) declares both `PageSpec`s and dispatches `get_page` / `review_action` /
+`review_audit` by `page_id`, so the `ModuleRegistry` — which already fans out over a manifest's
+pages — needs no change. This is one more page in the single Suggestions inbox, **not** a second
+review surface: both render through the same unmodified `ReviewView` / `SuggestionReviewModal`. The
+shared suggestion contract carries a small additive `automation` field
+(`epicurus_core.review.AutomationPreview`) so the modal renders the automation understandably
+rather than as a raw text diff; an `update` proposal also carries a readable before→after diff, and
+its approve `content` is the operator's chosen model (`""` = the tenant default). The staged
+proposals (`automation_proposals`) and their decision trail (`automation_review_decisions`) mirror
+the ADR-0090 storage shape.
+
 ### Built-in agent tools (ADR-0039)
 
 Besides the modules' MCP tools, the core offers **built-in tools** the agent can call,
@@ -257,6 +278,15 @@ per-tool disable filter as module tools.
   sessions text search (no embed) rather than failing the call; results are capped and compact —
   never a raw session dump. It runs inline like `now`/`remember` and shows as a normal
   `memory_search` step in the activity timeline.
+- **`propose_automation(name, action, autonomy, …)`** — draft an automation from the user's
+  natural-language ask and **stage it for approval** (#667, ADR-0107). The conversational front
+  door to the automations engine: "when I get mail from my boss, notify me", "every Monday at 9am
+  summarize last week" becomes one drafted spec per call (call it twice for two pipelines), staged
+  as a `ReviewSuggestion` on the core **automations review page** (see *Governed automations*
+  below). Classified `propose` — it stages for approval by construction, like `knowledge_propose_*`
+  — so it is offered in ordinary chat and withheld from a Notify automation. The **hard guardrail**:
+  the tool can *only* stage; it has no path to create or enable an automation at any autonomy level.
+  Approving the suggestion is the one path that creates one, and it creates it enabled.
 - **`ask_user(question)`** — pause the turn to ask the operator a clarifying question
   (ADR-0053). Unlike other built-ins it is **not executed inline**: the agent loop intercepts
   the call, persists the in-progress run (`agent_suspended_runs`), emits an `awaiting_input`

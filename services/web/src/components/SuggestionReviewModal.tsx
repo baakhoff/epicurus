@@ -12,12 +12,12 @@
  * Three actions: Approve (apply the current draft — ticked hunks, free edits, or both),
  * Reject (discard), Ignore (close; it stays pending on the Suggestions page).
  */
-import { useMutation } from "@tanstack/react-query";
-import { Check, FilePlus, FolderPlus, Library, Pencil, Trash2, X } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Check, FilePlus, FolderPlus, Library, Pencil, Trash2, X, Zap } from "lucide-react";
 import { type ComponentType, useMemo, useState } from "react";
 
 import { Markdown } from "@/components/Markdown";
-import { Badge, Button, TextArea, cn } from "@/components/ui";
+import { Badge, Button, Label, Select, TextArea, cn } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import type { PendingSuggestion } from "@/lib/contracts";
 import { type DiffLine, diffLines, mergeHunks, toHunks } from "@/lib/linediff";
@@ -134,9 +134,29 @@ export function SuggestionReviewModal({
 }) {
   const { module, page_id: pageId, id, operation, current, content } = suggestion;
   const meta = OP_META[operation];
+  // An automation proposal (#667) renders as a structured preview + a model picker, not a diff —
+  // so it takes over from the isEdit path below even though its operation is create/update.
+  const automation = suggestion.automation ?? null;
+  const isAutomation = automation !== null;
   // update/create/append all show a diff with per-hunk approval (append's diff is the
   // added text); move/mkdir/mkproject/delete are confirmations.
-  const isEdit = operation === "update" || operation === "create" || operation === "append";
+  const isEdit =
+    !isAutomation &&
+    (operation === "update" || operation === "create" || operation === "append");
+
+  // Models for the automation picker — the drafted model is editable before approval. Fetched
+  // only for an automation suggestion; the two queries mirror the Automations editor's sources.
+  const localModels = useQuery({
+    queryKey: ["models"],
+    queryFn: () => api.models(),
+    enabled: isAutomation,
+  });
+  const hostedModels = useQuery({
+    queryKey: ["saved-models"],
+    queryFn: api.savedModels,
+    enabled: isAutomation,
+  });
+  const [chosenModel, setChosenModel] = useState(automation?.model ?? "");
 
   const diff = useMemo(
     () => (isEdit ? diffLines(current, content) : []),
@@ -176,7 +196,15 @@ export function SuggestionReviewModal({
     toast.error(err instanceof ApiError ? err.detail : "Action failed.");
 
   const approve = useMutation({
-    mutationFn: () => api.approveSuggestion(module, pageId, id, isEdit ? draft : undefined),
+    // For an automation, the approve `content` is the operator's model choice ("" = default);
+    // for an editable document it is the (possibly hand-edited) draft; otherwise nothing.
+    mutationFn: () =>
+      api.approveSuggestion(
+        module,
+        pageId,
+        id,
+        isAutomation ? chosenModel : isEdit ? draft : undefined,
+      ),
     onSuccess: resolved,
     onError,
   });
@@ -205,10 +233,23 @@ export function SuggestionReviewModal({
         {/* header */}
         <header className="flex items-center gap-2 border-b border-edge px-4 py-3">
           <Badge tone={meta.tone} className="uppercase">
-            {meta.label}
+            {isAutomation
+              ? operation === "update"
+                ? "Edit automation"
+                : "New automation"
+              : meta.label}
           </Badge>
-          <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink" title={suggestion.path}>
-            {suggestion.path}
+          <span
+            className="min-w-0 flex-1 truncate text-xs text-ink"
+            title={isAutomation && automation ? automation.name : suggestion.path}
+          >
+            {isAutomation && automation ? (
+              <span className="inline-flex items-center gap-1.5 font-medium">
+                <Zap size={13} /> {automation.name}
+              </span>
+            ) : (
+              <span className="font-mono">{suggestion.path}</span>
+            )}
           </span>
           <button
             onClick={onClose}
@@ -252,6 +293,69 @@ export function SuggestionReviewModal({
               <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-(--radius-field) border border-edge bg-surface-2 p-3 font-mono text-[12px] text-ink-dim">
                 {suggestion.current || "(empty)"}
               </pre>
+            </div>
+          )}
+          {isAutomation && automation && (
+            <div className="flex flex-col gap-4">
+              <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+                <dt className="text-ink-faint">Trigger</dt>
+                <dd className="text-ink">{automation.trigger}</dd>
+                {automation.filter && (
+                  <>
+                    <dt className="text-ink-faint">Filter</dt>
+                    <dd className="text-ink">{automation.filter}</dd>
+                  </>
+                )}
+                <dt className="text-ink-faint">Does</dt>
+                <dd className="whitespace-pre-wrap text-ink">{automation.action}</dd>
+                <dt className="text-ink-faint">Autonomy</dt>
+                <dd className="text-ink">{automation.autonomy_label}</dd>
+                {automation.sinks.length > 0 && (
+                  <>
+                    <dt className="text-ink-faint">Delivers to</dt>
+                    <dd className="text-ink">{automation.sinks.join(", ")}</dd>
+                  </>
+                )}
+              </dl>
+
+              <div className="flex flex-col gap-1.5">
+                <Label>Model</Label>
+                <Select
+                  value={chosenModel}
+                  onChange={(e) => setChosenModel(e.target.value)}
+                  aria-label="Model"
+                >
+                  <option value="">Operator default</option>
+                  {(localModels.data ?? [])
+                    .filter((m) => !m.hidden)
+                    .map((m) => (
+                      <option key={m.name} value={m.name}>
+                        {m.name}
+                      </option>
+                    ))}
+                  {(hostedModels.data ?? []).length > 0 && (
+                    <optgroup label="Hosted">
+                      {(hostedModels.data ?? []).map((m) => (
+                        <option key={m.model} value={m.model}>
+                          {m.model}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </Select>
+                <p className="text-xs text-ink-faint">
+                  Approving turns this automation on — you can change the model first.
+                </p>
+              </div>
+
+              {operation === "update" && suggestion.diff && (
+                <details>
+                  <summary className="cursor-pointer text-xs text-ink-dim">What changes</summary>
+                  <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-(--radius-field) border border-edge bg-surface-2 p-3 font-mono text-[12px] text-ink-dim">
+                    {suggestion.diff}
+                  </pre>
+                </details>
+              )}
             </div>
           )}
           {isEdit && (

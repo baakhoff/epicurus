@@ -14,6 +14,25 @@ images to GHCR.
 
 ### Added
 
+- **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the
+  automations loop opened in W7. `propose_automation` is a core built-in that drafts an automation
+  from a natural-language ask and **only stages** it as a `ReviewSuggestion` — a hard guardrail with
+  no path to create or enable at any autonomy. Approval on a **second in-process `core` review page**
+  (a `CorePages` composite declaring both `PageSpec`s; `ModuleRegistry` already fans out over a
+  manifest's `pages`, so no registry change) is the one create path, and it creates the automation
+  *enabled* — the review is the consent. The review modal gains an editable **model picker** over an
+  additive `ReviewSuggestion.automation` (`AutomationPreview`). The engine's sink seam (ADR-0105, left
+  registered but empty) is now wired under the owner rules: **chat is turn-time** — the runner passes
+  `session_id` only when the chat sink is set, so an unchecked chat sink means zero sessions; a new
+  `automation_sessions` table badges those chats and groups a per-run automation's chats, and the
+  post-run dispatcher **skips** chat. **Notes/KB** route through the existing
+  `ModuleRegistry.save_page_doc` (the #541 no-second-write-path rule) at a per-automation
+  `DocumentTarget` (a `path_pattern` with `{date}`/`{datetime}`/`{time}` tokens, create or append);
+  each write records an `EntityRef` on the run's new `automation_runs.artifacts` column, so the runs
+  feed (#688) links what was produced. `automations.sink_config` and `automation_runs.artifacts` are
+  the first columns added since #682, so `AutomationStore.init` now runs `ensure_columns` (ADR-0067).
+  Implements ADR-0107 and ADR-0108. `epicurus-core` 0.30.0→0.31.0 (MINOR) · `core-app`
+  0.89.0→0.91.0 (MINOR) · `web` 0.116.0→0.118.0 (MINOR).
 - **Web: the Automations page** (#668, stacked on #669) — the operator's controls for the
   engine, a first-class core surface beside Settings. The list reads each row **in words**
   ("When mail.received arrives, matching subject contains invoice, between 09:00–17:00" ·

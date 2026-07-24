@@ -232,6 +232,11 @@ export const SessionSummary = z.object({
   title: z.string(),
   message_count: z.number(),
   last_at: z.coerce.date(),
+  /** Set when this chat belongs to an automation's chat sink (#672): the list badges it with the
+   *  automation's icon + name, and groups a `per_run` automation's sessions under it. */
+  automation_id: z.string().nullish(),
+  automation_name: z.string().nullish(),
+  chat_mode: z.string().nullish(),
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
 
@@ -1327,6 +1332,13 @@ export const AutomationScheduleTrigger = z.object({
 export type AutomationScheduleTrigger = z.infer<typeof AutomationScheduleTrigger>;
 
 /** One automation, as `GET /platform/v1/automations` returns it. */
+/** Where a notes/kb sink writes (#672): a document path pattern + create-vs-append. */
+export const SinkTarget = z.object({
+  path_pattern: z.string(),
+  mode: z.enum(["create", "append"]).default("append"),
+});
+export type SinkTarget = z.infer<typeof SinkTarget>;
+
 export const Automation = z.object({
   id: z.string(),
   name: z.string(),
@@ -1343,6 +1355,9 @@ export const Automation = z.object({
   chat_mode: z.string(),
   rate_cap_per_hour: z.number(),
   digest_window_minutes: z.number(),
+  /** The notes/kb document targets (#672); null when that sink is not configured. */
+  notes_target: SinkTarget.nullish(),
+  kb_target: SinkTarget.nullish(),
   created_at: z.string(),
   last_run_at: z.string().nullish(),
   last_status: z.string().nullish(),
@@ -1370,6 +1385,8 @@ export const AutomationRun = z.object({
   sinks_fired: z.array(z.string()).default([]),
   /** The triggering events' entity refs, server-resolved for hover-card chips. */
   trigger_entity_refs: z.array(EntityRef).default([]),
+  /** Documents this run produced via the notes/kb sinks (#672) — rendered as chips. */
+  artifacts: z.array(EntityRef).default([]),
 });
 export type AutomationRun = z.infer<typeof AutomationRun>;
 
@@ -1410,6 +1427,8 @@ export type AutomationDraft = {
   chat_mode: string;
   rate_cap_per_hour: number;
   digest_window_minutes: number;
+  notes_target: SinkTarget | null;
+  kb_target: SinkTarget | null;
   enabled: boolean;
 };
 

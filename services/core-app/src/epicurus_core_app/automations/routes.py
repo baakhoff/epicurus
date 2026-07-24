@@ -26,6 +26,7 @@ from epicurus_core_app.automations.model import (
     SINKS,
     Automation,
     AutomationRun,
+    DocumentTarget,
     EventTrigger,
     PayloadMatcher,
     ScheduleTrigger,
@@ -63,6 +64,17 @@ class ScheduleTriggerBody(BaseModel):
     weekday: int | None = None
 
 
+class SinkTargetBody(BaseModel):
+    """Where a notes/kb sink writes (#672): a document path pattern + create-vs-append.
+
+    ``path_pattern`` is the module-relative path with ``{date}`` / ``{datetime}`` / ``{time}``
+    substituted at run time (e.g. ``"Automations/Mail report {date}"``).
+    """
+
+    path_pattern: str
+    mode: Literal["create", "append"] = "append"
+
+
 class AutomationView(BaseModel):
     """The API-facing shape of an automation."""
 
@@ -79,6 +91,9 @@ class AutomationView(BaseModel):
     chat_mode: str
     rate_cap_per_hour: int
     digest_window_minutes: int
+    #: The notes/kb document targets (#672); null when that sink is not configured.
+    notes_target: SinkTargetBody | None = None
+    kb_target: SinkTargetBody | None = None
     created_at: str
     last_run_at: str | None = None
     last_status: str | None = None
@@ -107,6 +122,9 @@ class AutomationRunView(BaseModel):
     #: the feed renders source-entity hover-card chips with no per-module code. Empty for
     #: schedule/manual runs, and for trigger events retention has since pruned.
     trigger_entity_refs: list[EntityRef] = Field(default_factory=list)
+    #: Documents this run produced via the notes/kb sinks (#672) — rendered as chips linking to
+    #: what was written, the same way ``trigger_entity_refs`` renders the source.
+    artifacts: list[EntityRef] = Field(default_factory=list)
 
 
 class CreateAutomationRequest(BaseModel):
@@ -121,6 +139,8 @@ class CreateAutomationRequest(BaseModel):
     chat_mode: Literal["rolling", "per_run"] = "rolling"
     rate_cap_per_hour: int = 0
     digest_window_minutes: int = 0
+    notes_target: SinkTargetBody | None = None
+    kb_target: SinkTargetBody | None = None
 
 
 class UpdateAutomationRequest(BaseModel):
@@ -140,6 +160,8 @@ class UpdateAutomationRequest(BaseModel):
     chat_mode: Literal["rolling", "per_run"] = "rolling"
     rate_cap_per_hour: int = 0
     digest_window_minutes: int = 0
+    notes_target: SinkTargetBody | None = None
+    kb_target: SinkTargetBody | None = None
     enabled: bool = True
 
 
@@ -187,6 +209,28 @@ def _to_event_trigger(body: EventTriggerBody) -> EventTrigger:
     )
 
 
+def _target_body(target: DocumentTarget | None) -> SinkTargetBody | None:
+    if target is None:
+        return None
+    return SinkTargetBody(path_pattern=target.path_pattern, mode=target.mode)
+
+
+def _to_target(body: SinkTargetBody | None) -> DocumentTarget | None:
+    if body is None or not body.path_pattern.strip():
+        return None
+    return DocumentTarget(path_pattern=body.path_pattern.strip(), mode=body.mode)
+
+
+def _require_targets(
+    sinks: list[str], notes: DocumentTarget | None, kb: DocumentTarget | None
+) -> None:
+    """400 if a notes/kb sink is enabled without a document target to write into (#672)."""
+    if "notes" in sinks and notes is None:
+        raise HTTPException(status_code=400, detail="the notes sink needs a document target")
+    if "kb" in sinks and kb is None:
+        raise HTTPException(status_code=400, detail="the kb sink needs a document target")
+
+
 def _view(automation: Automation) -> AutomationView:
     return AutomationView(
         id=automation.id,
@@ -210,6 +254,8 @@ def _view(automation: Automation) -> AutomationView:
         chat_mode=automation.chat_mode,
         rate_cap_per_hour=automation.rate_cap_per_hour,
         digest_window_minutes=automation.digest_window_minutes,
+        notes_target=_target_body(automation.notes_target),
+        kb_target=_target_body(automation.kb_target),
         created_at=automation.created_at.isoformat(),
         last_run_at=automation.last_run_at.isoformat() if automation.last_run_at else None,
         last_status=automation.last_status,
@@ -235,6 +281,7 @@ def _run_view(
         output=run.output,
         sinks_fired=list(run.sinks_fired),
         trigger_entity_refs=trigger_entity_refs or [],
+        artifacts=list(run.artifacts),
     )
 
 
@@ -416,6 +463,9 @@ def create_automations_router(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        notes_target = _to_target(body.notes_target)
+        kb_target = _to_target(body.kb_target)
+        _require_targets(body.sinks, notes_target, kb_target)
         automation = await store.create(
             tenant=tenant_id or default_tenant,
             name=body.name.strip(),
@@ -429,6 +479,8 @@ def create_automations_router(
             chat_mode=body.chat_mode,
             rate_cap_per_hour=body.rate_cap_per_hour,
             digest_window_minutes=body.digest_window_minutes,
+            notes_target=notes_target,
+            kb_target=kb_target,
         )
         return _view(automation)
 
@@ -470,6 +522,9 @@ def create_automations_router(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        notes_target = _to_target(body.notes_target)
+        kb_target = _to_target(body.kb_target)
+        _require_targets(body.sinks, notes_target, kb_target)
         updated = await store.update(
             tenant=tenant,
             automation_id=automation_id,
@@ -483,6 +538,8 @@ def create_automations_router(
             chat_mode=body.chat_mode,
             rate_cap_per_hour=body.rate_cap_per_hour,
             digest_window_minutes=body.digest_window_minutes,
+            notes_target=notes_target,
+            kb_target=kb_target,
             enabled=body.enabled,
         )
         if updated is None:  # deleted between the read and the write — still a 404

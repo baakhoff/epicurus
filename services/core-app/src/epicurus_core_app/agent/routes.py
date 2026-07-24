@@ -23,6 +23,7 @@ from epicurus_core_app.agent.live_runs import (
 )
 from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.automations.store import AutomationSessionStore, SessionMeta
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory, MemoryItem
 from epicurus_core_app.memory.profile import SOURCE_EDITED, StandingProfile, StandingProfileStore
@@ -161,6 +162,19 @@ def _sse(event: AgentEvent, *, seq: int | None = None) -> str:
     return f"{prefix}event: {event.type}\ndata: {event.model_dump_json(exclude_none=True)}\n\n"
 
 
+def _with_automation(summary: SessionSummary, meta: SessionMeta | None) -> SessionSummary:
+    """Stamp an automation's session with its badge/grouping metadata (#672); unchanged if none."""
+    if meta is None:
+        return summary
+    return summary.model_copy(
+        update={
+            "automation_id": meta.automation_id,
+            "automation_name": meta.name,
+            "chat_mode": meta.chat_mode,
+        }
+    )
+
+
 def create_agent_router(
     agent: Agent,
     memory: Memory,
@@ -174,6 +188,7 @@ def create_agent_router(
     send_draft: SendDraft | None = None,
     live_runs: LiveRunRegistry | None = None,
     profile: StandingProfileStore | None = None,
+    automation_sessions: AutomationSessionStore | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
@@ -278,7 +293,20 @@ def create_agent_router(
 
     @router.get("/sessions", response_model=list[SessionSummary])
     async def sessions() -> list[SessionSummary]:
-        return await memory.sessions(tenant=tenant)
+        summaries = await memory.sessions(tenant=tenant)
+        # Badge/group automation chats (#672): enrich here, not in the ConversationStore, so that
+        # store stays automations-agnostic. Best-effort — a metadata hiccup degrades to plain
+        # sessions rather than emptying the list.
+        if automation_sessions is None:
+            return summaries
+        try:
+            metas = await automation_sessions.lookup(
+                tenant=tenant, session_ids=[s.id for s in summaries]
+            )
+        except Exception as exc:  # never fail the chat list over the badge lookup
+            log.warning("automation session enrichment failed", error=str(exc))
+            return summaries
+        return [_with_automation(s, metas.get(s.id)) for s in summaries]
 
     @router.get("/sessions/{session_id}", response_model=list[MessageRecord])
     async def session_messages(session_id: str) -> list[MessageRecord]:

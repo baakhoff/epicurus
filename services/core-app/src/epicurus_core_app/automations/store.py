@@ -36,16 +36,20 @@ from sqlalchemy import (
     func,
     select,
 )
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from epicurus_core import get_logger
+from epicurus_core import EntityRef, get_logger
+from epicurus_core.db import ensure_columns
 from epicurus_core_app.automations.model import (
     Automation,
     AutomationRun,
     AutonomyLevel,
     Cadence,
     ChatMode,
+    DocumentMode,
+    DocumentTarget,
     EventTrigger,
     PayloadMatcher,
     ScheduleTrigger,
@@ -53,6 +57,13 @@ from epicurus_core_app.automations.model import (
 )
 
 log = get_logger("epicurus_core_app.automations.store")
+
+# Columns added after these tables' first release (#682) — reconciled in place at init via the
+# shared additive helper (ADR-0067), since they now have a deployed predecessor. ``sink_config``
+# (#672) holds the notes/kb document targets; ``artifacts`` (#672) holds the EntityRefs a run
+# produced.
+_ADDED_AUTOMATION_COLUMNS = ("sink_config",)
+_ADDED_RUN_COLUMNS = ("artifacts",)
 
 
 class _Base(DeclarativeBase):
@@ -83,6 +94,10 @@ class _StoredAutomation(_Base):
     chat_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     rate_cap_per_hour: Mapped[int] = mapped_column(Integer, default=0)
     digest_window_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    # The notes/kb document targets (#672): {"notes": {path_pattern, mode}, "kb": {...}}. JSON for
+    # the same reason as the trigger — a closed shape the core owns and reads whole. Nullable: it
+    # was added after the table shipped (ADR-0067), so it is null for every pre-#672 row.
+    sink_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -112,6 +127,9 @@ class _StoredRun(_Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     output: Mapped[str] = mapped_column(Text, default="")
     sinks_fired: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # EntityRefs (as dicts) for documents this run produced via the notes/kb sinks (#672).
+    # Nullable — added after the table shipped (ADR-0067); null/absent means none.
+    artifacts: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
 
 
 class _StoredQueueItem(_Base):
@@ -139,6 +157,26 @@ class _StoredKillSwitch(_Base):
     tenant: Mapped[str] = mapped_column(String(63), primary_key=True)
     halted: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class _StoredAutomationSession(_Base):
+    """Which chat session belongs to which automation (#672) — the chat list's icon/name/grouping.
+
+    A row exists here **only** for a session an automation with a *chat sink* wrote into (the
+    runner records one when a chat-sink run persists), so a session absent from this table is an
+    ordinary user chat. ``session_id`` is the primary key: a ``rolling`` automation reuses one and
+    upserts the same row; a ``per_run`` automation makes a fresh session each run and they group
+    under ``automation_id`` in the chat list.
+    """
+
+    __tablename__ = "automation_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    automation_id: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    chat_mode: Mapped[str] = mapped_column(String(16), default="rolling")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # ── (de)serialization ────────────────────────────────────────────────────────
@@ -179,6 +217,28 @@ def _schedule_from_json(data: dict[str, Any]) -> ScheduleTrigger:
     )
 
 
+def _sink_config_to_json(
+    notes: DocumentTarget | None, kb: DocumentTarget | None
+) -> dict[str, Any] | None:
+    """Fold the notes/kb targets into one JSON blob, or ``None`` when neither is set."""
+    config: dict[str, Any] = {}
+    if notes is not None:
+        config["notes"] = {"path_pattern": notes.path_pattern, "mode": notes.mode}
+    if kb is not None:
+        config["kb"] = {"path_pattern": kb.path_pattern, "mode": kb.mode}
+    return config or None
+
+
+def _target_from_json(data: Any) -> DocumentTarget | None:
+    if not isinstance(data, dict):
+        return None
+    mode = data.get("mode", "append")
+    return DocumentTarget(
+        path_pattern=str(data.get("path_pattern", "")),
+        mode=cast("DocumentMode", mode if mode in ("create", "append") else "append"),
+    )
+
+
 def _to_value(row: _StoredAutomation) -> Automation:
     return Automation(
         id=row.id,
@@ -201,6 +261,8 @@ def _to_value(row: _StoredAutomation) -> Automation:
         created_at=row.created_at,
         last_run_at=row.last_run_at,
         last_status=row.last_status,
+        notes_target=_target_from_json((row.sink_config or {}).get("notes")),
+        kb_target=_target_from_json((row.sink_config or {}).get("kb")),
     )
 
 
@@ -220,6 +282,7 @@ def _run_to_value(row: _StoredRun) -> AutomationRun:
         error=row.error,
         output=row.output,
         sinks_fired=list(row.sinks_fired or []),
+        artifacts=[EntityRef.model_validate(a) for a in (row.artifacts or [])],
     )
 
 
@@ -243,14 +306,21 @@ class AutomationStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the automations tables if they do not exist (idempotent).
+        """Create the automations tables if they do not exist, then reconcile added columns.
 
-        No ``ensure_columns``: these tables are new in this release, so they have no
-        deployed predecessor to reconcile against. The first column added *after* this
-        ships must add one (ADR-0067) — ``create_all`` never alters an existing table.
+        ``create_all`` never alters an existing table, so the columns added after #682 shipped
+        (``sink_config`` on automations, ``artifacts`` on the run ledger — both #672) are added
+        in place via the shared additive helper (ADR-0067). Idempotent on every startup.
         """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
+
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Add the post-#682 columns an older deployment's tables still lack (ADR-0067)."""
+        ensure_columns(sync_conn, _StoredAutomation.__table__, _ADDED_AUTOMATION_COLUMNS)
+        ensure_columns(sync_conn, _StoredRun.__table__, _ADDED_RUN_COLUMNS)
 
     async def create(
         self,
@@ -268,6 +338,8 @@ class AutomationStore:
         chat_session_id: str | None = None,
         rate_cap_per_hour: int = 0,
         digest_window_minutes: int = 0,
+        notes_target: DocumentTarget | None = None,
+        kb_target: DocumentTarget | None = None,
         enabled: bool = True,
     ) -> Automation:
         """Stage a new automation and return it. Validate before calling."""
@@ -288,6 +360,7 @@ class AutomationStore:
                 chat_session_id=chat_session_id,
                 rate_cap_per_hour=rate_cap_per_hour,
                 digest_window_minutes=digest_window_minutes,
+                sink_config=_sink_config_to_json(notes_target, kb_target),
             )
             session.add(row)
             await session.commit()
@@ -352,6 +425,8 @@ class AutomationStore:
         chat_mode: ChatMode = "rolling",
         rate_cap_per_hour: int = 0,
         digest_window_minutes: int = 0,
+        notes_target: DocumentTarget | None = None,
+        kb_target: DocumentTarget | None = None,
         enabled: bool = True,
     ) -> Automation | None:
         """Replace an automation's editable fields (#668). Validate before calling.
@@ -382,6 +457,7 @@ class AutomationStore:
             row.chat_mode = chat_mode
             row.rate_cap_per_hour = rate_cap_per_hour
             row.digest_window_minutes = digest_window_minutes
+            row.sink_config = _sink_config_to_json(notes_target, kb_target)
             await session.commit()
             await session.refresh(row)
             return _to_value(row)
@@ -482,6 +558,7 @@ class AutomationStore:
                 error=run.error,
                 output=run.output,
                 sinks_fired=list(run.sinks_fired),
+                artifacts=[ref.model_dump() for ref in run.artifacts],
             )
             session.add(row)
             await session.commit()
@@ -634,6 +711,88 @@ class KillSwitchStore:
         log.info("automation kill switch set", tenant=tenant, halted=halted)
 
 
+@dataclass(frozen=True)
+class SessionMeta:
+    """The automation a chat session belongs to (#672) — the chat list's icon/name/grouping key."""
+
+    session_id: str
+    automation_id: str
+    name: str
+    chat_mode: str
+
+
+class AutomationSessionStore:
+    """Records which chat sessions an automation's chat sink wrote into (#672).
+
+    Only chat-sink runs record here (the runner calls :meth:`record`), so the chat list can show
+    an automation's sessions with its icon + name and group a ``per_run`` automation's sessions
+    under it — while an ordinary user chat, absent from this table, renders exactly as before.
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def init(self) -> None:
+        async with self._engine.begin() as conn:
+            await conn.run_sync(_Base.metadata.create_all)
+
+    async def record(
+        self, *, tenant: str, session_id: str, automation_id: str, name: str, chat_mode: str
+    ) -> None:
+        """Upsert the session→automation mapping (idempotent for a rolling session's reruns)."""
+        async with self._session() as session:
+            row = await session.get(_StoredAutomationSession, session_id)
+            if row is None:
+                session.add(
+                    _StoredAutomationSession(
+                        session_id=session_id,
+                        tenant=tenant,
+                        automation_id=automation_id,
+                        name=name[:200],
+                        chat_mode=chat_mode,
+                    )
+                )
+            else:
+                row.automation_id = automation_id
+                row.name = name[:200]
+                row.chat_mode = chat_mode
+            await session.commit()
+
+    async def lookup(self, *, tenant: str, session_ids: list[str]) -> dict[str, SessionMeta]:
+        """Map each of *session_ids* that belongs to an automation to its metadata."""
+        if not session_ids:
+            return {}
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredAutomationSession).where(
+                    _StoredAutomationSession.tenant == tenant,
+                    _StoredAutomationSession.session_id.in_(session_ids),
+                )
+            )
+            return {
+                row.session_id: SessionMeta(
+                    session_id=row.session_id,
+                    automation_id=row.automation_id,
+                    name=row.name,
+                    chat_mode=row.chat_mode,
+                )
+                for row in rows
+            }
+
+    async def delete_for_automation(self, *, tenant: str, automation_id: str) -> int:
+        """Drop an automation's session mappings (when it is deleted). Returns rows removed."""
+        async with self._session() as session:
+            result = await session.execute(
+                delete(_StoredAutomationSession).where(
+                    _StoredAutomationSession.tenant == tenant,
+                    _StoredAutomationSession.automation_id == automation_id,
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0
+
+
 def rate_cap_window_start(now: datetime) -> datetime:
     """The start of the rolling hour a rate cap counts within."""
     return now - timedelta(hours=1)
@@ -641,8 +800,10 @@ def rate_cap_window_start(now: datetime) -> datetime:
 
 __all__ = [
     "AutomationQueue",
+    "AutomationSessionStore",
     "AutomationStore",
     "KillSwitchStore",
     "QueuedTrigger",
+    "SessionMeta",
     "rate_cap_window_start",
 ]

@@ -166,3 +166,56 @@ describe("Conversations sheet (#480)", () => {
     expect(rowClasses).not.toContain("group");
   });
 });
+
+describe("automation chats (#672)", () => {
+  it("badges a rolling automation's chat with its name", async () => {
+    mockSessionsList.mockResolvedValue([
+      {
+        id: "auto-roll",
+        title: "Mail summary",
+        message_count: 2,
+        last_at: at(2 * hour),
+        automation_id: "a1",
+        automation_name: "Mail alerts",
+        chat_mode: "rolling",
+      },
+    ]);
+    render(<ChatScreen />, { wrapper });
+    fireEvent.click(screen.getByLabelText("Conversations"));
+    await screen.findByText("Mail summary"); // a normal row, in the recency list
+    expect(screen.getByLabelText("Automation")).toBeInTheDocument(); // the icon badge
+    expect(screen.getByText(/Mail alerts/)).toBeInTheDocument(); // the automation's name
+  });
+
+  it("groups a per-run automation's chats collapsibly under it", async () => {
+    mockSessionsList.mockResolvedValue([
+      {
+        id: "r1",
+        title: "Report one",
+        message_count: 1,
+        last_at: at(2 * hour),
+        automation_id: "a2",
+        automation_name: "Weekly report",
+        chat_mode: "per_run",
+      },
+      {
+        id: "r2",
+        title: "Report two",
+        message_count: 1,
+        last_at: at(3 * hour),
+        automation_id: "a2",
+        automation_name: "Weekly report",
+        chat_mode: "per_run",
+      },
+    ]);
+    render(<ChatScreen />, { wrapper });
+    fireEvent.click(screen.getByLabelText("Conversations"));
+    // The group header shows the automation name; the per-run rows are collapsed under it so a
+    // weekly report doesn't scatter dozens of rows.
+    await screen.findByText("Weekly report");
+    expect(screen.queryByText("Report one")).toBeNull();
+    fireEvent.click(screen.getByText("Weekly report"));
+    expect(screen.getByText("Report one")).toBeInTheDocument();
+    expect(screen.getByText("Report two")).toBeInTheDocument();
+  });
+});

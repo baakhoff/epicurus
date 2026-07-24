@@ -62,6 +62,7 @@ from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.automations.document_sinks import make_kb_sink, make_notes_sink
 from epicurus_core_app.automations.feed import RunFeed
 from epicurus_core_app.automations.migration import migrate_scheduled_turns
 from epicurus_core_app.automations.review import (
@@ -79,6 +80,7 @@ from epicurus_core_app.automations.runner import (
 from epicurus_core_app.automations.sinks import SinkDispatcher
 from epicurus_core_app.automations.store import (
     AutomationQueue,
+    AutomationSessionStore,
     AutomationStore,
     KillSwitchStore,
 )
@@ -323,6 +325,9 @@ def create_app() -> FastAPI:
     # conversation (#667, ADR-0107). The tool only stages here; approving on the core review
     # page is the one path that creates an automation, and it creates it enabled.
     automation_proposals = AutomationProposalStore(engine)
+    # Which chat session each chat-sink automation writes into (#672) — the chat list reads this
+    # to badge automation sessions and group a per-run automation's chats under it.
+    automation_sessions = AutomationSessionStore(engine)
     # The sink seam. Push/chat/notes/kb are companion issues, so nothing is registered yet:
     # a configured-but-unregistered sink is recorded as unavailable and the run's output
     # still lands on the ledger, which is what makes the degradation graceful (ADR-0105).
@@ -563,6 +568,18 @@ def create_app() -> FastAPI:
     # The live runs feed (#669): the runner hands every recorded ledger entry — skips
     # included — to the feed, which the observability page tails over SSE.
     automation_run_feed = RunFeed(automations)
+    # Notes/KB sinks (#672): a run's output routed into a module document through the *existing*
+    # document API (registry.save_page_doc), never a second write path (the #541 rule). The chat
+    # sink is turn-time (handled in the runner), and push is its own issue — neither is registered
+    # here. Timezone-aware so a `{date}` in a target path is the operator's local date.
+    automation_sinks.register(
+        "notes",
+        make_notes_sink(registry, lambda: timezone_prefs.get_timezone(settings.default_tenant_id)),
+    )
+    automation_sinks.register(
+        "kb",
+        make_kb_sink(registry, lambda: timezone_prefs.get_timezone(settings.default_tenant_id)),
+    )
     automation_runner = AutomationRunner(
         automations,
         automation_queue,
@@ -570,6 +587,7 @@ def create_app() -> FastAPI:
         power,
         automation_kill_switch,
         automation_sinks,
+        sessions=automation_sessions,
         bus=bus,
         on_recorded=automation_run_feed.publish,
     )
@@ -759,6 +777,7 @@ def create_app() -> FastAPI:
             await automation_queue.init()
             await automation_kill_switch.init()
             await automation_proposals.init()
+            await automation_sessions.init()
             # Fold #614's scheduled turns in (ADR-0105). Idempotent and non-destructive:
             # migrated rows are marked, never deleted, so a second boot is a no-op and a
             # bad migration is recoverable.
@@ -963,6 +982,8 @@ def create_app() -> FastAPI:
             live_runs=live_runs,
             # The standing profile (#527): the memory view reads/edits/clears it here.
             profile=profile_store,
+            # Chat sink metadata (#672): badge + group an automation's chat sessions in the list.
+            automation_sessions=automation_sessions,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

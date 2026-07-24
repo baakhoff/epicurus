@@ -685,17 +685,18 @@ async def test_sinks_receive_the_output() -> None:
     store, queue, kill = await _fresh()
     seen: list[str] = []
 
-    async def _chat(_a: Automation, output: str) -> None:
-        seen.append(output)
+    async def _notes(_a: Automation, _o: str) -> None:
+        seen.append(_o)
 
+    # A post-run fan-out sink (notes); chat is turn-time and no longer dispatched (#672).
     sinks = SinkDispatcher()
-    sinks.register("chat", _chat)
-    automation = await _an_automation(store, sinks=["chat"])
+    sinks.register("notes", _notes)
+    automation = await _an_automation(store, sinks=["notes"])
     run = await _runner(store, queue, kill, sinks=sinks).run_once(
         automation, trigger_refs=[], summaries=[], verdict="matched"
     )
     assert seen == ["done"]
-    assert run is not None and run.sinks_fired == ["chat"]
+    assert run is not None and run.sinks_fired == ["notes"]
 
 
 async def test_silent_act_fires_no_sink_but_still_records() -> None:
@@ -744,13 +745,13 @@ async def test_a_failing_sink_does_not_cost_the_others() -> None:
 
     sinks = SinkDispatcher()
     sinks.register("push", _broken)
-    sinks.register("chat", _works)
-    automation = await _an_automation(store, sinks=["push", "chat"])
+    sinks.register("notes", _works)
+    automation = await _an_automation(store, sinks=["push", "notes"])
     run = await _runner(store, queue, kill, sinks=sinks).run_once(
         automation, trigger_refs=[], summaries=[], verdict="matched"
     )
     assert delivered == ["done"]
-    assert run is not None and run.sinks_fired == ["chat"]
+    assert run is not None and run.sinks_fired == ["notes"]
 
 
 async def test_the_dispatcher_reports_what_it_could_not_do() -> None:
@@ -760,10 +761,10 @@ async def test_the_dispatcher_reports_what_it_could_not_do() -> None:
         raise RuntimeError("down")
 
     sinks.register("push", _broken)
-    automation = _scheduled(7, sinks=["push", "chat"])
+    automation = _scheduled(7, sinks=["push", "kb"])
     result = await sinks.dispatch(automation, "out")
     assert result.failed == ["push"]
-    assert result.unavailable == ["chat"]
+    assert result.unavailable == ["kb"]  # kb has no handler here; chat is skipped, not reported
     assert result.fired == []
 
 

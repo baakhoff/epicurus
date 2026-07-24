@@ -343,7 +343,7 @@ de-duplicate on `id`; the subscriber registers before the history query on purpo
 duplicated row is cosmetic and a missing one is not.
 
 Driven by the Observability screen's **Events** tab
-([observability](observability.md#raw-events-feed)).
+([observability](observability.md#raw-events-feed-adr-0103)).
 
 ---
 

@@ -801,7 +801,7 @@ sees the same one twice.
 `0` disables).
 
 The feed is at `GET /platform/v1/events[/stream]` — the Observability screen's **Events**
-tab (see [observability](../reference/observability.md#raw-events-feed)). The event catalog
+tab (see [observability](../reference/observability.md#raw-events-feed-adr-0103)). The event catalog
 lives in [events](../reference/events.md#the-event-catalog).
 
 ### Automations engine (ADR-0105)
@@ -855,6 +855,30 @@ from the operator's own chatting.
 schedule-triggered automations with a rolling chat sink, keeping their cadence, session,
 enabled flag, and last-run stamp. `ScheduledTurnScheduler` still exists for the un-migrated
 path but new work creates an automation.
+
+### Push notifications (ADR-0102)
+
+`PushService.notify(tenant, category=..., title=..., body=...)` (`push/service.py`) is the
+core-internal send path a future caller — the automations engine's push sink, a
+core-originated system notice — calls in-process (#670). Every call first records a
+notification-center row (`notifications.py`) if the category/automation's `center` toggle is
+on, regardless of what push delivery does below (#671, ADR-0102 §4). Push delivery then
+resolves, in order: the effective push toggle (off skips delivery entirely), quiet hours in the
+tenant's timezone (ADR-0039 — queues for a digest instead of sending), and an in-memory
+per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`, single-instance v1 — the same disposable-cache
+trade the live-run registry makes, ADR-0055). Delivery fans out to every device via
+VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service reports Gone
+(404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
+
+`/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
+service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
+/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, and `POST /test` (the settings UI's "send test
+notification" button — the only caller today; no event source triggers a real push yet).
+`/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
+`GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
+[the reference page](../reference/notifications.md) for the full contract and the web-side
+subscribe flow.
+
 ### Core-emitted spine events (#665)
 
 The core also **emits** (`core_events.py`, `CoreEventEmitter`) — over its own bus, exactly

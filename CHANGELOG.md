@@ -299,6 +299,28 @@ images to GHCR.
 
 ### Fixed
 
+- **CI: no gate ever checked a docs/ cross-reference — a dead one reached shipped operator
+  UI** (#692). Issue #661 existed because `docs/DEPLOYMENT.md` was referenced from shipped,
+  operator-facing UI copy and a compose comment while the file doesn't exist in the public
+  tree (the real doc is the gitignored `.workspace/docs/DEPLOYMENT.md`); nothing caught it,
+  and a generic markdown-link checker wouldn't catch the next one either — it never looks
+  inside a `.tsx` file or a compose comment. New **docs-linkcheck** CI job
+  (`scripts/check_docs_links.py`, stdlib-only) checks (1) every relative link between `docs/`
+  pages, anchors included, and (2) a repo-relative doc path quoted in shipped source (web UI
+  copy, compose comments, other top-level READMEs, `.env.example`) — excluding test
+  fixtures (which commonly use plausible-looking-but-synthetic doc-shaped paths that were
+  never meant to resolve) and `CHANGELOG.md` (narrates *past* fixes, not live references).
+  The gate's first real run found and fixed four genuine, previously-invisible cases: a
+  `docs/services/core-app.md` anchor named in two other pages
+  (`../services/core-app.md#push-notifications-adr-0102`, `#raw-events-feed` missing its
+  `-adr-0103` suffix in two places) that had no matching heading at all — added the missing
+  "Push notifications (ADR-0102)" section documenting the `push/` package's send path and
+  HTTP surface (previously undocumented entirely), and corrected the `-adr-0103` suffix — plus
+  one heading-renamed-out-from-under-it link in `docs/services/mail.md` (`#operator-setup-google`
+  → `#google-cloud-setup`). The two offenders this issue named as still-live
+  (`.env.example`, `docs/developer/releases.md`) were already fixed by #661 before this PR;
+  verified no live occurrence remains. No component bump — CI/docs only.
+
 - **CI: no gate ever parsed a shell script with a POSIX shell** (#691). #675 shipped a bash
   array in `infra/cd/reconcile.sh` — invoked as `sh infra/cd/reconcile.sh` everywhere (its own
   header comment, the `task reconcile` Taskfile entry, and both scheduled-task lines in

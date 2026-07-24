@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-notes"
-version = "0.9.0"
+version = "0.9.1"
 description = "Notes module — author Obsidian-style notes into a private, attach-only RAG collection."
 requires-python = ">=3.11"
 dependencies = [

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # On-box pull-reconcile: pull the pinned images and restart any that changed.
 #
 # Run from the repo root (or schedule via Windows Task Scheduler / WSL cron):
@@ -18,7 +18,11 @@
 # so the compose files / .env.example / new services match the images. Leave
 # EPICURUS_TRACK_BRANCH unset for the normal pinned-release flow (no git changes).
 
-set -euo pipefail
+# `pipefail` is undefined in POSIX sh (SC3040) — Debian dash rejects it outright ("Illegal
+# option"), which given this script's own lesson (#691) would be exactly the wrong kind of
+# silent-until-the-real-box failure. `-eu` alone is portable; the one pipeline below
+# (`sed | tail`) can't practically fail mid-pipe.
+set -eu
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${REPO_ROOT}"

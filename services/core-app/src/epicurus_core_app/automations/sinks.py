@@ -23,14 +23,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from epicurus_core import get_logger
+from epicurus_core import EntityRef, get_logger
 from epicurus_core_app.automations.model import Automation, Sink
 
 log = get_logger("epicurus_core_app.automations.sinks")
 
-#: Deliver one run's output. ``(automation, output) -> None``; raising means "did not
-#: deliver", which the dispatcher records rather than propagates.
-SinkHandler = Callable[[Automation, str], Awaitable[None]]
+#: Deliver one run's output, optionally returning an ``EntityRef`` for an artifact it produced —
+#: a notes/kb document (#672). ``(automation, output) -> EntityRef | None``; raising means "did
+#: not deliver", which the dispatcher records rather than propagates.
+SinkHandler = Callable[[Automation, str], Awaitable["EntityRef | None"]]
 
 
 @dataclass
@@ -42,6 +43,8 @@ class SinkResult:
     unavailable: list[str] = field(default_factory=list)
     #: Registered, attempted, and raised. The run itself is unaffected.
     failed: list[str] = field(default_factory=list)
+    #: EntityRefs for documents the sinks produced (#672) — so the runs feed links what was made.
+    artifacts: list[EntityRef] = field(default_factory=list)
 
 
 class SinkDispatcher:
@@ -71,9 +74,15 @@ class SinkDispatcher:
 
         Silent-act delivers nowhere by design — the caller checks
         :meth:`Automation.fires_sinks` before calling, and this asserts nothing about it.
+
+        The ``chat`` sink is **skipped here**: it is realized at turn time by the runner (the run
+        persists into the session so a rolling chat is reply-able), not as a post-run fan-out. The
+        runner records ``chat`` as fired itself.
         """
         result = SinkResult()
         for sink in automation.sinks:
+            if sink == "chat":
+                continue  # turn-time, handled by the runner — see the docstring
             handler = self._handlers.get(sink)
             if handler is None:
                 # Not an error: the sink's issue hasn't landed. The output is on the
@@ -86,8 +95,10 @@ class SinkDispatcher:
                 )
                 continue
             try:
-                await handler(automation, output)
+                artifact = await handler(automation, output)
                 result.fired.append(sink)
+                if artifact is not None:
+                    result.artifacts.append(artifact)
             except Exception as exc:  # one sink's failure must not cost the others
                 result.failed.append(sink)
                 log.warning(

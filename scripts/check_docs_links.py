@@ -43,10 +43,13 @@ DOCS_ROOT = REPO_ROOT / "docs"
 # scripts/new_module.py carries a genuine reference; the exclusion that matters
 # is by path (tests), not by extension.
 SOURCE_GLOBS = ("*.md", "*.tsx", "*.ts", "*.yaml", "*.yml", ".env.example", "*.py")
-# Non-docs markdown files that intentionally narrate *past* fixes (mentioning a
-# now-gone path as history, not as a live reference) rather than the docs/-tree
-# itself, which tier 1 already covers.
-SOURCE_EXCLUDE_FILES = {"CHANGELOG.md"}
+# Files that name a `docs/…` path as narration or illustration, not as a live
+# reference. `CHANGELOG.md` narrates *past* fixes (a now-gone path as history),
+# and this checker's own docstring/comments carry synthetic examples
+# (`docs/a.md`, `docs/DEPLOYMENT.md`, `docs/....md`) explaining what it looks for
+# — scanning itself would flag those every run. The docs/-tree itself is covered
+# by tier 1, so excluding these by basename drops no live reference.
+SOURCE_EXCLUDE_FILES = {"CHANGELOG.md", "check_docs_links.py"}
 
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 DOCS_PATH_RE = re.compile(r"docs/[A-Za-z0-9_/.-]+\.md")

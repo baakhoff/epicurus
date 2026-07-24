@@ -61,6 +61,7 @@ import type {
   AutomationMatcher,
   AutomationRun,
   AutomationTemplate,
+  SinkTarget,
 } from "@/lib/contracts";
 
 /* ── vocabulary helpers ──────────────────────────────────────────────────── */
@@ -357,6 +358,8 @@ function draftFrom(seed: EditorSeed): AutomationDraft {
       chat_mode: a.chat_mode,
       rate_cap_per_hour: a.rate_cap_per_hour,
       digest_window_minutes: a.digest_window_minutes,
+      notes_target: a.notes_target ?? null,
+      kb_target: a.kb_target ?? null,
       enabled: a.enabled,
     };
   }
@@ -389,6 +392,8 @@ function draftFrom(seed: EditorSeed): AutomationDraft {
       chat_mode: "rolling",
       rate_cap_per_hour: 0,
       digest_window_minutes: 0,
+      notes_target: null,
+      kb_target: null,
       enabled: true,
     };
   }
@@ -399,12 +404,55 @@ function draftFrom(seed: EditorSeed): AutomationDraft {
     event_trigger: null,
     schedule_trigger: { cadence: "daily", hour: 7, weekday: null },
     model: null,
-    sinks: ["chat"],
+    // The chat sink is unchecked by default everywhere — no automation gets a chat unless the
+    // operator asks for one (owner rule, #672).
+    sinks: [],
     chat_mode: "rolling",
     rate_cap_per_hour: 0,
     digest_window_minutes: 0,
+    notes_target: null,
+    kb_target: null,
     enabled: true,
   };
+}
+
+/** Where a notes/kb sink writes (#672): a document path pattern + create-vs-append. */
+function SinkTargetFields({
+  label,
+  target,
+  onChange,
+}: {
+  label: string;
+  target: SinkTarget | null;
+  onChange: (t: SinkTarget) => void;
+}) {
+  const value: SinkTarget = target ?? { path_pattern: "", mode: "append" };
+  return (
+    <div className="flex flex-col gap-1.5 rounded-(--radius-field) border border-edge bg-surface-2 p-3">
+      <Label>{label}</Label>
+      <TextInput
+        aria-label={`${label} path`}
+        value={value.path_pattern}
+        onChange={(e) => onChange({ ...value, path_pattern: e.target.value })}
+        placeholder="Automations/Report {date}"
+      />
+      <div className="flex items-center gap-2">
+        <Label>Each run</Label>
+        <Select
+          size="sm"
+          aria-label={`${label} mode`}
+          value={value.mode}
+          onChange={(e) => onChange({ ...value, mode: e.target.value as SinkTarget["mode"] })}
+        >
+          <option value="append">Appends to the document</option>
+          <option value="create">Replaces the document</option>
+        </Select>
+      </div>
+      <p className="text-xs text-ink-faint">
+        Use {"{date}"} or {"{datetime}"} in the path for a per-run document.
+      </p>
+    </div>
+  );
 }
 
 function AutomationEditor({ seed, onClose }: { seed: EditorSeed; onClose: () => void }) {
@@ -454,6 +502,8 @@ function AutomationEditor({ seed, onClose }: { seed: EditorSeed; onClose: () => 
   const eventTrigger = draft.event_trigger;
   const scheduleTrigger = draft.schedule_trigger;
   const usesChat = draft.sinks.includes("chat");
+  const usesNotes = draft.sinks.includes("notes");
+  const usesKb = draft.sinks.includes("kb");
   const knownType =
     eventTrigger != null &&
     (eventTrigger.event_type === "" || declaredTypes.includes(eventTrigger.event_type));
@@ -844,6 +894,20 @@ function AutomationEditor({ seed, onClose }: { seed: EditorSeed; onClose: () => 
               <option value="per_run">A new conversation per run</option>
             </Select>
           </div>
+        )}
+        {usesNotes && (
+          <SinkTargetFields
+            label="Notes document"
+            target={draft.notes_target}
+            onChange={(t) => patch({ notes_target: t })}
+          />
+        )}
+        {usesKb && (
+          <SinkTargetFields
+            label="Knowledge document"
+            target={draft.kb_target}
+            onChange={(t) => patch({ kb_target: t })}
+          />
         )}
       </div>
 

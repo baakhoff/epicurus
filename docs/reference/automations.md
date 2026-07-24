@@ -18,12 +18,36 @@ One tenant-scoped `automations` row:
 | `source` | `user` · `agent` · `template:<module>` — where the row came from. |
 | **trigger** | Exactly one of: an **event** trigger (module + type + deterministic filter) or a **schedule** trigger (cadence + local hour, the [ADR-0092](../services/core-app.md#scheduled-turns-adr-0092) vocabulary). |
 | **agent step** | `prompt` + optional `model` (blank = the tenant's default) + `autonomy`. |
-| **sinks** | Any of `push` · `chat` · `notes` · `kb`, plus `chat_mode` (`rolling` \| `per_run`). |
+| **sinks** | Any of `push` · `chat` · `notes` · `kb`, plus `chat_mode` (`rolling` \| `per_run`) and, for `notes`/`kb`, a `DocumentTarget` (`{path_pattern, mode}`). See [Sinks](#sinks). |
 | `rate_cap_per_hour` | Max runs in a rolling hour. `0` = uncapped. |
 | `digest_window_minutes` | Batch matched events into one run. `0` = run per event. |
 
 Exactly one trigger, enforced: none would never fire (a row that silently does nothing),
 and both would make "why did this run?" ambiguous in the ledger.
+
+## Creating automations by conversation (#667, ADR-0107)
+
+The operator can build an automation from the Automations page — or just **ask in chat**. The
+core `propose_automation` built-in drafts one from a natural-language request ("when I get mail
+from my boss, notify me"; "each Monday 9am summarize last week") and **stages** it as a
+`ReviewSuggestion` on the core **automations review page**:
+
+- **One spec per call** — a two-pipeline ask ("notify me on important mail; *and* a weekly report")
+  is two calls and two separately-approvable suggestions.
+- **`create` or `update`** — an edit to an existing automation stages an `update` proposal with a
+  readable before→after diff.
+- **The suggestion renders understandably** — trigger in words, filter, action, autonomy, sinks —
+  with a **model picker** the operator can change before approving (the one editable field; it
+  travels back as the approve `content`, `""` = tenant default).
+- **Approve → created *enabled*** (approval is the consent). **Reject → audit trail only** (the
+  `#687` suggestion-decision events fire at that seam).
+
+The **hard guardrail**: the tool can only *stage*. It has no path to `AutomationStore.create` at any
+autonomy level — only an approval on the review page creates a row. The staged proposals live in
+`automation_proposals` with a decision trail in `automation_review_decisions` (the ADR-0090 shape);
+the page is the reserved `core` pseudo-module's second review page, served in-process beside
+playbooks (ADR-0093 §2) via the `CorePages` composite. See
+[core-app → Governed automations](../services/core-app.md#governed-automations-667-adr-0107).
 
 ## The autonomy dial
 
@@ -74,9 +98,10 @@ naming heuristics are unsound, and `writes_document` is a rendering hint (its ow
 says so) that `mail_send` does not carry.
 
 > **Not yet annotated:** only the core built-ins (`now`, `memory_search` — read;
-> `remember`, `ask_user` — write) and `echo` declare side effects today. Until a module
-> annotates its read tools, a Notify automation reaches none of them — the triggering
-> event is still in its context, so it can still report. A follow-up sweeps the modules.
+> `propose_automation` — propose; `remember`, `ask_user` — write) and `echo` declare side
+> effects today. Until a module annotates its read tools, a Notify automation reaches none of
+> them — the triggering event is still in its context, so it can still report. A follow-up
+> sweeps the modules.
 
 ### How it is enforced
 
@@ -132,10 +157,26 @@ where treating it as anything else would let a mail subject line dictate behavio
 
 ### Sinks
 
-`push` · `chat` · `notes` · `kb` are companion issues. A configured-but-unregistered sink
-is **not an error** — it is a sink whose issue has not landed, and the run is still complete
-**because the ledger already recorded the output**. Nothing is dropped; it is written down
-and not yet announced. A sink that fails does not cost the others.
+Where a run's output goes. A configured-but-unregistered sink is **not an error** — the run is
+still complete **because the ledger always records the output** — and a sink that fails does not
+cost the others.
+
+- **`chat` (#672)** — a *turn-time* sink, not a post-run fan-out. When (and only when) it is
+  configured, the run persists into a session, so the operator can **reply in-context** and the
+  next run sees the reply. Per-automation mode: **`rolling`** (one persistent session the runs
+  accrete into) or **`per_run`** (a fresh session each run, **grouped** under the automation in the
+  chat list). Automation sessions carry metadata (`automation_sessions`) → an **icon + the
+  automation name** in the list. **Unchecked by default everywhere** — no automation ever creates a
+  chat implicitly (owner rule). Because chat is realized at turn time, the post-run dispatcher
+  **skips** it; the runner records it fired.
+- **`notes` / `kb` (#672)** — deterministic post-run routing into a module document through the
+  **existing** document API (`ModuleRegistry.save_page_doc`), never a second write path (the #541
+  rule, ADR-0101). Per-automation `DocumentTarget`: a `path_pattern` (with `{date}` / `{datetime}` /
+  `{time}` substituted at run time — e.g. `"Automations/Mail report {date}"`) and a `mode`
+  (`create` overwrites, `append` accretes). Each write records an `EntityRef` on the run's ledger
+  entry (`artifacts`), so the [runs feed](#the-run-ledger) links what was produced. A notes/kb sink
+  with no target is a **400** at write time, and a runtime miss degrades to a recorded failure.
+- **`push`** — its own issue; still unregistered here, so it records to the ledger only.
 
 ## Safety
 
@@ -179,6 +220,7 @@ runner's `on_recorded` hook the moment an entry is written, skips included.
 | `duration_ms` · `outcome` · `error` | `ok` · `error` · `skipped`. |
 | `output` | The turn's answer — recorded even when no sink fires. |
 | `sinks_fired` | Which sinks actually delivered. |
+| `artifacts` | `EntityRef`s for documents the notes/kb sinks produced (#672) — the feed links them. |
 
 Gateway usage carries the same dual attribution: `UsageEvent.automation_id` alongside
 `tenant`. Without it, an automation quietly burning tokens is indistinguishable from the

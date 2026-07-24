@@ -13,6 +13,9 @@ vi.mock("@/lib/api", () => ({
   api: {
     approveSuggestion: (...a: unknown[]) => mockApprove(...a),
     rejectSuggestion: (...a: unknown[]) => mockReject(...a),
+    // Sources for the automation model picker (#667); only fetched for an automation suggestion.
+    models: () => Promise.resolve([{ name: "llama-3.3", hidden: false }]),
+    savedModels: () => Promise.resolve([{ model: "gpt-4o" }]),
   },
 }));
 vi.mock("@/components/Markdown", () => ({
@@ -153,6 +156,67 @@ describe("SuggestionReviewModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /approve/i }));
     await waitFor(() =>
       expect(mockApprove).toHaveBeenCalledWith("knowledge", "vault", "s1", "hand-typed\n"),
+    );
+  });
+});
+
+// An automation proposal (#667/ADR-0107) renders a structured preview + a model picker rather
+// than a text diff; approve carries the operator's model choice as the content.
+function automationSuggestion(overrides: Partial<PendingSuggestion> = {}): PendingSuggestion {
+  return suggestion({
+    module: "core",
+    page_id: "automations",
+    operation: "create",
+    path: "automation/new",
+    title: "Important mail alerts",
+    automation: {
+      name: "Important mail alerts",
+      trigger: "When mail emits mail.received",
+      filter: "importance = 'high'",
+      action: "Tell me about important mail.",
+      autonomy: "notify",
+      autonomy_label: "Notify — look, don't touch",
+      sinks: ["push"],
+      model: null,
+    },
+    ...overrides,
+  });
+}
+
+describe("SuggestionReviewModal — automations (#667)", () => {
+  it("renders the trigger/action preview, not an editable diff", () => {
+    render(<SuggestionReviewModal suggestion={automationSuggestion()} onClose={() => {}} />, {
+      wrapper,
+    });
+    expect(screen.getByText("When mail emits mail.received")).toBeInTheDocument();
+    expect(screen.getByText(/Tell me about important mail/)).toBeInTheDocument();
+    expect(screen.getByText("Notify — look, don't touch")).toBeInTheDocument();
+    // No document draft editor — the automation path replaces it.
+    expect(screen.queryByLabelText(/editable draft/i)).not.toBeInTheDocument();
+  });
+
+  it("approves with the operator's picked model", async () => {
+    render(<SuggestionReviewModal suggestion={automationSuggestion()} onClose={() => {}} />, {
+      wrapper,
+    });
+    // The picker is populated from api.models / api.savedModels.
+    await screen.findByRole("option", { name: "llama-3.3" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Model" }), {
+      target: { value: "llama-3.3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() =>
+      expect(mockApprove).toHaveBeenCalledWith("core", "automations", "s1", "llama-3.3"),
+    );
+  });
+
+  it("approves with an empty model (operator default) when the picker is untouched", async () => {
+    render(<SuggestionReviewModal suggestion={automationSuggestion()} onClose={() => {}} />, {
+      wrapper,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() =>
+      expect(mockApprove).toHaveBeenCalledWith("core", "automations", "s1", ""),
     );
   });
 });

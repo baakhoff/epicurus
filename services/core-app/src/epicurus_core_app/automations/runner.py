@@ -50,7 +50,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
 
-from epicurus_core import ChatMessage, EventBus, SideEffect, emit_event, get_logger
+from epicurus_core import ChatMessage, EntityRef, EventBus, SideEffect, emit_event, get_logger
 from epicurus_core_app.automations.model import (
     Automation,
     AutomationRun,
@@ -59,6 +59,7 @@ from epicurus_core_app.automations.model import (
 from epicurus_core_app.automations.sinks import SinkDispatcher
 from epicurus_core_app.automations.store import (
     AutomationQueue,
+    AutomationSessionStore,
     AutomationStore,
     KillSwitchStore,
     rate_cap_window_start,
@@ -199,6 +200,7 @@ class AutomationRunner:
         kill_switch: KillSwitchStore,
         sinks: SinkDispatcher,
         *,
+        sessions: AutomationSessionStore | None = None,
         bus: EventBus | None = None,
         on_recorded: Callable[[AutomationRun], Awaitable[None]] | None = None,
     ) -> None:
@@ -208,6 +210,9 @@ class AutomationRunner:
         self._power = power
         self._kill_switch = kill_switch
         self._sinks = sinks
+        # Records a chat-sink run's session → automation mapping so the chat list can badge and
+        # group it (#672). None disables that recording (tests without the chat sink).
+        self._sessions = sessions
         self._bus = bus
         # Invoked with every ledger entry the moment it is written — skips included; the
         # runs feed's live-tail hook (#669). Best-effort: a feed failure never costs the
@@ -280,12 +285,18 @@ class AutomationRunner:
                     turn=None,
                 )
 
+        # The chat sink is turn-time: the run persists into a session (so a rolling chat is
+        # reply-able and the next run sees the reply) **only** when the chat sink is configured.
+        # Otherwise session_id is None and nothing persists — the owner rule that an unchecked
+        # chat sink creates zero chats (#672). silent_act fires no sinks, so it never persists.
+        chat_active = automation.fires_sinks() and "chat" in automation.sinks
+        session_id = _session_for(automation) if chat_active else None
         try:
             turn = await self._agent.run(
                 [ChatMessage(role="user", content=_build_prompt(automation, summaries))],
                 model=automation.model,
                 tenant_id=automation.tenant,
-                session_id=_session_for(automation),
+                session_id=session_id,
                 # The dial, enforced: the turn is handed only tools of these classes.
                 allow=automation.allowed(),
                 automation_id=automation.id,
@@ -315,9 +326,17 @@ class AutomationRunner:
         # Sinks fan out *after* the turn and deterministically — the model produced an
         # answer, it did not get to choose who hears about it. Silent-act hears nobody.
         fired: list[str] = []
+        artifacts: list[EntityRef] = []
         if automation.fires_sinks():
             result = await self._sinks.dispatch(automation, turn.content)
             fired = result.fired
+            artifacts = result.artifacts
+            if chat_active and session_id is not None:
+                # The dispatcher skips chat (it is turn-time); the run already persisted into the
+                # session, so record the session → automation mapping (for the chat list's badge
+                # and grouping) and count chat as fired. Best-effort: the chat already landed.
+                fired = ["chat", *fired]
+                await self._record_session(automation, session_id)
         await self._store.mark_run(automation_id=automation.id, status="ok", ran_at=started)
         return await self._record(
             automation,
@@ -329,7 +348,27 @@ class AutomationRunner:
             output=turn.content,
             turn=turn,
             sinks_fired=fired,
+            artifacts=artifacts,
         )
+
+    async def _record_session(self, automation: Automation, session_id: str) -> None:
+        """Upsert the chat session → automation mapping — best-effort (#672)."""
+        if self._sessions is None:
+            return
+        try:
+            await self._sessions.record(
+                tenant=automation.tenant,
+                session_id=session_id,
+                automation_id=automation.id,
+                name=automation.name,
+                chat_mode=automation.chat_mode,
+            )
+        except Exception as exc:  # metadata is a nicety; the chat itself already persisted
+            log.warning(
+                "automation session metadata not recorded",
+                automation=automation.id,
+                error=str(exc),
+            )
 
     async def _record(
         self,
@@ -343,6 +382,7 @@ class AutomationRunner:
         output: str,
         turn: AgentTurn | None,
         sinks_fired: list[str] | None = None,
+        artifacts: list[EntityRef] | None = None,
     ) -> AutomationRun:
         """Write the ledger entry — the one thing that always happens."""
         duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
@@ -363,6 +403,7 @@ class AutomationRunner:
                 # Recorded even when no sink fired — for silent_act this is the only trace.
                 output=output,
                 sinks_fired=sinks_fired or [],
+                artifacts=artifacts or [],
             )
         )
         # Hand the entry to the live runs feed (#669) — skips included, which is the

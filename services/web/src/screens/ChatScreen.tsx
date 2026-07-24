@@ -9,6 +9,7 @@ import {
   ArrowDown,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleHelp,
   CloudMoon,
   Copy,
@@ -24,6 +25,7 @@ import {
   Trash2,
   WifiOff,
   Wrench,
+  Zap,
 } from "lucide-react";
 import {
   useCallback,
@@ -312,11 +314,15 @@ function SessionRow({
               </span>
             )
           )}
+          {session.automation_id && (
+            <Zap size={12} className="shrink-0 text-accent" aria-label="Automation" />
+          )}
           <span className={cn("min-w-0 truncate", unseen && !running && "font-medium")}>
             {session.title || "untitled"}
           </span>
         </p>
         <p className="text-xs text-ink-faint">
+          {session.automation_name ? `${session.automation_name} · ` : ""}
           {relativeTime(session.last_at)} · {session.message_count} messages
         </p>
       </button>
@@ -374,11 +380,34 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   const matching = (sessions.data ?? []).filter(
     (s) => !needle || (s.title || "untitled").toLowerCase().includes(needle),
   );
+  // A per-run automation's chats collapse under it so a weekly report doesn't scatter dozens of
+  // rows (#672); everything else — user chats and a rolling automation's single thread — stays in
+  // the recency list, an automation one merely badged. A search flattens all of it.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const isGrouped = (s: SessionSummary) => s.automation_id != null && s.chat_mode === "per_run";
+  const perRun = matching.filter(isGrouped);
+  const rest = matching.filter((s) => !isGrouped(s));
+  const perRunGroups = [
+    ...new Map(perRun.map((s) => [s.automation_id ?? "", s.automation_name || "Automation"])),
+  ].map(([id, name]) => ({
+    id,
+    name,
+    items: perRun
+      .filter((s) => (s.automation_id ?? "") === id)
+      .sort((a, b) => b.last_at.getTime() - a.last_at.getTime()),
+  }));
   // Grouped by recency when browsing; a search shows one flat result list instead.
   const groups = RECENCY_BUCKETS.map((bucket) => ({
     bucket,
-    items: matching.filter((s) => recencyBucket(s.last_at) === bucket),
+    items: rest.filter((s) => recencyBucket(s.last_at) === bucket),
   })).filter((g) => g.items.length > 0);
+  const toggleGroup = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const row = (session: SessionSummary) => (
     <SessionRow
@@ -418,14 +447,35 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
           {matching.map(row)}
         </div>
       ) : (
-        groups.map(({ bucket, items }) => (
-          <div key={bucket} className="mb-3">
-            <p className="mb-1 px-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
-              {bucket}
-            </p>
-            <div className="flex flex-col gap-1">{items.map(row)}</div>
-          </div>
-        ))
+        <>
+          {perRunGroups.map((group) => (
+            <div key={group.id} className="mb-3">
+              <button
+                className="flex w-full items-center gap-1.5 rounded-(--radius-field) px-2 py-1 text-xs font-medium uppercase tracking-wide text-ink-faint hover:bg-surface-2 hover:text-ink"
+                onClick={() => toggleGroup(group.id)}
+                aria-expanded={expanded.has(group.id)}
+              >
+                {expanded.has(group.id) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <Zap size={12} className="text-accent" />
+                <span className="min-w-0 flex-1 truncate text-left normal-case">{group.name}</span>
+                <span className="text-ink-faint">{group.items.length}</span>
+              </button>
+              {expanded.has(group.id) && (
+                <div className="mt-1 flex flex-col gap-1 border-l border-edge pl-2">
+                  {group.items.map(row)}
+                </div>
+              )}
+            </div>
+          ))}
+          {groups.map(({ bucket, items }) => (
+            <div key={bucket} className="mb-3">
+              <p className="mb-1 px-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                {bucket}
+              </p>
+              <div className="flex flex-col gap-1">{items.map(row)}</div>
+            </div>
+          ))}
+        </>
       )}
       <Confirm
         open={confirming !== null}

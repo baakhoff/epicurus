@@ -207,6 +207,26 @@ describe("AutomationsScreen", () => {
     expect(body.schedule_trigger).toEqual({ cadence: "daily", hour: 7, weekday: null });
     expect(body.event_trigger).toBeNull();
     expect(body.enabled).toBe(true);
+    // The chat sink is unchecked by default — no chat unless asked (owner rule, #672).
+    expect(body.sinks).not.toContain("chat");
+  });
+
+  it("configures a notes sink target and sends it on create (#672)", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: /New automation/ }));
+
+    const dialog = within(screen.getByRole("dialog"));
+    await userEvent.type(dialog.getByLabelText("Name"), "Report");
+    await userEvent.type(dialog.getByLabelText("Instructions"), "Summarize.");
+    // Checking the notes sink reveals its document-target config.
+    await userEvent.click(dialog.getByLabelText("sink notes"));
+    await userEvent.type(dialog.getByLabelText("Notes document path"), "Reports/Daily");
+    await userEvent.click(dialog.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => expect(api.createAutomation).toHaveBeenCalled());
+    const body = vi.mocked(api.createAutomation).mock.calls[0][0];
+    expect(body.sinks).toContain("notes");
+    expect(body.notes_target).toEqual({ path_pattern: "Reports/Daily", mode: "append" });
   });
 
   it("edits an automation through the same editor", async () => {
@@ -291,6 +311,7 @@ describe("AutomationsScreen", () => {
         output: "",
         sinks_fired: [],
         trigger_entity_refs: [],
+        artifacts: [],
       },
     ];
     renderScreen();

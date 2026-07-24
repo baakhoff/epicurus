@@ -66,7 +66,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.9.0",
+        version="0.9.1",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -157,11 +157,15 @@ def build_module(
     async def _stage(slug: str, operation: str, proposed: str, note: str) -> str:
         clean = _valid_slug(slug)
         if clean is None:
-            return tool_envelope(f"Invalid note slug: {slug!r}", [])
-        try:
-            op = validate_note_operation(operation)
-        except ValueError as exc:
-            return tool_envelope(str(exc), [])
+            # Raise (not a success envelope) so the call is structurally an error: the live
+            # document pane keys `doc.failed` off the MCP call's `isError`, not the returned
+            # text (#690) — a `tool_envelope` here would open the pane on a write that never
+            # happened.
+            raise ValueError(f"Invalid note slug: {slug!r}")
+        # validate_note_operation already raises ValueError on an unknown operation; every
+        # caller below passes a fixed literal, so this never fires today, but propagating it
+        # (rather than wrapping it in a tool_envelope) keeps it consistent if that changes.
+        op = validate_note_operation(operation)
         s = await suggestions.add(
             tenant=tenant,
             slug=clean,
@@ -186,7 +190,10 @@ def build_module(
             await review.approve(s.sid)
         except Exception as exc:
             detail = getattr(exc, "detail", str(exc))
-            return tool_envelope(f"{pending} (review is off but applying failed: {detail})", [])
+            # Raise rather than return a success envelope (#690): the suggestion stays staged
+            # (nothing is lost), but the direct-apply the caller asked for did not happen, so
+            # the pane must not treat `doc.target` as written.
+            raise RuntimeError(f"{pending} (review is off but applying failed: {detail})") from exc
         return tool_envelope(
             f"{verb.capitalize()} note '{clean}' applied directly — review is off.", []
         )

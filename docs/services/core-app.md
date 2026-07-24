@@ -1037,7 +1037,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   above.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):
   `tenant`, `instructions` (nullable). A NULL/blank row falls back to the shipped
-  `DEFAULT_AGENT_INSTRUCTIONS`; resolved per turn and injected first in `Agent._assemble`.
+  `DEFAULT_AGENT_INSTRUCTIONS` — which establishes voice, tool use, and the source-grounding
+  ladder (module data first, then web search, never an unsourced guess, #703); resolved per turn
+  and injected first in `Agent._assemble`.
 - **Postgres `agent_instructions_versions`** — snapshots of the base prompt (ADR-0046 via
   ADR-0093 §3): `id`, `vid`, `tenant`, `content`, `created_at`. Each `set_instructions` records the
   prompt it **replaced** (the first edit therefore captures the shipped default), deduplicated,

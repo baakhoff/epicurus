@@ -12,6 +12,17 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent grounding: local sources first, then the web — never an unsourced guess** (#703) — the
+  shipped default instructions (#497) gain a "Finding answers" source ladder: the operator's module
+  data (knowledge base, notes, calendar, tasks, mail, files) first, then `web_search` when local
+  sources come up empty or a fact may have changed since training, and an explicit never-guess rule
+  (answer from a source, or say plainly nothing was found). `web_search`'s tool description now says
+  *when* to reach for it, not just what it does. Tenants with a customized prompt keep their text —
+  the paragraph can be adopted via Settings → Assistant instructions. `core-app` 0.91.0→0.92.0
+  (MINOR) · `websearch` 0.2.0→0.2.1 (PATCH).
+
 ### Added
 
 - **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the

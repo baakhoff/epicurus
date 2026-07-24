@@ -68,6 +68,19 @@ async def test_custom_default_is_used() -> None:
     assert await store.get_instructions("t1") == "Fallback prompt."
 
 
+async def test_default_encodes_the_source_grounding_ladder() -> None:
+    """#703 pins the policy, not the prose: local sources first, then the web, never a guess.
+
+    Anchors on the load-bearing phrases so the wording can evolve, but a rewrite cannot
+    silently drop the ladder, its order, or the never-guess rule.
+    """
+    text = DEFAULT_AGENT_INSTRUCTIONS.lower()
+    assert "check their modules first" in text
+    assert "search the web" in text
+    assert text.index("modules first") < text.index("search the web")  # local before web
+    assert "guess" in text  # the never-guess rule
+
+
 async def test_init_heals_legacy_table_without_instructions_column() -> None:
     """A pre-existing table missing ``instructions`` is migrated in place (mirrors llm_prefs)."""
     engine = create_async_engine(

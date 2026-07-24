@@ -5,7 +5,7 @@ description = "Storage module — agent file tools over the core file space, Min
 requires-python = ">=3.11"
 dependencies = [
     "epicurus-core",
-    "fastapi>=0.138.2",
+    "fastapi>=0.139.2",
     "uvicorn[standard]>=0.49.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",

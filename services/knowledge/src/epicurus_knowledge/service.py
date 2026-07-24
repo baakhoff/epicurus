@@ -257,7 +257,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.24.0",
+        version="0.24.1",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -369,7 +369,12 @@ def build_module(
             await review.approve(sid)
         except Exception as exc:
             detail = getattr(exc, "detail", str(exc))
-            return tool_envelope(f"{pending_msg} (review is off but applying failed: {detail})", [])
+            # Raise rather than return a success envelope (#690): the suggestion stays staged
+            # (nothing is lost), but the direct-apply the caller asked for did not happen, so
+            # the pane must not treat `doc.target` as written.
+            raise RuntimeError(
+                f"{pending_msg} (review is off but applying failed: {detail})"
+            ) from exc
         return tool_envelope(applied_msg, [])
 
     @module.tool()
@@ -463,11 +468,14 @@ def build_module(
             rel = safe_vault_rel(path)
         except Exception as exc:  # HTTPException(detail=...) from safe_vault_rel
             detail = getattr(exc, "detail", str(exc))
-            return tool_envelope(f"Cannot propose change to {path!r}: {detail}", [])
+            # Raise (not a success envelope) so the call is structurally an error: the live
+            # document pane keys `doc.failed` off the MCP call's `isError`, not the returned
+            # text (#690) — a `tool_envelope` here would open the pane on a write that never
+            # happened.
+            raise ValueError(f"Cannot propose change to {path!r}: {detail}") from exc
         if reject_existing and await reader.exists(rel):
-            return tool_envelope(
-                f"{path!r} already exists — use knowledge_propose_edit to update it instead.",
-                [],
+            raise ValueError(
+                f"{path!r} already exists — use knowledge_propose_edit to update it instead."
             )
         proposed = "" if op == "delete" else content
         suggestion = await suggestions.add(
@@ -537,16 +545,14 @@ def build_module(
         Returns a confirmation that the suggestion was queued, or an error describing why
         the path or operation was rejected.
         """
-        try:
-            op = validate_operation(operation)
-        except ValueError as exc:
-            return tool_envelope(str(exc), [])
+        # validate_operation already raises ValueError on an unknown operation (#690: let it
+        # propagate as the call's structural failure instead of wrapping it in a tool_envelope).
+        op = validate_operation(operation)
         if op not in ("create", "update", "delete"):
-            return tool_envelope(
+            raise ValueError(
                 "knowledge_propose_edit handles create/update/delete only; use"
                 " knowledge_propose_move, knowledge_propose_folder, or"
-                " knowledge_propose_project for structural changes.",
-                [],
+                " knowledge_propose_project for structural changes."
             )
         return await _stage_doc_write(op, path, content, note)
 

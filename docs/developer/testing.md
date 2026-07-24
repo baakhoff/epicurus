@@ -66,8 +66,9 @@ uv run mypy
 uv run pytest
 ```
 
-CI additionally runs a secret scan (gitleaks), validates the compose file,
-lints the observability config (see below), and boots the whole stack (see below).
+CI additionally runs a secret scan (gitleaks), validates the compose file, lints
+every shell script (see below), lints the observability config (see below), and
+boots the whole stack (see below).
 
 ## Observability lint gate
 
@@ -95,6 +96,31 @@ docker run --rm \
   -v "$(pwd)/infra/observability/alertmanager:/alertmanager:ro" \
   prom/alertmanager:v0.27.0 \
   amtool check-config /alertmanager/alertmanager.yml
+```
+
+## Shell-lint gate
+
+Nothing parsed a shell script with a POSIX shell before this gate existed: #675
+shipped a bash array in a script whose every documented invocation is `sh` (dash
+on the deploy box), and every check that ran it — CI included — used Git Bash's
+`sh`, which *is* bash, so the parse error was invisible everywhere but the real
+deploy box (#691). The **shell-lint** CI job runs `shellcheck` over every `*.sh`
+in the repo (discovered via `git ls-files`, not a hardcoded list, so a new script
+is covered automatically), with the shell it checks against inferred from each
+script's own shebang — never assumed.
+
+A script's shebang and its documented invocation must agree, and the script must
+actually be written for that shell (no bash arrays under a `sh`/`dash` target). An
+intentional shellcheck exception (e.g. a deliberately unquoted word-list variable
+standing in for POSIX sh's missing arrays) gets a `# shellcheck disable=SCxxxx`
+comment naming *why*, not a blanket suppression.
+
+To run it locally:
+
+```bash
+uvx --from shellcheck-py shellcheck.exe --shell=bash infra/backups/backup.sh
+uvx --from shellcheck-py shellcheck.exe --shell=sh infra/cd/reconcile.sh
+# ...or just: dash -n <script> for a syntax-only check with no shellcheck install.
 ```
 
 ## Runtime smoke gate

@@ -26,6 +26,29 @@ git push origin v0.2.0
   Maintenance), so good labels and Conventional Commit messages produce good
   notes.
 
+### Pre-release checklist
+
+Work through this before pushing the tag:
+
+- [ ] **CHANGELOG audited** — `[Unreleased]` reconciled against `git log
+      <last-tag>..HEAD` and the merged PR list, so every user-facing change has an
+      entry and the section reads true against actual merged history. Rename
+      `[Unreleased]` to the release version + date, and open a fresh empty
+      `[Unreleased]` above it for what comes next.
+- [ ] **Every merged PR since the last tag carries a `type:*` label** (`type:feat` /
+      `type:fix` / `type:chore` / `type:docs` / `type:test`) — the GitHub Release's
+      auto-generated notes group by this label, so a gap here means a missing or
+      miscategorized line in the public release notes. *Known gap as of the v1.0.0
+      prep: this convention lapsed early on and wasn't consistently applied — verify
+      the actual label coverage before relying on this gate; don't assume it holds.*
+- [ ] **After the workflow runs, verify every `ghcr.io/baakhoff/epicurus-*:{version}`
+      tag actually exists** (one per `services/*/Dockerfile`) before announcing — a
+      green workflow run doesn't guarantee every image published; check the package
+      list itself.
+- [ ] **Call out in the release notes that `:latest`-tracking operators auto-upgrade**
+      — an operator with `EPICURUS_VERSION` unset in `.env` pulls `:latest` on their
+      next reconcile cycle and lands on the new release with no explicit action.
+
 ## Deploying a specific release
 
 All service compose fragments use `${EPICURUS_VERSION:-latest}` for the image

@@ -12,6 +12,8 @@ images to GHCR.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-11
+
 ### Added
 
 - **Web: the Automations page** (#668, stacked on #669) — the operator's controls for the
@@ -1750,6 +1752,15 @@ images to GHCR.
   fan-out this never drops data). Also folded into the manual "Re-embed everything" action
   (ADR-0054) via a new **memory facts re-embed** maintenance job, so an operator-triggered
   re-embed refreshes memory the same way it refreshes knowledge/notes. core-app 0.53.0→0.54.0.
+- **Chat: a failed tool call now shows red in the activity timeline, not a green checkmark**
+  (#451) — the `ToolCallError` path (#440, ADR-0072) returns a tool's own failure message
+  **verbatim** (e.g. `"Error executing tool calendar_update_event: event 'e1' not found"`),
+  which doesn't start with the older `"error: ..."` prefix the activity timeline's status
+  check looked for — so a failed `ToolCallError` call was classified `"ok"` and rendered with
+  a green checkmark even though the tool failed and the model correctly reported the failure.
+  Tool status is now classified **structurally, not textually**: `_invoke` returns `(text,
+  is_error)` instead of overloading the string's prefix, at both the streaming and
+  non-streaming call sites; the text fed to the model is unchanged. core-app 0.54.0→0.54.1.
 - **Facts reconcile no longer drops facts beyond a scan cap** (#450, amends ADR-0074) — the
   #436 dimension-drift reconcile scrolled the collection in a **single, capped pass**
   (`_REBUILD_CAP`, 10,000) and rebuilt the collection from only what that pass returned; any
@@ -1758,6 +1769,35 @@ images to GHCR.
   **pages through the entire collection** following Qdrant's scroll offset until exhausted, so
   every stored fact survives a reconcile regardless of corpus size; the cap now bounds only how
   many points are held in memory per page. core-app 0.54.1→0.54.3.
+- **Web: dogfooding UI batch — calendar button sizing, Files duplicate rows, PWA nav height,
+  bridges gating** (#439) — four small PATCH fixes surfaced by 1.0 dogfooding: the Calendar
+  toolbar's "New event" action now renders at a proportionate `size="sm"` alongside its
+  neighbors, matching `Select`'s existing convention (#427); the installed Files PWA no longer
+  spawns duplicate rows on a folder tap — the item list is now keyed by the current path and a
+  tap is guarded against an immediate touchend+click double-fire (#428); the installed Android
+  PWA's bottom nav no longer gets pushed off-screen right after a reload, since `100dvh` can
+  misreport for a moment — `App.tsx` now mirrors the live `visualViewport` height into
+  `--app-height`, preferred over the raw `dvh` value once set (#429); and the Settings "Chat
+  bridges" card is now gated on the messaging module's `enabled` flag instead of always
+  rendering and polling (#430). web 0.67.0→0.67.1.
+- **Calendar: recurring events (RRULE) and attendees** (#443, closes #432) — `Event` gains
+  `recurrence` (a bare RFC 5545 RRULE, e.g. `FREQ=WEEKLY;COUNT=10`), `recurring_event_id`,
+  `original_start` (an occurrence's unmodified scheduled slot, needed to find/override it even
+  after it's been moved), and `attendees` (email/display name/RSVP status — Google's
+  vocabulary, also iCalendar's PARTSTAT set). `calendar_create_event` accepts `recurrence` and
+  a comma-separated `attendees` string (SchemaForm has no array-field support yet); the RRULE
+  is validated at write time (`dateutil.rrulestr`) so a bad rule fails immediately rather than
+  corrupting a series or 500ing the next read. `calendar_update_event`/`calendar_delete_event`
+  gain an `edit_scope`; the web New-event/Edit forms gain raw `recurrence`/`attendees` fields
+  and `EventDetail` shows a humanized repeat label (`FREQ=WEEKLY` → "Weekly") plus the guest
+  list. Google Meet links and the "this and following" split (a materially harder operation on
+  both providers) are deliberately deferred to follow-ups rather than rushed into this cut.
+  calendar 0.10.4→0.11.0, web 0.68.0→0.69.0.
+- **Infra: a `task reconcile` target for on-box deploys** (#452) — the box deploys by
+  **pulling** GHCR images (`docker compose pull && up -d --remove-orphans`), not a local build,
+  and `task up` (`docker compose up -d`) doesn't pull — a mismatch that made it easy to reach
+  for the wrong command by habit. `task reconcile` wraps the existing `infra/cd/reconcile.sh`
+  script, mirroring the established `task smoke` convention. No versioned component touched.
 - **Uninstalling a module no longer hard-fails when the core can't reach Docker** (#382, amends
   ADR-0028) — "Remove module" returned a **503** ("the core has no Docker access") whenever the
   Docker socket wasn't mounted, leaving no way to remove a module. Removal is now **decoupled from

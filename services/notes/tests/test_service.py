@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EpicurusModule, PlatformClient
@@ -39,7 +41,7 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.9.0"
+    assert manifest.version == "0.9.1"
 
 
 async def test_exposes_write_and_list_tools_but_no_read() -> None:
@@ -104,3 +106,35 @@ async def test_append_and_delete_do_not_open_the_document_pane() -> None:
     assert tools["notes_append"].writes_document is None
     assert tools["notes_delete"].writes_document is None
     assert tools["notes_list"].writes_document is None
+
+
+# ── rejected writes raise, not a success envelope (#690) ─────────────────────
+#
+# `notes_create`/`notes_propose_edit` ride the live document pane: the pane keys `doc.failed`
+# off the MCP call's structural `isError`, not the returned text. Before #690 `_stage`'s guard
+# clauses returned a normal `tool_envelope`, so a rejected write left `is_error=False` and the
+# pane opened an editor over a document that was never created. `pytest.raises(ToolError)` is
+# how FastMCP surfaces a raised exception from inside a `@module.tool()` function (proven
+# pattern: calendar's `test_calendar_update_event_tool_unknown_raises`).
+
+
+async def test_create_rejects_invalid_slug_by_raising() -> None:
+    with pytest.raises(ToolError, match="Invalid note slug"):
+        await _module().mcp.call_tool("notes_create", {"slug": "", "content": "x"})
+
+
+async def test_apply_failure_raises_not_a_success_envelope() -> None:
+    """Review off + a failed direct-apply must fail the call. The suggestion stays staged
+    either way (`_stage`'s auto-apply comment) — but the pane must not treat `doc.target` as
+    written when the apply it asked for did not happen."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store, sugg = NotesStore(engine), NoteSuggestionStore(engine)
+    await store.init()
+    await sugg.init()
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=False)  # review is off
+    review = AsyncMock(spec=NoteSuggestionReview)
+    review.approve = AsyncMock(side_effect=RuntimeError("disk full"))
+    module = build_module(store, sugg, review, platform, tenant="test")
+    with pytest.raises(ToolError, match=r"applying failed.*disk full"):
+        await module.mcp.call_tool("notes_create", {"slug": "a-note", "content": "hello"})

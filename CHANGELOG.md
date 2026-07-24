@@ -299,6 +299,22 @@ images to GHCR.
   arrays, `CDPATH= cd`, sourcing a `mktemp` path) marked with `# shellcheck disable=SCxxxx` /
   `# shellcheck source=/dev/null` naming why. No component bump (CI/docs only).
 
+- **Knowledge/notes: a rejected write returned a success envelope, so the live document pane
+  could open on content that was never written** (#690). `knowledge_create_document` /
+  `knowledge_propose_edit`'s `_stage_doc_write` (a bad path, an already-existing path) and
+  their shared `_finalize` (a failed review-off self-apply), plus notes' equivalent `_stage`
+  (an invalid slug, the same failed self-apply), all caught the rejection and returned a
+  normal `tool_envelope` — so the call read as `is_error=False` to the agent loop, and the
+  document pane (#541, ADR-0101) keys `doc.failed` off exactly that structural signal, not
+  the reply text. A rejected write with review off would open the pane's editor over stale
+  (update) or nonexistent (create) content. These paths now raise instead, so FastMCP reports
+  `isError` and the pane correctly shows "the write failed." The suggestion itself is
+  unaffected — a failed self-apply still leaves it staged, nothing is lost. Swept mail,
+  calendar, tasks, and storage for the same "error path reuses the success constructor"
+  shape; none had it — their write tools already raise directly, and their only
+  `tool_envelope`-on-empty-result usages are legitimate (no rejection involved). `knowledge`
+  0.24.0→0.24.1 (PATCH), `notes` 0.9.0→0.9.1 (PATCH).
+
 - **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
   but that file doesn't exist in the public tree** (#661). The real document was always the
   gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the

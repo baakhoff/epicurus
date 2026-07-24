@@ -17,6 +17,12 @@ one URL from multiple engines) are collapsed before refs are built; two separate
 calls surfacing the same result encode to the same `ref_id`, so the core's
 cross-call entity-ref dedup (`_RefCollector`) merges them into one chip.
 
+**v0.2.1** (#703): the tool description now tells the agent *when* to reach for
+the web — whenever a fact cannot be grounded in the operator's own data or may
+have changed since training — matching the source-grounding ladder the core's
+default agent instructions gained in the same change. The tool's behavior is
+unchanged.
+
 ## What it is
 
 The module adds two containers to the stack:
@@ -33,7 +39,7 @@ The module adds two containers to the stack:
 
 | Tool | Description |
 | ---- | ----------- |
-| `web_search(query, num_results?)` | Search the web for `query`; returns up to `num_results` results (default: configured max, capped at 20) as a `ToolEnvelope`. |
+| `web_search(query, num_results?)` | Search the web for `query`; returns up to `num_results` results (default: configured max, capped at 20) as a `ToolEnvelope`. The description steers the agent to search whenever a fact can't be grounded locally or may have changed since training (#703). |
 
 #### `web_search` return shape
 

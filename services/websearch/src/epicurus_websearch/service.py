@@ -3,8 +3,9 @@
 Registers one tool the agent can call:
 
 * ``web_search`` — query SearXNG and return ranked web results (title, url,
-  snippet, engine) so the agent can answer current-events questions and cite
-  sources. Each result also becomes a chat entity-reference chip (#551,
+  snippet, engine) so the agent can answer current-events questions, ground
+  anything it cannot source locally (#703), and cite sources. Each result
+  also becomes a chat entity-reference chip (#551,
   ADR-0019) the operator can hover for a preview and click to open in a new
   tab — resolved statelessly via ``epicurus_websearch.refs``.
 """
@@ -43,7 +44,7 @@ def build_module(client: SearXNGClient, max_results: int = 5) -> EpicurusModule:
     """Build the websearch module and register its tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.2.1",
         description="Self-hosted web search via SearXNG — no API key required.",
         resolver=True,
         ui=UiSection(
@@ -81,6 +82,12 @@ def build_module(client: SearXNGClient, max_results: int = 5) -> EpicurusModule:
     @module.tool()
     async def web_search(query: str, num_results: int = max_results) -> str:
         """Search the web for *query* and return ranked results.
+
+        Reach for this whenever the answer is not in the operator's own data
+        or could have changed since training: current events, releases,
+        prices, schedules, or any fact you cannot ground in a local source.
+        Prefer searching over answering from memory — never guess when you
+        can look something up.
 
         Queries the self-hosted SearXNG instance and returns up to *num_results*
         results, each with title, URL, and snippet, so the agent can cite its

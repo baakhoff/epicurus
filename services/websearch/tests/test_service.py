@@ -125,6 +125,17 @@ async def test_manifest_tool_describes_query_param() -> None:
     assert "query" in tool.input_schema.get("properties", {})
 
 
+async def test_manifest_tool_description_says_when_to_search() -> None:
+    """#703: the description carries when-to-reach-for-it guidance, not just what the tool does."""
+    client = _make_client([])
+    module = build_module(client)
+    manifest = await module.manifest()
+    (tool,) = [t for t in manifest.tools if t.name == "web_search"]
+    description = (tool.description or "").lower()
+    assert "never guess" in description
+    assert "operator's own data" in description
+
+
 async def test_default_max_results_respected() -> None:
     """max_results passed to build_module becomes the tool default."""
     client = _make_client(SAMPLE_RESULTS)

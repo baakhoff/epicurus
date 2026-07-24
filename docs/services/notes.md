@@ -67,8 +67,10 @@ directly; the operator approves or rejects it in the **Note suggestions** page:
 | `notes_delete(slug, note="")` | `slug`; `note` | A confirmation that a `delete` was staged; the note is removed only on approval. |
 
 There is **deliberately no read/get tool** — a note's content reaches the agent only via
-attach (see below). A slug is validated (non-empty, ≤ 512 chars, no control characters);
-an invalid slug or operation comes back as an error, not a staged suggestion.
+attach (see below). A slug is validated (non-empty, ≤ 512 chars, no control characters); an
+invalid slug or operation **fails the call** (a raised error, MCP `isError`) rather than
+returning a success-shaped result — the live document pane keys off that structural signal,
+not the reply text, so a rejected write must never look like a staged suggestion (#690).
 
 ### Chat attachments (ADR-0019)
 
@@ -138,7 +140,10 @@ approve its own proposals.
 **on** (the default), agent proposals stage here for approval as described above. When **off**,
 the propose tools **apply the change directly** (the module reads the setting via its
 `PlatformClient` and, if review is off, immediately approves its own staged suggestion through
-the same apply path) and the tool reply says so. The operator's editor saves are immediate
+the same apply path) and the tool reply says so. If that direct apply fails, the suggestion
+stays staged (nothing is lost) but the call itself fails the same way an invalid slug does
+(#690) — the caller asked for an immediate write and it did not happen, so the reply must
+say so structurally, not just in the text. The operator's editor saves are immediate
 regardless — the toggle only governs the **agent's** writes. If the setting can't be read the
 module defaults to the safe path (review on).
 

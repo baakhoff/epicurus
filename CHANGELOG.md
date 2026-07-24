@@ -280,6 +280,41 @@ images to GHCR.
 
 ### Fixed
 
+- **CI: no gate ever parsed a shell script with a POSIX shell** (#691). #675 shipped a bash
+  array in `infra/cd/reconcile.sh` — invoked as `sh infra/cd/reconcile.sh` everywhere (its own
+  header comment, the `task reconcile` Taskfile entry, and both scheduled-task lines in
+  `docs/infrastructure/auto-deploy.md`), and on the deploy box's real `/bin/sh` (dash) a bash
+  array is a parse error — but every check, CI included, ran under Git Bash's `sh`, which *is*
+  bash, so the bug was invisible everywhere but production. New **shell-lint** CI job runs
+  `shellcheck` over every `*.sh` (discovered via `git ls-files`, not a hardcoded list), with the
+  shell it checks against inferred from each script's own shebang. Fixed the live mismatch this
+  surfaced: `reconcile.sh`'s shebang said `bash` while every invocation and its own content
+  (already rewritten to POSIX positional parameters, no arrays) said `sh` — corrected the
+  shebang to match, and dropped `pipefail` from its `set` line (undefined in POSIX sh; Debian
+  dash rejects it outright, which would have been the exact same silent-until-production
+  failure this gate exists to catch). Also cleaned up the two other findings the gate's first
+  real run turned up: `infra/backups/backup.sh`'s `ls | grep` (rewritten as a plain Python
+  `os.listdir` filter) and a few intentional-but-unflagged-until-now `infra/ci/smoke.sh`
+  patterns (a deliberately unquoted service-name word list standing in for POSIX sh's missing
+  arrays, `CDPATH= cd`, sourcing a `mktemp` path) marked with `# shellcheck disable=SCxxxx` /
+  `# shellcheck source=/dev/null` naming why. No component bump (CI/docs only).
+
+- **Knowledge/notes: a rejected write returned a success envelope, so the live document pane
+  could open on content that was never written** (#690). `knowledge_create_document` /
+  `knowledge_propose_edit`'s `_stage_doc_write` (a bad path, an already-existing path) and
+  their shared `_finalize` (a failed review-off self-apply), plus notes' equivalent `_stage`
+  (an invalid slug, the same failed self-apply), all caught the rejection and returned a
+  normal `tool_envelope` — so the call read as `is_error=False` to the agent loop, and the
+  document pane (#541, ADR-0101) keys `doc.failed` off exactly that structural signal, not
+  the reply text. A rejected write with review off would open the pane's editor over stale
+  (update) or nonexistent (create) content. These paths now raise instead, so FastMCP reports
+  `isError` and the pane correctly shows "the write failed." The suggestion itself is
+  unaffected — a failed self-apply still leaves it staged, nothing is lost. Swept mail,
+  calendar, tasks, and storage for the same "error path reuses the success constructor"
+  shape; none had it — their write tools already raise directly, and their only
+  `tool_envelope`-on-empty-result usages are legitimate (no rejection involved). `knowledge`
+  0.24.0→0.24.1 (PATCH), `notes` 0.9.0→0.9.1 (PATCH).
+
 - **Infra: `docs/DEPLOYMENT.md` was referenced from shipped operator UI and a compose comment,
   but that file doesn't exist in the public tree** (#661). The real document was always the
   gitignored `.workspace/docs/DEPLOYMENT.md` — since the repo went public, anyone following the

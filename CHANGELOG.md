@@ -12,6 +12,30 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
+  operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
+  only source for a hosted model's vision support and context length, and it is missing ids
+  entirely (`grok/grok-latest`, which resolves to an unmapped `xai/grok-latest`) and mislabels
+  others; the consequence was concrete — `supports_vision()` resolved `False` and the image gate
+  (#633) refused image turns for a genuinely vision-capable model, leaving "rename your model to
+  a mapped id" as the workaround. The override is consulted **before** the map in both
+  `supports_vision()` and `_hosted_details`, and applies even when the map lookup fails outright
+  — an unmapped id is precisely the case it exists for, so that path must not be the one that
+  skips it. `vision: auto` (the default) with no `context_length` is today's behaviour exactly,
+  so an absent override changes nothing. New `PUT /platform/v1/llm/saved-models/capabilities`
+  (404 for an unsaved id — an override is a property of a saved row, never a way to create one);
+  `GET /saved-models` rows now carry both the **resolved** capabilities and the raw `override`,
+  so the editor round-trips without a client-side merge. The Models page's hosted-model sheet
+  gains the controls, and the saved rows finally render capability badges (they never did) —
+  driven by the resolved answer, so an override shows the moment it's saved. Two new columns on
+  `saved_models`, reconciled additively (ADR-0067). Gating and display only: routing, keys, and
+  metering are untouched (constraint #8). The `get_model_info`/`supports_vision` lookup misses
+  now warn **once per model id per process** and debug thereafter — an operator-saved alias
+  outside a curated static map is expected, not anomalous. `core-app` 0.92.1→0.93.0 (MINOR) ·
+  `web` 0.118.0→0.119.0 (MINOR).
+
 ### Fixed
 
 - **Model catalog: re-anchored on the library's current markup** (#710) — the public model

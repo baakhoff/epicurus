@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -23,6 +23,7 @@ from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsSto
 from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.saved_models import SavedHostedModelStore, SavedModelOverride
 
 
 class _FakeSecrets:
@@ -80,6 +81,7 @@ def _gateway(
     num_ctx: int | None = None,
     prefs: LlmPrefsStore | None = None,
     model_settings: ModelSettingsStore | None = None,
+    saved_models: SavedHostedModelStore | None = None,
 ) -> LlmGateway:
     return LlmGateway(
         ollama_url="http://ollama:11434",
@@ -97,6 +99,7 @@ def _gateway(
         num_ctx=num_ctx,
         prefs=prefs,
         model_settings=model_settings,
+        saved_models=saved_models,
     )
 
 
@@ -1538,3 +1541,185 @@ async def test_embed_device_cpu_sets_num_gpu_zero(monkeypatch: pytest.MonkeyPatc
     await ms.set("local", "nomic-embed-text", ModelSettings(device="cpu"))
     await _gateway(model_settings=ms).embed(["hi"], model="nomic-embed-text")
     assert captured["num_gpu"] == 0
+
+
+# ── per-saved-model capability overrides (#711) ────────────────────────────────
+#
+# LiteLLM's static cost map omits ids entirely (xai/grok-latest) and mislabels others, which made
+# supports_vision() resolve False and the image gate (#633) refuse a genuinely vision-capable
+# model. The operator's override is consulted *before* the map, everywhere the map is consulted.
+
+
+async def _saved_store(overrides: dict[str, SavedModelOverride]) -> SavedHostedModelStore:
+    """A real store seeded with saved models + their overrides (file-free in-memory SQLite)."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    store = SavedHostedModelStore(engine)
+    await store.init()
+    for model, override in overrides.items():
+        await store.add("local", model)
+        await store.set_override("local", model, override)
+    return store
+
+
+async def test_vision_override_on_beats_an_unmapped_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headline case: an id LiteLLM has never heard of still accepts image turns."""
+    called = False
+
+    def boom(model: str) -> bool:
+        nonlocal called
+        called = True
+        raise Exception("This model isn't mapped yet.")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.supports_vision", boom)
+    store = await _saved_store({"grok/grok-latest": SavedModelOverride(vision="on")})
+    assert await _gateway(saved_models=store).supports_vision("grok/grok-latest") is True
+    # The map isn't even consulted once the operator has answered the question.
+    assert called is False
+
+
+async def test_vision_override_off_beats_a_map_that_says_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.supports_vision", lambda model: True)
+    store = await _saved_store({"gpt/gpt-4o": SavedModelOverride(vision="off")})
+    assert await _gateway(saved_models=store).supports_vision("gpt/gpt-4o") is False
+
+
+async def test_vision_auto_falls_back_to_the_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.supports_vision", lambda model: True)
+    # A saved model whose override is explicitly "auto" (and a context length set) still asks
+    # the map about vision — the two fields are independent.
+    store = await _saved_store({"gpt/gpt-4o": SavedModelOverride(context_length=99)})
+    assert await _gateway(saved_models=store).supports_vision("gpt/gpt-4o") is True
+
+
+async def test_vision_is_unchanged_for_a_model_with_no_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "epicurus_core_app.llm.gateway.litellm.supports_vision", lambda model: False
+    )
+    store = await _saved_store({"grok/grok-latest": SavedModelOverride(vision="on")})
+    # The override is per-model: a *different* saved id keeps the map's answer.
+    assert await _gateway(saved_models=store).supports_vision("gpt/gpt-4o") is False
+
+
+async def test_no_store_wired_is_todays_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.supports_vision", lambda model: True)
+    assert await _gateway().supports_vision("gpt/gpt-4o") is True
+
+
+async def test_a_broken_store_degrades_to_the_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A capability *hint* must never be able to break a capability *check*."""
+
+    class _BrokenStore:
+        async def get_override(self, tenant: str, model: str) -> SavedModelOverride:
+            raise RuntimeError("database is gone")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.supports_vision", lambda model: True)
+    gateway = _gateway(saved_models=cast("Any", _BrokenStore()))
+    assert await gateway.supports_vision("gpt/gpt-4o") is True
+
+
+async def test_show_applies_the_override_over_the_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_model_info(model: str) -> dict[str, Any]:
+        return {"max_input_tokens": 8_000, "supports_vision": False}
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
+    store = await _saved_store(
+        {"grok/grok-latest": SavedModelOverride(vision="on", context_length=256_000)}
+    )
+    details = await _gateway(saved_models=store).show("grok/grok-latest")
+    assert details.capabilities == ["tools", "vision"]
+    assert details.context_length == 256_000
+
+
+async def test_show_applies_the_override_even_when_the_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An id absent from the map is exactly what the override exists for — so the failure path
+    must not be the one path that skips it."""
+
+    def boom(model: str) -> dict[str, Any]:
+        raise Exception("This model isn't mapped yet.")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", boom)
+    store = await _saved_store(
+        {"grok/grok-latest": SavedModelOverride(vision="on", context_length=256_000)}
+    )
+    details = await _gateway(saved_models=store).show("grok/grok-latest")
+    assert details.capabilities == ["tools", "vision"]
+    assert details.context_length == 256_000
+
+
+async def test_show_without_an_override_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_model_info(model: str) -> dict[str, Any]:
+        return {"max_input_tokens": 200_000, "supports_vision": True}
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
+    store = await _saved_store({"grok/grok-latest": SavedModelOverride(vision="off")})
+    details = await _gateway(saved_models=store).show("claude/claude-3-7-sonnet-20250219")
+    assert details.capabilities == ["tools", "vision"]
+    assert details.context_length == 200_000
+
+
+class _RecordingLog:
+    """Records level + fields per call.
+
+    Asserted against directly rather than through ``structlog.testing.capture_logs``: the app
+    configures structlog with ``cache_logger_on_first_use=True``, so whichever test boots it
+    first freezes the gateway module's bound logger and a later ``capture_logs()`` silently
+    intercepts nothing — the assertion would pass alone and fail in a full run.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def warning(self, event: str, **fields: Any) -> None:
+        self.calls.append(("warning", event, fields))
+
+    def debug(self, event: str, **fields: Any) -> None:
+        self.calls.append(("debug", event, fields))
+
+    def levels(self) -> list[str]:
+        return [level for level, _, _ in self.calls]
+
+
+async def test_an_unmapped_model_warns_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator-saved alias outside the map is expected — worth one warning, not a stream."""
+
+    def boom(model: str) -> dict[str, Any]:
+        raise Exception("This model isn't mapped yet.")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", boom)
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.log", recorder)
+    gateway = _gateway()
+    for _ in range(4):
+        await gateway.show("custom/some-unlisted-model")
+    await gateway.show("custom/another-unlisted-model")
+
+    # First sighting of each distinct id warns; the repeats drop to debug.
+    assert recorder.levels() == ["warning", "debug", "debug", "debug", "warning"]
+    warned = [f["model"] for level, _, f in recorder.calls if level == "warning"]
+    assert warned == ["openai/some-unlisted-model", "openai/another-unlisted-model"]
+
+
+async def test_the_unmapped_model_memo_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``model`` reaches the gateway from a route query param, so the memo can't grow forever."""
+
+    def boom(model: str) -> dict[str, Any]:
+        raise Exception("This model isn't mapped yet.")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", boom)
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.log", _RecordingLog())
+    gateway = _gateway()
+    for i in range(600):
+        await gateway.show(f"custom/unlisted-{i}")
+    assert len(gateway._unmapped_models) <= 512

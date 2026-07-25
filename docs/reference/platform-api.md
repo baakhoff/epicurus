@@ -153,17 +153,21 @@ client-side, not here (`sortByPageOrder` in `src/app/registry.ts`). Both take an
 
 ---
 
-## `GET` · `POST` · `DELETE /platform/v1/llm/saved-models`
+## `GET` · `POST` · `DELETE /platform/v1/llm/saved-models` · `PUT …/capabilities`
 
 The operator's saved hosted-model ids (#496) — a tenant-scoped, durable home for the hosted
 model strings entered in the chat picker, so they survive restarts / a PWA reinstall and follow
 the tenant across devices (unlike the browser's per-origin `recentModels` localStorage cache).
 
-- **`GET`** → `{models: [{model, provider, context_length, capabilities}]}`, most-recently-saved
-  first. `provider` is the id's `<provider>/` prefix (for grouping on the Models page).
-  `context_length`/`capabilities` (#618) come from LiteLLM's own model-cost map — the same source
-  `/models/details` uses for a hosted id — always included (a static lookup, never a network
-  call); `null`/empty when the model isn't in that map, never a fake default.
+- **`GET`** → `{models: [{model, provider, context_length, capabilities, override}]}`,
+  most-recently-saved first. `provider` is the id's `<provider>/` prefix (for grouping on the
+  Models page). `context_length`/`capabilities` (#618) come from LiteLLM's own model-cost map —
+  the same source `/models/details` uses for a hosted id — always included (a static lookup,
+  never a network call); `null`/empty when the model isn't in that map, never a fake default.
+  These are the **resolved** values: any `override` is already applied, so a client renders
+  badges straight from them and never merges the two itself. `override` is
+  `{vision: "auto"|"on"|"off", context_length: int|null}` — what the operator set, so an editor
+  round-trips; all-defaults means "trust the map".
 - **`POST {model}`** persists one id, idempotent — an **atomic upsert** (a re-save bumps it to the
   front; two concurrent first-saves of the same id can't race between the read and the write to a
   500). **400**s anything that isn't a *hosted* id — a known `<provider>/` prefix followed by a
@@ -175,9 +179,25 @@ the tenant across devices (unlike the browser's per-origin `recentModels` localS
   default keeps pointing at it (still valid for inference, just no longer *listed*); change or clear
   the default separately via `PUT …/prefs/default`.
 
-Backed by the tenant-scoped `saved_models` table. The chat picker renders this list (auto-saving
-on use), the Models page lists it (remove / set-as-default), and module model slots offer it
-(ADR-0029). Mutations **503** when the store is unavailable.
+- **`PUT …/saved-models/capabilities {model, vision, context_length}`** (#711) sets one saved
+  model's **capability override** — the operator's correction to what the core believes about a
+  model. LiteLLM's cost map is a curated static list: it omits ids entirely (`grok/grok-latest`,
+  which resolves to an unmapped `xai/grok-latest`) and mislabels others, and the consequence is
+  that `supports_vision()` resolves `False` and the image gate (#633) refuses image turns for a
+  model that would have handled them. `vision` is `"auto"` (trust the map — the default and the
+  pre-override behaviour), `"on"`, or `"off"`; `context_length` is the model's **declared**
+  window (a badge, and the ceiling on the context suggestion), *not* the compaction budget you
+  choose to send — that is `PUT …/model-settings`'s `context_window`. `"auto"` with a null
+  `context_length` clears the override. **404** for an id the tenant hasn't saved (an override is
+  a property of a saved row, never a way to create one); **422** for a `vision` outside the
+  vocabulary or a non-positive `context_length`. The gateway consults the override **before** the
+  map in both `supports_vision()` and the hosted-details lookup, including when that lookup fails
+  outright. Gating and display only — routing, keys, and metering are untouched.
+
+Backed by the tenant-scoped `saved_models` table (the override lives in two nullable columns on
+the same row, so forgetting a model forgets its override). The chat picker renders this list
+(auto-saving on use), the Models page lists it (remove / set-as-default / edit capabilities), and
+module model slots offer it (ADR-0029). Mutations **503** when the store is unavailable.
 
 ## `GET /platform/v1/llm/catalog` · `GET /platform/v1/llm/catalog/variants`
 

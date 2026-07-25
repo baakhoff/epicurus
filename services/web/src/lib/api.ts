@@ -65,6 +65,7 @@ import {
   TimezonePrefs,
   type ChannelPrefs,
   type PowerState,
+  type SavedModelOverride,
 } from "@/lib/contracts";
 import { epFetch } from "@/lib/http";
 import { parseFrame, sseRequest } from "@/lib/sse";
@@ -414,6 +415,20 @@ export const api = {
     request(z.object({ status: z.string() }), "/platform/v1/llm/saved-models", {
       method: "POST",
       body: JSON.stringify({ model }),
+    }),
+  // Correct what the core believes a saved hosted model can do (#711) — LiteLLM's static cost
+  // map omits some ids and mislabels others, which makes the image gate refuse a vision-capable
+  // model. `vision: "auto"` with a null context_length clears the override back to the map's
+  // answers. 404s for an id that isn't saved: an override is a property of a saved row, never a
+  // way to create one.
+  setSavedModelOverride: (model: string, override: SavedModelOverride) =>
+    request(z.object({ status: z.string() }), "/platform/v1/llm/saved-models/capabilities", {
+      method: "PUT",
+      body: JSON.stringify({
+        model,
+        vision: override.vision,
+        context_length: override.context_length ?? null,
+      }),
     }),
   // Forget a saved hosted model. `model` is a query param — ids carry "/" and ":" which
   // proxies may mangle in a path (mirrors deleteModel).

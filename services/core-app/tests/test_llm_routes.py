@@ -28,7 +28,7 @@ class _StubGateway:
     def __init__(self) -> None:
         self.unloaded: list[str | None] = []
 
-    async def show(self, model: str) -> ModelDetails:
+    async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
         return ModelDetails(
             quantization="Q4_K_M", parameter_size="8.0B", context_length=131072, family="llama"
         )
@@ -624,6 +624,8 @@ async def test_saved_models_add_persists_with_provider() -> None:
                 "provider": "claude",
                 "context_length": 131072,
                 "capabilities": [],
+                # No override set — the defaults say "trust the map" (#711).
+                "override": {"vision": "auto", "context_length": None},
             }
         ]
     }
@@ -633,7 +635,7 @@ async def test_saved_models_enriches_each_from_its_own_show_call() -> None:
     """Each saved model gets *its own* details, not one blob reused for every row (#618)."""
 
     class _PerModelGateway(_StubGateway):
-        async def show(self, model: str) -> ModelDetails:
+        async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
             return {
                 "claude/claude-3-7-sonnet-20250219": ModelDetails(
                     context_length=200000, capabilities=["tools", "vision"]
@@ -714,3 +716,87 @@ async def test_saved_models_mutations_without_store_are_503() -> None:
         )
     assert post.status_code == 503
     assert delete.status_code == 503
+
+
+# ── saved-model capability overrides (#711) ───────────────────────────────────
+
+
+async def test_capability_override_round_trips_the_editor() -> None:
+    """The editor's contract: what you PUT comes back on the next list, verbatim."""
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
+        put = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "vision": "on", "context_length": 256000},
+        )
+        assert put.status_code == 200
+        get = await client.get("/platform/v1/llm/saved-models")
+    row = next(m for m in get.json()["models"] if m["model"] == "grok/grok-latest")
+    assert row["override"] == {"vision": "on", "context_length": 256000}
+
+
+async def test_capability_override_auto_clears_back_to_the_map() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
+        await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "vision": "on", "context_length": 256000},
+        )
+        cleared = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "vision": "auto", "context_length": None},
+        )
+        assert cleared.status_code == 200
+        get = await client.get("/platform/v1/llm/saved-models")
+    row = next(m for m in get.json()["models"] if m["model"] == "grok/grok-latest")
+    assert row["override"] == {"vision": "auto", "context_length": None}
+
+
+async def test_capability_override_404s_for_an_unsaved_model() -> None:
+    """An override is a property of a saved row — never a back door to creating one."""
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        put = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "gpt/never-saved", "vision": "on"},
+        )
+        get = await client.get("/platform/v1/llm/saved-models")
+    assert put.status_code == 404
+    assert get.json() == {"models": []}
+
+
+async def test_capability_override_rejects_a_bad_vision_value() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
+        bad_vision = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "vision": "maybe"},
+        )
+        bad_context = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "vision": "auto", "context_length": 0},
+        )
+    assert bad_vision.status_code == 422
+    assert bad_context.status_code == 422  # a window of zero tokens is not a window
+
+
+async def test_capability_override_503s_without_a_store() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=None)), base_url="http://test"
+    ) as client:
+        put = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "vision": "on"},
+        )
+    assert put.status_code == 503

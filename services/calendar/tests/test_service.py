@@ -722,7 +722,42 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
 async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.16.0"
+    assert manifest.version == "0.18.0"
+
+
+async def test_manifest_declares_read_tool_side_effects(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105) —
+    # unannotated defaults to "write" (docs/reference/automations.md).
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["calendar_list_events"] == "read"
+    assert classes["calendar_find_free"] == "read"
+
+
+async def test_manifest_declares_automation_templates(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    # The Templates-tab contract (#705, ADR-0105). Declaring these creates nothing.
+    module = build_module(local_provider, tenant_id="t1")
+    manifest = await module.manifest()
+    templates = {t.key: t for t in manifest.automation_templates}
+    assert set(templates) == {"tomorrow-at-a-glance", "on-event-starting-soon"}
+
+    glance = templates["tomorrow-at-a-glance"]
+    assert glance.trigger == {"cadence": "daily", "hour": 18}
+    assert glance.autonomy == "notify"
+    assert glance.sinks == ["push"]
+
+    starting_soon = templates["on-event-starting-soon"]
+    assert starting_soon.trigger == {
+        "module": "calendar",
+        "event_type": "calendar.event_starting_soon",
+    }
+    assert starting_soon.autonomy == "notify"
+    assert starting_soon.sinks == ["push"]
 
 
 async def test_manifest_declares_calendar_oauth_scope(

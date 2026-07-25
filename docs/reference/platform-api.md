@@ -196,6 +196,12 @@ tenant-scoped (both mirror a public registry).
   tags must be ignored, not rejected. A `cloud` tag marks a **cloud-only** model: no local
   weights (its only upstream tag is a cloud alias) — the UI badges it, offers no Pull, and skips
   fit. `stale` flags a seed / last-good snapshot after a failed or skipped refresh.
+  `params` carries the size label exactly as upstream publishes it — which is **not** always
+  `<number>b`: mixture-of-experts families publish `8x7b` / `128x17b` and some families publish
+  "effective" sizes `e2b` / `e4b` (#710). Treat it as an opaque string appended after the `:`.
+  A persistently failing refresh is logged **once per streak**, not once per interval, so
+  `stale: true` with a quiet log is expected — the snapshot flag, not the log volume, is the
+  signal to read.
 - **`GET /llm/catalog/variants?model=…`** → `{model, variants: [{tag, quant, size_gb}]}`, the
   pullable quantizations of the given model (`model` is a query param — names carry `:`).
   `quant` is the parsed quant label (`q8_0`, `fp16`, … — `""` for the default build) and

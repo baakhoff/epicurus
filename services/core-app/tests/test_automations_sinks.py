@@ -66,6 +66,7 @@ class _FakeAgent:
         session_id: str | None = None,
         allow: frozenset[str] | None = None,
         automation_id: str | None = None,
+        quiet_capable: bool = False,
     ) -> AgentTurn:
         self.calls.append({"session_id": session_id, "automation_id": automation_id})
         return AgentTurn(

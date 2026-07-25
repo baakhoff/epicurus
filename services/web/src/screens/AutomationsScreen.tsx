@@ -181,6 +181,20 @@ function KillSwitchCard() {
 
 /* ── per-automation run history ──────────────────────────────────────────── */
 
+/** Badge tone for a ledger outcome — `quiet` (#706) reads as neutral, not a failure. */
+function runOutcomeTone(outcome: string): "ok" | "warn" | "dim" | "danger" {
+  switch (outcome) {
+    case "ok":
+      return "ok";
+    case "skipped":
+      return "warn";
+    case "quiet":
+      return "dim";
+    default:
+      return "danger";
+  }
+}
+
 function RunHistory({ automation }: { automation: Automation }) {
   const runs = useQuery({
     queryKey: ["automation-runs", automation.id],
@@ -201,15 +215,13 @@ function RunHistory({ automation }: { automation: Automation }) {
                 {shortWhen(run.started_at)}
               </span>
               <span className="shrink-0 text-ink-dim">{run.filter_verdict}</span>
-              <Badge
-                tone={
-                  run.outcome === "ok" ? "ok" : run.outcome === "skipped" ? "warn" : "danger"
-                }
-                className="shrink-0 font-mono uppercase"
-              >
+              <Badge tone={runOutcomeTone(run.outcome)} className="shrink-0 font-mono uppercase">
                 {run.outcome}
               </Badge>
               {run.error && <span className="break-all text-warn">{run.error}</span>}
+              {run.quiet_reason && (
+                <span className="break-all text-ink-faint">{run.quiet_reason}</span>
+              )}
               {run.duration_ms != null && (
                 <span className="shrink-0 text-ink-faint">{run.duration_ms} ms</span>
               )}
@@ -361,6 +373,7 @@ function draftFrom(seed: EditorSeed): AutomationDraft {
       notes_target: a.notes_target ?? null,
       kb_target: a.kb_target ?? null,
       enabled: a.enabled,
+      agent_gated_delivery: a.agent_gated_delivery,
     };
   }
   if (seed.kind === "template") {
@@ -395,6 +408,7 @@ function draftFrom(seed: EditorSeed): AutomationDraft {
       notes_target: null,
       kb_target: null,
       enabled: true,
+      agent_gated_delivery: false,
     };
   }
   return {
@@ -413,6 +427,7 @@ function draftFrom(seed: EditorSeed): AutomationDraft {
     notes_target: null,
     kb_target: null,
     enabled: true,
+    agent_gated_delivery: false,
   };
 }
 
@@ -909,6 +924,19 @@ function AutomationEditor({ seed, onClose }: { seed: EditorSeed; onClose: () => 
             onChange={(t) => patch({ kb_target: t })}
           />
         )}
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <Switch
+            checked={draft.agent_gated_delivery}
+            onChange={(agent_gated_delivery) => patch({ agent_gated_delivery })}
+            label="Agent decides delivery"
+          />
+          Agent decides delivery
+        </label>
+        <span className="text-xs text-ink-faint">
+          Off (default): every run delivers to the sinks above. On: the run may skip delivery
+          when it decides there is nothing worth telling you — the ledger still records it as
+          "quiet", with its reason.
+        </span>
       </div>
 
       {/* ── caps ── */}

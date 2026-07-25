@@ -312,6 +312,12 @@ streaming path can present a draft; the **non-streaming** loop (`POST /chat`, th
 has no review pane, so it degrades — the model is told the draft can't be sent from that channel
 rather than being fed the raw envelope (nothing is transmitted regardless).
 
+**Not on this list: `finish_quiet`.** It looks like a fifth built-in but isn't registered as one —
+`register_builtin`'s tools are offered to *every* turn (filtered only by the autonomy dial, which an
+ordinary chat turn bypasses entirely), and `finish_quiet` must never reach a plain chat turn. It is
+spliced into `Agent._loop`'s tool surface directly, gated on `automation_id`/`quiet_capable` — see
+*Automations engine → Agent-gated delivery* below.
+
 ### LLM gateway (ADR-0010)
 
 The gateway's HTTP surface is **model/provider management** (consumed by the web UI).
@@ -826,6 +832,24 @@ a run's output into a module document through the *existing* `ModuleRegistry.sav
 no-second-write-path rule), at a per-automation `DocumentTarget` (`{path_pattern, mode}`), recording
 an `EntityRef` on the run's `artifacts` so the runs feed links what was written. **push** stays its
 own issue.
+
+**Agent-gated delivery (#706).** The sink fan-out above is deterministic by default — but a
+per-automation toggle (`agent_gated_delivery`, off by default) lets the run's own turn decide.
+When on, `Agent._loop` splices a run-scoped `finish_quiet(reason)` spec into the turn **only when
+both `automation_id` and `quiet_capable` are set** — the same "bound at the tool surface, not by
+prompt politeness" discipline as the autonomy dial below, and deliberately *not* a `McpHost`
+built-in: `register_builtin`'s tools are filtered only by the read/propose/write `allow` class,
+and an ordinary chat turn passes `allow=None` (no filtering at all), so a globally-registered tool
+cannot be automation-only. The call is intercepted by name before it would reach `_invoke` — never
+routed, so it can't be mistaken for a module tool and never counts toward the loop guard's
+consecutive-error streak. Calling it sets `AgentTurn.quiet`/`quiet_reason`; the runner reads that
+back to skip `SinkDispatcher.dispatch` (`push`/`notes`/`kb`) and records the ledger entry with
+outcome `quiet` instead of `ok` — always a ledger entry, exactly as for any other outcome. **`chat`
+is the one sink `quiet` does not touch**: its session is decided *before* the turn runs (the
+paragraph above), so it persists and is recorded as fired regardless of the quiet decision — rolling
+continuity needs the next run to see this one's reply. Not calling the tool delivers exactly as
+before (fail-loud beats fail-silent). Full reference:
+[automations → Agent-gated delivery](../reference/automations.md#agent-gated-delivery-706).
 
 **The autonomy dial is enforced here, not requested.** An automation's level derives a set
 of allowed tool *classes* (`read` / `propose` / `write`, declared on each

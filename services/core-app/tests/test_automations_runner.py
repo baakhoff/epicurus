@@ -51,11 +51,19 @@ class _FakePower:
 
 
 class _FakeAgent:
-    """Records each turn it is asked to run; can be made to fail."""
+    """Records each turn it is asked to run; can be made to fail or go quiet (#706)."""
 
-    def __init__(self, answer: str = "done", fail: bool = False) -> None:
+    def __init__(
+        self,
+        answer: str = "done",
+        fail: bool = False,
+        *,
+        quiet_reason: str | None = None,
+    ) -> None:
         self.answer = answer
         self.fail = fail
+        # Set to make every turn behave as if the model called finish_quiet(quiet_reason).
+        self.quiet_reason = quiet_reason
         self.calls: list[dict[str, object]] = []
 
     async def run(
@@ -67,6 +75,7 @@ class _FakeAgent:
         session_id: str | None = None,
         allow: frozenset[str] | None = None,
         automation_id: str | None = None,
+        quiet_capable: bool = False,
     ) -> AgentTurn:
         self.calls.append(
             {
@@ -76,14 +85,18 @@ class _FakeAgent:
                 "session_id": session_id,
                 "allow": allow,
                 "automation_id": automation_id,
+                "quiet_capable": quiet_capable,
             }
         )
         if self.fail:
             raise RuntimeError("boom")
+        quiet = quiet_capable and self.quiet_reason is not None
         return AgentTurn(
             content=self.answer,
             stopped="completed",
             usage=TurnUsage(prompt_tokens=10, completion_tokens=5, steps=1),
+            quiet=quiet,
+            quiet_reason=self.quiet_reason if quiet else None,
         )
 
 
@@ -766,6 +779,137 @@ async def test_the_dispatcher_reports_what_it_could_not_do() -> None:
     assert result.failed == ["push"]
     assert result.unavailable == ["kb"]  # kb has no handler here; chat is skipped, not reported
     assert result.fired == []
+
+
+# ── agent-gated delivery / quiet runs (#706) ────────────────────────────────
+
+
+async def test_the_toggle_off_reaches_the_turn_as_not_quiet_capable() -> None:
+    # Existing automations are unaffected: the runner must not pass True unless the
+    # operator opted in (default False).
+    store, queue, kill = await _fresh()
+    agent = _FakeAgent()
+    automation = await _an_automation(store, agent_gated_delivery=False)
+    await _runner(store, queue, kill, agent=agent).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="manual"
+    )
+    assert agent.calls[0]["quiet_capable"] is False
+
+
+async def test_the_toggle_on_reaches_the_turn_as_quiet_capable() -> None:
+    store, queue, kill = await _fresh()
+    agent = _FakeAgent()
+    automation = await _an_automation(store, agent_gated_delivery=True)
+    await _runner(store, queue, kill, agent=agent).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="manual"
+    )
+    assert agent.calls[0]["quiet_capable"] is True
+
+
+async def test_a_quiet_turn_skips_the_sink_fan_out() -> None:
+    store, queue, kill = await _fresh()
+    delivered: list[str] = []
+
+    async def _push(_a: Automation, output: str) -> None:
+        delivered.append(output)
+
+    sinks = SinkDispatcher()
+    sinks.register("push", _push)
+    agent = _FakeAgent(quiet_reason="not important")
+    automation = await _an_automation(
+        store, autonomy="act", sinks=["push"], agent_gated_delivery=True
+    )
+    run = await _runner(store, queue, kill, agent=agent, sinks=sinks).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="matched"
+    )
+    assert delivered == []  # the dispatcher was never even asked to fan out
+    assert run is not None
+    assert run.outcome == "quiet"
+    assert run.quiet_reason == "not important"
+    assert run.sinks_fired == []
+
+
+async def test_default_deliver_when_the_tool_is_not_called() -> None:
+    # Fail-loud beats fail-silent: an opted-in automation whose turn never calls
+    # finish_quiet still delivers exactly as an automation with the toggle off would.
+    store, queue, kill = await _fresh()
+    delivered: list[str] = []
+
+    async def _push(_a: Automation, output: str) -> None:
+        delivered.append(output)
+
+    sinks = SinkDispatcher()
+    sinks.register("push", _push)
+    agent = _FakeAgent()  # no quiet_reason configured — the model "never called" finish_quiet
+    automation = await _an_automation(
+        store, autonomy="act", sinks=["push"], agent_gated_delivery=True
+    )
+    run = await _runner(store, queue, kill, agent=agent, sinks=sinks).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="matched"
+    )
+    assert delivered == ["done"]
+    assert run is not None
+    assert run.outcome == "ok"
+    assert run.quiet_reason is None
+    assert run.sinks_fired == ["push"]
+
+
+async def test_a_quiet_run_is_still_a_ledger_entry_with_full_metering() -> None:
+    # "Always a ledger entry" holds for quiet exactly as it does for silent_act; metering
+    # (token counts, dual attribution) is unaffected by the outcome.
+    store, queue, kill = await _fresh()
+    agent = _FakeAgent(quiet_reason="routine, filed away")
+    automation = await _an_automation(store, autonomy="act", agent_gated_delivery=True)
+    run = await _runner(store, queue, kill, agent=agent).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="matched"
+    )
+    assert run is not None
+    assert run.outcome == "quiet"
+    assert run.prompt_tokens == 10
+    assert run.completion_tokens == 5
+    assert run.output == "done"  # the turn's answer is still recorded, quiet or not
+
+
+async def test_a_quiet_run_still_persists_into_a_configured_chat_session() -> None:
+    # Scope decision (ADR addendum): chat is turn-time (ADR-0108), decided before the model
+    # could call finish_quiet, and rolling continuity needs the next run to see this one's
+    # reply — so unlike push/notes/kb it is not suppressed by a quiet outcome.
+    store, queue, kill = await _fresh()
+    agent = _FakeAgent(quiet_reason="nothing to add")
+    automation = await _an_automation(
+        store, sinks=["chat"], agent_gated_delivery=True, chat_mode="rolling"
+    )
+    run = await _runner(store, queue, kill, agent=agent).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="matched"
+    )
+    assert run is not None
+    assert run.outcome == "quiet"
+    assert "chat" in run.sinks_fired
+    assert agent.calls[0]["session_id"] is not None
+
+
+async def test_quiet_is_independent_of_autonomy_and_the_dial_still_applies() -> None:
+    # A quiet outcome is a delivery decision, not a skip (the loop guard, rate caps, and the
+    # autonomy dial are all untouched): the allowance still reaches the turn as usual.
+    store, queue, kill = await _fresh()
+    agent = _FakeAgent(quiet_reason="handled")
+    automation = await _an_automation(store, autonomy="propose", agent_gated_delivery=True)
+    await _runner(store, queue, kill, agent=agent).run_once(
+        automation, trigger_refs=[], summaries=[], verdict="matched"
+    )
+    assert agent.calls[0]["allow"] == frozenset({"read", "propose"})
+
+
+async def test_the_quiet_scaffold_only_appears_when_the_toggle_is_on() -> None:
+    store, queue, kill = await _fresh()
+    agent = _FakeAgent()
+    off = await _an_automation(store, name="off", agent_gated_delivery=False)
+    on = await _an_automation(store, name="on", agent_gated_delivery=True)
+    runner = _runner(store, queue, kill, agent=agent)
+    await runner.run_once(off, trigger_refs=[], summaries=[], verdict="manual")
+    await runner.run_once(on, trigger_refs=[], summaries=[], verdict="manual")
+    assert "finish_quiet" not in str(agent.calls[0]["prompt"])
+    assert "finish_quiet" in str(agent.calls[1]["prompt"])
 
 
 # ── the prompt ───────────────────────────────────────────────────────────────

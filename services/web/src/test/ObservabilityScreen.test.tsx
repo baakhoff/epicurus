@@ -148,6 +148,7 @@ function automation(overrides: Partial<Automation> = {}): Automation {
     last_run_at: null,
     last_status: null,
     allowed_tool_classes: ["read"],
+    agent_gated_delivery: false,
     ...overrides,
   };
 }
@@ -339,6 +340,23 @@ describe("Automation runs console (#669)", () => {
     const list = within(await screen.findByLabelText("Automation runs console"));
     expect(await list.findByText("skipped")).toBeInTheDocument();
     expect(list.getByText("rate cap reached (4/hour)")).toBeInTheDocument();
+  });
+
+  it("shows a quiet run's outcome and the model's own reason (#706)", async () => {
+    automationRuns = [
+      automationRun({
+        id: "r-quiet",
+        outcome: "quiet",
+        output: "Marked read; nothing worth flagging.",
+        sinks_fired: [],
+        quiet_reason: "routine newsletter",
+      }),
+    ];
+    await openRunsTab();
+
+    const list = within(await screen.findByLabelText("Automation runs console"));
+    expect(await list.findByText("quiet")).toBeInTheDocument();
+    expect(list.getByText("routine newsletter")).toBeInTheDocument();
   });
 
   it("re-subscribes with the outcome filter server-side", async () => {

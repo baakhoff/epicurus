@@ -374,9 +374,14 @@ List, or create. The create body:
   "sinks": ["chat"],
   "chat_mode": "rolling",
   "rate_cap_per_hour": 0,
-  "digest_window_minutes": 0
+  "digest_window_minutes": 0,
+  "agent_gated_delivery": false
 }
 ```
+
+`agent_gated_delivery` (default `false`, [agent-gated delivery](automations.md#agent-gated-delivery-706))
+offers the run-scoped `finish_quiet` tool so a turn may mark its own run `quiet` instead of
+always delivering.
 
 **400** on a blank name, an unknown autonomy level or sink, a malformed `source`, an
 out-of-range hour, a negative cap, or anything other than **exactly one** trigger (pass
@@ -413,7 +418,7 @@ unknown.
 ### `GET /platform/v1/automations/runs`
 
 The run ledger, newest first. Query: `automation_id` · `outcome` (`ok` \| `error` \|
-`skipped`; 400 on anything else) · `limit` (1–500, default 100).
+`skipped` \| `quiet`; 400 on anything else) · `limit` (1–500, default 100).
 
 ```json
 [
@@ -423,6 +428,7 @@ The run ledger, newest first. Query: `automation_id` · `outcome` (`ok` \| `erro
     "model": "qwen2.5:7b", "prompt_tokens": 812, "completion_tokens": 96,
     "duration_ms": 4210, "outcome": "ok", "error": null,
     "output": "An invoice from Acme arrived.", "sinks_fired": ["chat"],
+    "quiet_reason": null,
     "trigger_entity_refs": [
       { "ref_id": "…", "module": "mail", "kind": "message", "title": "Re: invoice" }
     ]

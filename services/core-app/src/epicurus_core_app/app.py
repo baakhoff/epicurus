@@ -398,10 +398,11 @@ def create_app() -> FastAPI:
     live_runs = LiveRunRegistry(grace_seconds=settings.live_run_grace_seconds)
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
-    # restart-only path for Ollama's KV-cache apply (#307). The socket is an explicit opt-in
-    # (ADR-0099) — unavailable by default, which defers container teardown on removal to the
-    # next restart and leaves a KV-cache change unapplied until a manual restart; it never
-    # disables removal itself (ADR-0056/#382) or blocks startup.
+    # restart-only path for Ollama's KV-cache apply (#307). Reaches docker-proxy-core by default
+    # (#708, ADR-0109) via DOCKER_HOST; the compose.docker-socket.yaml overlay points this at the
+    # raw socket instead (ADR-0099). If Docker is unreachable either way, that defers container
+    # teardown on removal to the next restart and leaves a KV-cache change unapplied until a
+    # manual restart; it never disables removal itself (ADR-0056/#382) or blocks startup.
     docker_availability = DockerController.from_env()
     docker = docker_availability.controller
     registry = ModuleRegistry(

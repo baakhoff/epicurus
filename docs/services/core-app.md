@@ -598,22 +598,25 @@ container, and its review is mandatory (nothing self-applies, ever).
 | `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 | `GET /platform/v1/calendar-feed?start=&end=` | **Cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items (e.g. open tasks with a due date) from every enabled, healthy module — each stamped with its owning `module`. **Not a manifest-declared capability** — probes every module for `GET {base}/calendar-feed?start=&end=` and skips it on a 404/unreachable, the same best-effort tolerance `/suggestions` already relies on, so a module opts in purely by serving the path (`tasks` is the first). Item shape: `{id, title, date, status, ref_id, kind}` (`date` a floating `YYYY-MM-DD`, `end` exclusive — ADR-0023's own range convention; `kind` + `ref_id` + the stamped `module` route a click to that module's existing `GET /resolve/{kind}/{ref_id}` hover-card, ADR-0019 — no new UI contract). Backs the calendar page's read-only task-due-date overlay. (Lives at `/platform/v1/calendar-feed`, not under `/modules`.) |
 
-> **Privileged surface, opt-in (ADR-0028, #307, #382, #622/ADR-0099).** Tearing down a removed
-> module's container — and applying the Ollama KV-cache type — needs the Docker socket. The core
-> touches it through a single `DockerController`: it stops/removes **only a configured module's
-> own container**, and separately **restarts only an allowlisted infra container** (`ollama`,
-> which is never removable). Both are scoped to this Compose project and never touch core-app /
-> web / a data-plane service. Module **removal itself never needs the socket** (#382): it
-> tombstones the module (hidden + unrouted at once) regardless, and **defers** the container
-> teardown to the next startup reconcile when Docker isn't reachable — so removal always works;
-> a KV-cache change likewise saves without applying. **The socket is NOT mounted by default**
-> (#622, ADR-0099) — mounting it unconditionally bought nothing real anyway, since the app's
-> unprivileged uid (10001, the same [entrypoint privilege drop](../infrastructure/index.md#shared-file-space)
-> the shared file space uses) can't reach it without a host-matched group either way.
-> Opt in with `services/core-app/compose.docker-socket.yaml` (mounts the socket **and** forwards
-> `DOCKER_GID`, the host's docker-socket group id — the entrypoint joins it before dropping
-> privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
-> `GET /platform/v1/modules/docker-status` reports the live state so the Modules page states it
+> **Privileged surface, least-privilege by default (ADR-0028, #307, #382, #622/ADR-0099,
+> #708/ADR-0109).** Tearing down a removed module's container — and applying the Ollama
+> KV-cache type — needs to reach Docker. The core touches it through a single
+> `DockerController`: it stops/removes **only a configured module's own container**, and
+> separately **restarts only an allowlisted infra container** (`ollama`, which is never
+> removable). Both are scoped to this Compose project and never touch core-app / web / a
+> data-plane service. By default this goes over `DOCKER_HOST=tcp://docker-proxy-core:2375` — a
+> filtered proxy allowlisting exactly those calls and refusing exec/create/attach/images/
+> volumes/networks/system before they reach the socket at all; `services/core-app/compose.
+> docker-socket.yaml` opts into the raw socket instead (mounts it **and** forwards `DOCKER_GID`,
+> the host's docker-socket group id, since the app's unprivileged uid — 10001, the same
+> [entrypoint privilege drop](../infrastructure/index.md#shared-file-space) the shared file
+> space uses — can't reach a direct mount without a host-matched group). Either way, module
+> **removal itself never needs Docker to be reachable** (#382): it tombstones the module (hidden
+> + unrouted at once) regardless, and **defers** the container teardown to the next startup
+> reconcile when neither path is reachable — so removal always works; a KV-cache change
+> likewise saves without applying. See [Docker-socket
+> access](../infrastructure/index.md#docker-socket-access-708-adr-0109). `GET
+> /platform/v1/modules/docker-status` reports the live state so the Modules page states it
 > proactively instead of an operator finding out by attempting a removal.
 
 Caller-supplied path segments the registry interpolates into a module request —

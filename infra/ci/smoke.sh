@@ -193,6 +193,23 @@ printf '%s' "$cat" | grep -q '"entries"' || die "model catalog endpoint returned
 printf '%s' "$cat" | grep -q '"id"' || die "model catalog served no entries (seed missing?): $cat"
 ok "model catalog endpoint serves entries (seed or live, #269)"
 
+# Least-privilege Docker control by default (#708, ADR-0109): docker-status must report
+# reachable with no operator setup (the proxy, not the opt-in raw socket), and a real KV-cache
+# apply must round-trip through it — set, then clear, so the shared ollama-runtime volume is
+# left as this run found it. This is the acceptance check the issue itself names.
+ds="$(http "http://core-app:8080/platform/v1/modules/docker-status" || true)"
+printf '%s' "$ds" | grep -q '"available":true' \
+  || die "docker-status reports unreachable by default (docker-proxy-core not wired?): $ds"
+ok "core reaches Docker by default through docker-proxy-core (#708)"
+
+kv="$(http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
+  -H 'Content-Type: application/json' -d '{"value":"q8_0"}' || true)"
+printf '%s' "$kv" | grep -q '"applied":true' \
+  || die "KV-cache change did not apply through docker-proxy-core (restart round-trip broken?): $kv"
+ok "KV-cache change applied immediately — restart round-tripped through docker-proxy-core (#708)"
+http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
+  -H 'Content-Type: application/json' -d '{"value":null}' >/dev/null 2>&1 || true
+
 # qdrant upgrade-recovery guard (#229): the one-shot must complete cleanly, and the
 # new /proc-based healthcheck must report healthy (a crash-looping qdrant binds no port
 # and would be unhealthy). compose-validate can't see either — only a live boot can.

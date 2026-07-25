@@ -84,21 +84,39 @@ evaluated by Prometheus; Alertmanager routes notifications (edit
 `infra/observability/alertmanager/alertmanager.yml` to add a receiver).
 Details: [`infra/observability/README.md`](../../infra/observability/README.md).
 
-## Docker-socket access (opt-in, #622)
+## Docker-socket access (#708, ADR-0109)
 
 `core-app` can tear down a removed module's container immediately, and restart Ollama to apply
-a KV-cache change (#307) — both need the Docker socket, which is **root-equivalent on the
-host**. The socket is **NOT mounted by default** (ADR-0099): without it, neither is broken —
-module removal always works (it tombstones the module at once regardless, ADR-0056/#382), and a
-KV-cache change still saves — only the container teardown / restart **defer to the next
-restart**, and the Modules page states that plainly (`GET /platform/v1/modules/docker-status`),
-never a mystery banner.
+a KV-cache change (#307) — both need to reach Docker, which is **root-equivalent on the host**.
+By default this goes through **`docker-proxy-core`**, a filtered
+[`wollomatic/socket-proxy`](https://github.com/wollomatic/socket-proxy) sitting in front of the
+real socket, internal-network-only, with no published port. Its allowlist is an exact
+method+path match on precisely what `DockerController` does — list/inspect a container,
+stop/restart/remove one by id — and nothing else: `exec`, `create`, `attach`, `images`,
+`volumes`, `networks`, and `system` are simply not in the allowlist, so the proxy refuses them
+before they ever reach the socket, regardless of who asks. *Which* container gets
+stopped/restarted/removed is still scoped by `DockerController`'s own project-label filter and
+protected-name denylist (ADR-0028) — the proxy can't filter by label on a write call (Docker
+addresses writes by container id, not by label), so that half of the scoping stays
+application-side, unchanged from before. The edge gateway gets its own sibling,
+**`docker-proxy-traefik`**, scoped to read-only discovery (list/inspect/events/version, no
+write verb allowed at all) — a compromised gateway (routing every inbound request, the bigger
+attack surface of the two) never inherits the restart/remove grant.
 
-Mounting the socket alone isn't sufficient anyway: `core-app` drops from root to an unprivileged
-uid after startup (see [Shared file space](#shared-file-space)), and the image defines no
-`docker` group to inherit — so an *unconditional* mount bought nothing real on a normal Linux
-host, while still exposing a root-equivalent surface by default. Opt in with both pieces
-together:
+Both proxy containers run as root (`user: "0:0"`) — the portable choice, since the host's
+docker-socket group id varies by distro/install method and Docker Desktop's VM socket doesn't
+expose one the same way at all, so matching a GID can't be a zero-config default. Root
+sidesteps that by reading the socket regardless of its owning group; `cap_drop: [ALL]`,
+`read_only: true`, and `no-new-privileges` remove everything else, so the allowlist — not the
+uid — is the actual boundary. This all works **out of the box**: a fresh `task up` applies a
+KV-cache change immediately (`applied: true`) and tears down a removed module's container at
+once, with no operator configuration.
+
+**Escape hatch: the raw socket, opt-in.** Prefer `core-app` to hold `/var/run/docker.sock`
+directly instead of going through a third-party proxy image? Layer
+`services/core-app/compose.docker-socket.yaml` on top — mirrors the pre-#708 behavior, and
+still narrower than nothing: `core-app` only ever exercises the same one audited
+`DockerController` path either way.
 
 ```bash
 DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose \
@@ -107,11 +125,12 @@ DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose \
 ```
 
 `DOCKER_GID` is the host's docker-socket group id (`getent group docker | cut -d: -f3`, or the
-`stat` form above if you don't use a `docker` group) — the entrypoint joins it before dropping
-privileges. The core still only ever exercises one narrow, audited path over the socket
-(`DockerController`, ADR-0028): stop + remove a *configured module's own* container, scoped to
-this Compose project, never core-app / web / a data-plane service — that scoping mitigates the
-grant, it doesn't replace treating it as privileged. Full tradeoff and rationale in
+`stat` form above if you don't use a `docker` group) — `core-app` drops from root to an
+unprivileged uid after startup (see [Shared file space](#shared-file-space)) and the image
+defines no `docker` group to inherit, so without a matching GID a directly-mounted socket stays
+unreachable to it. The overlay also points `DOCKER_HOST` back at the raw socket — otherwise
+`core-app` would keep talking to `docker-proxy-core` even with the raw socket mounted, since an
+env var wins regardless of what's mounted. Full tradeoff and rationale in
 `services/core-app/compose.docker-socket.yaml`'s header comment.
 
 **Persisting the opt-in across reconciles (#655).** `task up` / `docker compose up` alone never
@@ -125,8 +144,13 @@ DOCKER_GID=999   # from `getent group docker | cut -d: -f3` / `stat -c '%g' /var
 ```
 
 and every subsequent `task reconcile` includes the overlay automatically. Leave it unset (the
-default) and reconcile stays fail-safe — the socket mount reverts to off on the next run, exactly
-like a fresh `docker compose up`.
+default) and reconcile stays on the proxy path.
+
+**Docker unreachable at all (neither proxy nor raw socket)?** That's now a real degraded state,
+not the default — check `GET /platform/v1/modules/docker-status` (surfaced on the Modules page)
+for the probe's own exception text. Module removal always still works regardless (it tombstones
+the module at once, ADR-0056/#382); only the container teardown and a KV-cache restart defer to
+the next restart.
 
 ## Ollama (local LLM runtime)
 

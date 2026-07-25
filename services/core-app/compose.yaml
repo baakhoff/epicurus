@@ -1,5 +1,14 @@
 # Core App module — a per-module compose fragment (ADR-0006).
 # Add it to the top-level compose.yaml `include:` list to run it in the stack.
+#
+# YAML anchors don't cross `include:` boundaries (#462) — this fragment now defines two
+# services, so it declares its own logging anchor rather than inlining the block twice.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   core-app:
     build:
@@ -41,15 +50,12 @@ services:
       # Scopes confirmed module removal (#127) to this stack's containers only, so a
       # co-located stack (e.g. the CI smoke run beside a dev stack) is never touched.
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-epicurus}
-    # Confirmed module removal (#127, ADR-0028) and the Ollama KV-cache restart (#307) can use
-    # the Docker socket, but it is NOT mounted here by default (#622, ADR-0099) — it is
-    # root-equivalent on the host, and mounting it unconditionally bought nothing real anyway:
-    # the app drops to an unprivileged uid (ADR-0069) that, without a host-matched group, can't
-    # reach it regardless. Without it, module removal still fully works (ADR-0056/#382
-    # decoupled the two) — only the container teardown + KV-cache restart defer to the next
-    # restart, and the Modules page says so plainly. To opt in (immediate teardown), layer
-    # compose.docker-socket.yaml on top — see
-    # docs/infrastructure/index.md#docker-socket-access-opt-in-622.
+      # Confirmed module removal (#127, ADR-0028) and the Ollama KV-cache restart (#307) go
+      # through `docker-proxy-core` below (#708, ADR-0109) — a filtered allowlist proxy, not
+      # the raw socket. `docker.from_env()` (docker_control.py) picks this up automatically;
+      # no code change needed. The opt-in `compose.docker-socket.yaml` overlay points this back
+      # at the raw socket instead — see docs/infrastructure/index.md#docker-socket-access.
+      DOCKER_HOST: tcp://docker-proxy-core:2375
     volumes:
       # KV-cache apply (#307): the core writes ollama.env here; Ollama mounts it read-only and
       # sources it on (re)start. A named volume, so the choice persists across reconciles.
@@ -63,6 +69,8 @@ services:
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${CORE_PORT:-8082}:8080"
     depends_on:
+      docker-proxy-core:
+        condition: service_started
       nats:
         condition: service_started
       ollama:
@@ -88,9 +96,44 @@ services:
       # Scraped by Prometheus via Docker service discovery.
       - epicurus.metrics.port=8080
     # Bounded json-file logging (#462) — unbounded default otherwise fills the disk.
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *default-logging
+    networks: [epicurus]
+
+  # Least-privilege Docker control, on by default (#708, ADR-0109). core-app talks to this
+  # instead of the raw socket: an allowlist proxy that only ever answers GET (list/inspect a
+  # container) and POST/DELETE against `/containers/{id}/(stop|restart)` and `/containers/{id}`
+  # — matching exactly what DockerController (docker_control.py) does and nothing more.
+  # exec/create/attach/images/volumes/networks/system are never in the allowlist, so they 403
+  # regardless of who asks; *which* container gets stopped/removed is still scoped by
+  # DockerController's own project-label filter and PROTECTED denylist — this proxy can't see
+  # labels on a write call (Docker's API addresses writes by id, not by label), so that scoping
+  # stays application-side, same as before.
+  docker-proxy-core:
+    image: ghcr.io/wollomatic/socket-proxy:1.12.3
+    restart: unless-stopped
+    # Root is the portable choice (ADR-0109): the host's docker-socket GID varies by distro /
+    # install method, and Docker Desktop's VM socket doesn't expose one the same way at all —
+    # matching a GID (what the compose.docker-socket.yaml escape hatch requires via DOCKER_GID)
+    # can't be a zero-config default. Root sidesteps that by reading the socket regardless of
+    # its owning group; every other capability is dropped instead, and the allowlist below is
+    # the actual security boundary, not the uid.
+    user: "0:0"
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=core-app
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?_ping'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?version'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/json'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/[^/]+/json'
+      - '-allowPOST=/(v[0-9]+\.[0-9]+/)?containers/[^/]+/stop'
+      - '-allowPOST=/(v[0-9]+\.[0-9]+/)?containers/[^/]+/restart'
+      - '-allowDELETE=/(v[0-9]+\.[0-9]+/)?containers/[^/]+'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default-logging
     networks: [epicurus]

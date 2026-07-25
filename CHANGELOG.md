@@ -25,6 +25,18 @@ images to GHCR.
 
 ### Added
 
+- **Least-privilege Docker control, on by default** (#708) — a KV-cache change now applies
+  immediately and a removed module's container is torn down at once, out of the box, with no
+  operator setup. `core-app` reaches Docker through a new `docker-proxy-core` allowlist proxy
+  (`wollomatic/socket-proxy`) instead of a raw socket — scoped to exactly the calls
+  `DockerController` makes (list/inspect a container, stop/restart/remove one by id), refusing
+  exec/create/attach/images/volumes/networks/system regardless of who asks. The edge gateway
+  gets its own read-only sibling, `docker-proxy-traefik` (list/inspect/events/version, no write
+  verb at all), replacing its previous raw `:ro` socket mount — implementing the socket-proxy
+  option #656 proposed (final posture confirmed at review). The pre-existing raw-socket overlay
+  (`services/core-app/compose.docker-socket.yaml`) remains as a documented escape hatch for an
+  operator who'd rather core-app hold the socket directly. `core-app` 0.92.0→0.93.0 (MINOR).
+
 - **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the
   automations loop opened in W7. `propose_automation` is a core built-in that drafts an automation
   from a natural-language ask and **only stages** it as a `ReviewSuggestion` — a hard guardrail with

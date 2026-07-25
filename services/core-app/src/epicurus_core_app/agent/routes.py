@@ -22,6 +22,7 @@ from epicurus_core_app.agent.live_runs import (
     RunStreamFactory,
 )
 from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftStore
+from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.store import AutomationSessionStore, SessionMeta
 from epicurus_core_app.llm.models import ChatMessage
@@ -76,6 +77,18 @@ class EditRequest(BaseModel):
     content: str
     model: str | None = None
     message_id: int | None = None
+
+
+class SetSessionModelBody(BaseModel):
+    """Body for PUT /sessions/{id}/model — an explicit picker change (#707).
+
+    Writes the same field `set_chat_model` does, so a tool-set choice and a picker change
+    can never fight: whichever happens last is what's persisted. ``model: null`` clears the
+    override (picking "core default" back in the picker) — the tool itself never clears,
+    only ever sets, so this is the picker's own escape hatch.
+    """
+
+    model: str | None
 
 
 class ResumeRequest(BaseModel):
@@ -175,6 +188,13 @@ def _with_automation(summary: SessionSummary, meta: SessionMeta | None) -> Sessi
     )
 
 
+def _with_model(summary: SessionSummary, model: str | None) -> SessionSummary:
+    """Stamp a session with its persisted model override (#707); unchanged if none."""
+    if model is None:
+        return summary
+    return summary.model_copy(update={"model": model})
+
+
 def create_agent_router(
     agent: Agent,
     memory: Memory,
@@ -189,6 +209,7 @@ def create_agent_router(
     live_runs: LiveRunRegistry | None = None,
     profile: StandingProfileStore | None = None,
     automation_sessions: AutomationSessionStore | None = None,
+    session_models: SessionModelStore | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
@@ -294,19 +315,24 @@ def create_agent_router(
     @router.get("/sessions", response_model=list[SessionSummary])
     async def sessions() -> list[SessionSummary]:
         summaries = await memory.sessions(tenant=tenant)
-        # Badge/group automation chats (#672): enrich here, not in the ConversationStore, so that
-        # store stays automations-agnostic. Best-effort — a metadata hiccup degrades to plain
-        # sessions rather than emptying the list.
-        if automation_sessions is None:
-            return summaries
-        try:
-            metas = await automation_sessions.lookup(
-                tenant=tenant, session_ids=[s.id for s in summaries]
-            )
-        except Exception as exc:  # never fail the chat list over the badge lookup
-            log.warning("automation session enrichment failed", error=str(exc))
-            return summaries
-        return [_with_automation(s, metas.get(s.id)) for s in summaries]
+        # Badge/group automation chats (#672) and stamp each session's persisted model
+        # override (#707) — enriched here, not in the ConversationStore, so that store stays
+        # automations/model-agnostic. Each lookup is independently best-effort: a hiccup in
+        # one degrades that enrichment only, rather than emptying the list.
+        session_ids = [s.id for s in summaries]
+        if automation_sessions is not None:
+            try:
+                metas = await automation_sessions.lookup(tenant=tenant, session_ids=session_ids)
+                summaries = [_with_automation(s, metas.get(s.id)) for s in summaries]
+            except Exception as exc:  # never fail the chat list over the badge lookup
+                log.warning("automation session enrichment failed", error=str(exc))
+        if session_models is not None:
+            try:
+                models = await session_models.lookup(tenant=tenant, session_ids=session_ids)
+                summaries = [_with_model(s, models.get(s.id)) for s in summaries]
+            except Exception as exc:  # never fail the chat list over the model lookup
+                log.warning("session model enrichment failed", error=str(exc))
+        return summaries
 
     @router.get("/sessions/{session_id}", response_model=list[MessageRecord])
     async def session_messages(session_id: str) -> list[MessageRecord]:
@@ -316,6 +342,30 @@ def create_agent_router(
     async def delete_session(session_id: str) -> dict[str, int]:
         removed = await memory.forget(tenant=tenant, session_id=session_id)
         return {"deleted": removed}
+
+    @router.put("/sessions/{session_id}/model")
+    async def set_session_model(
+        session_id: str, body: SetSessionModelBody
+    ) -> dict[str, str | None]:
+        """An explicit picker change for this session (#707).
+
+        Writes the same field the ``set_chat_model`` tool does — one owner of truth, so a
+        tool-set choice and a picker change can never fight, whichever happens last stands.
+        Not validated against the model catalog here: the picker itself only ever offers a
+        real name, the same two sources (``GET /llm/models`` + ``GET /llm/saved-models``)
+        the tool resolves against. ``model: null`` clears the override (picking "core
+        default" back) — the tool itself never clears, only the picker can.
+        """
+        if session_models is None:
+            raise HTTPException(status_code=503, detail="session models are not available")
+        if body.model is None:
+            await session_models.clear(tenant=tenant, session_id=session_id)
+            return {"model": None}
+        model = body.model.strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="model must not be blank")
+        await session_models.set(tenant=tenant, session_id=session_id, model=model)
+        return {"model": model}
 
     @router.get("/sessions/{session_id}/active-run", response_model=ActiveRunInfo | None)
     async def active_run(session_id: str) -> ActiveRunInfo | None:

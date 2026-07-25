@@ -656,7 +656,9 @@ class Agent:
 
         With ``session_id`` and memory configured, the turn is grounded in the
         session's prior messages plus semantically recalled context, and both the
-        new user input and the answer are persisted for future turns.
+        new user input and the answer are persisted for future turns. ``session_id`` also
+        reaches any built-in tool that persists a per-session choice (``set_chat_model``,
+        #707); such a tool degrades to an ``error:`` result when it is ``None``.
 
         ``allow`` restricts the turn's tool surface to tools of those side-effect classes
         (ADR-0105) — how an automation's autonomy level is *enforced* rather than merely
@@ -679,6 +681,7 @@ class Agent:
                 convo,
                 model=model,
                 tenant_id=tenant_id,
+                session_id=session_id,
                 allow=allow,
                 automation_id=automation_id,
                 quiet_capable=quiet_capable,
@@ -835,7 +838,9 @@ class Agent:
                     yield AgentEvent(
                         type="tool", tool=name, status="running", detail=detail, document=document
                     )
-                    output, is_error = await self._invoke(name, arguments, route, tenant=tenant)
+                    output, is_error = await self._invoke(
+                        name, arguments, route, tenant=tenant, session_id=session_id
+                    )
                     text, found = _extract_entities(output, tenant_id=tenant)
                     refs.add(found)
                     draft = None if is_error else _parse_draft(output)
@@ -1338,6 +1343,7 @@ class Agent:
         *,
         model: str | None,
         tenant_id: str | None,
+        session_id: str | None = None,
         allow: frozenset[SideEffect] | None = None,
         automation_id: str | None = None,
         quiet_capable: bool = False,
@@ -1456,7 +1462,9 @@ class Agent:
                         )
                     continue
                 tools_used.append(name)
-                output, is_error = await self._invoke(name, arguments, route, tenant=call_tenant)
+                output, is_error = await self._invoke(
+                    name, arguments, route, tenant=call_tenant, session_id=session_id
+                )
                 text, found = _extract_entities(output, tenant_id=call_tenant)
                 refs.add(found)
                 status = "error" if is_error else "ok"
@@ -1536,7 +1544,13 @@ class Agent:
         return _document_payload(module, spec, arguments)
 
     async def _invoke(
-        self, name: str, arguments: dict[str, Any], route: dict[str, str], *, tenant: str
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        route: dict[str, str],
+        *,
+        tenant: str,
+        session_id: str | None = None,
     ) -> tuple[str, bool]:
         """Run a tool call, returning ``(text_for_model, is_error)``.
 
@@ -1547,12 +1561,16 @@ class Agent:
         is tracked from the catch state, *not* sniffed from the returned text: the ToolCallError
         path hands the model the tool's own message verbatim, which need not begin with
         ``error:`` (#440), so a text prefix is not a reliable signal.
+
+        ``session_id`` (#707) reaches a core built-in that persists a per-session choice
+        (``set_chat_model``); module calls ignore it.
         """
         url = route.get(name)
         if url is None:
             return f"error: unknown tool {name!r}", True
         try:
-            return await self._mcp.call(name, arguments, url, tenant=tenant), False
+            text = await self._mcp.call(name, arguments, url, tenant=tenant, session_id=session_id)
+            return text, False
         except ToolCallError as exc:
             # The tool ran and reported failure; hand the model the tool's own error
             # text — exactly what it received before the host raised on isError (#435).

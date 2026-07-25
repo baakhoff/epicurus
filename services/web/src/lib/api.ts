@@ -448,6 +448,15 @@ export const api = {
     request(z.object({ deleted: z.number() }), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  // An explicit picker change for this session (#707) — the same field the set_chat_model
+  // tool writes, so a mid-chat tool switch and a manual pick can't fight. `model: null`
+  // clears the override (picking "core default" back).
+  setSessionModel: (id: string, model: string | null) =>
+    request(
+      z.object({ model: z.string().nullable() }),
+      `/platform/v1/agent/sessions/${encodeURIComponent(id)}/model`,
+      { method: "PUT", body: JSON.stringify({ model }) },
+    ),
 
   // The cross-chat memory corpus — the durable facts the model remembers about the user.
   // No `q` = the corpus newest-first; with `q` = what recall surfaces for that query.

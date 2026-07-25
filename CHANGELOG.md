@@ -25,6 +25,20 @@ images to GHCR.
 
 ### Added
 
+- **`set_chat_model`: switch a conversation's model by asking** (#707) — "answer with grok from
+  now on" now works. The new core tool resolves the request against exactly what the web's model
+  picker offers — installed local models and the tenant's saved hosted models — case-insensitively,
+  exact match first then a substring match but only when it's unique; an unknown or ambiguous name
+  changes nothing and returns the available list rather than guess. The choice persists to a new
+  `session_models` sidecar table (there is no other "session row" — a session is derived from
+  `agent_messages` via `GROUP BY`) and survives a reload; `GET /sessions` reads it back for the
+  picker, and an explicit picker change writes the *same* field via a new
+  `PUT /sessions/{id}/model` (`model: null` clears it back to the device default) — one owner of
+  truth, so a tool switch and a manual pick can never fight. Classified `write`, following the
+  ordinary autonomy dial like `remember`/`ask_user` rather than a bespoke automation exclusion; it's
+  naturally inert for an automation with no chat sink (no session to apply it to). `core-app`
+  0.93.0→0.94.0 (MINOR) · `web` 0.119.0→0.120.0 (MINOR). ADR-0111.
+
 - **Agent-gated delivery: a `quiet` run outcome the model opts into** (#706) — a per-automation
   "agent decides delivery" toggle (`agent_gated_delivery`, off by default) offers the run's turn a
   run-scoped `finish_quiet(reason)` tool, bound at the tool surface — spliced into `Agent._loop` only

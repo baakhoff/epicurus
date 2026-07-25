@@ -98,10 +98,12 @@ naming heuristics are unsound, and `writes_document` is a rendering hint (its ow
 says so) that `mail_send` does not carry.
 
 > **Not yet annotated:** only the core built-ins (`now`, `memory_search` — read;
-> `propose_automation` — propose; `remember`, `ask_user` — write) and `echo` declare side
-> effects today. Until a module annotates its read tools, a Notify automation reaches none of
-> them — the triggering event is still in its context, so it can still report. A follow-up
-> sweeps the modules.
+> `propose_automation` — propose; `remember`, `ask_user`, `set_chat_model` — write) and `echo`
+> declare side effects today. Until a module annotates its read tools, a Notify automation
+> reaches none of them — the triggering event is still in its context, so it can still report.
+> A follow-up sweeps the modules. (`finish_quiet` is not in this list at all — it is bound
+> directly to the tool surface by `automation_id`/`quiet_capable`, not the side-effect dial;
+> see [Agent-gated delivery](#agent-gated-delivery-706).)
 
 ### How it is enforced
 

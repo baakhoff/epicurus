@@ -43,10 +43,13 @@ from epicurus_core_app.agent.builtins import (
     MEMORY_SEARCH_TOOL,
     NOW_SPEC,
     REMEMBER_SPEC,
+    SET_CHAT_MODEL_SPEC,
+    SET_CHAT_MODEL_TOOL,
     make_ask_user_handler,
     make_memory_search_handler,
     make_now_handler,
     make_remember_handler,
+    make_set_chat_model_handler,
 )
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.instructions_routes import create_instructions_router
@@ -61,6 +64,7 @@ from epicurus_core_app.agent.playbook_review import (
 from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.document_sinks import make_kb_sink, make_notes_sink
 from epicurus_core_app.automations.feed import RunFeed
@@ -189,6 +193,9 @@ def create_app() -> FastAPI:
     # hosted model strings entered in the picker, so they survive restarts / a PWA reinstall and
     # follow the tenant across devices (unlike the browser's per-origin recentModels cache).
     saved_models = SavedHostedModelStore(engine)
+    # A session's own persisted model override (#707) — the field both the set_chat_model
+    # tool and an explicit picker change write, so a mid-chat switch survives a reload.
+    session_models = SessionModelStore(engine)
     model_settings = ModelSettingsStore(engine)
     gateway = LlmGateway(
         ollama_url=settings.ollama_url,
@@ -500,6 +507,19 @@ def create_app() -> FastAPI:
         make_propose_automation_handler(automation_proposals, automations),
         side_effect="propose",
     )
+    # Core `set_chat_model` built-in tool (#707): switches the calling session's model,
+    # persisted to SessionModelStore (the same field an explicit picker change writes).
+    # Classified "write" — it follows the ordinary autonomy dial exactly like remember/
+    # ask_user rather than a bespoke automation exclusion: it is offered at act/silent_act
+    # and withheld at notify/propose, and it is naturally inert for the common automation
+    # case anyway (no chat sink ⇒ session_id is None ⇒ the handler errors plainly rather
+    # than silently doing nothing — see agent/builtins.py).
+    mcp_host.register_builtin(
+        SET_CHAT_MODEL_TOOL,
+        SET_CHAT_MODEL_SPEC,
+        make_set_chat_model_handler(gateway, saved_models, session_models),
+        side_effect="write",
+    )
     agent = Agent(
         gateway=gateway,
         mcp=mcp_host,
@@ -678,6 +698,10 @@ def create_app() -> FastAPI:
             await saved_models.init()
         except Exception as exc:
             log.error("saved-models init failed; hosted-model list disabled", error=str(exc))
+        try:
+            await session_models.init()
+        except Exception as exc:
+            log.error("session-models init failed; set_chat_model disabled", error=str(exc))
         try:
             await model_settings.init()
         except Exception as exc:
@@ -984,6 +1008,9 @@ def create_app() -> FastAPI:
             profile=profile_store,
             # Chat sink metadata (#672): badge + group an automation's chat sessions in the list.
             automation_sessions=automation_sessions,
+            # A session's persisted model override (#707): the sessions list reads it back;
+            # the picker's explicit change route writes it (the same field set_chat_model does).
+            session_models=session_models,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

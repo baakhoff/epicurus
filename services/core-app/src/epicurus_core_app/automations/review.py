@@ -25,7 +25,6 @@ from __future__ import annotations
 import difflib
 import json
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, cast
@@ -45,6 +44,7 @@ from epicurus_core.review import (
     ReviewDecision,
     ReviewSuggestion,
 )
+from epicurus_core_app.agent.mcp_host import BuiltinHandler
 from epicurus_core_app.automations.model import (
     AUTONOMY_LEVELS,
     Automation,
@@ -937,9 +937,6 @@ PROPOSE_AUTOMATION_SPEC: dict[str, Any] = {
 }
 
 
-BuiltinHandler = Callable[[dict[str, Any], str], Awaitable[str]]
-
-
 def _draft_from_args(arguments: dict[str, Any]) -> ProposedAutomation:
     """Build a :class:`ProposedAutomation` from the model's tool arguments (unvalidated)."""
     event = arguments.get("event_trigger")
@@ -978,7 +975,9 @@ def make_propose_automation_handler(
     chat turn. Tenant-scoped: the calling tenant stages under itself (constraint #1).
     """
 
-    async def handler(arguments: dict[str, Any], tenant: str) -> str:
+    async def handler(
+        arguments: dict[str, Any], tenant: str, _session_id: str | None = None
+    ) -> str:
         try:
             draft = _draft_from_args(arguments)
             draft.validate()

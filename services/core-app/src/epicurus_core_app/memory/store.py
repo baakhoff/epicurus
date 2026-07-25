@@ -48,6 +48,11 @@ class SessionSummary(BaseModel):
     automation_id: str | None = None
     automation_name: str | None = None
     chat_mode: str | None = None
+    # This session's persisted model override (#707) — set by the set_chat_model tool or an
+    # explicit picker change while this session is open; None means no override (the caller's
+    # own default applies). The ConversationStore leaves this None too — the agent route
+    # enriches from SessionModelStore, so this store stays model-agnostic.
+    model: str | None = None
 
 
 class MessageRecord(BaseModel):

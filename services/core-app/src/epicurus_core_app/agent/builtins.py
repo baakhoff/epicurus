@@ -2,9 +2,10 @@
 
 Tools the core provides directly, alongside the module tools discovered over MCP. Unlike
 module tools they are dispatched in-process (no HTTP), and they receive the calling tenant
-so a built-in can read or write tenant-scoped state. ``now`` reports the current date/time
-(without it the model guesses the date from its training cutoff); ``remember`` saves a
-durable fact about the user to long-term memory (ADR-0045).
+— and, since #707, the calling session — so a built-in can read or write tenant/session-scoped
+state. ``now`` reports the current date/time (without it the model guesses the date from its
+training cutoff); ``remember`` saves a durable fact about the user to long-term memory
+(ADR-0045); ``set_chat_model`` (#707) switches the calling session's model.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from epicurus_core import get_logger
+from epicurus_core_app.llm.models import ModelInfo
 from epicurus_core_app.memory.facts import SOURCE_TOOL, UserFact
 from epicurus_core_app.memory.memory import MemoryItem, SessionHit
 
@@ -70,17 +72,19 @@ def _resolve_zone(name: str) -> tuple[ZoneInfo, str]:
 def make_now_handler(
     tz_provider: TimezoneProvider,
     calendar_tz_provider: CalendarTzProvider,
-) -> Callable[[dict[str, Any], str], Awaitable[str]]:
+) -> Callable[[dict[str, Any], str, str | None], Awaitable[str]]:
     """Build the ``now`` handler closed over its timezone + calendar-tz sources.
 
     The handler reports the current time in the operator's configured timezone (or an
     explicit ``timezone`` argument). It also reports the connected calendar's timezone and
     a note when it differs from the configured one, so the agent creates events at the
     intended local time. The calendar lookup is best-effort — any failure is omitted, never
-    raised. ``now`` is tenant-agnostic, so the tenant argument is accepted and ignored.
+    raised. ``now`` is tenant- and session-agnostic, so both are accepted and ignored.
     """
 
-    async def handler(arguments: dict[str, Any], _tenant: str) -> str:
+    async def handler(
+        arguments: dict[str, Any], _tenant: str, _session_id: str | None = None
+    ) -> str:
         configured = await tz_provider()
         requested = arguments.get("timezone")
         wanted = requested if isinstance(requested, str) and requested.strip() else configured
@@ -152,7 +156,7 @@ class FactWriter(Protocol):
 
 def make_remember_handler(
     memory: FactWriter,
-) -> Callable[[dict[str, Any], str], Awaitable[str]]:
+) -> Callable[[dict[str, Any], str, str | None], Awaitable[str]]:
     """Build the ``remember`` handler closed over the memory facade (ADR-0045).
 
     Saves the fact to the calling tenant's user-fact memory. A near-duplicate of an existing
@@ -160,7 +164,9 @@ def make_remember_handler(
     string rather than raised, so a memory hiccup never breaks the turn.
     """
 
-    async def handler(arguments: dict[str, Any], tenant: str) -> str:
+    async def handler(
+        arguments: dict[str, Any], tenant: str, _session_id: str | None = None
+    ) -> str:
         fact = str(arguments.get("fact") or "").strip()
         if not fact:
             return "error: a `fact` to remember is required."
@@ -264,7 +270,7 @@ def _format_session_hit(hit: SessionHit) -> str:
 
 def make_memory_search_handler(
     memory: MemorySearcher,
-) -> Callable[[dict[str, Any], str], Awaitable[str]]:
+) -> Callable[[dict[str, Any], str, str | None], Awaitable[str]]:
     """Build the ``memory_search`` handler closed over the memory facade (ADR-0089).
 
     Deliberate recall for the **calling tenant** — built-in handlers receive the tenant precisely
@@ -275,7 +281,9 @@ def make_memory_search_handler(
     that half is simply omitted. Results are capped and compact — never a raw session dump.
     """
 
-    async def handler(arguments: dict[str, Any], tenant: str) -> str:
+    async def handler(
+        arguments: dict[str, Any], tenant: str, _session_id: str | None = None
+    ) -> str:
         query = str(arguments.get("query") or "").strip()
         if not query:
             return "error: a `query` to search for is required."
@@ -342,7 +350,7 @@ ASK_USER_SPEC: dict[str, Any] = {
 }
 
 
-def make_ask_user_handler() -> Callable[[dict[str, Any], str], Awaitable[str]]:
+def make_ask_user_handler() -> Callable[[dict[str, Any], str, str | None], Awaitable[str]]:
     """Build the ``ask_user`` safety-net handler (ADR-0053).
 
     The agent loop intercepts ``ask_user`` to suspend the turn (persist + emit
@@ -352,11 +360,140 @@ def make_ask_user_handler() -> Callable[[dict[str, Any], str], Awaitable[str]]:
     without suspend support degrades to a clear instruction rather than failing.
     """
 
-    async def handler(arguments: dict[str, Any], _tenant: str) -> str:
+    async def handler(
+        arguments: dict[str, Any], _tenant: str, _session_id: str | None = None
+    ) -> str:
         question = str(arguments.get("question") or "").strip()
         return (
             "error: cannot pause for input right now; proceed with your best assumption "
             f"and state it. (Question was: {question})"
         )
+
+    return handler
+
+
+# ── set_chat_model (#707) ────────────────────────────────────────────────────
+
+SET_CHAT_MODEL_TOOL = "set_chat_model"
+
+SET_CHAT_MODEL_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": SET_CHAT_MODEL_TOOL,
+        "description": (
+            "Switch the model THIS conversation uses, starting with your next reply, and "
+            "remember the choice (it survives a reload and shows in the model picker). Call "
+            "this when the user asks to switch models mid-chat — 'answer with grok from now "
+            "on', 'switch to the local qwen model'. Pass the model name, or a distinctive "
+            "part of it; it resolves against the models actually available (installed local "
+            "models and the operator's saved hosted models). An unknown or ambiguous name "
+            "changes nothing and returns the available list — never guess a model id. This "
+            "only changes the current conversation, never the tenant-wide default or a "
+            "module's model."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "description": "The model name (or a distinctive part of it) to switch to.",
+                }
+            },
+            "required": ["model"],
+        },
+    },
+}
+
+
+class LocalModelSource(Protocol):
+    """The slice of ``LlmGateway`` ``set_chat_model`` needs (eases faking in tests)."""
+
+    async def models(self, tenant_id: str | None = None) -> list[ModelInfo]: ...
+
+
+class SavedModelSource(Protocol):
+    """The slice of ``SavedHostedModelStore`` ``set_chat_model`` needs."""
+
+    async def list(self, tenant: str) -> list[str]: ...
+
+
+class SessionModelWriter(Protocol):
+    """The slice of ``SessionModelStore`` ``set_chat_model`` needs."""
+
+    async def set(self, *, tenant: str, session_id: str, model: str) -> None: ...
+
+
+def _resolve_model(query: str, available: list[str]) -> str | None:
+    """Resolve *query* against *available* model names/ids, or ``None`` if it doesn't.
+
+    An exact match (case-sensitive, then case-insensitive) wins outright. Otherwise a
+    case-insensitive substring match — but only when exactly **one** candidate contains
+    *query* — so 'grok' resolves when the operator has one saved grok model and refuses
+    (as ambiguous) when they have two. Never guesses: zero or multiple candidates both
+    return ``None``, and the caller reports the available list instead of picking one.
+    """
+    q = query.strip()
+    if not q:
+        return None
+    if q in available:
+        return q
+    lowered = q.lower()
+    for name in available:
+        if name.lower() == lowered:
+            return name
+    candidates = [name for name in available if lowered in name.lower()]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def make_set_chat_model_handler(
+    local: LocalModelSource,
+    saved: SavedModelSource,
+    sessions: SessionModelWriter,
+) -> Callable[[dict[str, Any], str, str | None], Awaitable[str]]:
+    """Build the ``set_chat_model`` handler (#707).
+
+    Resolves against exactly the two sources the web's model picker offers from —
+    installed local models (``LlmGateway.models``, hidden ones excluded: they are hidden
+    from chat pickers too, ADR-0029) and the tenant's saved hosted models
+    (``SavedHostedModelStore``) — and never guesses (:func:`_resolve_model`): an unknown or
+    ambiguous name changes nothing and hands the model the available list to try again
+    with. Persists to :class:`SessionModelStore` — the same field an explicit picker change
+    writes, so the two paths cannot fight. Requires a session: a turn with none (e.g. an
+    automation with no chat sink) has nowhere to persist the choice, so it errors plainly
+    rather than silently doing nothing. Every failure is an ``error:`` string, never raised
+    — a bad or unavailable catalog must not break the chat turn.
+    """
+
+    async def handler(arguments: dict[str, Any], tenant: str, session_id: str | None = None) -> str:
+        query = str(arguments.get("model") or "").strip()
+        if not query:
+            return "error: a `model` to switch to is required."
+        if session_id is None:
+            return "error: no active conversation to apply a model switch to."
+        try:
+            local_models = [m.name for m in await local.models(tenant) if not m.hidden]
+        except Exception as exc:  # the catalog is best-effort; a hiccup narrows, never fails
+            log.warning("local model list unavailable for set_chat_model", error=str(exc))
+            local_models = []
+        try:
+            hosted_models = await saved.list(tenant)
+        except Exception as exc:
+            log.warning("saved model list unavailable for set_chat_model", error=str(exc))
+            hosted_models = []
+        available = [*local_models, *hosted_models]
+        if not available:
+            return "error: no models are available to switch to right now."
+        resolved = _resolve_model(query, available)
+        if resolved is None:
+            return (
+                f"error: {query!r} does not match exactly one available model. "
+                f"Available models: {', '.join(available)}."
+            )
+        try:
+            await sessions.set(tenant=tenant, session_id=session_id, model=resolved)
+        except Exception as exc:  # surface to the model, never crash the turn
+            log.warning("set_chat_model persist failed", error=str(exc))
+            return f"error: could not switch the model: {exc}"
+        return f"Switched this conversation to {resolved} — it takes effect on your next reply."
 
     return handler

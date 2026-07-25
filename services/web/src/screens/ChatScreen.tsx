@@ -501,6 +501,14 @@ function ModelPicker() {
   const setModel = usePrefs((s) => s.setModel);
   const recents = usePrefs((s) => s.recentModels);
   const [custom, setCustom] = useState("");
+  const sessionId = useChat((s) => s.sessionId);
+  // The same ["sessions"] query the conversations list already fetches — react-query
+  // dedupes it, so this doesn't add a request. This session's own persisted model (#707,
+  // set by set_chat_model or a prior explicit pick here) takes priority over the
+  // device-wide default; null means no override.
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, staleTime: 15_000 });
+  const sessionModel = sessions.data?.find((s) => s.id === sessionId)?.model ?? null;
+  const effectiveModel = sessionModel ?? model;
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
@@ -524,10 +532,23 @@ function ModelPicker() {
     mutationFn: api.addSavedModel,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["savedModels"] }),
   });
-  const chooseHosted = (id: string) => {
+  // Writes the same field set_chat_model does (#707) — whichever of the tool or this picker
+  // fires last simply wins. `null` clears the override (picking "core default" back).
+  const setForSession = useMutation({
+    mutationFn: (m: string | null) => api.setSessionModel(sessionId, m),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+  // Always updates the device-wide default (so the next brand-new chat starts there too);
+  // additionally pins it to *this* session when one is open, so switching mid-chat doesn't
+  // silently drift back to the device default on the next message.
+  const choose = (id: string | null) => {
     setModel(id);
-    if (isHostedModelId(id)) save.mutate(id);
+    if (sessionId) setForSession.mutate(id);
     setOpen(false);
+  };
+  const chooseHosted = (id: string) => {
+    choose(id);
+    if (isHostedModelId(id)) save.mutate(id);
   };
 
   return (
@@ -536,7 +557,7 @@ function ModelPicker() {
         onClick={() => setOpen(true)}
         className="flex max-w-44 items-center gap-1 rounded-full border border-edge px-2.5 py-1 text-xs text-ink-dim transition-colors hover:border-accent hover:text-accent-strong"
       >
-        <span className="truncate">{model ?? "default model"}</span>
+        <span className="truncate">{effectiveModel ?? "default model"}</span>
         <ChevronDown size={12} className="shrink-0" />
       </button>
       <Sheet open={open} onClose={() => setOpen(false)} title="Model for this chat">
@@ -544,18 +565,15 @@ function ModelPicker() {
           <div>
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Local</p>
             <div className="flex flex-col gap-1">
-              <PickRow label={defaultLabel} active={model === null} onPick={() => { setModel(null); setOpen(false); }} />
+              <PickRow label={defaultLabel} active={effectiveModel === null} onPick={() => choose(null)} />
               {visibleModels.map((m) => (
                 <PickRow
                   key={m.name}
                   label={m.name}
                   loaded={m.loaded}
                   size={m.size}
-                  active={model === m.name}
-                  onPick={() => {
-                    setModel(m.name);
-                    setOpen(false);
-                  }}
+                  active={effectiveModel === m.name}
+                  onPick={() => choose(m.name)}
                 />
               ))}
               {models.isError && (
@@ -580,7 +598,7 @@ function ModelPicker() {
             {hostedIds.length > 0 && (
               <div className="mb-2 flex flex-col gap-1">
                 {hostedIds.map((id) => (
-                  <PickRow key={id} label={id} active={model === id} onPick={() => chooseHosted(id)} />
+                  <PickRow key={id} label={id} active={effectiveModel === id} onPick={() => chooseHosted(id)} />
                 ))}
               </div>
             )}

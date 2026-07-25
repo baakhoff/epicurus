@@ -117,7 +117,15 @@ class _FakeMcp:
         self.allow_seen.append(allow)
         return self._specs, self._route
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         self.called.append((name, arguments))
         return self._outputs.get(name, "tool-output")
 
@@ -406,7 +414,15 @@ async def test_agent_max_steps_falls_back_to_constructor_default() -> None:
 
 async def test_agent_handles_tool_error() -> None:
     class _FailingMcp(_FakeMcp):
-        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        async def call(
+            self,
+            name: str,
+            arguments: dict[str, Any],
+            url: str,
+            *,
+            tenant: str,
+            session_id: str | None = None,
+        ) -> str:
             raise RuntimeError("boom")
 
     gw = _FakeGateway(
@@ -427,7 +443,15 @@ async def test_agent_feeds_tool_reported_failure_text_to_the_model() -> None:
     # model the tool's own message — the exact text it received before the host raised —
     # so the model can react (retry, apologise, ask) without the turn crashing.
     class _ErrorMcp(_FakeMcp):
-        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        async def call(
+            self,
+            name: str,
+            arguments: dict[str, Any],
+            url: str,
+            *,
+            tenant: str,
+            session_id: str | None = None,
+        ) -> str:
             raise ToolCallError("Error executing tool echo: event 'e1' not found")
 
     gw = _FakeGateway(
@@ -450,7 +474,15 @@ async def test_agent_marks_tool_reported_failure_as_an_error_step() -> None:
     # gave it. The tool's own message (fed to the model verbatim) need not begin with "error:",
     # so the status is classified from whether the call raised, not from the returned text.
     class _ErrorMcp(_FakeMcp):
-        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        async def call(
+            self,
+            name: str,
+            arguments: dict[str, Any],
+            url: str,
+            *,
+            tenant: str,
+            session_id: str | None = None,
+        ) -> str:
             raise ToolCallError("Error executing tool echo: event 'e1' not found")
 
     gw = _FakeGateway(
@@ -1249,7 +1281,15 @@ async def test_distinct_args_repeats_are_not_flagged() -> None:
 
 
 class _AlwaysFailMcp(_FakeMcp):
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         self.called.append((name, arguments))
         raise ToolCallError("boom: cannot do that")
 
@@ -1277,7 +1317,15 @@ async def test_error_streak_stops_early_with_what_failed() -> None:
 
 
 class _PickyMcp(_FakeMcp):
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         self.called.append((name, arguments))
         if arguments.get("ok"):
             return "worked"

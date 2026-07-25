@@ -254,7 +254,7 @@ def _spec(name: str) -> dict[str, object]:
 async def test_discover_includes_registered_builtin() -> None:
     host = McpHost([])  # no modules — only the built-in
 
-    async def handler(_args: dict[str, object], _tenant: str) -> str:
+    async def handler(_args: dict[str, object], _tenant: str, _session_id: str | None) -> str:
         return "ok"
 
     host.register_builtin("now", _spec("now"), handler)
@@ -266,14 +266,14 @@ async def test_discover_includes_registered_builtin() -> None:
 async def test_call_dispatches_builtin_in_process_with_tenant() -> None:
     host = McpHost([])
 
-    async def handler(args: dict[str, object], tenant: str) -> str:
-        return f"got {args.get('timezone')} for {tenant}"
+    async def handler(args: dict[str, object], tenant: str, session_id: str | None) -> str:
+        return f"got {args.get('timezone')} for {tenant} (session={session_id})"
 
     host.register_builtin("now", _spec("now"), handler)
     _, route = await host.discover()
-    # the calling tenant is threaded through to the built-in handler
-    out = await host.call("now", {"timezone": "UTC"}, route["now"], tenant="t1")
-    assert out == "got UTC for t1"
+    # the calling tenant (and session, #707) are threaded through to the built-in handler
+    out = await host.call("now", {"timezone": "UTC"}, route["now"], tenant="t1", session_id="s1")
+    assert out == "got UTC for t1 (session=s1)"
 
 
 async def test_memory_search_builtin_dispatches_end_to_end() -> None:
@@ -329,7 +329,7 @@ async def test_builtin_respects_disabled_filter() -> None:
     async def tool_filter() -> set[str]:
         return {"now"}
 
-    async def handler(_args: dict[str, object], _tenant: str) -> str:
+    async def handler(_args: dict[str, object], _tenant: str, _session_id: str | None) -> str:
         return "ok"
 
     host = McpHost([])

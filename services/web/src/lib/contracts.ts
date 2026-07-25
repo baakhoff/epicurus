@@ -237,6 +237,10 @@ export const SessionSummary = z.object({
   automation_id: z.string().nullish(),
   automation_name: z.string().nullish(),
   chat_mode: z.string().nullish(),
+  /** This session's persisted model override (#707) — set by the set_chat_model tool or an
+   *  explicit picker change while this session is open; null means no override (the
+   *  device's own default picker choice applies). */
+  model: z.string().nullish(),
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
 

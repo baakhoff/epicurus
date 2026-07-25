@@ -1418,9 +1418,20 @@ export function KvCache() {
         <p className="mt-2 text-[11px] leading-relaxed text-ink-dim">
           Applied — Ollama restarted with the new cache type (a few seconds to warm back up).
         </p>
-      ) : save.isSuccess && !save.data.applied ? (
+      ) : save.isSuccess && save.data.staged ? (
+        // The usual degraded case (#709): the env file is already written, and Ollama's
+        // entrypoint re-sources it on every start — so a plain container restart is the whole
+        // remaining job. Editing environment variables would be busywork.
+        <p className="mt-2 text-[11px] leading-relaxed text-ink-dim">
+          Saved — restart the Ollama container to apply it. The choice is already staged, so
+          there’s nothing to edit: <code className="font-mono">docker compose restart ollama</code>
+          .
+        </p>
+      ) : save.isSuccess ? (
+        // Not staged: the env file couldn't be written at all, so the manual route is the
+        // only one that works.
         <p className="mt-2 text-[11px] leading-relaxed text-warn">
-          Saved, but the core couldn’t restart Ollama (no Docker access). Set{" "}
+          Saved, but the core couldn’t write Ollama’s start-up settings. Set{" "}
           <code className="font-mono">OLLAMA_KV_CACHE_TYPE</code>
           {current ? ` (${current})` : ""} and{" "}
           <code className="font-mono">OLLAMA_FLASH_ATTENTION=1</code> in your environment, then

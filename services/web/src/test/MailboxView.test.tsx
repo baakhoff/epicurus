@@ -127,6 +127,36 @@ it("reconciles the landing in the background and swaps in fresh data (#623)", as
   );
 });
 
+it("keeps the previous folder's list visible while the next one loads, never a blank flash (#712)", async () => {
+  const SENT = {
+    ...LIST,
+    active_label: "SENT",
+    threads: [{ ...LIST.threads[0], id: "s1", subject: "Re: budget", sender: "carol@example.com" }],
+  };
+  let resolveSent: (value: unknown) => void = () => {};
+  const sentPromise = new Promise((resolve) => {
+    resolveSent = resolve;
+  });
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.thread_id) return Promise.resolve(THREAD);
+    if (params?.label === "SENT") return sentPromise;
+    return Promise.resolve(LIST);
+  });
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Sent" }));
+
+  // The Inbox row is still on screen — the folder switch never unmounts to a blank
+  // spinner — while Sent's fetch is still in flight.
+  expect(screen.getByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByText("carol@example.com")).not.toBeInTheDocument();
+
+  resolveSent(SENT);
+  expect(await screen.findByText("carol@example.com")).toBeInTheDocument();
+  expect(screen.queryByText("Project kickoff")).not.toBeInTheDocument();
+});
+
 it("marks a thread's unread messages read on open (#625)", async () => {
   const UNREAD_THREAD = {
     thread: {

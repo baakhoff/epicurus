@@ -6,7 +6,7 @@
  * render through the shared `MailMessageView` (the same component the panel `email-reader`
  * uses); sends go through the gated, operator-only send proxy (never the agent — ADR-0085).
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronLeft, ChevronRight, Mail, PenSquare, Search, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -307,6 +307,15 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
       if (cursor) params.cursor = cursor;
       return api.modulePage(module, pageId, params);
     },
+    // Keep the previous folder/page on screen while the next one loads (#712) — a folder,
+    // search, or pagination switch is a new query key, so without this every switch mounts
+    // cold (isLoading, no data) and blanks to a spinner even though we already have a
+    // perfectly good list to show meanwhile.
+    placeholderData: keepPreviousData,
+    // Every visited folder stays warm for the session: a revisit renders instantly and
+    // refreshes in the background rather than re-fetching from a blank state.
+    staleTime: 30_000,
+    gcTime: 30 * 60_000,
   });
 
   // Cache-first landing (ADR-0096, #623): the plain folder view (no search, first page) serves
@@ -426,6 +435,11 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
               className="pl-8"
             />
           </div>
+          {/* A folder/search/page switch keeps the previous list on screen (#712) — this is
+              the only signal that a fetch is still under way behind it. */}
+          {listQuery.isFetching && !listQuery.isLoading && (
+            <Spinner className="size-3.5 shrink-0 text-ink-faint" />
+          )}
           <Button variant="outline" size="sm" onClick={() => setComposing(true)}>
             <PenSquare size={15} />
             <span className="hidden sm:inline">New message</span>

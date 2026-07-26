@@ -97,11 +97,35 @@ classification is *declared*, not inferred: `mail_mark_read` contains "read" and
 naming heuristics are unsound, and `writes_document` is a rendering hint (its own docstring
 says so) that `mail_send` does not carry.
 
-> **Not yet annotated:** only the core built-ins (`now`, `memory_search` — read;
-> `propose_automation` — propose; `remember`, `ask_user` — write) and `echo` declare side
-> effects today. Until a module annotates its read tools, a Notify automation reaches none of
-> them — the triggering event is still in its context, so it can still report. A follow-up
-> sweeps the modules.
+> **Coverage.** The core built-ins (`now`, `memory_search` — read; `propose_automation` —
+> propose; `remember`, `ask_user` — write) and `echo` are annotated, and two sweeps have now
+> covered every module that stages anything. Each module's *read* tools declare `read`
+> (#705/#717) — mail (`mail_search`, `mail_read`), calendar (`calendar_list_events`,
+> `calendar_find_free`), tasks (`tasks_list`, `tasks_lists`), notes (`notes_list`,
+> `notes_tree`) and knowledge (`knowledge_search`, `knowledge_list_projects`, `knowledge_tree`,
+> `knowledge_read_document`) — the minimum a `notify` automation needs to read
+> mail/events/tasks/notes/the vault rather than only the triggering event's payload, which is
+> what each module's starter templates (see [Templates](#templates)) assume. Every
+> *propose*-shaped tool declares `propose` (#721) — mail's `mail_send`/`mail_reply`, knowledge's
+> `knowledge_propose_*` and `knowledge_create_document`, and notes' `notes_create`,
+> `notes_propose_edit`, `notes_append`, `notes_delete`. Those three are the only modules that
+> stage: tasks, calendar, storage and websearch apply every write directly, and messaging
+> exposes no agent tools, so nothing there is propose-shaped. Their remaining write tools stay
+> unannotated, and any tool this page has not named defaults to `write`.
+>
+> **The review-toggle interaction (#721, ADR-0112).** Knowledge's and notes' propose tools
+> stage a suggestion *unless* the operator has turned suggestion review off for that specific
+> module (`PlatformClient.get_suggestions_enabled()`, scoped per **(tenant, module)** — never
+> global), in which case the same call applies immediately. `propose` is accurate whenever
+> review is on (the default); with it off for a module, a `propose`-autonomy automation
+> touching that module inherits the same direct-apply behavior chat already has there — an
+> accepted consequence of one operator setting governing every caller consistently, not a
+> loophole this annotation opens. An operator who wants an automation to never write to
+> knowledge/notes regardless of their own review setting should keep it at `notify` autonomy,
+> which never reaches these tools either way. `mail_send`/`mail_reply` carry no such caveat:
+> they compose a `DraftReview` (ADR-0085) unconditionally, and a headless automation turn
+> already degrades a draft it can't show into an informative error (below) rather than ever
+> sending.
 
 ### How it is enforced
 
@@ -337,7 +361,12 @@ See [platform-api](platform-api.md#automations-adr-0105).
   send — the agent loop rewrites a `DraftReview` into an error, since there is no chat UI to
   Confirm in. The `propose` tier works (its tools stage a suggestion); the transmit path
   from an unattended turn is its own design question.
-- **Most module tools are unannotated**, so a Notify automation reaches few of them (above).
+- **Knowledge/notes' `propose` tools can apply directly if the operator has turned suggestion
+  review off for that module** (#721, ADR-0112) — an accepted interaction with an existing,
+  module-scoped operator setting, not a bug; see the "Tool side effects" callout above.
+- **Most modules' tools are still unannotated** outside what #705/#717/#721 covered (read and
+  propose tools across mail/calendar/tasks/notes/knowledge), so `notify`/`propose` automations
+  reach few of them elsewhere.
 - **Rate caps are per-instance** in the sense that the ledger is the source of truth; there
   is no cross-instance coordination beyond Postgres, which is sufficient for single-core-app
   deployments.

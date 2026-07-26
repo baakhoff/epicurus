@@ -12,6 +12,66 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
+  operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
+  only source for a hosted model's vision support and context length, and it is missing ids
+  entirely (`grok/grok-latest`, which resolves to an unmapped `xai/grok-latest`) and mislabels
+  others; the consequence was concrete — `supports_vision()` resolved `False` and the image gate
+  (#633) refused image turns for a genuinely vision-capable model, leaving "rename your model to
+  a mapped id" as the workaround. The override is consulted **before** the map in both
+  `supports_vision()` and `_hosted_details`, and applies even when the map lookup fails outright
+  — an unmapped id is precisely the case it exists for, so that path must not be the one that
+  skips it. `vision: auto` (the default) with no `context_length` is today's behaviour exactly,
+  so an absent override changes nothing. New `PUT /platform/v1/llm/saved-models/capabilities`
+  (404 for an unsaved id — an override is a property of a saved row, never a way to create one);
+  `GET /saved-models` rows now carry both the **resolved** capabilities and the raw `override`,
+  so the editor round-trips without a client-side merge. The Models page's hosted-model sheet
+  gains the controls, and the saved rows finally render capability badges (they never did) —
+  driven by the resolved answer, so an override shows the moment it's saved. Two new columns on
+  `saved_models`, reconciled additively (ADR-0067). Gating and display only: routing, keys, and
+  metering are untouched (constraint #8). The `get_model_info`/`supports_vision` lookup misses
+  now warn **once per model id per process** and debug thereafter — an operator-saved alias
+  outside a curated static map is expected, not anomalous. `core-app` 0.92.1→0.93.0 (MINOR) ·
+  `web` 0.119.0→0.120.0 (MINOR).
+
+### Fixed
+
+- **KV-cache fallback message: a staged choice needs a restart, not an environment edit** (#709)
+  — `apply_kv_cache_type` has two distinct degraded modes and the API collapsed both into
+  `applied: false`, so the Models page always showed the scarier, mostly-wrong instruction
+  ("set `OLLAMA_KV_CACHE_TYPE` … in your environment"). In the common case — the env file was
+  written and only Docker access is missing — that instruction is busywork: Ollama's entrypoint
+  re-sources `/etc/epicurus/ollama.env` on every start, so a plain container restart applies the
+  already-staged choice. The prefs route now returns `staged` beside `applied`
+  (`applied` ⇒ `staged`; a `KvCacheApplyResult` replaces the bare bool), and the UI branches on
+  it: staged → "restart the Ollama container to apply … `docker compose restart ollama`";
+  not staged (the env file could not be written at all) → today's environment-variable text.
+  The clear-to-default path stages identically — a successful unlink *is* the choice on disk.
+  A core predating this reports no `staged`, which defaults to `false`, so an older backend keeps
+  the old copy rather than promising a restart that wouldn't help.
+  `core-app` 0.93.0→0.93.1 (PATCH) · `web` 0.120.0→0.120.1 (PATCH).
+- **Model catalog: re-anchored on the library's current markup** (#710) — the public model
+  library dropped the `x-test-*` attributes the parser keyed on, so every refresh parsed to
+  `[]`, the box served the seed indefinitely, and a `model catalog refresh failed` warning was
+  written every `refresh_seconds` for weeks. The parser now keys on the page's **structure and
+  user-visible copy** — the per-model `/library/<name>` link, the rounded-badge idiom, and the
+  word "Pulls" — and classifies each chip by its *text* rather than by the Tailwind colour that
+  distinguishes capabilities from sizes, so a restyle degrades instead of silently mislabelling.
+  Three regressions fall out of the live data: mixture-of-experts (`8x7b`, `128x17b`) and
+  "effective" (`e2b`) size labels are now expanded into pullable entries instead of dropped;
+  comma-grouped pull counts (`8,171`) rank correctly instead of scoring 0; and a blurb that
+  merely *mentions* "updated"/"tags"/"pulls" is no longer blanked (the stats line is told apart
+  structurally now — this affected 7 of the library's 233 families, `mistral` among them).
+  Repeated failures are **bounded**: the first failure of a streak warns, a *changed* error
+  warns again, the rest drop to debug, and the recovery reports how long the outage ran.
+  `tests/fixtures/ollama-library.html` and `ollama-tags-*.html` are trimmed verbatim captures
+  (2026-07-25) that pin the real markup, so the next redesign fails a test instead of the box.
+  The tags-page selectors (#571, #330) were verified against the same redesign and needed no
+  change — they key on the `/library/<family>:<tag>` link, which survived. `core-app`
+  0.92.0→0.92.1 (PATCH).
+
 ### Changed
 
 - **Agent grounding: local sources first, then the web — never an unsourced guess** (#703) — the
@@ -34,8 +94,40 @@ images to GHCR.
   always records the run, with the model's own reason (`AutomationRun.quiet_reason`); `chat` is
   deliberately exempted (it is turn-time — ADR-0108 — and rolling continuity needs the next run to
   see this one's reply regardless). The Automations editor gains the toggle; the runs feed and the
-  per-automation history badge `quiet` outcomes distinctly with their reason. `core-app` 0.92.0→0.93.0
-  (MINOR) · `web` 0.118.0→0.119.0 (MINOR). ADR-0110.
+  per-automation history badge `quiet` outcomes distinctly with their reason. `core-app` 0.93.1→0.94.0
+  (MINOR) · `web` 0.120.1→0.121.0 (MINOR). ADR-0110.
+
+- **Propose-autonomy automations can now actually reach mail's compose tools and knowledge/
+  notes' suggestion tools** (#721) — completes the sweep #705 started: `mail_send`/
+  `mail_reply`, knowledge's six `knowledge_propose_*`/`knowledge_create_document`, and notes'
+  four propose-shaped tools now declare `side_effect="propose"`. Previously unannotated
+  (defaulting to `write`), a `propose`-autonomy automation had zero usable tools on any of
+  these three modules — the tier was structurally dead for them. Knowledge's and notes' tools
+  stage a suggestion unless the operator has turned suggestion review off for that module, in
+  which case they apply directly, same as they already do in chat (ADR-0112 documents why this
+  is an accepted interaction with an existing per-module setting, not a gap the annotation
+  should paper over); `mail_send`/`mail_reply` carry no such caveat — they compose a draft
+  unconditionally, and an unattended automation turn already degrades a draft it can't show
+  into an informative error rather than ever sending. `mail` 0.15.0→0.16.0 · `knowledge`
+  0.25.0→0.26.0 · `notes` 0.10.0→0.11.0 (all MINOR). No `core-app` change.
+
+- **Starter automation templates for every module** (#705) — the Templates tab was
+  effectively empty (only `echo`'s reference `on-ping`); mail, calendar, tasks, notes, and
+  knowledge each now declare two curated presets — mail (triage new mail, morning unread
+  digest), calendar (tomorrow-at-a-glance, event-starting-soon — "notify on a new invitation"
+  was dropped, no such event exists yet), tasks (due-today digest, overdue alert), notes
+  (weekly review, on-note-created), knowledge (large-vault-sync notify, index-failed notify).
+  All ten are `notify`-autonomy with a `push` sink, never auto-instantiated (the operator
+  instantiates from the Templates tab, same as ever). Getting these actually useful required
+  annotating each module's read tools `side_effect="read"` (`mail_search`/`mail_read`,
+  `calendar_list_events`/`calendar_find_free`, `tasks_list`/`tasks_lists`, `notes_list`/
+  `notes_tree`, `knowledge_search`/`knowledge_list_projects`/`knowledge_tree`/
+  `knowledge_read_document`) — unannotated defaults to `write`, which a Notify automation can
+  never call, so a schedule-triggered template (no triggering-event payload to fall back on)
+  would otherwise reach zero tools and produce nothing useful. `mail` 0.14.0→0.15.0 ·
+  `calendar` 0.17.0→0.18.0 · `tasks` 0.17.0→0.18.0 · `notes` 0.9.1→0.10.0 · `knowledge`
+  0.24.1→0.25.0 (all MINOR). No `core-app` change — the templates contract already existed
+  (ADR-0105).
 
 - **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the
   automations loop opened in W7. `propose_automation` is a core built-in that drafts an automation
@@ -321,6 +413,26 @@ images to GHCR.
   §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
 
 ### Fixed
+
+- **Web: no more cold-mount flash on a folder/search/pagination switch** (#712) — mail's
+  thread list blanked to a spinner on every folder change (search, and pagination too),
+  because each switch is a new react-query key and, left at the defaults, that mounts cold
+  with no data. `MailboxView`'s list query now keeps the previous folder's data on screen
+  (`placeholderData: keepPreviousData`) with a small inline spinner as the only sign a fetch
+  is under way, plus a tuned `staleTime`/`gcTime` so every folder visited in a session stays
+  warm and a revisit renders instantly. A borrowed placeholder also has to be guarded wherever
+  one query gates on another's success: the cache-first reconcile read (#623) waits on the list
+  query, and a placeholder resolves that to `success` before the newly-selected folder's own read
+  has landed, so the gate now also requires `!isPlaceholderData` — without it a first visit fired
+  both provider reads at once, the exact double round-trip ADR-0096's gate exists to prevent.
+  Auditing the other three archetypes for the same pattern found it live in two more places —
+  `BrowserView` (a directory/search switch) and
+  `EditorView` (opening a different document) — and fixed both; `EditorView`'s fix also
+  guards the draft-seeding effect on `!doc.isPlaceholderData`, since without it the *previous*
+  document's still-visible placeholder content would seed into the newly-selected path and
+  strand the real content unread once it arrived. `CalendarView`/`BoardView` already did this
+  (Calendar since #378/#379) and needed no change — they were the reference the audit checked
+  the others against. `web` 0.118.0→0.119.0 (MINOR — the audit landed changes beyond mail).
 
 - **CI: no gate ever checked a docs/ cross-reference — a dead one reached shipped operator
   UI** (#692). Issue #661 existed because `docs/DEPLOYMENT.md` was referenced from shipped,

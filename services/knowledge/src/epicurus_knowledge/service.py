@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from epicurus_core import (
+    AutomationTemplate,
     EntityRef,
     EpicurusModule,
     ModelSlot,
@@ -257,7 +258,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.24.1",
+        version="0.26.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -326,6 +327,38 @@ def build_module(
         # Holds embeddings (vault + platform/module docs): re-embed on demand when the
         # embedding model changes, via POST /reindex (the core's re-embed fan-out, #332).
         reindexable=True,
+        # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
+        automation_templates=[
+            AutomationTemplate(
+                key="on-large-vault-sync",
+                name="Notify on a large vault sync",
+                description=(
+                    "Runs when an external vault sync (#232) indexes a large batch in one pass —"
+                    " the threshold (10 documents) is a sensible default; edit it after"
+                    " instantiating if your vault syncs larger batches routinely."
+                ),
+                trigger={
+                    "module": MODULE_NAME,
+                    "event_type": VAULT_SYNCED,
+                    "matchers": [{"field": "indexed", "op": "gt", "value": 10}],
+                },
+                prompt=(
+                    "A vault sync just indexed a large batch of documents. Summarize how many"
+                    " were added/updated and how many were deleted."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+            AutomationTemplate(
+                key="on-index-failed",
+                name="Tell me when indexing fails",
+                description="Runs when the initial index or a vault-sync pass fails.",
+                trigger={"module": MODULE_NAME, "event_type": INDEX_FAILED},
+                prompt="Indexing failed. Say so plainly so it doesn't go unnoticed silently.",
+                autonomy="notify",
+                sinks=["push"],
+            ),
+        ],
     )
 
     # Spine emitters (#665) — replaces the legacy `knowledge.index.completed` declaration,
@@ -358,6 +391,12 @@ def build_module(
         is applied immediately (the suggestion is approved right after it is staged), reusing
         the same apply path the operator would. A failed auto-apply (e.g. a read-only watched
         vault) leaves the change staged rather than losing it.
+
+        Every caller is annotated ``side_effect="propose"`` (#721, ADR-0112): accurate when
+        review is on for this module; with it off, a propose-autonomy automation inherits the
+        same direct-apply behavior chat already has here — an accepted interaction, not a bug
+        the annotation should paper over (see the ADR for why forcing automations to always
+        stage isn't the resolution).
         """
         try:
             review_on = await platform.get_suggestions_enabled()
@@ -377,7 +416,7 @@ def build_module(
             ) from exc
         return tool_envelope(applied_msg, [])
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def knowledge_search(query: str, k: int = 5) -> str:
         """Search the knowledge base for content relevant to *query*.
 
@@ -495,8 +534,16 @@ def build_module(
 
     # `content` is the document's whole body, so the shell can show it in the document pane as
     # the note being written (#541, ADR-0100). The structural tools below (move / rename /
-    # folder / project) carry no body and stay un-annotated.
-    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="path"))
+    # folder / project) carry no body and stay un-annotated (for `writes_document` — they do
+    # carry `side_effect`, added separately below).
+    # side_effect="propose" (#721, ADR-0112): stages unless review is off for this module, in
+    # which case _stage_doc_write/_finalize applies it directly — an accepted, documented
+    # interaction (docs/reference/automations.md), not a bug. Shares _stage_doc_write with
+    # knowledge_propose_edit below, so both get the identical classification.
+    @module.tool(
+        writes_document=WritesDocument(content_arg="content", target_arg="path"),
+        side_effect="propose",
+    )
     async def knowledge_create_document(path: str, content: str, note: str = "") -> str:
         """Create a NEW document in the knowledge base.
 
@@ -517,7 +564,12 @@ def build_module(
         """
         return await _stage_doc_write("create", path, content, note, reject_existing=True)
 
-    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="path"))
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # knowledge_create_document above (both share _stage_doc_write).
+    @module.tool(
+        writes_document=WritesDocument(content_arg="content", target_arg="path"),
+        side_effect="propose",
+    )
     async def knowledge_propose_edit(
         path: str,
         content: str = "",
@@ -558,7 +610,7 @@ def build_module(
 
     # ── Navigation (read-only): how the agent learns where things live ───────────
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def knowledge_list_projects() -> str:
         """List the knowledge bases (projects) — the top-level collections of the KB.
 
@@ -571,7 +623,7 @@ def build_module(
             return "No knowledge bases yet. Propose one with knowledge_propose_project(name)."
         return "Knowledge bases:\n" + "\n".join(f"- {p}" for p in projects)
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def knowledge_tree(project: str = "") -> str:
         """Show the folder/document structure of the knowledge base — its schema.
 
@@ -595,7 +647,7 @@ def build_module(
                 lines.append(f"{'  ' * depth}{name}{suffix}")
         return "\n".join(lines)
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def knowledge_read_document(path: str) -> str:
         """Read a knowledge-base document's full content by its path.
 
@@ -616,7 +668,10 @@ def build_module(
 
     # ── Structural changes (staged for review, like every agent write) ───────────
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112): stages unless review is off for this module
+    # (PlatformClient.get_suggestions_enabled()), in which case _finalize applies it directly —
+    # an accepted, documented interaction (docs/reference/automations.md), not a bug.
+    @module.tool(side_effect="propose")
     async def knowledge_propose_move(from_path: str, to_path: str, note: str = "") -> str:
         """Propose moving or renaming a document or folder, for operator review (ADR-0033).
 
@@ -654,7 +709,9 @@ def build_module(
             " your review in Knowledge → Suggestions; nothing moves until you approve it.",
         )
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # knowledge_propose_move above.
+    @module.tool(side_effect="propose")
     async def knowledge_propose_rename(path: str, new_name: str, note: str = "") -> str:
         """Propose renaming a document or folder (keeps it where it is), for review (ADR-0033).
 
@@ -702,7 +759,9 @@ def build_module(
             " your review in Knowledge → Suggestions.",
         )
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # knowledge_propose_move above.
+    @module.tool(side_effect="propose")
     async def knowledge_propose_folder(path: str, note: str = "") -> str:
         """Propose creating a folder in the knowledge base, for operator review (ADR-0033).
 
@@ -730,7 +789,9 @@ def build_module(
             " review in Knowledge → Suggestions.",
         )
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # knowledge_propose_move above.
+    @module.tool(side_effect="propose")
     async def knowledge_propose_project(name: str, note: str = "") -> str:
         """Propose creating a new knowledge base (project), for operator review (ADR-0033).
 

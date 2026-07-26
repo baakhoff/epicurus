@@ -6,7 +6,7 @@
  * render through the shared `MailMessageView` (the same component the panel `email-reader`
  * uses); sends go through the gated, operator-only send proxy (never the agent — ADR-0085).
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronLeft, ChevronRight, Mail, PenSquare, Search, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -307,13 +307,25 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
       if (cursor) params.cursor = cursor;
       return api.modulePage(module, pageId, params);
     },
+    // Keep the previous folder/page on screen while the next one loads (#712) — a folder,
+    // search, or pagination switch is a new query key, so without this every switch mounts
+    // cold (isLoading, no data) and blanks to a spinner even though we already have a
+    // perfectly good list to show meanwhile.
+    placeholderData: keepPreviousData,
+    // Every visited folder stays warm for the session: a revisit renders instantly and
+    // refreshes in the background rather than re-fetching from a blank state.
+    staleTime: 30_000,
+    gcTime: 30 * 60_000,
   });
 
   // Cache-first landing (ADR-0096, #623): the plain folder view (no search, first page) serves
   // from the module's local cache instantly, then this second read reconciles the provider delta
   // into the cache and swaps in the fresh list — new/changed messages and flag flips appear
   // without a manual refresh. Gated on the cached read succeeding first, so a cold cache does one
-  // full sync (the list read) rather than two racing ones. Search / deeper pages skip it.
+  // full sync (the list read) rather than two racing ones — and that gate has to exclude placeholder
+  // data (#712): keeping the previous folder on screen resolves the list query to `success` on the
+  // very first render of an unvisited folder, before that folder's own read has landed, which would
+  // re-open exactly the race the gate exists to close. Search / deeper pages skip it.
   const isLanding = !submitted && !cursor;
   const reconcileQuery = useQuery({
     queryKey: ["module-page", module, pageId, "reconcile", label],
@@ -322,7 +334,7 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
       if (label) params.label = label;
       return api.modulePage(module, pageId, params);
     },
-    enabled: isLanding && listQuery.isSuccess,
+    enabled: isLanding && listQuery.isSuccess && !listQuery.isPlaceholderData,
   });
 
   // Prefer the reconciled data once it lands; until then paint the instant cached read.
@@ -426,6 +438,11 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
               className="pl-8"
             />
           </div>
+          {/* A folder/search/page switch keeps the previous list on screen (#712) — this is
+              the only signal that a fetch is still under way behind it. */}
+          {listQuery.isFetching && !listQuery.isLoading && (
+            <Spinner className="size-3.5 shrink-0 text-ink-faint" />
+          )}
           <Button variant="outline" size="sm" onClick={() => setComposing(true)}>
             <PenSquare size={15} />
             <span className="hidden sm:inline">New message</span>

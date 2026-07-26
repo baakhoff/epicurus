@@ -123,13 +123,31 @@ export const PushTestResult = z.object({
 });
 export type PushTestResult = z.infer<typeof PushTestResult>;
 
+/**
+ * The operator's correction to a saved hosted model's declared capabilities (#711).
+ *
+ * LiteLLM's static cost map omits ids entirely (`xai/grok-latest`) and mislabels others, which
+ * makes the image gate (#633) refuse a genuinely vision-capable model. `auto` means "trust the
+ * map" — the pre-override behaviour — so an all-default override changes nothing. The
+ * `context_length` here is the model's *declared* window (a badge); the compaction budget we
+ * choose to send is `ModelSettings.context_window`, a different layer.
+ */
+export const SavedModelOverride = z.object({
+  vision: z.enum(["auto", "on", "off"]).default("auto"),
+  context_length: z.number().nullish(),
+});
+export type SavedModelOverride = z.infer<typeof SavedModelOverride>;
+
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({
   model: z.string(),
   provider: z.string(),
-  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map.
+  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map. Already
+  // override-resolved by the core (#711) — render badges from these, never merge them yourself.
   context_length: z.number().nullish(),
   capabilities: z.array(z.string()).default([]),
+  // What the operator set, so the editor round-trips. Defaulted for an older core.
+  override: SavedModelOverride.default({ vision: "auto", context_length: null }),
 });
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 

@@ -20,6 +20,7 @@ the ``review`` archetype — both core-rendered (this module supplies data only)
 from __future__ import annotations
 
 from epicurus_core import (
+    AutomationTemplate,
     EpicurusModule,
     PageSpec,
     PlatformClient,
@@ -66,7 +67,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.9.1",
+        version="0.11.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -103,6 +104,35 @@ def build_module(
             ),
             status_url="/status",
         ),
+        # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
+        automation_templates=[
+            AutomationTemplate(
+                key="weekly-notes-review",
+                name="Weekly notes review",
+                description=(
+                    "A lightweight weekly recap of which notes you've been touching —"
+                    " titles only, notes stay private."
+                ),
+                trigger={"cadence": "weekly", "hour": 17, "weekday": 4},
+                prompt=(
+                    "List your notes and call out which ones look recently touched, as a"
+                    " short weekly recap. You cannot read note bodies — titles only."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+            AutomationTemplate(
+                key="on-note-created",
+                name="Tell me when a note is created",
+                description=(
+                    "Runs whenever a note comes into existence (editor or approved suggestion)."
+                ),
+                trigger={"module": MODULE_NAME, "event_type": NOTE_CREATED},
+                prompt="A note was created. Name it in one short line.",
+                autonomy="notify",
+                sinks=["push"],
+            ),
+        ],
     )
 
     # Spine emitters (#665) — replaces the legacy bare `notes.saved` subject, which had no
@@ -124,7 +154,7 @@ def build_module(
 
     # ── Read-only structure (titles only — never bodies; notes are private) ──────
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def notes_list() -> str:
         """List your notes — their titles and slugs, newest first. **Never returns bodies.**
 
@@ -136,7 +166,7 @@ def build_module(
             return "No notes yet."
         return "Notes (title — slug):\n" + "\n".join(f"- {s.title} — {s.slug}" for s in summaries)
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def notes_tree() -> str:
         """Show your notes as a structure (folders inferred from ``/`` in slugs). Titles only.
 
@@ -155,6 +185,14 @@ def build_module(
     # ── Writes — all staged for operator review (notes are private) ──────────────
 
     async def _stage(slug: str, operation: str, proposed: str, note: str) -> str:
+        """Stage a suggestion, or auto-apply it when review is off for this module.
+
+        Every caller is annotated ``side_effect="propose"`` (#721, ADR-0112): accurate when
+        review is on for this module; with it off, a propose-autonomy automation inherits the
+        same direct-apply behavior chat already has here — an accepted interaction, not a bug
+        the annotation should paper over (see the ADR for why forcing automations to always
+        stage isn't the resolution).
+        """
         clean = _valid_slug(slug)
         if clean is None:
             # Raise (not a success envelope) so the call is structurally an error: the live
@@ -199,9 +237,16 @@ def build_module(
         )
 
     # `content` is the note's whole body, so the shell can show it in the document pane as the
-    # note being written (#541, ADR-0100). `notes_append` is deliberately NOT annotated: its
-    # `text` is a fragment the server concatenates on approval, not a document.
-    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="slug"))
+    # note being written (#541, ADR-0100). `notes_append` is deliberately NOT annotated (for
+    # `writes_document` — it does carry `side_effect`, below): its `text` is a fragment the
+    # server concatenates on approval, not a document.
+    # side_effect="propose" (#721, ADR-0112): stages unless review is off for this module
+    # (PlatformClient.get_suggestions_enabled()), in which case _stage applies it directly —
+    # an accepted, documented interaction (docs/reference/automations.md), not a bug.
+    @module.tool(
+        writes_document=WritesDocument(content_arg="content", target_arg="slug"),
+        side_effect="propose",
+    )
     async def notes_create(slug: str, content: str, note: str = "") -> str:
         """Propose creating a note at *slug* with *content*, for operator review (ADR-0033).
 
@@ -211,7 +256,12 @@ def build_module(
         """
         return await _stage(slug, "create", content, note)
 
-    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="slug"))
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # notes_create above.
+    @module.tool(
+        writes_document=WritesDocument(content_arg="content", target_arg="slug"),
+        side_effect="propose",
+    )
     async def notes_propose_edit(slug: str, content: str, note: str = "") -> str:
         """Propose replacing note *slug*'s full body with *content*, for review (ADR-0033).
 
@@ -221,7 +271,9 @@ def build_module(
         """
         return await _stage(slug, "update", content, note)
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # notes_create above.
+    @module.tool(side_effect="propose")
     async def notes_append(slug: str, text: str, note: str = "") -> str:
         """Propose appending *text* to the end of note *slug*, for review (ADR-0033).
 
@@ -230,7 +282,9 @@ def build_module(
         """
         return await _stage(slug, "append", text, note)
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # notes_create above.
+    @module.tool(side_effect="propose")
     async def notes_delete(slug: str, note: str = "") -> str:
         """Propose deleting note *slug*, for operator review (ADR-0033).
 

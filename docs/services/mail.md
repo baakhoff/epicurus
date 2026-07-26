@@ -351,6 +351,24 @@ on the bare `mail.sent` subject via a raw `EventBus.publish` call with an ad-hoc
 payload. All three events now ride the same catalogued, validated contract every module's
 events share.
 
+### Automation templates (#705, ADR-0105)
+
+Two starter presets on the Templates tab — never auto-instantiated, see
+[reference/automations.md#templates](../reference/automations.md#templates):
+
+| Key | Trigger | Autonomy | Sinks |
+| --- | --- | --- | --- |
+| `on-mail-received` | Event: `mail.received` | `notify` | `push` |
+| `morning-unread-digest` | Schedule: daily, 08:00 | `notify` | `push` |
+
+Both need `mail_search`/`mail_read` reachable at `notify` — the reason those two tools are
+annotated `side_effect="read"` (the [autonomy dial](../reference/automations.md#the-autonomy-dial)
+otherwise defaults every tool to `write`, which a Notify turn can never call).
+
+`mail_send`/`mail_reply` are annotated `side_effect="propose"` (#721), which is what lets
+a `propose`-autonomy automation reach them. Both compose a `DraftReview` unconditionally
+(ADR-0085), so that tier carries no risk of an unattended send here.
+
 #### Provider caveats
 
 Gmail's `users.history.list` reports changes at **thread** granularity for most purposes

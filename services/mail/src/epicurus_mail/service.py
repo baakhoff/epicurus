@@ -192,7 +192,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.13.0",
+        version="0.15.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -332,7 +332,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         parts.append(m.body or "(no body)")
         return "\n".join(parts)
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112): unconditionally draft-first, never a direct send —
+    # the automations dial can hand this to a propose-autonomy turn with no caveat.
+    @module.tool(side_effect="propose")
     async def mail_send(to: str, subject: str, body: str) -> str:
         """Compose an email for the user to review — this does **not** send it (ADR-0085).
 
@@ -359,7 +361,9 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             draft=message.model_dump(),
         )
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112): same unconditional draft-first guarantee as
+    # mail_send.
+    @module.tool(side_effect="propose")
     async def mail_reply(message_id: str, body: str) -> str:
         """Compose a reply for the user to review — this does **not** send it (ADR-0085).
 

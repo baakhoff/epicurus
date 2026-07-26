@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.24.1"
+    assert manifest.version == "0.25.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -61,6 +61,23 @@ async def test_manifest_declares_spine_events() -> None:
         "events.knowledge.index_failed",
     } <= subjects
     assert "knowledge.index.completed" not in subjects
+
+
+async def test_manifest_declares_propose_tool_side_effects() -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105).
+    # All six route through _finalize()'s review-toggle interaction, an accepted resolution
+    # documented at #721/ADR-0112 rather than papered over.
+    manifest = await _module().manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    for name in (
+        "knowledge_create_document",
+        "knowledge_propose_edit",
+        "knowledge_propose_move",
+        "knowledge_propose_rename",
+        "knowledge_propose_folder",
+        "knowledge_propose_project",
+    ):
+        assert classes[name] == "propose", name
 
 
 def _indexer_stub() -> object:

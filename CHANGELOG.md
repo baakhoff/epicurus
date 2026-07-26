@@ -25,6 +25,20 @@ images to GHCR.
 
 ### Added
 
+- **Propose-autonomy automations can now actually reach mail's compose tools and knowledge/
+  notes' suggestion tools** (#721) — completes the sweep #705 started: `mail_send`/
+  `mail_reply`, knowledge's six `knowledge_propose_*`/`knowledge_create_document`, and notes'
+  four propose-shaped tools now declare `side_effect="propose"`. Previously unannotated
+  (defaulting to `write`), a `propose`-autonomy automation had zero usable tools on any of
+  these three modules — the tier was structurally dead for them. Knowledge's and notes' tools
+  stage a suggestion unless the operator has turned suggestion review off for that module, in
+  which case they apply directly, same as they already do in chat (ADR-0112 documents why this
+  is an accepted interaction with an existing per-module setting, not a gap the annotation
+  should paper over); `mail_send`/`mail_reply` carry no such caveat — they compose a draft
+  unconditionally, and an unattended automation turn already degrades a draft it can't show
+  into an informative error rather than ever sending. `mail` 0.14.0→0.15.0 · `knowledge`
+  0.24.1→0.25.0 · `notes` 0.9.1→0.10.0 (all MINOR). No `core-app` change.
+
 - **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the
   automations loop opened in W7. `propose_automation` is a core built-in that drafts an automation
   from a natural-language ask and **only stages** it as a `ReviewSuggestion` — a hard guardrail with

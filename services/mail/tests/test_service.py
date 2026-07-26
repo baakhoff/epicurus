@@ -472,11 +472,22 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_13_0() -> None:
+async def test_manifest_version_is_0_15_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.13.0"
+    assert manifest.version == "0.15.0"
+
+
+async def test_manifest_declares_propose_tool_side_effects() -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105) —
+    # unconditionally draft-first (ADR-0085), so propose is accurate with no caveat (#721,
+    # ADR-0112), unlike knowledge/notes' review-toggle-sensitive propose tools.
+    provider = _make_provider()
+    manifest = await build_module(provider).manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["mail_send"] == "propose"
+    assert classes["mail_reply"] == "propose"
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:

@@ -109,6 +109,7 @@ function automation(overrides: Partial<Automation> = {}): Automation {
     last_run_at: "2026-07-20T07:00:00Z",
     last_status: "ok",
     allowed_tool_classes: ["read"],
+    agent_gated_delivery: false,
     ...overrides,
   };
 }
@@ -209,6 +210,25 @@ describe("AutomationsScreen", () => {
     expect(body.enabled).toBe(true);
     // The chat sink is unchecked by default — no chat unless asked (owner rule, #672).
     expect(body.sinks).not.toContain("chat");
+  });
+
+  it("defaults agent-gated delivery off and sends it explicitly on create (#706)", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: /New automation/ }));
+
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByRole("switch", { name: "Agent decides delivery" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    await userEvent.type(dialog.getByLabelText("Name"), "Mail triage");
+    await userEvent.type(dialog.getByLabelText("Instructions"), "Triage mail.");
+    await userEvent.click(dialog.getByRole("switch", { name: "Agent decides delivery" }));
+    await userEvent.click(dialog.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => expect(api.createAutomation).toHaveBeenCalled());
+    const body = vi.mocked(api.createAutomation).mock.calls[0][0];
+    expect(body.agent_gated_delivery).toBe(true);
   });
 
   it("configures a notes sink target and sends it on create (#672)", async () => {
@@ -320,6 +340,35 @@ describe("AutomationsScreen", () => {
     expect(await screen.findByText("rate cap reached (4/hour)")).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Open in Observability/ });
     expect(link).toHaveAttribute("href", "/observability?tab=runs&automation=a1");
+  });
+
+  it("shows a quiet run's reason in the history, not as a failure (#706)", async () => {
+    automationRows = [automation({ agent_gated_delivery: true })];
+    runs = [
+      {
+        id: "r-quiet",
+        automation_id: "a1",
+        started_at: "2026-07-20T07:00:00Z",
+        trigger_refs: [],
+        filter_verdict: "matched",
+        model: "qwen2.5:7b",
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        duration_ms: 300,
+        outcome: "quiet",
+        error: null,
+        output: "Marked read.",
+        sinks_fired: [],
+        trigger_entity_refs: [],
+        artifacts: [],
+        quiet_reason: "not important",
+      },
+    ];
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: /History/ }));
+
+    expect(await screen.findByText("quiet")).toBeInTheDocument();
+    expect(screen.getByText("not important")).toBeInTheDocument();
   });
 
   it("runs an automation on demand", async () => {

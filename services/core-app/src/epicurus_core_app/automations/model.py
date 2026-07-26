@@ -246,6 +246,11 @@ class Automation:
     # Where the notes/kb sinks route a run's output (#672); None = that sink is unconfigured.
     notes_target: DocumentTarget | None = None
     kb_target: DocumentTarget | None = None
+    # "Agent decides delivery" (#706): offers the run-scoped finish_quiet tool so this
+    # automation's own turn can mark a run outcome "quiet" (no sink fan-out) instead of
+    # always delivering. Default False — every automation keeps today's always-deliver
+    # behavior until the operator opts in.
+    agent_gated_delivery: bool = False
 
     def allowed(self) -> frozenset[SideEffect]:
         """The tool classes this automation's turn may reach."""
@@ -270,13 +275,16 @@ class AutomationRun:
     prompt_tokens: int | None
     completion_tokens: int | None
     duration_ms: int | None
-    outcome: str  # "ok" | "error" | "skipped"
+    outcome: str  # "ok" | "error" | "skipped" | "quiet"
     error: str | None
     output: str  # the turn's answer — recorded even when no sink fires
     sinks_fired: list[str]
     # EntityRefs for documents this run produced via the notes/kb sinks (#672) — so the runs
     # feed links what was created. Empty when nothing was written.
     artifacts: list[EntityRef] = field(default_factory=list)
+    # The agent's own reason for an outcome=="quiet" run (#706) — what it told finish_quiet.
+    # None for every other outcome.
+    quiet_reason: str | None = None
 
 
 def validate_automation(

@@ -430,6 +430,21 @@ uniqueness constraint deciding races, not a read-then-write check — proven to 
 restart. The lead time itself is a tenant setting (`calendar_lead_time_prefs`, below) — storage
 only in this PR, no operator-facing settings UI yet.
 
+### Automation templates (#705, ADR-0105)
+
+Two starter presets on the Templates tab — never auto-instantiated, see
+[reference/automations.md#templates](../reference/automations.md#templates):
+
+| Key | Trigger | Autonomy | Sinks |
+| --- | --- | --- | --- |
+| `tomorrow-at-a-glance` | Schedule: daily, 18:00 | `notify` | `push` |
+| `on-event-starting-soon` | Event: `calendar.event_starting_soon` | `notify` | `push` |
+
+"Notify on a new invitation" was considered and dropped — there is no event for it (see the
+provider-write-seam caveat above); `event_starting_soon` is the real, well-supported equivalent.
+Both templates need `calendar_list_events`/`calendar_find_free` reachable at `notify` — the
+reason those two tools are annotated `side_effect="read"`.
+
 ## Configuration
 
 There is **no provider-selection env var** (ADR-0030): the module always backs itself with

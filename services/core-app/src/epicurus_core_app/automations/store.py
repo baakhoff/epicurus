@@ -61,9 +61,12 @@ log = get_logger("epicurus_core_app.automations.store")
 # Columns added after these tables' first release (#682) — reconciled in place at init via the
 # shared additive helper (ADR-0067), since they now have a deployed predecessor. ``sink_config``
 # (#672) holds the notes/kb document targets; ``artifacts`` (#672) holds the EntityRefs a run
-# produced.
-_ADDED_AUTOMATION_COLUMNS = ("sink_config",)
-_ADDED_RUN_COLUMNS = ("artifacts",)
+# produced; ``agent_gated_delivery`` (#706) is the "agent decides delivery" toggle; ``quiet_reason``
+# (#706) is the model's own reason for an outcome=="quiet" run. Neither added column declares a
+# server_default, so ``ensure_columns`` reconciles both nullable on an upgraded table — the
+# row-readers below coerce a reconciled NULL to the model's Python-side default.
+_ADDED_AUTOMATION_COLUMNS = ("sink_config", "agent_gated_delivery")
+_ADDED_RUN_COLUMNS = ("artifacts", "quiet_reason")
 
 
 class _Base(DeclarativeBase):
@@ -101,6 +104,9 @@ class _StoredAutomation(_Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # "Agent decides delivery" (#706), added after the table shipped — nullable for the same
+    # reconciliation reason as sink_config; _to_value coerces a reconciled NULL to False.
+    agent_gated_delivery: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class _StoredRun(_Base):
@@ -130,6 +136,8 @@ class _StoredRun(_Base):
     # EntityRefs (as dicts) for documents this run produced via the notes/kb sinks (#672).
     # Nullable — added after the table shipped (ADR-0067); null/absent means none.
     artifacts: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    # The agent's own reason for an outcome=="quiet" run (#706); added after the table shipped.
+    quiet_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class _StoredQueueItem(_Base):
@@ -263,6 +271,10 @@ def _to_value(row: _StoredAutomation) -> Automation:
         last_status=row.last_status,
         notes_target=_target_from_json((row.sink_config or {}).get("notes")),
         kb_target=_target_from_json((row.sink_config or {}).get("kb")),
+        # bool(...), not the raw column: a reconciled row on an upgraded deployment has this
+        # column NULL (no server_default to reconcile it with — see ensure_columns), and that
+        # must read as False, not None.
+        agent_gated_delivery=bool(row.agent_gated_delivery),
     )
 
 
@@ -283,6 +295,7 @@ def _run_to_value(row: _StoredRun) -> AutomationRun:
         output=row.output,
         sinks_fired=list(row.sinks_fired or []),
         artifacts=[EntityRef.model_validate(a) for a in (row.artifacts or [])],
+        quiet_reason=row.quiet_reason,
     )
 
 
@@ -341,6 +354,7 @@ class AutomationStore:
         notes_target: DocumentTarget | None = None,
         kb_target: DocumentTarget | None = None,
         enabled: bool = True,
+        agent_gated_delivery: bool = False,
     ) -> Automation:
         """Stage a new automation and return it. Validate before calling."""
         async with self._session() as session:
@@ -361,6 +375,7 @@ class AutomationStore:
                 rate_cap_per_hour=rate_cap_per_hour,
                 digest_window_minutes=digest_window_minutes,
                 sink_config=_sink_config_to_json(notes_target, kb_target),
+                agent_gated_delivery=agent_gated_delivery,
             )
             session.add(row)
             await session.commit()
@@ -392,7 +407,7 @@ class AutomationStore:
     ) -> list[AutomationRun]:
         """The newest ledger entries first, optionally filtered.
 
-        *outcome* narrows to one ledger state (``ok`` / ``error`` / ``skipped``) — the
+        *outcome* narrows to one ledger state (``ok`` / ``error`` / ``skipped`` / ``quiet``) — the
         runs feed's server-side filter (#669), so a tab watching for failures never
         receives the traffic it would throw away.
         """
@@ -428,6 +443,7 @@ class AutomationStore:
         notes_target: DocumentTarget | None = None,
         kb_target: DocumentTarget | None = None,
         enabled: bool = True,
+        agent_gated_delivery: bool = False,
     ) -> Automation | None:
         """Replace an automation's editable fields (#668). Validate before calling.
 
@@ -458,6 +474,7 @@ class AutomationStore:
             row.rate_cap_per_hour = rate_cap_per_hour
             row.digest_window_minutes = digest_window_minutes
             row.sink_config = _sink_config_to_json(notes_target, kb_target)
+            row.agent_gated_delivery = agent_gated_delivery
             await session.commit()
             await session.refresh(row)
             return _to_value(row)
@@ -559,6 +576,7 @@ class AutomationStore:
                 output=run.output,
                 sinks_fired=list(run.sinks_fired),
                 artifacts=[ref.model_dump() for ref in run.artifacts],
+                quiet_reason=run.quiet_reason,
             )
             session.add(row)
             await session.commit()

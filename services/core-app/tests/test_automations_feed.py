@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from epicurus_core import EntityRef, EventEnvelope
-from epicurus_core_app.automations.feed import RunFeed
+from epicurus_core_app.automations.feed import RunFeed, valid_outcome
 from epicurus_core_app.automations.model import AutomationRun
 from epicurus_core_app.automations.routes import create_automations_router
 from epicurus_core_app.automations.store import AutomationStore, KillSwitchStore
@@ -196,6 +196,22 @@ async def test_runs_endpoint_filters_by_outcome(tmp_path: Path) -> None:
         resp = await client.get("/platform/v1/automations/runs", params={"outcome": "skipped"})
     assert resp.status_code == 200
     assert [r["outcome"] for r in resp.json()] == ["skipped"]
+
+
+async def test_quiet_is_a_recognized_outcome() -> None:
+    # #706's outcome-vocabulary extension: "quiet" must not read as "unknown" to the
+    # feed's outcome filter, same as ok/error/skipped.
+    assert valid_outcome("quiet") is True
+
+
+async def test_runs_endpoint_filters_by_the_quiet_outcome(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    await store.record_run(_run(outcome="ok"))
+    await store.record_run(_run(outcome="quiet"))
+    async with await _client(store, tmp_path) as client:
+        resp = await client.get("/platform/v1/automations/runs", params={"outcome": "quiet"})
+    assert resp.status_code == 200
+    assert [r["outcome"] for r in resp.json()] == ["quiet"]
 
 
 async def test_runs_endpoint_resolves_trigger_entity_refs(tmp_path: Path) -> None:

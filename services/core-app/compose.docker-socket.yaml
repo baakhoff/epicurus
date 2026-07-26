@@ -1,7 +1,8 @@
 # Opt-in DIRECT Docker-socket access for core-app (#622, ADR-0099; #708/ADR-0109 changed what
 # this is an alternative TO). By default core-app talks to `docker-proxy-core` — an allowlist
-# proxy scoped to exactly the calls DockerController makes (docs/infrastructure/index.md#docker-
-# socket-access). Layer this overlay only if you'd rather core-app hold the raw socket directly
+# proxy scoped to exactly the calls DockerController makes (see "Docker-socket access" in
+# docs/infrastructure/index.md). Layer this overlay only if you'd rather hold the raw socket
+# directly
 # — e.g. you don't want the extra proxy container, or you don't trust a third-party proxy image
 # over the mitigation the app's own `DockerController` allowlist/denylist already provides.
 # NOT auto-loaded — Compose only auto-merges a `compose.override.yaml` sitting beside the file

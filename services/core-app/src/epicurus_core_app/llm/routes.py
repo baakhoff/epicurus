@@ -8,17 +8,21 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, ProviderInfo
-from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
+from epicurus_core_app.llm.ollama_runtime import KvCacheApplyResult, OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.providers import is_hosted
-from epicurus_core_app.llm.saved_models import SavedHostedModelStore
+from epicurus_core_app.llm.saved_models import (
+    SavedHostedModelStore,
+    SavedModelOverride,
+    VisionOverride,
+)
 from epicurus_core_app.llm.variants import ModelVariantsResponse, VariantLookup
 from epicurus_core_app.system_info import suggest_context_for_model
 
@@ -127,8 +131,12 @@ class SavedModel(BaseModel):
     provider: str
     # From LiteLLM's model-cost map (#618, same source as `GET .../models/details` for a
     # hosted id) — `None`/empty when the model isn't in that map, never a fake default.
+    # These are the **resolved** values: the operator's override (below) is already applied,
+    # so a client renders badges from these and never has to merge the two itself (#711).
     context_length: int | None = None
     capabilities: list[str] = []
+    # What the operator set, so the editor round-trips. All-defaults = "trust the map".
+    override: SavedModelOverride = SavedModelOverride()
 
 
 class SavedModelsResponse(BaseModel):
@@ -141,6 +149,14 @@ class SaveModelRequest(BaseModel):
     """Body for POST /llm/saved-models — a hosted model id to persist for the tenant."""
 
     model: str
+
+
+class SaveModelOverrideRequest(BaseModel):
+    """Body for PUT /llm/saved-models/capabilities — one saved model's override (#711)."""
+
+    model: str
+    vision: VisionOverride = "auto"
+    context_length: int | None = Field(default=None, gt=0)
 
 
 def create_llm_router(
@@ -210,7 +226,7 @@ def create_llm_router(
         """Read-only facts about a local model (quantization, parameter size, trained
         context length) from the runtime's ``/api/show``, for the model-settings sheet.
         ``model`` is a query param for the same name-mangling reason as ``delete``."""
-        return await gateway.show(model)
+        return await gateway.show(model, default_tenant)
 
     @router.post("/unload")
     async def unload_models(request: UnloadRequest) -> dict[str, str]:
@@ -323,14 +339,29 @@ def create_llm_router(
 
         Persists the choice, then — when Docker is wired — writes Ollama's start-up env file and
         restarts the container so it takes effect; flash attention is enabled automatically for
-        the quantized types (#307, amends ADR-0046). ``applied`` is ``False`` when Docker is
-        unavailable, in which case the UI falls back to the manual-restart instructions.
+        the quantized types (#307, amends ADR-0046).
+
+        Reports **two** flags, because there are two degraded modes and they need different
+        instructions (#709). ``applied`` means the server is running the new value.
+        ``staged`` means the env file reflects it and a restart of the Ollama container is all
+        that's left — the usual case without Docker access, since the entrypoint re-sources the
+        file on every start. Only ``staged: false`` calls for editing environment variables by
+        hand, which is what the UI used to say in every degraded case.
         """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_kv_cache_type(default_tenant, request.value)
-        applied = ollama_runtime.apply_kv_cache_type(request.value) if ollama_runtime else False
-        return {"status": "ok", "value": request.value, "applied": applied}
+        result = (
+            ollama_runtime.apply_kv_cache_type(request.value)
+            if ollama_runtime
+            else KvCacheApplyResult(applied=False, staged=False)
+        )
+        return {
+            "status": "ok",
+            "value": request.value,
+            "applied": result.applied,
+            "staged": result.staged,
+        }
 
     @router.put("/prefs/agent-max-steps")
     async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | None | str]:
@@ -376,18 +407,43 @@ def create_llm_router(
         if saved_models is None:
             return SavedModelsResponse(models=[])
         ids = await saved_models.list(default_tenant)
-        details = await asyncio.gather(*(gateway.show(m) for m in ids))
+        details = await asyncio.gather(*(gateway.show(m, default_tenant) for m in ids))
+        overrides = await saved_models.overrides(default_tenant)
         return SavedModelsResponse(
             models=[
                 SavedModel(
                     model=m,
                     provider=m.split("/", 1)[0],
+                    # Already override-resolved — ``gateway.show`` applies it (#711).
                     context_length=d.context_length,
                     capabilities=d.capabilities,
+                    override=overrides.get(m, SavedModelOverride()),
                 )
                 for m, d in zip(ids, details, strict=True)
             ]
         )
+
+    @router.put("/saved-models/capabilities")
+    async def set_saved_model_override(request: SaveModelOverrideRequest) -> dict[str, str]:
+        """Set one saved model's capability override (#711).
+
+        The override corrects what the core *believes* about a model when LiteLLM's static
+        cost map is wrong or silent — it omits ids entirely (``xai/grok-latest``) and
+        mislabels others, which makes the image gate (#633) refuse a genuinely vision-capable
+        model. It affects **gating and display only**: routing, keys, and metering are
+        untouched, and every model concern still lives in the core (constraint #8).
+
+        ``vision: "auto"`` with no ``context_length`` clears the override back to the map's
+        answers. **404** for an id the tenant hasn't saved — an override is a property of a
+        saved row, not a way to create one.
+        """
+        if saved_models is None:
+            raise HTTPException(status_code=503, detail="saved-models store not available")
+        model = request.model.strip()
+        override = SavedModelOverride(vision=request.vision, context_length=request.context_length)
+        if not await saved_models.set_override(default_tenant, model, override):
+            raise HTTPException(status_code=404, detail=f"{model!r} is not a saved model")
+        return {"status": "ok", "model": model}
 
     @router.post("/saved-models")
     async def add_saved_model(request: SaveModelRequest) -> dict[str, str]:

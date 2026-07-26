@@ -20,6 +20,7 @@ from epicurus_core_app.agent.agent import (
     _STOPPED_TOOL_ERRORS,
     _STOPPED_UNSUPPORTED_MEDIA,
     _VISION_UNSUPPORTED_MESSAGE,
+    FINISH_QUIET_TOOL,
     Agent,
     _canonical_calls,
     _LoopGuard,
@@ -158,6 +159,83 @@ async def test_a_turns_allowance_reaches_the_tool_surface() -> None:
         [ChatMessage(role="user", content="hi")], allow=frozenset({"read"})
     )
     assert mcp.allow_seen == [frozenset({"read"})]
+
+
+async def test_finish_quiet_is_not_offered_to_an_ordinary_turn() -> None:
+    # Bound at the tool surface, not by prompt politeness: with no automation_id at all,
+    # the tool must never appear — a plain chat turn has nowhere for "quiet" to mean anything.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    assert gw.tools_seen == [None]
+
+
+async def test_finish_quiet_is_not_offered_when_the_automation_has_not_opted_in() -> None:
+    # automation_id alone is not enough — quiet_capable defaults to False, mirroring the
+    # per-automation toggle's default-off (existing automations keep today's behavior).
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    await Agent(gateway=gw, mcp=_FakeMcp()).run(
+        [ChatMessage(role="user", content="hi")], automation_id="auto-1"
+    )
+    assert gw.tools_seen == [None]
+
+
+async def test_finish_quiet_is_offered_once_the_automation_opts_in() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    await Agent(gateway=gw, mcp=_FakeMcp()).run(
+        [ChatMessage(role="user", content="hi")], automation_id="auto-1", quiet_capable=True
+    )
+    offered = gw.tools_seen[0]
+    assert offered is not None
+    assert FINISH_QUIET_TOOL in [spec["function"]["name"] for spec in offered]
+
+
+async def test_calling_finish_quiet_marks_the_turn_quiet() -> None:
+    gw = _FakeGateway(
+        [
+            ChatResult(
+                model="m",
+                content="",
+                tool_calls=[_tool_call(FINISH_QUIET_TOOL, '{"reason": "nothing important"}')],
+            ),
+            ChatResult(model="m", content="Marked it read; nothing worth flagging."),
+        ]
+    )
+    mcp = _FakeMcp()
+    turn = await Agent(gateway=gw, mcp=mcp).run(
+        [ChatMessage(role="user", content="triage")], automation_id="auto-1", quiet_capable=True
+    )
+    assert turn.quiet is True
+    assert turn.quiet_reason == "nothing important"
+    assert FINISH_QUIET_TOOL in turn.tools_used
+    assert turn.content == "Marked it read; nothing worth flagging."
+    # Intercepted, never routed — it must not reach MCP (there is no module tool by this name).
+    assert mcp.called == []
+
+
+async def test_not_calling_finish_quiet_leaves_the_turn_not_quiet() -> None:
+    # Fail-loud beats fail-silent: not calling the tool means deliver as today.
+    gw = _FakeGateway([ChatResult(model="m", content="pushed the summary")])
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(
+        [ChatMessage(role="user", content="triage")], automation_id="auto-1", quiet_capable=True
+    )
+    assert turn.quiet is False
+    assert turn.quiet_reason is None
+
+
+async def test_finish_quiet_without_a_reason_is_rejected_and_the_turn_continues() -> None:
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call(FINISH_QUIET_TOOL, "{}")]),
+            ChatResult(model="m", content="okay, retrying with a reason next time"),
+        ]
+    )
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(
+        [ChatMessage(role="user", content="triage")], automation_id="auto-1", quiet_capable=True
+    )
+    assert turn.quiet is False
+    assert turn.quiet_reason is None
+    assert turn.stopped == "completed"  # a missing reason nudges, it does not stop the turn
+    assert any(m.role == "tool" and "reason" in (m.content or "") for m in gw.calls[1])
 
 
 async def test_the_automation_attribution_reaches_the_gateway() -> None:

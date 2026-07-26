@@ -207,6 +207,9 @@ def create_app() -> FastAPI:
         num_ctx=settings.llm_num_ctx,
         prefs=prefs,
         model_settings=model_settings,
+        # Read-only here: the gateway consults each saved model's capability override ahead of
+        # LiteLLM's static cost map when resolving vision / context length (#711).
+        saved_models=saved_models,
     )
 
     # On-demand quant-variant lookup from each model's public library tags page (#330).

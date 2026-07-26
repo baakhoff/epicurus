@@ -32,7 +32,7 @@ FEED_HISTORY = 200
 # drops its oldest pending runs (the feed is a tail, not a ledger — the table is).
 _SUBSCRIBER_QUEUE_MAX = 500
 
-_OUTCOMES = ("ok", "error", "skipped")
+_OUTCOMES = ("ok", "error", "skipped", "quiet")
 
 
 def valid_outcome(value: str) -> bool:

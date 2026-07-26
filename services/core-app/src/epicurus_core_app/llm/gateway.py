@@ -43,6 +43,7 @@ from epicurus_core_app.llm.models import (
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.reasoning import ThinkSplitter, split_reasoning
+from epicurus_core_app.llm.saved_models import SavedHostedModelStore, SavedModelOverride
 
 litellm.telemetry = False
 litellm.drop_params = True
@@ -157,6 +158,7 @@ class LlmGateway:
         num_ctx: int | None = None,
         prefs: LlmPrefsStore | None = None,
         model_settings: ModelSettingsStore | None = None,
+        saved_models: SavedHostedModelStore | None = None,
     ) -> None:
         self._ollama_url = ollama_url.rstrip("/")
         self._default_model = default_model
@@ -177,6 +179,16 @@ class LlmGateway:
         self._num_ctx = num_ctx
         self._prefs = prefs
         self._model_settings = model_settings
+        self._saved_models = saved_models
+        # Model ids already reported as absent from LiteLLM's static cost map (#711). An
+        # operator-saved alias outside that map is *expected*, so the miss is worth exactly one
+        # warning per id per process — enough to explain a model with no badges, not enough to
+        # be noise. Capped because ``model`` reaches here from a route query param.
+        self._unmapped_models: set[str] = set()
+        # Whether the override store has already failed once this process (#711). Unlike a
+        # cost-map miss this is *not* expected, and it disables every override at once, so it
+        # warns the first time rather than only at debug.
+        self._override_store_failed = False
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         """The active default model: the stored pref if set, else the env default."""
@@ -784,15 +796,15 @@ class LlmGateway:
             for m in payload.get("models", [])
         ]
         if with_capabilities and infos:
-            details = await asyncio.gather(*(self.show(info.name) for info in infos))
+            details = await asyncio.gather(*(self.show(info.name, tenant_id) for info in infos))
             for info, detail in zip(infos, details, strict=True):
                 info.capabilities = detail.capabilities
                 info.context_length = detail.context_length
         return infos
 
-    async def _capabilities(self, model: str) -> list[str]:
+    async def _capabilities(self, model: str, tenant_id: str | None = None) -> list[str]:
         """The model's reported capabilities (best-effort; empty when unknown/unreported)."""
-        return (await self.show(model)).capabilities
+        return (await self.show(model, tenant_id)).capabilities
 
     async def supports_tools(self, model: str | None = None, tenant_id: str | None = None) -> bool:
         """Whether ``model`` can use tools — so the agent offers them only when they'll work.
@@ -807,8 +819,44 @@ class LlmGateway:
         _, provider = registry.resolve(resolved)
         if not provider.is_local:
             return True
-        caps = await self._capabilities(resolved)
+        caps = await self._capabilities(resolved, tenant_id)
         return "tools" in caps if caps else True
+
+    def _note_unmapped(self, litellm_model: str, message: str) -> None:
+        """Report a LiteLLM cost-map miss once per model id per process, debug after (#711).
+
+        A saved id outside that map is expected — the map is a curated static list, and the
+        operator names the model (ADR-0010). Warning on every lookup made the box repeat the
+        same line indefinitely; warning *once* still explains a model that shows no badges.
+        """
+        if litellm_model in self._unmapped_models:
+            log.debug(message, model=litellm_model)
+            return
+        if len(self._unmapped_models) >= 512:
+            self._unmapped_models.clear()  # bounded: ``model`` can arrive as a query param
+        self._unmapped_models.add(litellm_model)
+        log.warning(message, model=litellm_model)
+
+    async def _capability_override(self, model: str, tenant_id: str | None) -> SavedModelOverride:
+        """The operator's capability override for ``model`` (all-defaults when none) (#711).
+
+        Never raises: a capability *hint* must not be able to break a capability *check*. A
+        store hiccup degrades to the map's answer, which is exactly the pre-override behaviour.
+        """
+        if self._saved_models is None:
+            return SavedModelOverride()
+        try:
+            return await self._saved_models.get_override(tenant_id or self._default_tenant, model)
+        except Exception as exc:
+            # Warn once, debug after. A cost-map miss is expected and stays quiet; this is not —
+            # it silently drops *every* operator override back to the map's answer, which is the
+            # same quiet capability failure #711 exists to fix. It has to be visible once.
+            if self._override_store_failed:
+                log.debug("capability override lookup failed", model=model, error=str(exc))
+            else:
+                self._override_store_failed = True
+                log.warning("capability override lookup failed", model=model, error=str(exc))
+            return SavedModelOverride()
 
     async def supports_vision(self, model: str | None = None, tenant_id: str | None = None) -> bool:
         """Whether ``model`` can take image input — gates an image attachment (#633).
@@ -822,19 +870,27 @@ class LlmGateway:
         model with no reported capabilities (older Ollama) defaults to **not** vision-capable —
         the opposite of ``supports_tools``'s "empty means don't restrict" — only an explicit
         ``vision`` entry says yes.
+
+        Resolution order (#711): the operator's per-saved-model **override** first, then the
+        source above. The map is authoritative until it is wrong — it omits ids entirely
+        (``xai/grok-latest``) and mislabels others — and a curated static list being stale is
+        not something the operator should have to work around by renaming their model.
         """
         resolved = model or await self.effective_default(tenant_id)
+        override = await self._capability_override(resolved, tenant_id)
+        if override.vision != "auto":
+            return override.vision == "on"
         litellm_model, provider = registry.resolve(resolved)
         if provider.is_local:
-            caps = await self._capabilities(resolved)
+            caps = await self._capabilities(resolved, tenant_id)
             return "vision" in caps
         try:
             return bool(litellm.supports_vision(model=litellm_model))
         except Exception:  # litellm raises a bare Exception for a model outside its cost map
-            log.warning("litellm supports_vision lookup failed", model=litellm_model)
+            self._note_unmapped(litellm_model, "litellm supports_vision lookup failed")
             return False
 
-    async def show(self, model: str) -> ModelDetails:
+    async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
         """Read-only facts about ``model`` — from the runtime's ``/api/show`` when local, from
         LiteLLM's model-cost map when hosted (#633/#618).
 
@@ -844,11 +900,13 @@ class LlmGateway:
         ``llama.context_length``); fall back to any ``*.context_length`` if the arch is absent.
 
         Hosted: LiteLLM's cost/context map is the source of truth for both capabilities and
-        context length — no provider call, and no fake default when the model isn't in the map.
+        context length — no provider call, and no fake default when the model isn't in the map
+        — except where the tenant's saved-model **override** says otherwise (#711), which is
+        why this takes a tenant (the overrides are tenant-scoped like every other stored row).
         """
         _, provider = registry.resolve(model)
         if not provider.is_local:
-            return await self._hosted_details(model)
+            return await self._hosted_details(model, tenant_id)
         try:
             async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
                 response = await client.post("/api/show", json={"model": model})
@@ -886,7 +944,7 @@ class LlmGateway:
             capabilities=capabilities,
         )
 
-    async def _hosted_details(self, model: str) -> ModelDetails:
+    async def _hosted_details(self, model: str, tenant_id: str | None = None) -> ModelDetails:
         """A hosted model's facts from LiteLLM's own model-cost/context map (#633/#618).
 
         No network call — this is a static lookup LiteLLM ships and updates independently.
@@ -895,20 +953,31 @@ class LlmGateway:
         same as "unknown" it already does for a local model the runtime can't describe.
         Hosted providers are assumed tool-capable (:meth:`supports_tools`); vision is not
         assumed — it is exactly what LiteLLM's map reports.
+
+        The operator's per-saved-model **override** wins over the map on both vision and
+        context length (#711), and applies even when the lookup fails outright — an id absent
+        from the map is precisely the case the override exists for, so it must not be a path
+        that skips it.
         """
+        override = await self._capability_override(model, tenant_id)
         litellm_model, _ = registry.resolve(model)
+        info: Any = {}
         try:
             info = litellm.get_model_info(model=litellm_model)
         except Exception:  # litellm raises a bare Exception for a model outside its cost map
-            log.warning("litellm get_model_info lookup failed", model=litellm_model)
-            return ModelDetails(capabilities=["tools"])
-        context_length = info.get("max_input_tokens") or info.get("max_tokens")
-        capabilities = ["tools"]
-        if info.get("supports_vision"):
-            capabilities.append("vision")
+            self._note_unmapped(litellm_model, "litellm get_model_info lookup failed")
+        mapped_context = info.get("max_input_tokens") or info.get("max_tokens")
+        context_length = override.context_length or (
+            mapped_context if isinstance(mapped_context, int) else None
+        )
+        has_vision = (
+            bool(info.get("supports_vision"))
+            if override.vision == "auto"
+            else override.vision == "on"
+        )
         return ModelDetails(
-            context_length=context_length if isinstance(context_length, int) else None,
-            capabilities=capabilities,
+            context_length=context_length,
+            capabilities=["tools", "vision"] if has_vision else ["tools"],
         )
 
     async def pull(self, model: str) -> None:

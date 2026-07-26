@@ -389,6 +389,8 @@ function outcomeTone(outcome: string): "dim" | "accent" | "ok" | "warn" | "dange
       return "warn";
     case "error":
       return "danger";
+    case "quiet":
+      return "dim";
     default:
       return "dim";
   }
@@ -428,6 +430,9 @@ function RunRow({ run, automationName }: { run: AutomationRun; automationName: s
           {run.outcome}
         </Badge>
         {run.error && <span className="break-all text-warn">{run.error}</span>}
+        {run.quiet_reason && (
+          <span className="break-all text-ink-faint">{run.quiet_reason}</span>
+        )}
         {run.model && <span className="shrink-0 text-ink-dim">{run.model}</span>}
         {tokens && <span className="shrink-0 text-ink-faint">{tokens}</span>}
         {run.duration_ms != null && (
@@ -541,6 +546,7 @@ function RunsConsole({ initialAutomation = "" }: { initialAutomation?: string })
           <option value="ok">ok</option>
           <option value="skipped">skipped</option>
           <option value="error">error</option>
+          <option value="quiet">quiet</option>
         </Select>
         <Select
           size="sm"

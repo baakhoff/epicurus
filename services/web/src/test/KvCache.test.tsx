@@ -50,24 +50,51 @@ beforeEach(() => {
 
 describe("KvCache", () => {
   it("confirms it applied (Ollama restarted) when the core could restart", async () => {
-    mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: true });
+    mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: true, staged: true });
     render(<KvCache />, { wrapper });
     fireEvent.change(await screen.findByRole("combobox"), { target: { value: "q8_0" } });
     expect(await screen.findByText(/Ollama restarted/)).toBeInTheDocument();
     expect(mockSetKvCacheType).toHaveBeenCalledWith("q8_0");
   });
 
-  it("falls back to manual-restart instructions when Docker isn't wired", async () => {
+  it("asks only for a container restart when the choice is already staged (#709)", async () => {
+    // The common degraded case: no Docker access, but the env file is written and Ollama's
+    // entrypoint re-sources it on every start — so there is nothing to edit.
+    mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: false, staged: true });
+    render(<KvCache />, { wrapper });
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "q4_0" } });
+
+    expect(await screen.findByText(/restart the Ollama container/i)).toBeInTheDocument();
+    expect(screen.getByText("docker compose restart ollama")).toBeInTheDocument();
+    // The scary, mostly-wrong instruction must NOT appear here — that was the bug.
+    expect(screen.queryByText("OLLAMA_FLASH_ATTENTION=1")).not.toBeInTheDocument();
+    expect(screen.queryByText(/in your environment/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the env-var instructions when the choice could not be staged (#709)", async () => {
+    // The env file itself could not be written, so the manual route really is the only one.
+    mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: false, staged: false });
+    render(<KvCache />, { wrapper });
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "q4_0" } });
+
+    expect(await screen.findByText(/couldn.t write Ollama.s start-up settings/i)).toBeInTheDocument();
+    expect(screen.getByText("OLLAMA_FLASH_ATTENTION=1")).toBeInTheDocument();
+    expect(screen.queryByText("docker compose restart ollama")).not.toBeInTheDocument();
+  });
+
+  it("treats an older core that reports no staged flag as not staged", async () => {
+    // `staged` defaults to false in the contract, so a core predating #709 keeps today's copy
+    // rather than promising a restart that wouldn't help.
     mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: false });
     render(<KvCache />, { wrapper });
     fireEvent.change(await screen.findByRole("combobox"), { target: { value: "q4_0" } });
-    expect(await screen.findByText(/no Docker access/)).toBeInTheDocument();
-    expect(screen.getByText("OLLAMA_FLASH_ATTENTION=1")).toBeInTheDocument();
+
+    expect(await screen.findByText("OLLAMA_FLASH_ATTENTION=1")).toBeInTheDocument();
   });
 
   it("suggests a KV-cache type from VRAM and applies it in one click (#329)", async () => {
     mockSystemInfo.mockResolvedValue(systemWithVram(12288)); // moderate → q8_0
-    mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: true });
+    mockSetKvCacheType.mockResolvedValue({ status: "ok", applied: true, staged: true });
     render(<KvCache />, { wrapper });
 
     // The hint explains the suggestion (reason text) and offers a one-click apply; the current

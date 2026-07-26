@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from epicurus_core import AutomationTemplate, ChatMessage
 from epicurus_core_app.agent.agent import AgentTurn, TurnUsage
+from epicurus_core_app.automations.model import matches_event
 from epicurus_core_app.automations.routes import create_automations_router
 from epicurus_core_app.automations.runner import AutomationRunner
 from epicurus_core_app.automations.sinks import SinkDispatcher
@@ -40,6 +41,7 @@ class _FakeAgent:
         session_id: str | None = None,
         allow: frozenset[str] | None = None,
         automation_id: str | None = None,
+        quiet_capable: bool = False,
     ) -> AgentTurn:
         self.calls += 1
         return AgentTurn(
@@ -107,6 +109,25 @@ async def test_create_and_list() -> None:
         assert created.json()["enabled"] is True
         listed = (await client.get("/platform/v1/automations")).json()
     assert [a["name"] for a in listed] == ["Tell me about pings"]
+
+
+async def test_agent_gated_delivery_defaults_off_and_round_trips() -> None:
+    store, kill, runner, _agent = await _fresh()
+    async with _client(store, kill, runner) as client:
+        default = await client.post("/platform/v1/automations", json=_body())
+        assert default.json()["agent_gated_delivery"] is False
+
+        on = await client.post(
+            "/platform/v1/automations", json=_body(name="on", agent_gated_delivery=True)
+        )
+        automation_id = on.json()["id"]
+        assert on.json()["agent_gated_delivery"] is True
+
+        updated = await client.put(
+            f"/platform/v1/automations/{automation_id}",
+            json=_body(agent_gated_delivery=False),
+        )
+    assert updated.json()["agent_gated_delivery"] is False
 
 
 async def test_the_view_exposes_the_derived_allowance() -> None:
@@ -181,6 +202,56 @@ async def test_matchers_round_trip() -> None:
     body = created.json()["event_trigger"]
     assert body["matchers"] == [{"field": "subject", "op": "contains", "value": "lunch"}]
     assert body["window_start_hour"] == 9
+
+
+async def test_a_representative_module_template_instantiates_end_to_end() -> None:
+    # #705: a module's starter template is only ever a starting point — instantiating one
+    # means the web takes its raw `trigger` dict as-is and POSTs a regular create request
+    # with it, same as this test does. Knowledge's "large vault sync" template is the
+    # representative pick: it is the one starter template across all five modules whose
+    # trigger carries a matcher, so this proves the full conversion path (a plain dict on
+    # the manifest -> EventTriggerBody -> a real EventTrigger with PayloadMatcher instances)
+    # rather than just a trigger with no moving parts.
+    store, kill, runner, _agent = await _fresh()
+    template_trigger = {
+        "module": "knowledge",
+        "event_type": "knowledge.vault_synced",
+        "matchers": [{"field": "indexed", "op": "gt", "value": 10}],
+    }
+    async with _client(store, kill, runner) as client:
+        created = await client.post(
+            "/platform/v1/automations",
+            json=_body(
+                name="Notify on a large vault sync",
+                prompt="Summarize the batch.",
+                event_trigger=template_trigger,
+                sinks=["push"],
+                source="template:knowledge",
+            ),
+        )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["source"] == "template:knowledge"
+    assert body["event_trigger"]["matchers"] == [{"field": "indexed", "op": "gt", "value": 10}]
+    # The matcher is not just stored — it actually gates the trigger, exactly as the
+    # template's description promises ("a large batch"): a small sync does not match, a
+    # large one does.
+    stored = await store.get(tenant=TENANT, automation_id=body["id"])
+    assert stored is not None and stored.event_trigger is not None
+    assert not matches_event(
+        stored.event_trigger,
+        module="knowledge",
+        event_type="knowledge.vault_synced",
+        payload={"indexed": 3, "deleted": 0, "unchanged": 50},
+        local_hour=12,
+    )
+    assert matches_event(
+        stored.event_trigger,
+        module="knowledge",
+        event_type="knowledge.vault_synced",
+        payload={"indexed": 25, "deleted": 1, "unchanged": 50},
+        local_hour=12,
+    )
 
 
 async def test_enable_disable_and_delete() -> None:

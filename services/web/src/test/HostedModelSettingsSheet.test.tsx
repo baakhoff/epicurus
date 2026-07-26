@@ -7,11 +7,13 @@ import { HostedModelSettingsSheet } from "@/screens/ModelsScreen";
 
 const mockModelSettings = vi.fn();
 const mockSetModelSettings = vi.fn();
+const mockSetSavedModelOverride = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     modelSettings: (m: string) => mockModelSettings(m),
     setModelSettings: (m: string, s: unknown) => mockSetModelSettings(m, s),
+    setSavedModelOverride: (m: string, o: unknown) => mockSetSavedModelOverride(m, o),
   },
 }));
 
@@ -25,7 +27,9 @@ const HOSTED = "claude/claude-3-5-sonnet-latest";
 beforeEach(() => {
   mockModelSettings.mockReset();
   mockSetModelSettings.mockReset();
+  mockSetSavedModelOverride.mockReset();
   mockSetModelSettings.mockResolvedValue({ status: "ok" });
+  mockSetSavedModelOverride.mockResolvedValue({ status: "ok" });
 });
 
 describe("HostedModelSettingsSheet", () => {
@@ -110,5 +114,120 @@ describe("HostedModelSettingsSheet", () => {
       wrapper,
     });
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// ── capability override (#711) ────────────────────────────────────────────────
+
+const AUTO = { vision: "auto", context_length: null } as const;
+
+describe("HostedModelSettingsSheet capability override", () => {
+  beforeEach(() => {
+    mockModelSettings.mockResolvedValue({ context_window: null, keep_alive: null, device: null });
+  });
+
+  it("seeds the controls from the stored override", async () => {
+    render(
+      <HostedModelSettingsSheet
+        model={HOSTED}
+        override={{ vision: "on", context_length: 256000 }}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+
+    const vision = (await screen.findByLabelText("Image input support")) as HTMLSelectElement;
+    expect(vision.value).toBe("on");
+    const declared = screen.getByLabelText("Declared context length tokens") as HTMLInputElement;
+    expect(declared.value).toBe("256000");
+  });
+
+  it("defaults to auto when the core sends no override", async () => {
+    render(<HostedModelSettingsSheet model={HOSTED} onClose={() => {}} />, { wrapper });
+
+    const vision = (await screen.findByLabelText("Image input support")) as HTMLSelectElement;
+    expect(vision.value).toBe("auto");
+    expect(screen.getByText(/decided by the provider catalogue/i)).toBeInTheDocument();
+  });
+
+  it("saves vision=on alongside the budget", async () => {
+    render(<HostedModelSettingsSheet model={HOSTED} override={AUTO} onClose={() => {}} />, {
+      wrapper,
+    });
+
+    const vision = (await screen.findByLabelText("Image input support")) as HTMLSelectElement;
+    fireEvent.change(vision, { target: { value: "on" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
+        vision: "on",
+        context_length: null,
+      }),
+    );
+  });
+
+  it("saves a declared context length", async () => {
+    render(<HostedModelSettingsSheet model={HOSTED} override={AUTO} onClose={() => {}} />, {
+      wrapper,
+    });
+
+    const declared = (await screen.findByLabelText(
+      "Declared context length tokens",
+    )) as HTMLInputElement;
+    fireEvent.change(declared, { target: { value: "256000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
+        vision: "auto",
+        context_length: 256000,
+      }),
+    );
+  });
+
+  it("clears an override back to auto", async () => {
+    render(
+      <HostedModelSettingsSheet
+        model={HOSTED}
+        override={{ vision: "on", context_length: 256000 }}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+
+    const vision = (await screen.findByLabelText("Image input support")) as HTMLSelectElement;
+    fireEvent.change(vision, { target: { value: "auto" } });
+    fireEvent.change(screen.getByLabelText("Declared context length tokens"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
+        vision: "auto",
+        context_length: null,
+      }),
+    );
+  });
+
+  it("does not write the override when it wasn't touched", async () => {
+    // The endpoint 404s for a model that isn't saved, and an unchanged override is nothing to
+    // say — so editing only the budget must not send a capability write at all.
+    render(
+      <HostedModelSettingsSheet
+        model={HOSTED}
+        override={{ vision: "on", context_length: 256000 }}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+
+    const ctx = (await screen.findByLabelText("Hosted context window tokens")) as HTMLInputElement;
+    fireEvent.change(ctx, { target: { value: "50000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mockSetModelSettings).toHaveBeenCalled());
+    expect(mockSetSavedModelOverride).not.toHaveBeenCalled();
   });
 });

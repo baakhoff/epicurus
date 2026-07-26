@@ -123,13 +123,31 @@ export const PushTestResult = z.object({
 });
 export type PushTestResult = z.infer<typeof PushTestResult>;
 
+/**
+ * The operator's correction to a saved hosted model's declared capabilities (#711).
+ *
+ * LiteLLM's static cost map omits ids entirely (`xai/grok-latest`) and mislabels others, which
+ * makes the image gate (#633) refuse a genuinely vision-capable model. `auto` means "trust the
+ * map" — the pre-override behaviour — so an all-default override changes nothing. The
+ * `context_length` here is the model's *declared* window (a badge); the compaction budget we
+ * choose to send is `ModelSettings.context_window`, a different layer.
+ */
+export const SavedModelOverride = z.object({
+  vision: z.enum(["auto", "on", "off"]).default("auto"),
+  context_length: z.number().nullish(),
+});
+export type SavedModelOverride = z.infer<typeof SavedModelOverride>;
+
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({
   model: z.string(),
   provider: z.string(),
-  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map.
+  // From LiteLLM's model-cost map (#618); null/empty when the model isn't in that map. Already
+  // override-resolved by the core (#711) — render badges from these, never merge them yourself.
   context_length: z.number().nullish(),
   capabilities: z.array(z.string()).default([]),
+  // What the operator set, so the editor round-trips. Defaulted for an older core.
+  override: SavedModelOverride.default({ vision: "auto", context_length: null }),
 });
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 
@@ -1363,6 +1381,8 @@ export const Automation = z.object({
   last_status: z.string().nullish(),
   /** Derived server-side from the autonomy dial — never stored, never guessed here. */
   allowed_tool_classes: z.array(z.string()).default([]),
+  /** "Agent decides delivery" (#706): offers finish_quiet so a run can mark itself quiet. */
+  agent_gated_delivery: z.boolean().default(false),
 });
 export type Automation = z.infer<typeof Automation>;
 
@@ -1378,7 +1398,7 @@ export const AutomationRun = z.object({
   prompt_tokens: z.number().nullish(),
   completion_tokens: z.number().nullish(),
   duration_ms: z.number().nullish(),
-  /** `ok` · `error` · `skipped` — skips are first-class (rate cap, paused). */
+  /** `ok` · `error` · `skipped` · `quiet` — skips are first-class (rate cap, paused). */
   outcome: z.string(),
   error: z.string().nullish(),
   output: z.string().default(""),
@@ -1387,6 +1407,8 @@ export const AutomationRun = z.object({
   trigger_entity_refs: z.array(EntityRef).default([]),
   /** Documents this run produced via the notes/kb sinks (#672) — rendered as chips. */
   artifacts: z.array(EntityRef).default([]),
+  /** The agent's own reason for an `outcome === "quiet"` run (#706); null otherwise. */
+  quiet_reason: z.string().nullish(),
 });
 export type AutomationRun = z.infer<typeof AutomationRun>;
 
@@ -1430,6 +1452,7 @@ export type AutomationDraft = {
   notes_target: SinkTarget | null;
   kb_target: SinkTarget | null;
   enabled: boolean;
+  agent_gated_delivery: boolean;
 };
 
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;

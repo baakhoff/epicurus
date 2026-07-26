@@ -54,7 +54,7 @@ services:
       # through `docker-proxy-core` below (#708, ADR-0109) — a filtered allowlist proxy, not
       # the raw socket. `docker.from_env()` (docker_control.py) picks this up automatically;
       # no code change needed. The opt-in `compose.docker-socket.yaml` overlay points this back
-      # at the raw socket instead — see docs/infrastructure/index.md#docker-socket-access.
+      # at the raw socket instead — see docs/infrastructure/index.md#docker-socket-access-708-adr-0109.
       DOCKER_HOST: tcp://docker-proxy-core:2375
     volumes:
       # KV-cache apply (#307): the core writes ollama.env here; Ollama mounts it read-only and

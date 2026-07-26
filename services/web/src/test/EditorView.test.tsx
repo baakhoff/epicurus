@@ -178,6 +178,38 @@ describe("EditorView", () => {
     expect(mockSave).not.toHaveBeenCalledWith("knowledge", "vault", "b.md", "AAA-edited");
   });
 
+  it("keeps the previous document on screen while the next one loads, without ever seeding its stale content into the new path (#712)", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "a.md", title: "a", path: "a.md" },
+        { id: "b.md", title: "b", path: "b.md" },
+      ],
+    });
+    let resolveB: (value: unknown) => void = () => {};
+    const bPromise = new Promise((resolve) => {
+      resolveB = resolve;
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      path === "a.md"
+        ? Promise.resolve({ path: "a.md", title: "a", content: "AAA" })
+        : bPromise,
+    );
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("AAA");
+
+    fireEvent.click(screen.getByText("b"));
+    // While B's fetch is in flight, the pane still shows A's content — never a blank
+    // spinner flash (#712) — but the placeholder guard must stop it from being seeded as
+    // if it were B's real content, which would strand B's actual content unread once it
+    // arrives (and could even save A's text onto B's path).
+    expect(screen.getByTestId("wysiwyg")).toHaveValue("AAA");
+
+    resolveB({ path: "b.md", title: "b", content: "BBB" });
+    await waitFor(() => expect(screen.getByTestId("wysiwyg")).toHaveValue("BBB"));
+  });
+
   it("saves the open document on unmount (leaving the editor)", async () => {
     mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
     mockModulePageDoc.mockResolvedValue({ path: "a.md", title: "a", content: "old" });

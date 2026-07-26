@@ -100,6 +100,9 @@ class AutomationView(BaseModel):
     #: What this automation's turns may actually do — derived, never stored, so the UI
     #: shows the same allowance the tool surface enforces rather than its own guess.
     allowed_tool_classes: list[str]
+    #: "Agent decides delivery" (#706): offers finish_quiet so a run can mark itself quiet
+    #: (no sink fan-out) instead of always delivering. Default off.
+    agent_gated_delivery: bool = False
 
 
 class AutomationRunView(BaseModel):
@@ -125,6 +128,8 @@ class AutomationRunView(BaseModel):
     #: Documents this run produced via the notes/kb sinks (#672) — rendered as chips linking to
     #: what was written, the same way ``trigger_entity_refs`` renders the source.
     artifacts: list[EntityRef] = Field(default_factory=list)
+    #: The agent's own reason for an ``outcome == "quiet"`` run (#706); null otherwise.
+    quiet_reason: str | None = None
 
 
 class CreateAutomationRequest(BaseModel):
@@ -141,6 +146,7 @@ class CreateAutomationRequest(BaseModel):
     digest_window_minutes: int = 0
     notes_target: SinkTargetBody | None = None
     kb_target: SinkTargetBody | None = None
+    agent_gated_delivery: bool = False
 
 
 class UpdateAutomationRequest(BaseModel):
@@ -163,6 +169,7 @@ class UpdateAutomationRequest(BaseModel):
     notes_target: SinkTargetBody | None = None
     kb_target: SinkTargetBody | None = None
     enabled: bool = True
+    agent_gated_delivery: bool = False
 
 
 class SetEnabledBody(BaseModel):
@@ -260,6 +267,7 @@ def _view(automation: Automation) -> AutomationView:
         last_run_at=automation.last_run_at.isoformat() if automation.last_run_at else None,
         last_status=automation.last_status,
         allowed_tool_classes=sorted(automation.allowed()),
+        agent_gated_delivery=automation.agent_gated_delivery,
     )
 
 
@@ -282,6 +290,7 @@ def _run_view(
         sinks_fired=list(run.sinks_fired),
         trigger_entity_refs=trigger_entity_refs or [],
         artifacts=list(run.artifacts),
+        quiet_reason=run.quiet_reason,
     )
 
 
@@ -385,7 +394,7 @@ def create_automations_router(
     ) -> list[AutomationRunView]:
         """The run ledger, newest first — what the runs feed renders.
 
-        ``outcome`` narrows to one ledger state (``ok`` / ``error`` / ``skipped``);
+        ``outcome`` narrows to one ledger state (``ok`` / ``error`` / ``skipped`` / ``quiet``);
         skipped runs are first-class here — a rate-capped or paused run being visible
         is the tab's whole point (#669).
         """
@@ -481,6 +490,7 @@ def create_automations_router(
             digest_window_minutes=body.digest_window_minutes,
             notes_target=notes_target,
             kb_target=kb_target,
+            agent_gated_delivery=body.agent_gated_delivery,
         )
         return _view(automation)
 
@@ -541,6 +551,7 @@ def create_automations_router(
             notes_target=notes_target,
             kb_target=kb_target,
             enabled=body.enabled,
+            agent_gated_delivery=body.agent_gated_delivery,
         )
         if updated is None:  # deleted between the read and the write — still a 404
             raise HTTPException(status_code=404, detail="no such automation")

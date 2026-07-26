@@ -34,7 +34,7 @@ images to GHCR.
   metering are untouched (constraint #8). The `get_model_info`/`supports_vision` lookup misses
   now warn **once per model id per process** and debug thereafter — an operator-saved alias
   outside a curated static map is expected, not anomalous. `core-app` 0.92.1→0.93.0 (MINOR) ·
-  `web` 0.118.0→0.119.0 (MINOR).
+  `web` 0.119.0→0.120.0 (MINOR).
 
 ### Fixed
 
@@ -70,6 +70,24 @@ images to GHCR.
   (MINOR) · `websearch` 0.2.0→0.2.1 (PATCH).
 
 ### Added
+
+- **Starter automation templates for every module** (#705) — the Templates tab was
+  effectively empty (only `echo`'s reference `on-ping`); mail, calendar, tasks, notes, and
+  knowledge each now declare two curated presets — mail (triage new mail, morning unread
+  digest), calendar (tomorrow-at-a-glance, event-starting-soon — "notify on a new invitation"
+  was dropped, no such event exists yet), tasks (due-today digest, overdue alert), notes
+  (weekly review, on-note-created), knowledge (large-vault-sync notify, index-failed notify).
+  All ten are `notify`-autonomy with a `push` sink, never auto-instantiated (the operator
+  instantiates from the Templates tab, same as ever). Getting these actually useful required
+  annotating each module's read tools `side_effect="read"` (`mail_search`/`mail_read`,
+  `calendar_list_events`/`calendar_find_free`, `tasks_list`/`tasks_lists`, `notes_list`/
+  `notes_tree`, `knowledge_search`/`knowledge_list_projects`/`knowledge_tree`/
+  `knowledge_read_document`) — unannotated defaults to `write`, which a Notify automation can
+  never call, so a schedule-triggered template (no triggering-event payload to fall back on)
+  would otherwise reach zero tools and produce nothing useful. `mail` 0.14.0→0.15.0 ·
+  `calendar` 0.17.0→0.18.0 · `tasks` 0.17.0→0.18.0 · `notes` 0.9.1→0.10.0 · `knowledge`
+  0.24.1→0.25.0 (all MINOR). No `core-app` change — the templates contract already existed
+  (ADR-0105).
 
 - **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the
   automations loop opened in W7. `propose_automation` is a core built-in that drafts an automation

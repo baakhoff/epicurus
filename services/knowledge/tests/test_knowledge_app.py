@@ -39,7 +39,7 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.24.1"
+    assert manifest.version == "0.25.0"
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:
@@ -61,6 +61,38 @@ async def test_manifest_declares_spine_events() -> None:
         "events.knowledge.index_failed",
     } <= subjects
     assert "knowledge.index.completed" not in subjects
+
+
+async def test_manifest_declares_read_tool_side_effects() -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105) —
+    # unannotated defaults to "write" (docs/reference/automations.md).
+    manifest = await _module().manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["knowledge_search"] == "read"
+    assert classes["knowledge_list_projects"] == "read"
+    assert classes["knowledge_tree"] == "read"
+    assert classes["knowledge_read_document"] == "read"
+
+
+async def test_manifest_declares_automation_templates() -> None:
+    # The Templates-tab contract (#705, ADR-0105). Declaring these creates nothing.
+    manifest = await _module().manifest()
+    templates = {t.key: t for t in manifest.automation_templates}
+    assert set(templates) == {"on-large-vault-sync", "on-index-failed"}
+
+    large_sync = templates["on-large-vault-sync"]
+    assert large_sync.trigger == {
+        "module": "knowledge",
+        "event_type": "knowledge.vault_synced",
+        "matchers": [{"field": "indexed", "op": "gt", "value": 10}],
+    }
+    assert large_sync.autonomy == "notify"
+    assert large_sync.sinks == ["push"]
+
+    failed = templates["on-index-failed"]
+    assert failed.trigger == {"module": "knowledge", "event_type": "knowledge.index_failed"}
+    assert failed.autonomy == "notify"
+    assert failed.sinks == ["push"]
 
 
 def _indexer_stub() -> object:

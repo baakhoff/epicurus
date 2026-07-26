@@ -185,6 +185,10 @@ class LlmGateway:
         # warning per id per process — enough to explain a model with no badges, not enough to
         # be noise. Capped because ``model`` reaches here from a route query param.
         self._unmapped_models: set[str] = set()
+        # Whether the override store has already failed once this process (#711). Unlike a
+        # cost-map miss this is *not* expected, and it disables every override at once, so it
+        # warns the first time rather than only at debug.
+        self._override_store_failed = False
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         """The active default model: the stored pref if set, else the env default."""
@@ -844,7 +848,14 @@ class LlmGateway:
         try:
             return await self._saved_models.get_override(tenant_id or self._default_tenant, model)
         except Exception as exc:
-            log.debug("capability override lookup failed", model=model, error=str(exc))
+            # Warn once, debug after. A cost-map miss is expected and stays quiet; this is not —
+            # it silently drops *every* operator override back to the map's answer, which is the
+            # same quiet capability failure #711 exists to fix. It has to be visible once.
+            if self._override_store_failed:
+                log.debug("capability override lookup failed", model=model, error=str(exc))
+            else:
+                self._override_store_failed = True
+                log.warning("capability override lookup failed", model=model, error=str(exc))
             return SavedModelOverride()
 
     async def supports_vision(self, model: str | None = None, tenant_id: str | None = None) -> bool:

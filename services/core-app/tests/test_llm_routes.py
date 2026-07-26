@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from epicurus_core_app.llm.catalog import CatalogEntry, ModelCatalog
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
 from epicurus_core_app.llm.models import ModelDetails
-from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
+from epicurus_core_app.llm.ollama_runtime import KvCacheApplyResult, OllamaRuntime
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
 from epicurus_core_app.llm.saved_models import SavedHostedModelStore
@@ -461,28 +461,62 @@ async def test_kv_cache_type_route_present_and_round_trips() -> None:
     assert got.json()["kv_cache_type"] == "q8_0"
 
 
-async def test_kv_cache_type_route_applies_when_runtime_present() -> None:
+class _FakeRuntime:
+    """Records the choices pushed at it and reports a canned outcome."""
+
+    def __init__(self, result: KvCacheApplyResult | None = None) -> None:
+        self.applied: list[str | None] = []
+        self._result = result or KvCacheApplyResult(applied=True, staged=True)
+
+    def apply_kv_cache_type(self, value: str | None) -> KvCacheApplyResult:
+        self.applied.append(value)
+        return self._result
+
+
+async def _put_kv_cache_type(runtime: object | None, value: str | None = "q4_0") -> httpx.Response:
     prefs = await _fresh_prefs()
-
-    class _FakeRuntime:
-        def __init__(self) -> None:
-            self.applied: list[str | None] = []
-
-        def apply_kv_cache_type(self, value: str | None) -> bool:
-            self.applied.append(value)
-            return True
-
-    runtime = _FakeRuntime()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(
             app=_app(prefs=prefs, ollama_runtime=runtime)  # type: ignore[arg-type]
         ),
         base_url="http://test",
     ) as client:
-        put = await client.put("/platform/v1/llm/prefs/kv-cache-type", json={"value": "q4_0"})
+        return await client.put("/platform/v1/llm/prefs/kv-cache-type", json={"value": value})
+
+
+async def test_kv_cache_type_route_applies_when_runtime_present() -> None:
+    runtime = _FakeRuntime()
+    put = await _put_kv_cache_type(runtime)
     assert put.status_code == 200
     assert put.json()["applied"] is True
+    assert put.json()["staged"] is True  # applied always implies staged
     assert runtime.applied == ["q4_0"]  # the choice was pushed to the live runtime
+
+
+async def test_kv_cache_type_route_reports_staged_when_only_the_restart_is_missing() -> None:
+    """The usual degraded install (#709): the env file holds the choice, Docker isn't wired.
+
+    The UI branches on this to say "restart the container" instead of sending the operator to
+    edit environment variables they never needed to touch.
+    """
+    put = await _put_kv_cache_type(_FakeRuntime(KvCacheApplyResult(applied=False, staged=True)))
+    body = put.json()
+    assert body["applied"] is False
+    assert body["staged"] is True
+
+
+async def test_kv_cache_type_route_reports_unstaged_when_the_write_failed() -> None:
+    """The only case where the manual environment-variable route is the real one."""
+    put = await _put_kv_cache_type(_FakeRuntime(KvCacheApplyResult(applied=False, staged=False)))
+    body = put.json()
+    assert body["applied"] is False
+    assert body["staged"] is False
+
+
+async def test_kv_cache_type_route_is_unstaged_without_a_runtime() -> None:
+    # Nothing wrote the env file at all, so the manual route is all that's left.
+    put = await _put_kv_cache_type(None)
+    assert put.json() == {"status": "ok", "value": "q4_0", "applied": False, "staged": False}
 
 
 async def test_model_settings_device_round_trips() -> None:

@@ -38,6 +38,20 @@ images to GHCR.
 
 ### Fixed
 
+- **KV-cache fallback message: a staged choice needs a restart, not an environment edit** (#709)
+  — `apply_kv_cache_type` has two distinct degraded modes and the API collapsed both into
+  `applied: false`, so the Models page always showed the scarier, mostly-wrong instruction
+  ("set `OLLAMA_KV_CACHE_TYPE` … in your environment"). In the common case — the env file was
+  written and only Docker access is missing — that instruction is busywork: Ollama's entrypoint
+  re-sources `/etc/epicurus/ollama.env` on every start, so a plain container restart applies the
+  already-staged choice. The prefs route now returns `staged` beside `applied`
+  (`applied` ⇒ `staged`; a `KvCacheApplyResult` replaces the bare bool), and the UI branches on
+  it: staged → "restart the Ollama container to apply … `docker compose restart ollama`";
+  not staged (the env file could not be written at all) → today's environment-variable text.
+  The clear-to-default path stages identically — a successful unlink *is* the choice on disk.
+  A core predating this reports no `staged`, which defaults to `false`, so an older backend keeps
+  the old copy rather than promising a restart that wouldn't help.
+  `core-app` 0.93.0→0.93.1 (PATCH) · `web` 0.120.0→0.120.1 (PATCH).
 - **Model catalog: re-anchored on the library's current markup** (#710) — the public model
   library dropped the `x-test-*` attributes the parser keyed on, so every refresh parsed to
   `[]`, the box served the seed indefinitely, and a `model catalog refresh failed` warning was

@@ -164,11 +164,18 @@ export const api = {
       body: JSON.stringify({ value }),
     }),
   // Global Ollama KV-cache type ("q8_0"|"q4_0"|null=default f16). The core writes Ollama's env
-  // file and restarts it to apply (#307); `applied` is false when Docker isn't wired, so the UI
-  // falls back to the manual-restart instructions.
+  // file and restarts it to apply (#307). Two flags, because there are two degraded modes
+  // (#709): `applied` = the running server has it; `staged` = the env file has it and only a
+  // container restart is missing (the usual case without Docker access — Ollama's entrypoint
+  // re-sources the file on every start). Only `staged: false` calls for editing env vars by
+  // hand. Defaulted for an older core, which reports neither.
   setKvCacheType: (value: string | null) =>
     request(
-      z.object({ status: z.string(), applied: z.boolean() }),
+      z.object({
+        status: z.string(),
+        applied: z.boolean(),
+        staged: z.boolean().default(false),
+      }),
       "/platform/v1/llm/prefs/kv-cache-type",
       { method: "PUT", body: JSON.stringify({ value }) },
     ),

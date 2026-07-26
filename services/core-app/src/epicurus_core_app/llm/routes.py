@@ -14,7 +14,7 @@ from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, ProviderInfo
-from epicurus_core_app.llm.ollama_runtime import OllamaRuntime
+from epicurus_core_app.llm.ollama_runtime import KvCacheApplyResult, OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.providers import is_hosted
@@ -339,14 +339,29 @@ def create_llm_router(
 
         Persists the choice, then — when Docker is wired — writes Ollama's start-up env file and
         restarts the container so it takes effect; flash attention is enabled automatically for
-        the quantized types (#307, amends ADR-0046). ``applied`` is ``False`` when Docker is
-        unavailable, in which case the UI falls back to the manual-restart instructions.
+        the quantized types (#307, amends ADR-0046).
+
+        Reports **two** flags, because there are two degraded modes and they need different
+        instructions (#709). ``applied`` means the server is running the new value.
+        ``staged`` means the env file reflects it and a restart of the Ollama container is all
+        that's left — the usual case without Docker access, since the entrypoint re-sources the
+        file on every start. Only ``staged: false`` calls for editing environment variables by
+        hand, which is what the UI used to say in every degraded case.
         """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
         await prefs.set_kv_cache_type(default_tenant, request.value)
-        applied = ollama_runtime.apply_kv_cache_type(request.value) if ollama_runtime else False
-        return {"status": "ok", "value": request.value, "applied": applied}
+        result = (
+            ollama_runtime.apply_kv_cache_type(request.value)
+            if ollama_runtime
+            else KvCacheApplyResult(applied=False, staged=False)
+        )
+        return {
+            "status": "ok",
+            "value": request.value,
+            "applied": result.applied,
+            "staged": result.staged,
+        }
 
     @router.put("/prefs/agent-max-steps")
     async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | None | str]:

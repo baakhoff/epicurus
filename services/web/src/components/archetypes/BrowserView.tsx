@@ -16,7 +16,7 @@
  * Responsive: two panes side-by-side on wide screens; on phones the list fills the
  * view and selecting an item slides to its detail (with a back affordance).
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   BookOpen,
@@ -237,6 +237,11 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   const query = useQuery({
     queryKey: [...source.queryKey, currentPath, activeQuery],
     queryFn: () => source.fetchPage(currentPath, activeQuery),
+    // Keep the previous directory/search listing on screen while the next one loads
+    // (#712) — a folder navigation or search is a new query key, so without this every
+    // switch mounts cold and blanks to a spinner even though we already have a listing
+    // to show meanwhile.
+    placeholderData: keepPreviousData,
   });
 
   if (query.isLoading) {
@@ -482,6 +487,12 @@ export function BrowserView({ source }: { source: BrowserSource }) {
                 </span>
               ))}
             </nav>
+          )}
+
+          {/* A directory/search switch keeps the previous listing on screen (#712) — this
+              is the only signal that a fetch is still under way behind it. */}
+          {query.isFetching && !query.isLoading && (
+            <Spinner className="size-3.5 shrink-0 text-ink-faint" />
           )}
 
           {/* search */}

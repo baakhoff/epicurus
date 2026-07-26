@@ -91,6 +91,42 @@ def _vision_unsupported_turn() -> AgentTurn:
     return AgentTurn(content=_VISION_UNSUPPORTED_MESSAGE, stopped=_STOPPED_UNSUPPORTED_MEDIA)
 
 
+# Agent-gated delivery (#706). `finish_quiet` is deliberately NOT a McpHost built-in
+# (register_builtin offers a tool to every turn, filtered only by the read/propose/write
+# `allow` class — and an ordinary chat turn passes allow=None, which skips that filter
+# entirely, so a globally-registered tool cannot be automation-only). Instead `_loop`
+# splices this spec in, and intercepts the call by name, only when the caller passed
+# automation_id and quiet_capable=True — the same "bound at the tool surface, not by
+# prompt politeness" discipline ADR-0105 uses for the autonomy dial.
+FINISH_QUIET_TOOL = "finish_quiet"
+
+FINISH_QUIET_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": FINISH_QUIET_TOOL,
+        "description": (
+            "Mark this automation run as not worth notifying about: no push, chat, notes, "
+            "or kb delivery happens for it — only the run log records it. Call this once "
+            "you've decided there is nothing here that needs the operator's attention (a "
+            "routine item you handled or that doesn't rise to their notice). You may still "
+            "call other tools first (e.g. to mark something read); call this when you've "
+            "decided delivery isn't needed, then give your final answer as usual. If you "
+            "don't call it, this run delivers normally."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "A short reason this run needs no delivery, for the run log.",
+                }
+            },
+            "required": ["reason"],
+        },
+    },
+}
+
+
 def _text_only(content: str | list[dict[str, Any]] | None) -> str | None:
     """``content`` as plain text, or ``None`` for the transient multimodal-parts shape.
 
@@ -246,6 +282,12 @@ class AgentTurn(BaseModel):
     # turn ignores it. Only the non-streaming path fills it — the streamed one is not
     # token-metered by the providers today — and automations run non-streaming.
     usage: TurnUsage = Field(default_factory=TurnUsage)
+    # Agent-gated delivery (#706): set when the turn called `finish_quiet`. Only ever
+    # possible for an automation turn started with quiet_capable=True (see _loop) — an
+    # ordinary chat turn can never set this. The runner checks it to skip the sink
+    # fan-out and record the run's outcome as "quiet" instead of "ok".
+    quiet: bool = False
+    quiet_reason: str | None = None
 
 
 def _entity_refs_for_model(refs: list[EntityRef], *, tenant_id: str | None = None) -> str:
@@ -608,6 +650,7 @@ class Agent:
         session_id: str | None = None,
         allow: frozenset[SideEffect] | None = None,
         automation_id: str | None = None,
+        quiet_capable: bool = False,
     ) -> AgentTurn:
         """Run one turn to completion (or until ``max_steps`` tool rounds).
 
@@ -619,7 +662,9 @@ class Agent:
         (ADR-0105) — how an automation's autonomy level is *enforced* rather than merely
         requested. ``None`` (an ordinary turn) offers everything enabled. ``automation_id``
         attributes the turn's gateway usage to the automation that caused it, alongside the
-        tenant — the dual attribution the SaaS overlay meters on.
+        tenant — the dual attribution the SaaS overlay meters on. ``quiet_capable`` offers
+        the ``finish_quiet`` tool (#706, agent-gated delivery) — only ever meaningful
+        alongside an ``automation_id``; a plain chat turn ignores it.
         """
         tenant = tenant_id or self._default_tenant
         messages, images = await self._expand_attachments(messages, tenant=tenant)
@@ -636,6 +681,7 @@ class Agent:
                 tenant_id=tenant_id,
                 allow=allow,
                 automation_id=automation_id,
+                quiet_capable=quiet_capable,
             )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         if not blocked:
@@ -1294,11 +1340,21 @@ class Agent:
         tenant_id: str | None,
         allow: frozenset[SideEffect] | None = None,
         automation_id: str | None = None,
+        quiet_capable: bool = False,
     ) -> AgentTurn:
         """The tool-calling loop: ask, run tools, feed results back, until an answer."""
         # `allow` filters both what the model is told about and what `route` will dispatch,
         # so a withheld tool is unroutable, not merely unmentioned (ADR-0105).
         specs, route = await self._mcp.discover(allow=allow)
+        # finish_quiet (#706) is offered only for an automation turn whose automation opted
+        # in — never a plain chat turn, and never an automation with the toggle off. It is
+        # spliced into `specs` (not registered on McpHost) precisely so this gate can see
+        # automation_id/quiet_capable; `route` deliberately gets no entry — the call is
+        # intercepted by name below, before dispatch, the same way run_stream intercepts
+        # ASK_USER_TOOL.
+        offer_quiet = automation_id is not None and quiet_capable
+        if offer_quiet:
+            specs = [*specs, FINISH_QUIET_SPEC]
         call_tenant = tenant_id or self._default_tenant
         max_steps = await self._effective_max_steps(tenant_id)
         # Offer tools only to a tool-capable model (else the runtime errors); a tool-less model
@@ -1309,6 +1365,7 @@ class Agent:
         timeline: list[ActivityItem] = []
         refs = _RefCollector()
         usage = TurnUsage()  # summed across every step, for the automations ledger
+        quiet_reason: str | None = None  # set once, if finish_quiet is called with a reason
 
         def activity() -> MessageActivity:
             return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
@@ -1367,6 +1424,37 @@ class Agent:
             errored: list[bool] = []
             for call in result.tool_calls:
                 name, arguments, call_id = _parse_tool_call(call)
+                if offer_quiet and name == FINISH_QUIET_TOOL:
+                    # Intercepted, never routed (see the note above discover()): this call
+                    # never reaches _invoke, so it can't count as a module tool error and
+                    # never touches the loop guard's consecutive-error streak.
+                    tools_used.append(name)
+                    reason = str(arguments.get("reason") or "").strip()
+                    if reason:
+                        quiet_reason = reason
+                        append_tool(timeline, name, "ok", _tool_detail(arguments))
+                        convo.append(
+                            ChatMessage(
+                                role="tool",
+                                tool_call_id=call_id,
+                                name=name,
+                                content=(
+                                    "Understood — this run is marked quiet (no delivery). "
+                                    "Continue and give your final answer."
+                                ),
+                            )
+                        )
+                    else:
+                        append_tool(timeline, name, "error", _tool_detail(arguments))
+                        convo.append(
+                            ChatMessage(
+                                role="tool",
+                                tool_call_id=call_id,
+                                name=name,
+                                content="error: a `reason` is required to mark this run quiet.",
+                            )
+                        )
+                    continue
                 tools_used.append(name)
                 output, is_error = await self._invoke(name, arguments, route, tenant=call_tenant)
                 text, found = _extract_entities(output, tenant_id=call_tenant)
@@ -1422,6 +1510,8 @@ class Agent:
             entity_refs=refs.refs,
             activity=activity(),
             usage=usage,
+            quiet=quiet_reason is not None,
+            quiet_reason=quiet_reason,
         )
 
     async def _document_written_by(

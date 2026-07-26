@@ -1381,6 +1381,8 @@ export const Automation = z.object({
   last_status: z.string().nullish(),
   /** Derived server-side from the autonomy dial — never stored, never guessed here. */
   allowed_tool_classes: z.array(z.string()).default([]),
+  /** "Agent decides delivery" (#706): offers finish_quiet so a run can mark itself quiet. */
+  agent_gated_delivery: z.boolean().default(false),
 });
 export type Automation = z.infer<typeof Automation>;
 
@@ -1396,7 +1398,7 @@ export const AutomationRun = z.object({
   prompt_tokens: z.number().nullish(),
   completion_tokens: z.number().nullish(),
   duration_ms: z.number().nullish(),
-  /** `ok` · `error` · `skipped` — skips are first-class (rate cap, paused). */
+  /** `ok` · `error` · `skipped` · `quiet` — skips are first-class (rate cap, paused). */
   outcome: z.string(),
   error: z.string().nullish(),
   output: z.string().default(""),
@@ -1405,6 +1407,8 @@ export const AutomationRun = z.object({
   trigger_entity_refs: z.array(EntityRef).default([]),
   /** Documents this run produced via the notes/kb sinks (#672) — rendered as chips. */
   artifacts: z.array(EntityRef).default([]),
+  /** The agent's own reason for an `outcome === "quiet"` run (#706); null otherwise. */
+  quiet_reason: z.string().nullish(),
 });
 export type AutomationRun = z.infer<typeof AutomationRun>;
 
@@ -1448,6 +1452,7 @@ export type AutomationDraft = {
   notes_target: SinkTarget | null;
   kb_target: SinkTarget | null;
   enabled: boolean;
+  agent_gated_delivery: boolean;
 };
 
 export type OAuthClientStatus = z.infer<typeof OAuthClientStatus>;

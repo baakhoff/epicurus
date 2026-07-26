@@ -85,6 +85,18 @@ images to GHCR.
 
 ### Added
 
+- **Agent-gated delivery: a `quiet` run outcome the model opts into** (#706) — a per-automation
+  "agent decides delivery" toggle (`agent_gated_delivery`, off by default) offers the run's turn a
+  run-scoped `finish_quiet(reason)` tool, bound at the tool surface — spliced into `Agent._loop` only
+  when both `automation_id` and the toggle are set, never a global built-in, so it can never reach an
+  ordinary chat turn. Calling it marks the run outcome `quiet` and skips the push/notes/kb sink
+  fan-out; not calling it delivers exactly as before (fail-loud beats fail-silent). The ledger still
+  always records the run, with the model's own reason (`AutomationRun.quiet_reason`); `chat` is
+  deliberately exempted (it is turn-time — ADR-0108 — and rolling continuity needs the next run to
+  see this one's reply regardless). The Automations editor gains the toggle; the runs feed and the
+  per-automation history badge `quiet` outcomes distinctly with their reason. `core-app` 0.93.1→0.94.0
+  (MINOR) · `web` 0.120.1→0.121.0 (MINOR). ADR-0110.
+
 - **Propose-autonomy automations can now actually reach mail's compose tools and knowledge/
   notes' suggestion tools** (#721) — completes the sweep #705 started: `mail_send`/
   `mail_reply`, knowledge's six `knowledge_propose_*`/`knowledge_create_document`, and notes'

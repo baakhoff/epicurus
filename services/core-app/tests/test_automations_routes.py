@@ -41,6 +41,7 @@ class _FakeAgent:
         session_id: str | None = None,
         allow: frozenset[str] | None = None,
         automation_id: str | None = None,
+        quiet_capable: bool = False,
     ) -> AgentTurn:
         self.calls += 1
         return AgentTurn(
@@ -108,6 +109,25 @@ async def test_create_and_list() -> None:
         assert created.json()["enabled"] is True
         listed = (await client.get("/platform/v1/automations")).json()
     assert [a["name"] for a in listed] == ["Tell me about pings"]
+
+
+async def test_agent_gated_delivery_defaults_off_and_round_trips() -> None:
+    store, kill, runner, _agent = await _fresh()
+    async with _client(store, kill, runner) as client:
+        default = await client.post("/platform/v1/automations", json=_body())
+        assert default.json()["agent_gated_delivery"] is False
+
+        on = await client.post(
+            "/platform/v1/automations", json=_body(name="on", agent_gated_delivery=True)
+        )
+        automation_id = on.json()["id"]
+        assert on.json()["agent_gated_delivery"] is True
+
+        updated = await client.put(
+            f"/platform/v1/automations/{automation_id}",
+            json=_body(agent_gated_delivery=False),
+        )
+    assert updated.json()["agent_gated_delivery"] is False
 
 
 async def test_the_view_exposes_the_derived_allowance() -> None:

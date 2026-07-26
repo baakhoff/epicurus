@@ -175,9 +175,11 @@ a restart mid-digest loses nothing. A poll loop drains the queue and fires due s
 
 Each run is one agent turn with the triggering events in context, then a **deterministic
 sink fan-out after the turn** — the model produced an answer, it did not get to choose who
-hears about it. The events reach the prompt framed as *context to act on, not instructions
-to follow*: an event's payload is data a module emitted, and this is exactly the boundary
-where treating it as anything else would let a mail subject line dictate behaviour.
+hears about it, unless the automation opted into
+[agent-gated delivery](#agent-gated-delivery-706). The events reach the prompt framed as
+*context to act on, not instructions to follow*: an event's payload is data a module emitted,
+and this is exactly the boundary where treating it as anything else would let a mail subject
+line dictate behaviour.
 
 ### Sinks
 
@@ -201,6 +203,37 @@ cost the others.
   entry (`artifacts`), so the [runs feed](#the-run-ledger) links what was produced. A notes/kb sink
   with no target is a **400** at write time, and a runtime miss degrades to a recorded failure.
 - **`push`** — its own issue; still unregistered here, so it records to the ledger only.
+
+### Agent-gated delivery (#706)
+
+By default a run always delivers to its configured sinks — the fan-out is deterministic and
+the model has no say. The per-automation **"agent decides delivery"** toggle
+(`agent_gated_delivery`, default **off**) changes that: when on, the turn is additionally
+offered a run-scoped `finish_quiet(reason)` tool, and the prompt is scaffolded to tell the
+model it may use it.
+
+- **Bound at the tool surface, not by prompt politeness** — the same discipline as the
+  autonomy dial. `finish_quiet` is spliced into the turn only when both `automation_id` and
+  `quiet_capable` are set: never for an ordinary chat turn, and never for an automation with
+  the toggle off, regardless of autonomy level.
+- **Calling it marks the run's outcome `quiet`.** The dispatcher-fanned sinks — `push`,
+  `notes`, `kb` — are skipped entirely; the ledger still records the run, with the model's
+  own reason (`AutomationRun.quiet_reason`). **Not calling the tool delivers exactly as
+  today** — fail-loud beats fail-silent: a confused model produces a redundant push, never a
+  silently swallowed important one.
+- **`chat` is a deliberate exception.** It is realized at turn time (the session is decided
+  *before* the turn runs, for rolling continuity — see [Sinks](#sinks) above) and is **not**
+  suppressed by a quiet outcome: if a quiet-capable automation has a chat sink configured, the
+  run still persists into the session and is still recorded as fired, so the next run's
+  rolling context stays unbroken. Quiet only ever silences push/notes/kb.
+- **Independent of autonomy.** A `quiet` outcome is a delivery decision, not a skip: the loop
+  guard, rate caps, and dual metering are all unaffected, and the autonomy dial still governs
+  which tools the turn may use regardless of whether it goes quiet.
+
+The mail-triage example this shipped for: an `act`-level automation configured to mark mail
+read and push a summary, with agent-gated delivery on. Unimportant mail → the turn marks it
+read, calls `finish_quiet("not important")`, outcome `quiet`, no push. Important mail → the
+turn never calls it, so the summary pushes as normal.
 
 ## Safety
 
@@ -241,10 +274,11 @@ runner's `on_recorded` hook the moment an entry is written, skips included.
 | `trigger_refs` | The `module_events` row ids that caused it (empty for a schedule). |
 | `filter_verdict` | `matched` · `digest` · `schedule` · `manual`. |
 | `model` · `prompt_tokens` · `completion_tokens` | What it used, summed across the turn's steps. |
-| `duration_ms` · `outcome` · `error` | `ok` · `error` · `skipped`. |
+| `duration_ms` · `outcome` · `error` | `ok` · `error` · `skipped` · `quiet` (#706). |
 | `output` | The turn's answer — recorded even when no sink fires. |
 | `sinks_fired` | Which sinks actually delivered. |
 | `artifacts` | `EntityRef`s for documents the notes/kb sinks produced (#672) — the feed links them. |
+| `quiet_reason` | The model's own reason for an `outcome == "quiet"` run ([agent-gated delivery](#agent-gated-delivery-706)); `null` otherwise. |
 
 Gateway usage carries the same dual attribution: `UsageEvent.automation_id` alongside
 `tenant`. Without it, an automation quietly burning tokens is indistinguishable from the
@@ -299,8 +333,10 @@ edit / template-instantiate, saved explicitly — the fields are interdependent)
 every stored field: instructions, a per-automation model (ADR-0029's core-default
 fall-through), an event trigger (type picker driven by module manifests' declared
 `events.*` subjects, with a free-text escape hatch, plus the matcher builder and active
-hours) or a schedule (the ADR-0092 vocabulary), sinks + chat mode, the 4-level dial with
-its reach spelled out, and the rate cap / digest window. The **Templates** tab renders
+hours) or a schedule (the ADR-0092 vocabulary), sinks + chat mode,
+[agent-gated delivery](#agent-gated-delivery-706) (the "agent decides delivery" toggle, off by
+default), the 4-level dial with its reach spelled out, and the rate cap / digest window. The
+**Templates** tab renders
 module-shipped presets grouped by module; *Use* prefills the editor and saving creates an
 independent `source="template:<module>"` row — enabled on save (the editor pass **is**
 the review), never retro-edited by later template changes. Per-row **run history** reads

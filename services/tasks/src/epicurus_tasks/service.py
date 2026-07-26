@@ -20,6 +20,7 @@ from epicurus_core import (
     LOCAL_ACCOUNT,
     Account,
     AccountsView,
+    AutomationTemplate,
     Collection,
     CollectionPrefs,
     CollectionsSpec,
@@ -152,7 +153,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.16.0",
+        version="0.18.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -187,6 +188,27 @@ def build_module(
         # The Google API scope the shell requests when connecting an account (#241); the
         # core adds the default identity scopes. Without this, the Google Tasks API 403s.
         oauth_scopes={"google": ["https://www.googleapis.com/auth/tasks"]},
+        # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
+        automation_templates=[
+            AutomationTemplate(
+                key="due-today-digest",
+                name="Morning due-today digest",
+                description="A short daily summary of what's due today across your lists.",
+                trigger={"cadence": "daily", "hour": 8},
+                prompt="List today's due tasks and summarize what's on deck for today.",
+                autonomy="notify",
+                sinks=["push"],
+            ),
+            AutomationTemplate(
+                key="on-task-overdue",
+                name="Tell me when a task goes overdue",
+                description="Runs whenever an open task's due date passes.",
+                trigger={"module": MODULE_NAME, "event_type": "tasks.task_overdue"},
+                prompt="A task is now overdue. Name it and its original due date in one sentence.",
+                autonomy="notify",
+                sinks=["push"],
+            ),
+        ],
     )
 
     # Module event spine (#664, ADR-0103).
@@ -215,7 +237,7 @@ def build_module(
         "An open task's due date has passed (#664).",
     )
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def tasks_list(list_id: str | None = None) -> str:
         """List open tasks from the active provider as entity-reference chips.
 
@@ -249,7 +271,7 @@ def build_module(
         text = capped_listing(lines, noun="open task")
         return tool_envelope(text, refs)
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def tasks_lists() -> str:
         """List the task lists (categories) available to add to or move tasks between.
 

@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.16.0"
+    assert manifest.version == "0.18.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -78,6 +78,32 @@ async def test_manifest(module_fixture: object) -> None:
     assert manifest.collections.multi is True
     assert manifest.collections.providers == ["google"]
     assert manifest.ui.config_schema is None
+
+
+async def test_manifest_declares_read_tool_side_effects(module_fixture: object) -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105) —
+    # unannotated defaults to "write" (docs/reference/automations.md).
+    manifest = await module_fixture.manifest()  # type: ignore[attr-defined]
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["tasks_list"] == "read"
+    assert classes["tasks_lists"] == "read"
+
+
+async def test_manifest_declares_automation_templates(module_fixture: object) -> None:
+    # The Templates-tab contract (#705, ADR-0105). Declaring these creates nothing.
+    manifest = await module_fixture.manifest()  # type: ignore[attr-defined]
+    templates = {t.key: t for t in manifest.automation_templates}
+    assert set(templates) == {"due-today-digest", "on-task-overdue"}
+
+    digest = templates["due-today-digest"]
+    assert digest.trigger == {"cadence": "daily", "hour": 8}
+    assert digest.autonomy == "notify"
+    assert digest.sinks == ["push"]
+
+    overdue = templates["on-task-overdue"]
+    assert overdue.trigger == {"module": "tasks", "event_type": "tasks.task_overdue"}
+    assert overdue.autonomy == "notify"
+    assert overdue.sinks == ["push"]
 
 
 async def test_tasks_list_empty(module_fixture: object) -> None:

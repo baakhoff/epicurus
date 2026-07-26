@@ -93,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.16.0"
+    assert data["version"] == "0.18.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",

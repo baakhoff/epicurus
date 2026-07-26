@@ -97,11 +97,17 @@ classification is *declared*, not inferred: `mail_mark_read` contains "read" and
 naming heuristics are unsound, and `writes_document` is a rendering hint (its own docstring
 says so) that `mail_send` does not carry.
 
-> **Not yet annotated:** only the core built-ins (`now`, `memory_search` — read;
-> `propose_automation` — propose; `remember`, `ask_user` — write) and `echo` declare side
-> effects today. Until a module annotates its read tools, a Notify automation reaches none of
-> them — the triggering event is still in its context, so it can still report. A follow-up
-> sweeps the modules.
+> **Not yet fully annotated:** the core built-ins (`now`, `memory_search` — read;
+> `propose_automation` — propose; `remember`, `ask_user` — write), `echo`, and (#705) each of
+> mail (`mail_search`, `mail_read`), calendar (`calendar_list_events`, `calendar_find_free`),
+> tasks (`tasks_list`, `tasks_lists`), notes (`notes_list`, `notes_tree`), and knowledge
+> (`knowledge_search`, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`)
+> declare `read` — the minimum each module's own starter templates (see
+> [Templates](#templates)) need to be a Notify automation with something to read mail/events/
+> tasks/notes/the vault with, rather than only the triggering event's payload. Still open: no
+> module's `propose`-shaped tools (`mail_send`, `knowledge_propose_*`, `notes_propose_edit`, …)
+> are annotated yet, so a `propose`-level automation still reaches none of them today — a
+> follow-up sweep.
 
 ### How it is enforced
 
@@ -301,7 +307,9 @@ See [platform-api](platform-api.md#automations-adr-0105).
   send — the agent loop rewrites a `DraftReview` into an error, since there is no chat UI to
   Confirm in. The `propose` tier works (its tools stage a suggestion); the transmit path
   from an unattended turn is its own design question.
-- **Most module tools are unannotated**, so a Notify automation reaches few of them (above).
+- **Most modules' `propose`-shaped tools are unannotated** (#705 covered each module's `read`
+  tools; `propose` tools are still open, above), so a `propose`-level automation reaches none
+  of them today.
 - **Rate caps are per-instance** in the sense that the ledger is the source of truth; there
   is no cross-instance coordination beyond Postgres, which is sufficient for single-core-app
   deployments.

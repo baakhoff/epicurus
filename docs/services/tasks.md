@@ -438,6 +438,19 @@ uniqueness constraint deciding races, not a read-then-write check — proven to 
 restart. The lead time itself is a tenant setting (`tasks_lead_time_prefs`, below) — storage
 only in this PR, no operator-facing settings UI yet.
 
+## Automation templates (#705, ADR-0105)
+
+Two starter presets on the Templates tab — never auto-instantiated, see
+[reference/automations.md#templates](../reference/automations.md#templates):
+
+| Key | Trigger | Autonomy | Sinks |
+| --- | --- | --- | --- |
+| `due-today-digest` | Schedule: daily, 08:00 | `notify` | `push` |
+| `on-task-overdue` | Event: `tasks.task_overdue` | `notify` | `push` |
+
+Both need `tasks_list`/`tasks_lists` reachable at `notify` — the reason those two tools are
+annotated `side_effect="read"`.
+
 ## Configuration
 
 `TasksSettings` extends [`CoreSettings`](../reference/config.md). There is **no

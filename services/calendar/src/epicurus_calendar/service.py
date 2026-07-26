@@ -34,6 +34,7 @@ from epicurus_core import (
     LOCAL_ACCOUNT,
     Account,
     AccountsView,
+    AutomationTemplate,
     CollectionRef,
     CollectionsSpec,
     EntityRef,
@@ -205,7 +206,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.16.0",
+        version="0.18.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -251,6 +252,39 @@ def build_module(
         # core adds the default identity scopes. Without this, connecting grants only an
         # identity token and the Calendar API returns 403.
         oauth_scopes={"google": ["https://www.googleapis.com/auth/calendar"]},
+        # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
+        # "Notify on a new invitation" was considered and dropped: there is no event for it
+        # today (see the comment below on `invitation_received`) — a template built on an
+        # event that never fires would silently never run, which is worse than not offering
+        # it. `event_starting_soon` is the real, well-supported equivalent instead.
+        automation_templates=[
+            AutomationTemplate(
+                key="tomorrow-at-a-glance",
+                name="Tomorrow at a glance",
+                description="A short evening summary of tomorrow's schedule.",
+                trigger={"cadence": "daily", "hour": 18},
+                prompt=(
+                    "List tomorrow's calendar events and summarize the day at a glance —"
+                    " meeting times, any gaps, and anything back-to-back."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+            AutomationTemplate(
+                key="on-event-starting-soon",
+                name="Tell me when an event is starting soon",
+                description=(
+                    "Runs whenever an event enters its lead-time window (default 15m —"
+                    " configurable in Calendar settings)."
+                ),
+                trigger={"module": MODULE_NAME, "event_type": "calendar.event_starting_soon"},
+                prompt=(
+                    "A calendar event is starting soon. Say which one and when, in one sentence."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+        ],
     )
 
     # Module event spine (#664, ADR-0103). invitation_received / attendee_responded are
@@ -279,7 +313,7 @@ def build_module(
         "An event's end time has passed (#664).",
     )
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def calendar_list_events(range_days: int = 7) -> str:
         """List calendar events in the next *range_days* days (default 7).
 
@@ -549,7 +583,7 @@ def build_module(
             raise ValueError(f"event {event_id!r} not found")
         return {"deleted": True, "id": event_id}
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def calendar_find_free(
         duration_minutes: int = 60,
         range_days: int = 7,

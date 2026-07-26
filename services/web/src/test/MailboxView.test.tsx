@@ -127,6 +127,80 @@ it("reconciles the landing in the background and swaps in fresh data (#623)", as
   );
 });
 
+it("keeps the previous folder's list visible while the next one loads, never a blank flash (#712)", async () => {
+  const SENT = {
+    ...LIST,
+    active_label: "SENT",
+    threads: [{ ...LIST.threads[0], id: "s1", subject: "Re: budget", sender: "carol@example.com" }],
+  };
+  let resolveSent: (value: unknown) => void = () => {};
+  const sentPromise = new Promise((resolve) => {
+    resolveSent = resolve;
+  });
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.thread_id) return Promise.resolve(THREAD);
+    if (params?.label === "SENT") return sentPromise;
+    return Promise.resolve(LIST);
+  });
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Sent" }));
+
+  // The Inbox row is still on screen — the folder switch never unmounts to a blank
+  // spinner — while Sent's fetch is still in flight.
+  expect(screen.getByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByText("carol@example.com")).not.toBeInTheDocument();
+
+  resolveSent(SENT);
+  expect(await screen.findByText("carol@example.com")).toBeInTheDocument();
+  expect(screen.queryByText("Project kickoff")).not.toBeInTheDocument();
+});
+
+it("still serialises the reconcile read behind a new folder's own read (#712, #623)", async () => {
+  // The gate above this one is `listQuery.isSuccess`, and keeping the previous folder on screen
+  // flips that to `true` on the first render of a folder nobody has visited — the placeholder
+  // counts as success. Without excluding placeholder data the reconcile fires alongside the
+  // folder's own read, i.e. two provider round-trips per first visit, which is precisely what
+  // ADR-0096's gate exists to prevent.
+  const SENT = {
+    ...LIST,
+    active_label: "SENT",
+    threads: [{ ...LIST.threads[0], id: "s1", subject: "Re: budget", sender: "carol@example.com" }],
+  };
+  let resolveSentList: (value: unknown) => void = () => {};
+  const sentList = new Promise((resolve) => {
+    resolveSentList = resolve;
+  });
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.thread_id) return Promise.resolve(THREAD);
+    if (params?.label === "SENT") return params?.reconcile ? Promise.resolve(SENT) : sentList;
+    return Promise.resolve(LIST);
+  });
+  const sentReconciles = () =>
+    mockModulePage.mock.calls.filter(
+      (call) => call[2]?.reconcile === "1" && call[2]?.label === "SENT",
+    );
+
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Sent" }));
+
+  // Sent's own read is in flight and Inbox's rows are still painted (that is #712 working) —
+  // so the reconcile must not have started yet.
+  await waitFor(() =>
+    expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { label: "SENT" }),
+  );
+  expect(screen.getByText("Project kickoff")).toBeInTheDocument();
+  expect(sentReconciles()).toHaveLength(0);
+
+  resolveSentList(SENT);
+  expect(await screen.findByText("carol@example.com")).toBeInTheDocument();
+  // Once the folder's real data lands the gate opens, exactly once.
+  await waitFor(() => expect(sentReconciles()).toHaveLength(1));
+});
+
 it("marks a thread's unread messages read on open (#625)", async () => {
   const UNREAD_THREAD = {
     thread: {

@@ -20,6 +20,7 @@ the ``review`` archetype — both core-rendered (this module supplies data only)
 from __future__ import annotations
 
 from epicurus_core import (
+    AutomationTemplate,
     EpicurusModule,
     PageSpec,
     PlatformClient,
@@ -66,7 +67,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.0",
+        version="0.11.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -103,6 +104,35 @@ def build_module(
             ),
             status_url="/status",
         ),
+        # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
+        automation_templates=[
+            AutomationTemplate(
+                key="weekly-notes-review",
+                name="Weekly notes review",
+                description=(
+                    "A lightweight weekly recap of which notes you've been touching —"
+                    " titles only, notes stay private."
+                ),
+                trigger={"cadence": "weekly", "hour": 17, "weekday": 4},
+                prompt=(
+                    "List your notes and call out which ones look recently touched, as a"
+                    " short weekly recap. You cannot read note bodies — titles only."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+            AutomationTemplate(
+                key="on-note-created",
+                name="Tell me when a note is created",
+                description=(
+                    "Runs whenever a note comes into existence (editor or approved suggestion)."
+                ),
+                trigger={"module": MODULE_NAME, "event_type": NOTE_CREATED},
+                prompt="A note was created. Name it in one short line.",
+                autonomy="notify",
+                sinks=["push"],
+            ),
+        ],
     )
 
     # Spine emitters (#665) — replaces the legacy bare `notes.saved` subject, which had no
@@ -124,7 +154,7 @@ def build_module(
 
     # ── Read-only structure (titles only — never bodies; notes are private) ──────
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def notes_list() -> str:
         """List your notes — their titles and slugs, newest first. **Never returns bodies.**
 
@@ -136,7 +166,7 @@ def build_module(
             return "No notes yet."
         return "Notes (title — slug):\n" + "\n".join(f"- {s.title} — {s.slug}" for s in summaries)
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def notes_tree() -> str:
         """Show your notes as a structure (folders inferred from ``/`` in slugs). Titles only.
 

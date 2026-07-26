@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from epicurus_core import (
+    AutomationTemplate,
     EntityRef,
     EpicurusModule,
     PageSpec,
@@ -192,7 +193,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.15.0",
+        version="0.16.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -244,6 +245,37 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         # The Gmail API scopes the shell requests when connecting Google (#241); the core
         # adds the default identity scopes. Without these, Gmail API calls return 403.
         oauth_scopes={"google": GMAIL_API_SCOPES},
+        # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
+        automation_templates=[
+            AutomationTemplate(
+                key="on-mail-received",
+                name="Triage new mail",
+                description=(
+                    "Runs a read-only turn whenever a new message arrives, so you get a"
+                    " quick sense of what it's about without opening your inbox."
+                ),
+                trigger={"module": MODULE_NAME, "event_type": "mail.received"},
+                prompt=(
+                    "A new email just arrived. Search for it and read it if you need to, then"
+                    " summarize it in one or two sentences, noting whether it looks important"
+                    " or time-sensitive."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+            AutomationTemplate(
+                key="morning-unread-digest",
+                name="Morning unread digest",
+                description="A short daily summary of what's sitting unread in your inbox.",
+                trigger={"cadence": "daily", "hour": 8},
+                prompt=(
+                    "Search your unread mail and give a short digest of what's new, grouped by"
+                    " sender or topic. Skip anything that looks like a pure notification/no-reply."
+                ),
+                autonomy="notify",
+                sinks=["push"],
+            ),
+        ],
     )
 
     module.emits(event_subject("mail.sent"), "Emitted after a message is sent successfully.")
@@ -258,7 +290,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         "forcing a full resync) — rate-limited per account.",
     )
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def mail_search(query: str, max_results: int = 10) -> str:
         """Search for mail matching *query*.
 
@@ -304,7 +336,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         text = capped_listing(lines, noun="message")
         return tool_envelope(text, refs)
 
-    @module.tool()
+    @module.tool(side_effect="read")
     async def mail_read(message_id: str) -> str:
         """Fetch the full content of a mail message by its *message_id*.
 

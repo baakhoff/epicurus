@@ -476,7 +476,7 @@ async def test_manifest_version_is_0_15_0() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.15.0"
+    assert manifest.version == "0.16.0"
 
 
 async def test_manifest_declares_propose_tool_side_effects() -> None:
@@ -488,6 +488,38 @@ async def test_manifest_declares_propose_tool_side_effects() -> None:
     classes = {t.name: t.side_effect for t in manifest.tools}
     assert classes["mail_send"] == "propose"
     assert classes["mail_reply"] == "propose"
+
+
+async def test_manifest_declares_read_tool_side_effects() -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105) —
+    # unannotated defaults to "write", which would leave a Notify automation with nothing
+    # to read mail with (docs/reference/automations.md).
+    provider = _make_provider()
+    manifest = await build_module(provider).manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["mail_search"] == "read"
+    assert classes["mail_read"] == "read"
+
+
+async def test_manifest_declares_automation_templates() -> None:
+    # The Templates-tab contract (#705, ADR-0105). Declaring these creates nothing —
+    # the operator instantiates them.
+    provider = _make_provider()
+    manifest = await build_module(provider).manifest()
+    templates = {t.key: t for t in manifest.automation_templates}
+    assert set(templates) == {"on-mail-received", "morning-unread-digest"}
+
+    on_received = templates["on-mail-received"]
+    assert on_received.trigger == {"module": "mail", "event_type": "mail.received"}
+    assert on_received.autonomy == "notify"
+    assert on_received.sinks == ["push"]
+
+    digest = templates["morning-unread-digest"]
+    assert digest.trigger == {"cadence": "daily", "hour": 8}
+    assert digest.autonomy == "notify"
+    assert digest.sinks == ["push"]
+    # No template carries "enabled" — nothing for a module to switch on.
+    assert not hasattr(digest, "enabled")
 
 
 async def test_manifest_declares_gmail_oauth_scopes() -> None:

@@ -98,14 +98,20 @@ naming heuristics are unsound, and `writes_document` is a rendering hint (its ow
 says so) that `mail_send` does not carry.
 
 > **Coverage.** The core built-ins (`now`, `memory_search` — read; `propose_automation` —
-> propose; `remember`, `ask_user` — write), `echo`, and — as of #721 — mail's `mail_send`/
-> `mail_reply` and each of knowledge's/notes' propose-shaped tools (`knowledge_propose_*`,
-> `knowledge_create_document`, `notes_create`, `notes_propose_edit`, `notes_append`,
-> `notes_delete`) declare `propose`. A **companion sweep (#705/#717)** covers each module's
-> *read* tools (`mail_search`, `calendar_list_events`, `tasks_list`, `notes_list`,
-> `knowledge_search`, etc.) — until both land, a `notify`-autonomy automation on an
-> unannotated module reaches nothing but the triggering event already in its context (still
-> enough to report), and any tool this page hasn't named yet defaults to `write`.
+> propose; `remember`, `ask_user` — write) and `echo` are annotated, and two sweeps have now
+> covered every module that stages anything. Each module's *read* tools declare `read`
+> (#705/#717) — mail (`mail_search`, `mail_read`), calendar (`calendar_list_events`,
+> `calendar_find_free`), tasks (`tasks_list`, `tasks_lists`), notes (`notes_list`,
+> `notes_tree`) and knowledge (`knowledge_search`, `knowledge_list_projects`, `knowledge_tree`,
+> `knowledge_read_document`) — the minimum a `notify` automation needs to read
+> mail/events/tasks/notes/the vault rather than only the triggering event's payload, which is
+> what each module's starter templates (see [Templates](#templates)) assume. Every
+> *propose*-shaped tool declares `propose` (#721) — mail's `mail_send`/`mail_reply`, knowledge's
+> `knowledge_propose_*` and `knowledge_create_document`, and notes' `notes_create`,
+> `notes_propose_edit`, `notes_append`, `notes_delete`. Those three are the only modules that
+> stage: tasks, calendar, storage and websearch apply every write directly, and messaging
+> exposes no agent tools, so nothing there is propose-shaped. Their remaining write tools stay
+> unannotated, and any tool this page has not named defaults to `write`.
 >
 > **The review-toggle interaction (#721, ADR-0112).** Knowledge's and notes' propose tools
 > stage a suggestion *unless* the operator has turned suggestion review off for that specific

@@ -196,6 +196,25 @@ All emission is best-effort: a spine hiccup never fails the save or delete that 
 landed. The legacy bare **`notes.saved`** subject is gone — it had no consumer, and the
 spine events replace it (the same migration `mail.sent` made, #663).
 
+### Automation templates (#705, ADR-0105)
+
+Two starter presets on the Templates tab — never auto-instantiated, see
+[reference/automations.md#templates](../reference/automations.md#templates):
+
+| Key | Trigger | Autonomy | Sinks |
+| --- | --- | --- | --- |
+| `weekly-notes-review` | Schedule: weekly, Fri 17:00 | `notify` | `push` |
+| `on-note-created` | Event: `notes.note_created` | `notify` | `push` |
+
+The weekly review is titles-only, matching the privacy line at the top of this page — the
+agent's read tools (`notes_list`, `notes_tree`, both annotated `side_effect="read"` so a
+Notify automation can reach them) never return a body either way.
+
+`notes_create`, `notes_propose_edit`, `notes_append` and `notes_delete` are annotated
+`side_effect="propose"` (#721) so a `propose`-autonomy automation can reach them — accurate
+while suggestion review is on for this module; with it off they apply directly, as in chat
+(ADR-0112).
+
 ### Web UI (manifest, ADR-0007 Tier 1)
 
 | Panel | What it shows / does |

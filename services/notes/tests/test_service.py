@@ -41,7 +41,7 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.10.0"
+    assert manifest.version == "0.11.0"
 
 
 async def test_manifest_declares_propose_tool_side_effects() -> None:
@@ -52,6 +52,32 @@ async def test_manifest_declares_propose_tool_side_effects() -> None:
     classes = {t.name: t.side_effect for t in manifest.tools}
     for name in ("notes_create", "notes_propose_edit", "notes_append", "notes_delete"):
         assert classes[name] == "propose", name
+
+
+async def test_manifest_declares_read_tool_side_effects() -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105) —
+    # unannotated defaults to "write" (docs/reference/automations.md).
+    manifest = await _module().manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    assert classes["notes_list"] == "read"
+    assert classes["notes_tree"] == "read"
+
+
+async def test_manifest_declares_automation_templates() -> None:
+    # The Templates-tab contract (#705, ADR-0105). Declaring these creates nothing.
+    manifest = await _module().manifest()
+    templates = {t.key: t for t in manifest.automation_templates}
+    assert set(templates) == {"weekly-notes-review", "on-note-created"}
+
+    review = templates["weekly-notes-review"]
+    assert review.trigger == {"cadence": "weekly", "hour": 17, "weekday": 4}
+    assert review.autonomy == "notify"
+    assert review.sinks == ["push"]
+
+    created = templates["on-note-created"]
+    assert created.trigger == {"module": "notes", "event_type": NOTE_CREATED}
+    assert created.autonomy == "notify"
+    assert created.sinks == ["push"]
 
 
 async def test_exposes_write_and_list_tools_but_no_read() -> None:

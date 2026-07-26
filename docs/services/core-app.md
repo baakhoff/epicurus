@@ -359,12 +359,47 @@ no tenant data, and is identical for every tenant (like the provider registry). 
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
 
+##### What the parser keys on (#710)
+
+The index is HTML, so the selectors are the fragile part — and in 2026 they broke: the page
+dropped the `x-test-*` attributes the parser had keyed on, every refresh parsed to `[]`, and
+the box served the seed for weeks behind a warning repeated every refresh interval. The
+selectors are now chosen for **survivability**, in this order of preference:
+
+| Signal | Anchor | Why it was chosen |
+| --- | --- | --- |
+| Model block | the per-model `<a href="/library/<name>">` element | the link *is* the product; a redesign that removes it removes the page |
+| Name | that same `href` | one source of truth, no title/heading fallback to drift |
+| Description | the first `<p>` in the block that is **not** the stats line | structural, so a blurb that merely says "updated"/"tags"/"pulls" is kept |
+| Stats line | a `<p>` whose `Pulls`/`Tags`/`Updated` labels are *whole elements* | the labels are user-visible copy, not styling |
+| Pull count | the last count element before the word `Pulls` | ditto — anchored on copy, tolerant of markup between |
+| Chips (capability / size / cloud) | any rounded **badge** span, classified by its **text** | see below |
+
+The chip rule is the load-bearing one. Upstream distinguishes the three chip kinds only by
+Tailwind colour (`bg-indigo-50` capabilities, `bg-[#ddf4ff]` sizes, `bg-cyan-50` cloud), and
+keying on colour would mean a palette change silently reads sizes as capabilities. Classifying
+by text instead — a chip matching `^(?:e|\d+x)?\d[\d.]*[bm]$` is a size, anything else is a
+capability — partitions all 233 live blocks exactly, and a restyle degrades to "no chips
+parsed" rather than to wrong data. The size pattern deliberately admits **mixture-of-experts**
+(`8x7b`, `128x17b`) and **"effective"** (`e2b`, `e4b`) labels: each is a real pullable ref, so
+a stricter pattern drops the entry. A capability outside the tag vocabulary (`audio` is live
+today) is simply ignored.
+
+`tests/fixtures/ollama-library.html` is a trimmed **verbatim** capture of the live index; the
+tests assert against it so the next redesign fails CI instead of the running box. Regenerate it
+from a fresh capture of the same families rather than hand-editing it.
+
+**Bounded failure logging** (#710): a persistently broken upstream must not write a warning
+every `LLM_CATALOG_REFRESH_SECONDS` indefinitely. The first failure of a streak logs at
+**warn**, a *changed* error message logs at warn again (a new symptom is news), and the rest of
+the streak logs at **debug** with a running `failures` count. The recovering refresh carries a
+`recovered_after` field, so the end of a debug-quiet outage is still visible at info.
+
 **Cloud-only models** (#571): some upstream families publish no downloadable weights at all —
 their only tag is a `cloud` alias whose inference runs on the library vendor's cloud. The
-index marks them with a `cloud` pill (a plain styled span **without** the `x-test-capability`
-hook, so the parser matches it separately; verified live 2026-07-09). The parser adds `cloud`
-to the tag vocabulary (alongside the `thinking` capability, new in the same pass) — but only
-on a family's **size-less bare entry**: hybrid families (gemma3, gpt-oss, …) carry the pill
+index marks them with a `cloud` chip, which the parser reads like any other chip — by its text.
+The parser adds `cloud` to the tag vocabulary (alongside the `thinking` capability, new in the
+same pass) — but only on a family's **size-less bare entry**: hybrid families carry the chip
 too, yet their size-expanded rows are ordinary local builds and stay untagged. The web badges
 `cloud` rows, offers no Pull, and excludes them from fit — by design, with the reason in a
 tooltip.
@@ -383,6 +418,12 @@ returns 404 for it; only the tags page enumerates a model's quants.) Parsed tag 
 upstream request. It is deliberately best-effort (any failure → empty list, UI falls back to
 the manual box; a model not in the public library logs at debug, not warning) and, like the
 catalog, global rather than tenant-scoped.
+
+The tags-page selectors came through the redesign that broke the index parser **unchanged**
+(re-verified 2026-07-25, #710): they key on the `/library/<family>:<tag>` link and on the size
+string in the row's own text, neither of which the restyle touched. They are pinned the same
+way regardless — `tests/fixtures/ollama-tags-llama3.1.html` (sizes and quants) and
+`ollama-tags-glm-5.1.html` (a cloud-only family, whose row publishes no size).
 
 **GB size fill** (#571): the index page publishes no on-disk sizes, so a fresh catalog parse
 has `size_gb = null` everywhere — only the tags pages carry sizes. Rather than an eager crawl

@@ -73,9 +73,38 @@ describe("BrowserView", () => {
     await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("docs/sub", ""));
 
     // Up one level → the parent directory ("docs"). The control appears once the
-    // sub-directory finishes loading (the browser shows a spinner mid-navigation).
+    // sub-directory finishes loading (the previous listing stays on screen meanwhile, #712).
     fireEvent.click(await screen.findByRole("button", { name: /up one level/i }));
     await waitFor(() => expect(source.fetchPage).toHaveBeenLastCalledWith("docs", ""));
+  });
+
+  it("keeps the previous directory listing visible while the next one loads (#712)", async () => {
+    let resolveSub: (value: unknown) => void = () => {};
+    const subPromise = new Promise((resolve) => {
+      resolveSub = resolve;
+    });
+    const source = fakeSource({
+      fetchPage: vi.fn().mockImplementation((path: string) => {
+        if (path === "docs/sub") return subPromise;
+        return Promise.resolve({
+          title: "Files",
+          items: [{ id: "docs", title: "root item", nav_path: "docs/sub" }],
+        });
+      }),
+    });
+    render(<BrowserView source={source} />, { wrapper });
+
+    expect(await screen.findByText("root item")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("root item"));
+
+    // The root listing's row is still on screen — the navigation never unmounts to a
+    // blank spinner — while the subdirectory's fetch is still in flight.
+    expect(screen.getByText("root item")).toBeInTheDocument();
+    expect(screen.queryByText("readme.md")).not.toBeInTheDocument();
+
+    resolveSub({ title: "docs", items: [{ id: "readme", title: "readme.md" }] });
+    expect(await screen.findByText("readme.md")).toBeInTheDocument();
+    expect(screen.queryByText("root item")).not.toBeInTheDocument();
   });
 
   it("search then clear round-trips to the same directory (#619)", async () => {

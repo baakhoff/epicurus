@@ -316,8 +316,13 @@ images to GHCR.
   with no data. `MailboxView`'s list query now keeps the previous folder's data on screen
   (`placeholderData: keepPreviousData`) with a small inline spinner as the only sign a fetch
   is under way, plus a tuned `staleTime`/`gcTime` so every folder visited in a session stays
-  warm and a revisit renders instantly. Auditing the other three archetypes for the same
-  pattern found it live in two more places — `BrowserView` (a directory/search switch) and
+  warm and a revisit renders instantly. A borrowed placeholder also has to be guarded wherever
+  one query gates on another's success: the cache-first reconcile read (#623) waits on the list
+  query, and a placeholder resolves that to `success` before the newly-selected folder's own read
+  has landed, so the gate now also requires `!isPlaceholderData` — without it a first visit fired
+  both provider reads at once, the exact double round-trip ADR-0096's gate exists to prevent.
+  Auditing the other three archetypes for the same pattern found it live in two more places —
+  `BrowserView` (a directory/search switch) and
   `EditorView` (opening a different document) — and fixed both; `EditorView`'s fix also
   guards the draft-seeding effect on `!doc.isPlaceholderData`, since without it the *previous*
   document's still-visible placeholder content would seed into the newly-selected path and

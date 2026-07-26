@@ -322,7 +322,10 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
   // from the module's local cache instantly, then this second read reconciles the provider delta
   // into the cache and swaps in the fresh list — new/changed messages and flag flips appear
   // without a manual refresh. Gated on the cached read succeeding first, so a cold cache does one
-  // full sync (the list read) rather than two racing ones. Search / deeper pages skip it.
+  // full sync (the list read) rather than two racing ones — and that gate has to exclude placeholder
+  // data (#712): keeping the previous folder on screen resolves the list query to `success` on the
+  // very first render of an unvisited folder, before that folder's own read has landed, which would
+  // re-open exactly the race the gate exists to close. Search / deeper pages skip it.
   const isLanding = !submitted && !cursor;
   const reconcileQuery = useQuery({
     queryKey: ["module-page", module, pageId, "reconcile", label],
@@ -331,7 +334,7 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
       if (label) params.label = label;
       return api.modulePage(module, pageId, params);
     },
-    enabled: isLanding && listQuery.isSuccess,
+    enabled: isLanding && listQuery.isSuccess && !listQuery.isPlaceholderData,
   });
 
   // Prefer the reconciled data once it lands; until then paint the instant cached read.

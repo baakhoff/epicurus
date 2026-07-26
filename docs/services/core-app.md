@@ -336,10 +336,46 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied}`; `applied` is `false` when Docker isn't wired, and the UI then shows the manual-restart path. |
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
-| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (remove / set-as-default), and module model slots; persisted in `saved_models`. Mutations **503** without the store. |
+| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (remove / set-as-default / edit capabilities), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, context_length}` sets the **capability override** (#711) — see *Capability resolution* below; **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Works for a **hosted** `<provider>/<model>` id too — there `context_window` is a **compaction budget** (`keep_alive`/`device` are local-only Ollama options). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 | `POST /platform/v1/llm/model-settings/suggest-context` | Compute **and persist** a recommended per-model context window for a freshly pulled model (#386), so it opens sized to itself instead of the global default. Body `{model}`. Reuses the `system/info` heuristic (VRAM-or-RAM + the named model's on-disk size + KV-cache type, capped at its trained length) but for *that* model rather than the active one. **Non-destructive** — an existing per-model context override is left untouched. Returns `{model, context_window, applied}` (`applied` is `false` when one was already set, or none could be computed — e.g. a hosted model with no local size). The web calls it when **any** pull finishes (catalog, variant, or manual tag). |
 | `GET /platform/v1/system/info` | Host spec + the context-window suggestion behind the Models page. Returns `{gpu, cpu, ram_total_mb, model:{name, size_mb, context_length, quantization}, suggested_context:{min, suggested, max}, kv_cache_type}`. The suggestion estimates how big a context the box can hold from VRAM (or RAM, no GPU), the active model's on-disk size, and the **KV-cache type** (a quantized cache `q8_0`/`q4_0` costs fewer bytes/token, so the same memory buys more context). Its ceiling is the model's **trained** `context_length` when known — no longer a flat 32k — so a long-context model on a roomy GPU is no longer clipped; 32768 remains only the fallback when the trained length is unknown. Best-effort: every probe degrades to `null`. |
+
+#### Capability resolution (#633, #618, #711)
+
+Two questions get asked about every model: **can it see images** (`supports_vision`, which gates
+an image attachment) and **how much context does it have** (a badge, and the ceiling on the
+context-window suggestion). They resolve in this order:
+
+1. **The operator's per-saved-model override**, when one is set (#711).
+2. **The local runtime's `/api/show`** for a local model — an explicit `vision` capability says
+   yes, anything else (including an unreported list on an older Ollama) says no.
+3. **LiteLLM's static model-cost map** for a hosted model.
+
+Step 1 exists because step 3 is a *curated static list* while model ids are the operator's choice
+(ADR-0010) — the two are guaranteed to drift. The map omits ids entirely (`grok/grok-latest`
+resolves to an unmapped `xai/grok-latest`) and mislabels others, and the failure is not cosmetic:
+`supports_vision()` resolves `False` and the image gate refuses image turns for a model that
+would have handled them. Renaming the saved model to a mapped id was the only workaround, which
+is not the operator's job.
+
+The override is `{vision: "auto"|"on"|"off", context_length: int|null}`, stored in two nullable
+columns on the model's `saved_models` row and edited in the Models page's hosted-model sheet.
+`auto` with no context length is the pre-override behaviour exactly, so an absent or cleared
+override changes nothing. It applies **even when the map lookup raises** — an unmapped id is
+precisely the case it exists for, so that path must not be the one that skips it.
+
+Two boundaries worth keeping straight:
+
+- **The override's `context_length` is not `ModelSettings.context_window`.** The first is *what
+  the model has* (metadata, a badge); the second is *how much of it we choose to send* (a
+  compaction budget, #570). Same word, different layer — both appear in the same sheet.
+- **Gating and display only.** Routing, provider keys, and usage metering never consult the
+  override; every model concern still lives in the core (constraint #8).
+
+A miss against the map logs **once per model id per process**, then at debug: a saved alias
+outside a curated list is expected, not anomalous, but the first sighting still explains a model
+that shows no badges.
 
 #### Model catalog (#269)
 
@@ -1043,10 +1079,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   (`null` = inherit). Drives the per-model resolution chain in the gateway (see **Per-model
   settings**). A missing row means the model inherits the global pref / env defaults.
 - **Postgres `saved_models`** — per-`(tenant, model)` saved **hosted**-model ids (#496):
-  `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering).
-  Only hosted ids land here — a known `<provider>/` prefix; the route rejects locals so an
-  `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the strings
-  entered in the chat picker (the browser's `recentModels` is only a warm cache).
+  `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering), plus
+  the capability override (#711) in `vision_override` (`"on"`/`"off"`/NULL = auto) and
+  `context_length_override` (NULL = take LiteLLM's map) — both nullable and reconciled additively
+  (ADR-0067), so NULL on both is the pre-override behaviour and forgetting a model forgets its
+  override with it. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
+  locals so an `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the
+  strings entered in the chat picker (the browser's `recentModels` is only a warm cache).
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
   deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON

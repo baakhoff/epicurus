@@ -41,7 +41,12 @@ import {
 import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag } from "@/data/catalog";
 import { api } from "@/lib/api";
 import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
-import type { ProviderInfo, SavedHostedModel, SystemInfo } from "@/lib/contracts";
+import type {
+  ProviderInfo,
+  SavedHostedModel,
+  SavedModelOverride,
+  SystemInfo,
+} from "@/lib/contracts";
 import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit, fitFilterOf, type FitFilter } from "@/lib/modelFit";
 import { recommendKvCache } from "@/lib/kvCacheFit";
@@ -1139,7 +1144,15 @@ export function ModelSettingsSheet({
  * global Ollama context pref never applies to a hosted call, so there is no "inherit" read-out —
  * blank simply means no budget (send the whole conversation, up to the provider's own window).
  */
-function HostedModelSettingsForm({ model, onSaved }: { model: string; onSaved: () => void }) {
+function HostedModelSettingsForm({
+  model,
+  override,
+  onSaved,
+}: {
+  model: string;
+  override: SavedModelOverride;
+  onSaved: () => void;
+}) {
   const queryClient = useQueryClient();
   const settings = useQuery({
     queryKey: ["modelSettings", model],
@@ -1154,19 +1167,44 @@ function HostedModelSettingsForm({ model, onSaved }: { model: string; onSaved: (
     setSeeded(true);
   }
 
+  // The capability override arrives as a prop (it rides the saved-models list), so it needs no
+  // fetch and can seed directly.
+  const [vision, setVision] = useState<SavedModelOverride["vision"]>(override.vision);
+  const [declared, setDeclared] = useState(
+    override.context_length != null ? String(override.context_length) : "",
+  );
+
   const save = useMutation({
     // The budget is passed in explicitly (not read from `ctx` state) so "Clear" can save null in
     // the same click without waiting for the state update to settle. keep_alive and device are
     // local-only runtime options — always cleared for a hosted model.
-    mutationFn: (value: number | null) =>
-      api.setModelSettings(model, { context_window: value, keep_alive: null, device: null }),
+    mutationFn: async (value: number | null) => {
+      await api.setModelSettings(model, {
+        context_window: value,
+        keep_alive: null,
+        device: null,
+      });
+      // Only written when it actually changed: an unchanged override needs no request, and the
+      // endpoint 404s for a model that isn't saved — which the budget field alone tolerates.
+      if (overrideChanged) {
+        await api.setSavedModelOverride(model, { vision, context_length: declaredNum });
+      }
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["modelSettings", model] });
+      void queryClient.invalidateQueries({ queryKey: ["savedModels"] });
+      // Chat's image gate reads resolved capabilities from ["modelDetails", <model>], not from
+      // savedModels — without this an override saved here stays invisible there until its
+      // staleTime lapses, so the composer can still refuse an image the operator just enabled.
+      void queryClient.invalidateQueries({ queryKey: ["modelDetails", model] });
       onSaved();
     },
   });
 
   const ctxNum = ctx.trim() === "" ? null : Number(ctx);
+  const declaredNum = declared.trim() === "" ? null : Number(declared);
+  const overrideChanged =
+    vision !== override.vision || declaredNum !== (override.context_length ?? null);
   const hasBudget = settings.data?.context_window != null;
 
   return (
@@ -1197,6 +1235,56 @@ function HostedModelSettingsForm({ model, onSaved }: { model: string; onSaved: (
         </p>
       </div>
 
+      {/* Capability override (#711) — corrects what we believe the model can do when LiteLLM's
+          static map is wrong or silent about this id. Gating and display only. */}
+      <div>
+        <Label hint="What this model can do. Auto trusts the provider catalogue we ship; set it explicitly when that catalogue is missing or wrong about your model.">
+          Capabilities
+        </Label>
+        <label className="mt-1.5 block">
+          <span className="mb-1 block text-xs text-ink-dim">Image input</span>
+          <Select
+            className="w-56"
+            value={vision}
+            aria-label="Image input support"
+            onChange={(e) => setVision(e.target.value as SavedModelOverride["vision"])}
+          >
+            <option value="auto">Auto — use the catalogue</option>
+            <option value="on">Supported — allow images</option>
+            <option value="off">Not supported — block images</option>
+          </Select>
+        </label>
+        <p className="mt-1.5 text-xs text-ink-dim">
+          {vision === "auto" ? (
+            <>
+              Whether you can attach an image is decided by the provider catalogue. If it&apos;s
+              wrong about this model, set it here.
+            </>
+          ) : vision === "on" ? (
+            <>Images can be attached to this model, whatever the catalogue says.</>
+          ) : (
+            <>Images are blocked for this model, whatever the catalogue says.</>
+          )}
+        </p>
+        <label className="mt-3 block">
+          <span className="mb-1 block text-xs text-ink-dim">Context length</span>
+          <TextInput
+            type="number"
+            min={CTX_FLOOR}
+            step={CTX_STEP}
+            value={declared}
+            placeholder="from catalogue"
+            aria-label="Declared context length tokens"
+            className="w-40"
+            onChange={(e) => setDeclared(e.target.value)}
+          />
+        </label>
+        <p className="mt-1.5 text-xs text-ink-dim">
+          The window the model actually has — shown as its badge. Leave blank to take the
+          catalogue&apos;s number. This is not the budget above, which is how much of it we use.
+        </p>
+      </div>
+
       {save.isError && <p className="text-sm text-danger">{(save.error as Error).message}</p>}
       <div className="flex items-center gap-2">
         <Button variant="primary" busy={save.isPending} onClick={() => save.mutate(ctxNum)}>
@@ -1220,21 +1308,29 @@ function HostedModelSettingsForm({ model, onSaved }: { model: string; onSaved: (
 }
 
 /**
- * The settings Sheet for a saved hosted model — the hosted analog of `ModelSettingsSheet`, showing
- * the context field only (a compaction budget, #570). Renders nothing when no model is selected.
+ * The settings Sheet for a saved hosted model — the hosted analog of `ModelSettingsSheet`: the
+ * context budget (#570) plus the capability override (#711). Renders nothing when no model is
+ * selected. `override` defaults to "trust the map", so an older core (which sends none) behaves
+ * exactly as before.
  */
 export function HostedModelSettingsSheet({
   model,
+  override,
   onClose,
 }: {
   model: string | null;
+  override?: SavedModelOverride;
   onClose: () => void;
 }) {
   if (model === null) return null;
   return (
     <Sheet open onClose={onClose} title="Hosted model settings">
       <p className="-mt-1 mb-4 font-mono text-sm break-all text-ink">{model}</p>
-      <HostedModelSettingsForm model={model} onSaved={onClose} />
+      <HostedModelSettingsForm
+        model={model}
+        override={override ?? { vision: "auto", context_length: null }}
+        onSaved={onClose}
+      />
     </Sheet>
   );
 }
@@ -1589,8 +1685,9 @@ export function SavedHostedModels() {
   const saved = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   const globalDefault = llmPrefs.data?.global_default ?? null;
-  // The hosted id whose settings sheet is open (a context budget, #570), or null when closed.
-  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  // The saved row whose settings sheet is open (context budget #570 + capability override
+  // #711), or null when closed. The whole row, not just the id — it carries the override.
+  const [settingsFor, setSettingsFor] = useState<SavedHostedModel | null>(null);
 
   const setDefault = useMutation({
     mutationFn: (model: string | null) => api.setGlobalDefault(model),
@@ -1642,16 +1739,19 @@ export function SavedHostedModels() {
                         {id}
                       </span>
                       {isDefault && <Badge tone="accent">default</Badge>}
+                      {/* Capability badges follow the *resolved* answer, so an override shows
+                          here the moment it's saved (#711). */}
+                      <CapabilityIcons capabilities={m.capabilities} />
                       {m.context_length != null && (
                         <Tooltip label={`${m.context_length.toLocaleString()} token context`}>
                           <Badge tone="dim">{formatContextLength(m.context_length)}</Badge>
                         </Tooltip>
                       )}
-                      <Tooltip label="Context budget">
+                      <Tooltip label="Context budget and capabilities">
                         <Button
                           variant="ghost"
                           aria-label={`Settings for ${id}`}
-                          onClick={() => setSettingsFor(id)}
+                          onClick={() => setSettingsFor(m)}
                         >
                           <SlidersHorizontal size={14} />
                         </Button>
@@ -1687,7 +1787,11 @@ export function SavedHostedModels() {
           {((setDefault.error ?? remove.error) as Error)?.message}
         </p>
       )}
-      <HostedModelSettingsSheet model={settingsFor} onClose={() => setSettingsFor(null)} />
+      <HostedModelSettingsSheet
+        model={settingsFor?.model ?? null}
+        override={settingsFor?.override}
+        onClose={() => setSettingsFor(null)}
+      />
     </Card>
   );
 }

@@ -392,7 +392,7 @@ class _ModelSource(Protocol):
 
     async def models(self, tenant_id: str | None = None) -> list[ModelInfo]: ...
     async def effective_default(self, tenant_id: str | None = None) -> str: ...
-    async def show(self, model: str) -> ModelDetails: ...
+    async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails: ...
     async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None: ...
 
 
@@ -476,7 +476,7 @@ async def _named_model_size(
             size_mb = info.size // (1024 * 1024) if info.size else None
             # /api/show gives the trained context length (the suggestion's real ceiling) and
             # the weight quantization. Best-effort — it degrades to None on any failure.
-            details = await _safe_show(gateway, info.name)
+            details = await _safe_show(gateway, info.name, tenant_id)
             return ModelSize(
                 name=info.name,
                 size_mb=size_mb,
@@ -498,10 +498,12 @@ async def _effective_model_size(gateway: _ModelSource, tenant_id: str | None) ->
     return found if found is not None else ModelSize(name=active)
 
 
-async def _safe_show(gateway: _ModelSource, model: str) -> ModelDetails:
+async def _safe_show(
+    gateway: _ModelSource, model: str, tenant_id: str | None = None
+) -> ModelDetails:
     """``gateway.show`` wrapped so any failure degrades to empty details (all ``None``)."""
     try:
-        return await gateway.show(model)
+        return await gateway.show(model, tenant_id)
     except Exception:  # runtime unreachable / unexpected shape — the facts are simply unknown
         log.warning("could not read model details for sizing", exc_info=True)
         return ModelDetails()

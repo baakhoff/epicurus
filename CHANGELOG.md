@@ -85,6 +85,26 @@ images to GHCR.
 
 ### Added
 
+- **`set_chat_model`: switch a conversation's model by asking** (#707) — "answer with grok from
+  now on" now works. The new core tool resolves the request against exactly what the web's model
+  picker offers — installed local models and the tenant's saved hosted models — case-insensitively,
+  exact match first then a substring match but only when it's unique; an unknown or ambiguous name
+  changes nothing and returns the available list rather than guess. The choice persists to a new
+  `session_models` sidecar table (there is no other "session row" — a session is derived from
+  `agent_messages` via `GROUP BY`) and survives a reload; `GET /sessions` reads it back for the
+  picker, and an explicit picker change writes the *same* field via a new
+  `PUT /sessions/{id}/model` (`model: null` clears it back to the device default) — one owner of
+  truth, so a tool switch and a manual pick can never fight. The **server** resolves that row at
+  turn time (`/chat`, `/chat/stream`, `/regenerate`, `/edit`), so `model` on a request is the
+  caller's *default* and the conversation's own choice wins whenever it has one. Resolving it
+  client-side would have left a window: a turn sent between the tool writing the row and the
+  client's cached sessions list refreshing would have run the old model, silently — the agent
+  says it switched and the next answer proves otherwise. A store hiccup degrades to the
+  caller's default rather than costing the turn. Classified `write`, following the
+  ordinary autonomy dial like `remember`/`ask_user` rather than a bespoke automation exclusion; it's
+  naturally inert for an automation with no chat sink (no session to apply it to). `core-app`
+  0.95.0→0.96.0 (MINOR) · `web` 0.121.0→0.122.0 (MINOR). ADR-0111.
+
 - **Least-privilege Docker control, on by default** (#708) — a KV-cache change now applies
   immediately and a removed module's container is torn down at once, out of the box, with no
   operator setup. `core-app` reaches Docker through a new `docker-proxy-core` allowlist proxy

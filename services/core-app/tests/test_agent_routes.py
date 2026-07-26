@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -22,10 +23,12 @@ from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
 from epicurus_core_app.agent.live_runs import LiveRun, LiveRunRegistry
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
 from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.memory.profile import StandingProfileStore
+from epicurus_core_app.memory.store import SessionSummary
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
 
 
@@ -168,7 +171,13 @@ async def test_readiness_endpoint_returns_a_snapshot() -> None:
 class _FakeMemory:
     """Stands in for the memory facade — records what the memory routes asked of it."""
 
-    def __init__(self, *, last_user: int | None = 1, roles: dict[int, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        last_user: int | None = 1,
+        roles: dict[int, str] | None = None,
+        session_list: list[SessionSummary] | None = None,
+    ) -> None:
         self.searched: list[str] = []
         self.forgotten: list[str] = []
         self._last_user = last_user
@@ -177,6 +186,10 @@ class _FakeMemory:
         self._roles = roles or {}
         self.truncated_after: list[int] = []
         self.revised: list[tuple[int, str]] = []
+        self._session_list = session_list or []
+
+    async def sessions(self, *, tenant: str) -> list[SessionSummary]:
+        return self._session_list
 
     async def last_user_message_id(self, *, tenant: str, session_id: str) -> int | None:
         return self._last_user
@@ -210,20 +223,279 @@ class _FakeMemory:
         return 1
 
 
-def _memory_app(memory: object, *, live_runs: LiveRunRegistry | None = None) -> FastAPI:
+def _memory_app(
+    memory: object,
+    *,
+    live_runs: LiveRunRegistry | None = None,
+    session_models: SessionModelStore | None = None,
+    agent: object | None = None,
+) -> FastAPI:
     app = FastAPI()
     app.include_router(
         create_agent_router(
-            _FakeAgent(),  # type: ignore[arg-type]
+            agent or _FakeAgent(),  # type: ignore[arg-type]
             memory,  # type: ignore[arg-type]
             "local",
             object(),  # attachment store — unused by the memory routes  # type: ignore[arg-type]
             # Unset → the router builds a private, empty registry, so the edit route's
             # active-run guard sees no live turn (what every non-#552 test here wants).
             live_runs=live_runs,
+            session_models=session_models,
         )
     )
     return app
+
+
+# ── sessions list + per-session model override (#707) ────────────────────────
+
+
+def _session(id_: str, *, model: str | None = None) -> SessionSummary:
+    return SessionSummary(
+        id=id_, title="t", message_count=1, last_at=datetime(2026, 7, 25, tzinfo=UTC), model=model
+    )
+
+
+async def test_sessions_lists_without_a_model_store_wired() -> None:
+    memory = _FakeMemory(session_list=[_session("s1")])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/sessions")
+    assert resp.status_code == 200
+    assert resp.json()[0]["model"] is None
+
+
+async def test_sessions_enriches_with_the_persisted_model_override() -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    session_models = SessionModelStore(engine)
+    await session_models.init()
+    await session_models.set(tenant="local", session_id="s1", model="grok/grok-4.5-latest")
+    memory = _FakeMemory(session_list=[_session("s1"), _session("s2")])
+    app = _memory_app(memory, session_models=session_models)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/sessions")
+    by_id = {s["id"]: s["model"] for s in resp.json()}
+    assert by_id == {"s1": "grok/grok-4.5-latest", "s2": None}
+
+
+async def test_sessions_enrichment_degrades_on_a_lookup_failure() -> None:
+    class _BrokenSessionModels:
+        async def lookup(self, *, tenant: str, session_ids: list[str]) -> dict[str, str]:
+            raise RuntimeError("db down")
+
+    memory = _FakeMemory(session_list=[_session("s1")])
+    app = _memory_app(memory, session_models=_BrokenSessionModels())  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/sessions")
+    # The list still comes back — a model-lookup hiccup must not empty the chat list.
+    assert resp.status_code == 200
+    assert resp.json()[0]["model"] is None
+
+
+async def test_set_session_model_persists_and_returns_it() -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    session_models = SessionModelStore(engine)
+    await session_models.init()
+    app = _memory_app(_FakeMemory(), session_models=session_models)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/agent/sessions/s1/model", json={"model": "grok/grok-4.5-latest"}
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"model": "grok/grok-4.5-latest"}
+    assert await session_models.get(tenant="local", session_id="s1") == "grok/grok-4.5-latest"
+
+
+# ── the model a turn actually runs on (#707, ADR-0111) ───────────────────────
+#
+# The session row is the owner of truth, resolved server-side at turn time. These assert the
+# behaviour a client cannot be trusted to get right: it sends its own device default on every
+# turn, and a turn sent before its cached sessions list catches up must still run the model the
+# conversation was actually given.
+
+
+CHAT = "/platform/v1/agent/chat"
+# The caller's default on every turn, exactly as the web sends it.
+BODY: dict[str, Any] = {"messages": [], "model": "llama3.2"}
+
+
+class _RecordingAgent:
+    """Records the model each turn was started with — the only thing these tests assert."""
+
+    def __init__(self) -> None:
+        self.models: list[str | None] = []
+
+    async def run(
+        self,
+        messages: object,
+        *,
+        model: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+    ) -> AgentTurn:
+        self.models.append(model)
+        return AgentTurn(content="hi", stopped="completed")
+
+    async def run_stream(
+        self,
+        messages: object,
+        *,
+        model: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+        persist_input: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        self.models.append(model)
+        yield AgentEvent(type="delta", text="hi")
+        yield AgentEvent(type="done", turn=AgentTurn(content="hi", stopped="completed"))
+
+
+async def _model_store(session_id: str | None = None, model: str = "grok/grok-4.5-latest") -> Any:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    store = SessionModelStore(engine)
+    await store.init()
+    if session_id is not None:
+        await store.set(tenant="local", session_id=session_id, model=model)
+    return store
+
+
+async def _post(app: FastAPI, path: str, body: dict[str, Any]) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.post(path, json=body)
+
+
+async def test_a_turn_runs_the_sessions_model_over_the_callers_default() -> None:
+    # The point of the whole feature: set_chat_model wrote the row, and the next turn honours it
+    # even though the client is still sending the device default it had before the switch.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["grok/grok-4.5-latest"]
+
+
+async def test_a_session_with_no_model_falls_back_to_the_callers_default() -> None:
+    # A brand-new chat: nothing has been chosen for it, so the caller's own default is right.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store(), agent=agent)
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_clearing_the_override_hands_the_model_back_to_the_caller() -> None:
+    # Picking "core default" back in the picker deletes the row; the next turn must not keep
+    # running the model that row used to name.
+    agent = _RecordingAgent()
+    store = await _model_store("s1")
+    await store.clear(tenant="local", session_id="s1")
+    app = _memory_app(_FakeMemory(), session_models=store, agent=agent)
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_a_turn_without_a_session_never_consults_the_store() -> None:
+    # A one-off turn (no session_id) has no row to consult; it must not error looking for one.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, CHAT, dict(BODY))
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_a_model_lookup_failure_degrades_to_the_callers_default() -> None:
+    # A capability *hint* must never cost the user their turn — a store hiccup falls back to
+    # exactly the pre-override behaviour rather than 500ing.
+    class _BrokenSessionModels:
+        async def get(self, *, tenant: str, session_id: str) -> str | None:
+            raise RuntimeError("db down")
+
+    agent = _RecordingAgent()
+    app = _memory_app(
+        _FakeMemory(),
+        session_models=_BrokenSessionModels(),  # type: ignore[arg-type]
+        agent=agent,
+    )
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_the_streamed_turn_resolves_the_session_model_too() -> None:
+    # /chat/stream is the path the web app actually uses — resolving only in /chat would fix
+    # nothing a user can see.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, CHAT + "/stream", {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["grok/grok-4.5-latest"]
+
+
+async def test_regenerating_keeps_the_sessions_model() -> None:
+    # Re-answering must not silently switch the conversation back to the device default.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, "/platform/v1/agent/sessions/s1/regenerate", {"model": "llama3.2"})
+    assert resp.status_code == 200
+    assert agent.models == ["grok/grok-4.5-latest"]
+
+
+async def test_set_session_model_requires_a_store() -> None:
+    app = _memory_app(_FakeMemory())  # no session_models wired
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/agent/sessions/s1/model", json={"model": "x"})
+    assert resp.status_code == 503
+
+
+async def test_set_session_model_rejects_a_blank_model() -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    session_models = SessionModelStore(engine)
+    await session_models.init()
+    app = _memory_app(_FakeMemory(), session_models=session_models)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/agent/sessions/s1/model", json={"model": "   "})
+    assert resp.status_code == 400
+    assert await session_models.get(tenant="local", session_id="s1") is None
+
+
+async def test_set_session_model_null_clears_the_override() -> None:
+    # Picking "core default" back in the picker (#707) — the tool itself never clears,
+    # only this explicit path can.
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    session_models = SessionModelStore(engine)
+    await session_models.init()
+    await session_models.set(tenant="local", session_id="s1", model="qwen2.5:7b")
+    app = _memory_app(_FakeMemory(), session_models=session_models)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/agent/sessions/s1/model", json={"model": None})
+    assert resp.status_code == 200
+    assert resp.json() == {"model": None}
+    assert await session_models.get(tenant="local", session_id="s1") is None
 
 
 async def test_memory_list_returns_corpus_and_total() -> None:

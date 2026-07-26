@@ -54,7 +54,7 @@ def _provider(classes: dict[str, SideEffect]):
     return _get
 
 
-async def _handler(_args: dict[str, Any], _tenant: str) -> str:
+async def _handler(_args: dict[str, Any], _tenant: str, _session_id: str | None) -> str:
     return "ok"
 
 

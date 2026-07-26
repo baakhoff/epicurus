@@ -74,7 +74,15 @@ class _FakeMcp:
         specs = [{"type": "function", "function": {"name": "echo"}}]
         return specs, {"echo": "http://echo:8080/mcp"}
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         if self._fail:
             raise RuntimeError("boom")
         return self._outputs.get(name, "out")
@@ -139,7 +147,15 @@ async def test_stream_tool_reported_failure_shows_error_status() -> None:
     # gave it, since the tool's own message (fed to the model verbatim) need not begin with
     # "error:". This is the SSE status the web timeline renders (red X vs. green check).
     class _ErrorMcp(_FakeMcp):
-        async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+        async def call(
+            self,
+            name: str,
+            arguments: dict[str, Any],
+            url: str,
+            *,
+            tenant: str,
+            session_id: str | None = None,
+        ) -> str:
             raise ToolCallError("Error executing tool echo: event 'e1' not found")
 
     gw = _FakeStreamGateway(
@@ -652,7 +668,15 @@ class _DraftMcp:
         specs = [{"type": "function", "function": {"name": "mail_send"}}]
         return specs, {"mail_send": "http://mail:8080/mcp"}
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         self.calls.append(name)
         return self._output
 
@@ -782,7 +806,15 @@ class _CountingMcp(_FakeMcp):
         super().__init__(fail=fail)
         self.calls_made: list[dict[str, Any]] = []
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         self.calls_made.append(arguments)
         if self._fail:
             raise ToolCallError("boom: cannot do that")

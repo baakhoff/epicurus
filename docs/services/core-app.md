@@ -37,9 +37,10 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
+| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563 — an additive shape a stale client ignores) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
-| `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count). |
+| `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. |
+| `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. Each message carries its **`id`** — the stable anchor a client names to edit that turn (`/edit`, #552) — alongside `role`, `content`, `created_at`, `entity_refs`, `attachments`, and (assistant turns) `activity`. |
 | `GET /platform/v1/agent/sessions/{id}/active-run` | The session's in-flight run to re-attach to — `{run_id, last_seq}` or `null` if none is live (ADR-0055). How a client rediscovers a turn after a reload/reconnect. |
 | `DELETE /platform/v1/agent/sessions/{id}/active-run` | Cancel the session's in-flight turn — the explicit **Stop** (a decoupled turn outlives the connection, so Stop must say so). Returns `{cancelled}` (ADR-0055). |
@@ -295,6 +296,33 @@ per-tool disable filter as module tools.
   the answer as the tool result. The suspended run is consumed on resume and reaped after
   `ASK_USER_TTL_HOURS`. With no suspend store wired the loop degrades — the model is told to
   proceed with its best assumption rather than pausing.
+- **`set_chat_model(model)`** — switch the *current session's* model, from the next reply
+  onward, and remember the choice (#707). "Answer with grok from now on" resolves `model`
+  against exactly what the web's picker offers — installed local models
+  (`LlmGateway.models`, hidden ones excluded) and the tenant's saved hosted models
+  (`SavedHostedModelStore`) — case-insensitively, exact match first, then a substring match
+  but *only* when it's unique; an unknown or ambiguous name changes nothing and returns the
+  available list rather than guess. Persists to `SessionModelStore` (a small sidecar table —
+  there is no other "session row" to put it on; a session is derived from `agent_messages`
+  via `GROUP BY`, see **Data model**), keyed by `session_id`, so it survives a reload and the
+  picker reads it back (`GET /sessions` enriches each summary's `model`). An explicit picker
+  change writes the *same* field via `PUT /sessions/{id}/model` (`model: null` clears the
+  override back to the device default) — one owner of truth, so a tool switch and a manual
+  pick can never fight, whichever happens last simply stands. **The core resolves that row at
+  turn time** (ADR-0113): `/chat`, `/chat/stream`, `/sessions/{id}/regenerate` and
+  `/sessions/{id}/edit` each read it before starting the turn, so `model` on the request body
+  is the *caller's default* — used only while the conversation has no choice of its own — and a
+  session that has been given a model runs it whatever the caller sends. Resolving server-side
+  rather than in the client is what makes the tool trustworthy: a client computing this reads a
+  cached sessions list, so a turn sent before that cache refreshed would silently run the
+  previous model immediately after the agent said it had switched. A store failure degrades to
+  the caller's default rather than costing the turn. Requires an active session:
+  with none (e.g. some headless path) it errors plainly rather than silently doing nothing.
+  Classified `write` — it follows the ordinary autonomy dial exactly like `remember`/
+  `ask_user` rather than a bespoke automation exclusion, and is naturally inert for the
+  common automation case anyway (no chat sink ⇒ no session ⇒ the handler errors). Changing
+  the tenant-wide default model or a module's model slot stays in Settings — a mid-chat
+  remark never rewires more than the one conversation.
 
 The same pause machinery powers **draft-first outbound sends** (ADR-0085, #563) — but triggered by
 a *module* tool, not a core built-in. When a compose tool (mail's `mail_send` / `mail_reply`)
@@ -312,7 +340,7 @@ streaming path can present a draft; the **non-streaming** loop (`POST /chat`, th
 has no review pane, so it degrades — the model is told the draft can't be sent from that channel
 rather than being fed the raw envelope (nothing is transmitted regardless).
 
-**Not on this list: `finish_quiet`.** It looks like a fifth built-in but isn't registered as one —
+**Not on this list: `finish_quiet`.** It looks like another built-in but isn't registered as one —
 `register_builtin`'s tools are offered to *every* turn (filtered only by the autonomy dial, which an
 ordinary chat turn bypasses entirely), and `finish_quiet` must never reach a plain chat turn. It is
 spliced into `Agent._loop`'s tool surface directly, gated on `automation_id`/`quiet_capable` — see
@@ -942,8 +970,10 @@ posture as the draft-first guarantee — *"the guarantee is the contract, not a 
 Because MCP's `list_tools` carries no manifest annotation, the classification is resolved
 registry-side (`ModuleRegistry.tool_side_effects`, over the TTL-cached snapshot) — the same
 reason `document_tool` exists — and only when a turn actually passes `allow`, so ordinary
-chat pays nothing. The four core built-ins are classified at registration: `now` and
-`memory_search` read; `remember` and `ask_user` write.
+chat pays nothing. The core built-ins are classified at registration: `now` and
+`memory_search` read; `propose_automation` propose; `remember`, `ask_user`, and
+`set_chat_model` write. (`finish_quiet` carries no such classification at all — it isn't a
+`register_builtin` tool, see *Built-in agent tools* above.)
 
 **Safety:** a **persisted** per-tenant kill switch (unlike `PowerController`, which resets
 on restart — a stop a restart undoes is not a stop), rate caps, digest windows, a
@@ -1195,6 +1225,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `agent_suspended_runs` (a separate table, so `create_all` builds it with no migration and the two
   consume-on-resume paths can't cross). Written on suspend, **consumed** on Confirm/Decline, reaped
   after `DRAFT_REVIEW_TTL_HOURS`.
+- **Postgres `session_models`** — a session's persisted model override (#707): `session_id`
+  (primary key), `tenant`, `model`, `updated_at`. A row exists only once a session's model has
+  been explicitly set — by the `set_chat_model` tool or an explicit picker change (the same
+  `SessionModelStore.set`, so the two paths share one owner of truth) — never for an ordinary
+  session; `GET /sessions` left-joins it in for the picker's read-back. The sidecar exists
+  because there is no other "session row": a session is derived from `agent_messages` via
+  `GROUP BY` (`ConversationStore.sessions`), the same reason `automation_sessions` (above)
+  needed its own table for the chat-list badge.
 - **Postgres `scheduled_turns`** — recurring prompts that run unattended (ADR-0092): `id`,
   `tenant`, `prompt`, `cadence` (`daily`/`weekly`), `hour`, `weekday` (nullable, weekly-only,
   0=Monday..6=Sunday), `delivery_target` (the session id the turn delivers into), `enabled`,

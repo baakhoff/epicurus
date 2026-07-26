@@ -12,10 +12,15 @@ from epicurus_core_app.agent.builtins import (
     MEMORY_SEARCH_TOOL,
     NOW_SPEC,
     REMEMBER_SPEC,
+    SET_CHAT_MODEL_SPEC,
+    SET_CHAT_MODEL_TOOL,
+    _resolve_model,
     make_memory_search_handler,
     make_now_handler,
     make_remember_handler,
+    make_set_chat_model_handler,
 )
+from epicurus_core_app.llm.models import ModelInfo
 from epicurus_core_app.memory.facts import UserFact
 from epicurus_core_app.memory.memory import MemoryItem, SessionHit
 
@@ -269,3 +274,205 @@ async def test_memory_search_unknown_scope_falls_back_to_both() -> None:
     out = await make_memory_search_handler(searcher)({"query": "q", "scope": "nonsense"}, "t1")
     assert "Remembered facts:" in out
     assert "From past conversations:" in out
+
+
+# ── set_chat_model (#707) ─────────────────────────────────────────────────────
+
+
+class _FakeLocalModels:
+    def __init__(self, models: list[ModelInfo] | None = None, *, raises: bool = False) -> None:
+        self._models = models or []
+        self._raises = raises
+        self.tenants: list[str | None] = []
+
+    async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
+        self.tenants.append(tenant_id)
+        if self._raises:
+            raise RuntimeError("ollama down")
+        return self._models
+
+
+class _FakeSavedModels:
+    def __init__(self, models: list[str] | None = None, *, raises: bool = False) -> None:
+        self._models = models or []
+        self._raises = raises
+        self.tenants: list[str] = []
+
+    async def list(self, tenant: str) -> list[str]:
+        self.tenants.append(tenant)
+        if self._raises:
+            raise RuntimeError("db down")
+        return self._models
+
+
+class _FakeSessionModels:
+    def __init__(self, *, raises: bool = False) -> None:
+        self._raises = raises
+        self.set_calls: list[tuple[str, str, str]] = []  # tenant, session_id, model
+
+    async def set(self, *, tenant: str, session_id: str, model: str) -> None:
+        if self._raises:
+            raise RuntimeError("store down")
+        self.set_calls.append((tenant, session_id, model))
+
+
+def _model(name: str, *, hidden: bool = False) -> ModelInfo:
+    return ModelInfo(name=name, hidden=hidden)
+
+
+def test_set_chat_model_spec_shape() -> None:
+    fn = SET_CHAT_MODEL_SPEC["function"]
+    assert fn["name"] == SET_CHAT_MODEL_TOOL == "set_chat_model"
+    assert fn["parameters"]["required"] == ["model"]
+
+
+# ── _resolve_model ──────────────────────────────────────────────────────────
+
+
+def test_resolve_model_exact_match() -> None:
+    assert _resolve_model("qwen2.5:7b", ["qwen2.5:7b", "llama3.3"]) == "qwen2.5:7b"
+
+
+def test_resolve_model_case_insensitive_exact_match() -> None:
+    assert _resolve_model("QWEN2.5:7B", ["qwen2.5:7b"]) == "qwen2.5:7b"
+
+
+def test_resolve_model_unique_substring_match() -> None:
+    assert _resolve_model("grok", ["grok/grok-4.5-latest", "claude/opus"]) == "grok/grok-4.5-latest"
+
+
+def test_resolve_model_ambiguous_substring_refuses_to_guess() -> None:
+    available = ["grok/grok-4.5-latest", "grok/grok-4-fast"]
+    assert _resolve_model("grok", available) is None
+
+
+def test_resolve_model_unknown_name_returns_none() -> None:
+    assert _resolve_model("bard", ["qwen2.5:7b"]) is None
+
+
+def test_resolve_model_blank_query_returns_none() -> None:
+    assert _resolve_model("   ", ["qwen2.5:7b"]) is None
+
+
+# ── make_set_chat_model_handler ──────────────────────────────────────────────
+
+
+async def test_set_chat_model_switches_to_a_local_model() -> None:
+    local = _FakeLocalModels([_model("qwen2.5:7b"), _model("llama3.3")])
+    saved = _FakeSavedModels()
+    sessions = _FakeSessionModels()
+    handler = make_set_chat_model_handler(local, saved, sessions)
+    out = await handler({"model": "qwen2.5:7b"}, "t1", "s1")
+    assert sessions.set_calls == [("t1", "s1", "qwen2.5:7b")]
+    assert "qwen2.5:7b" in out
+    assert not out.startswith("error:")
+
+
+async def test_set_chat_model_switches_to_a_saved_hosted_model_by_partial_name() -> None:
+    local = _FakeLocalModels([_model("qwen2.5:7b")])
+    saved = _FakeSavedModels(["grok/grok-4.5-latest"])
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, saved, sessions)({"model": "grok"}, "t1", "s1")
+    assert sessions.set_calls == [("t1", "s1", "grok/grok-4.5-latest")]
+    assert "grok/grok-4.5-latest" in out
+
+
+async def test_set_chat_model_excludes_hidden_local_models() -> None:
+    # Hidden from chat pickers too (ADR-0029) — resolving against "what the picker offers"
+    # must not let a hidden model be switched to by name.
+    local = _FakeLocalModels([_model("qwen2.5:7b", hidden=True)])
+    saved = _FakeSavedModels()
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, saved, sessions)(
+        {"model": "qwen2.5:7b"}, "t1", "s1"
+    )
+    assert out.startswith("error:")
+    assert sessions.set_calls == []
+
+
+async def test_set_chat_model_unknown_name_changes_nothing_and_lists_available() -> None:
+    local = _FakeLocalModels([_model("qwen2.5:7b")])
+    saved = _FakeSavedModels(["grok/grok-4.5-latest"])
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, saved, sessions)({"model": "bard"}, "t1", "s1")
+    assert out.startswith("error:")
+    assert "qwen2.5:7b" in out
+    assert "grok/grok-4.5-latest" in out
+    assert sessions.set_calls == []
+
+
+async def test_set_chat_model_ambiguous_name_changes_nothing_and_lists_available() -> None:
+    local = _FakeLocalModels([])
+    saved = _FakeSavedModels(["grok/grok-4.5-latest", "grok/grok-4-fast"])
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, saved, sessions)({"model": "grok"}, "t1", "s1")
+    assert out.startswith("error:")
+    assert sessions.set_calls == []
+
+
+async def test_set_chat_model_requires_a_model_argument() -> None:
+    handler = make_set_chat_model_handler(
+        _FakeLocalModels(), _FakeSavedModels(), _FakeSessionModels()
+    )
+    out = await handler({"model": "  "}, "t1", "s1")
+    assert out.startswith("error:")
+
+
+async def test_set_chat_model_requires_an_active_session() -> None:
+    # No session to persist the choice into (e.g. some headless path) — errors plainly
+    # rather than silently doing nothing.
+    local = _FakeLocalModels([_model("qwen2.5:7b")])
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, _FakeSavedModels(), sessions)(
+        {"model": "qwen2.5:7b"}, "t1", None
+    )
+    assert out.startswith("error:")
+    assert sessions.set_calls == []
+
+
+async def test_set_chat_model_reports_when_nothing_is_available() -> None:
+    handler = make_set_chat_model_handler(
+        _FakeLocalModels(), _FakeSavedModels(), _FakeSessionModels()
+    )
+    out = await handler({"model": "anything"}, "t1", "s1")
+    assert out.startswith("error:")
+
+
+async def test_set_chat_model_degrades_when_the_local_catalog_fails() -> None:
+    # A cold/unreachable Ollama must not crash the tool — the saved-hosted half still works.
+    local = _FakeLocalModels(raises=True)
+    saved = _FakeSavedModels(["grok/grok-4.5-latest"])
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, saved, sessions)({"model": "grok"}, "t1", "s1")
+    assert not out.startswith("error:")
+    assert sessions.set_calls == [("t1", "s1", "grok/grok-4.5-latest")]
+
+
+async def test_set_chat_model_degrades_when_the_saved_list_fails() -> None:
+    local = _FakeLocalModels([_model("qwen2.5:7b")])
+    saved = _FakeSavedModels(raises=True)
+    sessions = _FakeSessionModels()
+    out = await make_set_chat_model_handler(local, saved, sessions)(
+        {"model": "qwen2.5:7b"}, "t1", "s1"
+    )
+    assert not out.startswith("error:")
+    assert sessions.set_calls == [("t1", "s1", "qwen2.5:7b")]
+
+
+async def test_set_chat_model_surfaces_a_persist_failure() -> None:
+    local = _FakeLocalModels([_model("qwen2.5:7b")])
+    sessions = _FakeSessionModels(raises=True)
+    out = await make_set_chat_model_handler(local, _FakeSavedModels(), sessions)(
+        {"model": "qwen2.5:7b"}, "t1", "s1"
+    )
+    assert out.startswith("error:")
+
+
+async def test_set_chat_model_scopes_the_catalog_lookups_to_the_calling_tenant() -> None:
+    local = _FakeLocalModels([_model("qwen2.5:7b")])
+    saved = _FakeSavedModels(["grok/grok-4.5-latest"])
+    await make_set_chat_model_handler(local, saved, _FakeSessionModels())(
+        {"model": "qwen2.5:7b"}, "tenant-9", "s1"
+    )
+    assert local.tenants == ["tenant-9"]
+    assert saved.tenants == ["tenant-9"]

@@ -98,7 +98,7 @@ naming heuristics are unsound, and `writes_document` is a rendering hint (its ow
 says so) that `mail_send` does not carry.
 
 > **Coverage.** The core built-ins (`now`, `memory_search` — read; `propose_automation` —
-> propose; `remember`, `ask_user` — write) and `echo` are annotated, and two sweeps have now
+> propose; `remember`, `ask_user`, `set_chat_model` — write) and `echo` are annotated, and two sweeps have now
 > covered every module that stages anything. Each module's *read* tools declare `read`
 > (#705/#717) — mail (`mail_search`, `mail_read`), calendar (`calendar_list_events`,
 > `calendar_find_free`), tasks (`tasks_list`, `tasks_lists`), notes (`notes_list`,
@@ -111,7 +111,10 @@ says so) that `mail_send` does not carry.
 > `notes_propose_edit`, `notes_append`, `notes_delete`. Those three are the only modules that
 > stage: tasks, calendar, storage and websearch apply every write directly, and messaging
 > exposes no agent tools, so nothing there is propose-shaped. Their remaining write tools stay
-> unannotated, and any tool this page has not named defaults to `write`.
+> unannotated, and any tool this page has not named defaults to `write`. `finish_quiet` is
+> deliberately absent from all of this: it is bound to the tool surface by
+> `automation_id`/`quiet_capable` rather than by the side-effect dial — see
+> [Agent-gated delivery](#agent-gated-delivery-706).
 >
 > **The review-toggle interaction (#721, ADR-0112).** Knowledge's and notes' propose tools
 > stage a suggestion *unless* the operator has turned suggestion review off for that specific

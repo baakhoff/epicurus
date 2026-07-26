@@ -32,9 +32,12 @@ _BUILTIN_URL = "__builtin__"
 # ``_post_json`` write bound in ``modules.py``.
 _CALL_TIMEOUT_S = 30.0
 
-#: A built-in tool: its OpenAI function spec + an async handler ``(arguments, tenant) -> text``.
-#: The tenant is passed so a built-in can read or write tenant-scoped state (e.g. ``remember``).
-BuiltinHandler = Callable[[dict[str, Any], str], Awaitable[str]]
+#: A built-in tool: its OpenAI function spec + an async handler
+#: ``(arguments, tenant, session_id) -> text``. ``tenant`` lets a built-in read or write
+#: tenant-scoped state (e.g. ``remember``); ``session_id`` (added for #707's
+#: ``set_chat_model``) is the calling turn's session, or ``None`` for a turn with none (e.g.
+#: an automation with no chat sink) — most built-ins ignore it.
+BuiltinHandler = Callable[[dict[str, Any], str, str | None], Awaitable[str]]
 #: ``(spec, handler, side effect)`` — the classification is carried here because a built-in has
 #: no module manifest to declare it on (ADR-0105).
 BuiltinTool = tuple[dict[str, Any], BuiltinHandler, SideEffect]
@@ -224,11 +227,21 @@ class McpHost:
             route[name] = _BUILTIN_URL
         return specs, route
 
-    async def call(self, name: str, arguments: dict[str, Any], url: str, *, tenant: str) -> str:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
         """Call ``name`` on the module at ``url`` (or a core built-in) and return its text.
 
-        ``tenant`` scopes a core built-in's access to per-tenant state; it is unused for a
-        module call (the module resolves identity through the platform API).
+        ``tenant`` scopes a core built-in's access to per-tenant state; ``session_id`` (#707)
+        is the calling turn's session, for a built-in that persists a per-session choice
+        (``set_chat_model``). Neither is used for a module call (the module resolves identity
+        through the platform API, and has no notion of the core's session ids).
 
         Every hop is bounded by :data:`_CALL_TIMEOUT_S` (connect, ``initialize``, and the
         tool RPC) so an unresponsive module can never hang the caller (#472).
@@ -240,7 +253,7 @@ class McpHost:
                 before the tool could run — mapped to a controlled 502 by the HTTP layer.
         """
         if url == _BUILTIN_URL:
-            return await self._builtins[name][1](arguments, tenant)
+            return await self._builtins[name][1](arguments, tenant, session_id)
         timeout = timedelta(seconds=_CALL_TIMEOUT_S)
         try:
             async with (

@@ -117,6 +117,11 @@ instantiating if your vault syncs larger batches routinely. Both need `knowledge
 `knowledge_list_projects`/`knowledge_tree`/`knowledge_read_document` reachable at `notify` —
 the reason those four tools are annotated `side_effect="read"`.
 
+The six propose-shaped tools (`knowledge_propose_*` and `knowledge_create_document`) are
+annotated `side_effect="propose"` (#721), which is what lets a `propose`-autonomy automation
+reach them. That is accurate while suggestion review is on for this module; with it off they
+apply directly, exactly as they already do in chat (ADR-0112).
+
 ### Web UI (manifest, ADR-0007 Tier 1)
 
 | Panel | What it shows / does |

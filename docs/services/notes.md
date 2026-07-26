@@ -210,6 +210,11 @@ The weekly review is titles-only, matching the privacy line at the top of this p
 agent's read tools (`notes_list`, `notes_tree`, both annotated `side_effect="read"` so a
 Notify automation can reach them) never return a body either way.
 
+`notes_create`, `notes_propose_edit`, `notes_append` and `notes_delete` are annotated
+`side_effect="propose"` (#721) so a `propose`-autonomy automation can reach them — accurate
+while suggestion review is on for this module; with it off they apply directly, as in chat
+(ADR-0112).
+
 ### Web UI (manifest, ADR-0007 Tier 1)
 
 | Panel | What it shows / does |

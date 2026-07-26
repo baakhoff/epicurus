@@ -41,7 +41,17 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.10.0"
+    assert manifest.version == "0.11.0"
+
+
+async def test_manifest_declares_propose_tool_side_effects() -> None:
+    # The autonomy dial's tool allowance is derived from this classification (ADR-0105).
+    # All four route through _stage()'s review-toggle interaction, an accepted resolution
+    # documented at #721/ADR-0112 rather than papered over.
+    manifest = await _module().manifest()
+    classes = {t.name: t.side_effect for t in manifest.tools}
+    for name in ("notes_create", "notes_propose_edit", "notes_append", "notes_delete"):
+        assert classes[name] == "propose", name
 
 
 async def test_manifest_declares_read_tool_side_effects() -> None:

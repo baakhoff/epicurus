@@ -365,6 +365,10 @@ Both need `mail_search`/`mail_read` reachable at `notify` — the reason those t
 annotated `side_effect="read"` (the [autonomy dial](../reference/automations.md#the-autonomy-dial)
 otherwise defaults every tool to `write`, which a Notify turn can never call).
 
+`mail_send`/`mail_reply` are annotated `side_effect="propose"` (#721), which is what lets
+a `propose`-autonomy automation reach them. Both compose a `DraftReview` unconditionally
+(ADR-0085), so that tier carries no risk of an unattended send here.
+
 #### Provider caveats
 
 Gmail's `users.history.list` reports changes at **thread** granularity for most purposes

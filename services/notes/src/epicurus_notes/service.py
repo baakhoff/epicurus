@@ -67,7 +67,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.0",
+        version="0.11.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -185,6 +185,14 @@ def build_module(
     # ── Writes — all staged for operator review (notes are private) ──────────────
 
     async def _stage(slug: str, operation: str, proposed: str, note: str) -> str:
+        """Stage a suggestion, or auto-apply it when review is off for this module.
+
+        Every caller is annotated ``side_effect="propose"`` (#721, ADR-0112): accurate when
+        review is on for this module; with it off, a propose-autonomy automation inherits the
+        same direct-apply behavior chat already has here — an accepted interaction, not a bug
+        the annotation should paper over (see the ADR for why forcing automations to always
+        stage isn't the resolution).
+        """
         clean = _valid_slug(slug)
         if clean is None:
             # Raise (not a success envelope) so the call is structurally an error: the live
@@ -229,9 +237,16 @@ def build_module(
         )
 
     # `content` is the note's whole body, so the shell can show it in the document pane as the
-    # note being written (#541, ADR-0100). `notes_append` is deliberately NOT annotated: its
-    # `text` is a fragment the server concatenates on approval, not a document.
-    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="slug"))
+    # note being written (#541, ADR-0100). `notes_append` is deliberately NOT annotated (for
+    # `writes_document` — it does carry `side_effect`, below): its `text` is a fragment the
+    # server concatenates on approval, not a document.
+    # side_effect="propose" (#721, ADR-0112): stages unless review is off for this module
+    # (PlatformClient.get_suggestions_enabled()), in which case _stage applies it directly —
+    # an accepted, documented interaction (docs/reference/automations.md), not a bug.
+    @module.tool(
+        writes_document=WritesDocument(content_arg="content", target_arg="slug"),
+        side_effect="propose",
+    )
     async def notes_create(slug: str, content: str, note: str = "") -> str:
         """Propose creating a note at *slug* with *content*, for operator review (ADR-0033).
 
@@ -241,7 +256,12 @@ def build_module(
         """
         return await _stage(slug, "create", content, note)
 
-    @module.tool(writes_document=WritesDocument(content_arg="content", target_arg="slug"))
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # notes_create above.
+    @module.tool(
+        writes_document=WritesDocument(content_arg="content", target_arg="slug"),
+        side_effect="propose",
+    )
     async def notes_propose_edit(slug: str, content: str, note: str = "") -> str:
         """Propose replacing note *slug*'s full body with *content*, for review (ADR-0033).
 
@@ -251,7 +271,9 @@ def build_module(
         """
         return await _stage(slug, "update", content, note)
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # notes_create above.
+    @module.tool(side_effect="propose")
     async def notes_append(slug: str, text: str, note: str = "") -> str:
         """Propose appending *text* to the end of note *slug*, for review (ADR-0033).
 
@@ -260,7 +282,9 @@ def build_module(
         """
         return await _stage(slug, "append", text, note)
 
-    @module.tool()
+    # side_effect="propose" (#721, ADR-0112) — same review-toggle interaction as
+    # notes_create above.
+    @module.tool(side_effect="propose")
     async def notes_delete(slug: str, note: str = "") -> str:
         """Propose deleting note *slug*, for operator review (ADR-0033).
 

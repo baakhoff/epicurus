@@ -70,13 +70,16 @@ keep `main` for vetted code and treat the testing box as disposable.
 from the repo root (or `task reconcile`, the same script).  Schedule it with **Windows Task
 Scheduler** so it runs while you sleep — or run it by hand for an immediate deploy.
 
-**Docker-socket opt-in survives reconcile only if `DOCKER_GID` is in `.env` (#655).** A manual
-`task docker-socket-up` mounts the socket for that one `up`, but the next scheduled reconcile
-recreates `core-app` from plain `compose.yaml` with no overlay, silently reverting to degraded
-mode (fails safe, but the opt-in doesn't stick). Set `DOCKER_GID` in `.env` alongside
+**Docker control needs no opt-in (#708, ADR-0109)** — a plain reconcile already gives immediate
+module-removal teardown and KV-cache restarts through `docker-proxy-core`, the default proxy.
+**The raw-socket escape hatch survives reconcile only if `DOCKER_GID` is in `.env` (#655)**,
+for an operator who's opted into `services/core-app/compose.docker-socket.yaml` instead. A
+manual `task docker-socket-up` mounts the socket for that one `up`, but the next scheduled
+reconcile recreates `core-app` from plain `compose.yaml` with no overlay, silently reverting to
+the proxy path (fails safe, but the opt-in doesn't stick). Set `DOCKER_GID` in `.env` alongside
 `EPICURUS_VERSION` and every reconcile includes
 `services/core-app/compose.docker-socket.yaml` automatically — see
-[Docker-socket access](index.md#docker-socket-access-opt-in-622) for the value to use.
+[Docker-socket access](index.md#docker-socket-access-708-adr-0109) for the value to use.
 
 ### One-time GHCR login
 
@@ -214,8 +217,10 @@ docker compose logs --tail 20 core-app   # no startup errors
 Check Grafana at `http://localhost:3000` → **Alerting → Alert rules** to confirm
 no alerts are firing.
 
-A fresh deploy's **Modules** page may show a status card saying Docker isn't reachable — that
-is the **expected default** (#622, ADR-0099), not a broken deploy: module removal still works
-immediately, only container teardown (and an Ollama KV-cache restart) defer to the next
-restart. See [Docker-socket access](index.md#docker-socket-access-opt-in-622) to opt into
-immediate teardown instead.
+A fresh deploy's **Modules** page showing a status card saying Docker isn't reachable is, since
+#708/ADR-0109, no longer the expected default — `docker-proxy-core` reaches Docker out of the
+box. If you see the card anyway, that's worth investigating (a host with no Docker daemon at
+all, or the proxy container failing to start); module removal still works immediately
+regardless — it's only the container teardown (and an Ollama KV-cache restart) that defer to
+the next restart while Docker stays unreachable. See [Docker-socket
+access](index.md#docker-socket-access-708-adr-0109).

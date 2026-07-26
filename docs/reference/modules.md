@@ -726,14 +726,14 @@ needs the Docker socket.
   its `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
   stack is never touched — and **never** core-app, web, or a data-plane / infra service (a hard
   denylist on top of the configured-module guard, also enforced in the registry before tombstoning).
-- **The socket is opt-in, not mounted by default (#622, ADR-0099).** Mounting it unconditionally
-  never actually worked on a real deployment anyway — `core-app` drops to an unprivileged uid after
-  startup, and reaching a bind-mounted socket needs a host-matched group the image doesn't define —
-  so an always-on mount bought no real capability while still exposing a root-equivalent surface by
-  default. An operator opts in with `services/core-app/compose.docker-socket.yaml`, which mounts the
-  socket **and** forwards `DOCKER_GID` (the entrypoint joins that host group before dropping
-  privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
-  Dropping (or never adding) the mount never disables removal — it only defers the container
+- **Least-privilege by default, via a proxy (#708, ADR-0109).** `core-app` reaches Docker through
+  `docker-proxy-core`, a filtered allowlist proxy scoped to exactly the calls this path makes —
+  list/inspect a container, stop/restart/remove one by id — never exec/create/attach/images/
+  volumes/networks/system. An operator who'd rather `core-app` hold the raw socket directly can
+  layer `services/core-app/compose.docker-socket.yaml` instead, which mounts the socket **and**
+  forwards `DOCKER_GID` (the entrypoint joins that host group before dropping privileges); see
+  [Docker-socket access](../infrastructure/index.md#docker-socket-access-708-adr-0109). Docker
+  being unreachable by either path never disables removal — it only defers the container
   teardown to the next restart.
 - **Proactive status, not a mystery banner.** `GET /platform/v1/modules/docker-status` reports
   `{available, reason}` — `reason` is the probe's own exception text — so the Modules page states

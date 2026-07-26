@@ -393,6 +393,29 @@ remount, #428). Page data is fetched through the core proxy
 (`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
 calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
 
+**Caching posture: no cold-mount flash on a view/filter switch (#712).** Every one of these
+archetypes' list-shaped queries — mailbox's folder/search/page list, the browser's
+directory/search listing, the editor's file tree and open document, calendar's date-range
+window — key on the thing that changed (folder, path, range, selected document…), so a
+switch is a **new** query key by design. Left at react-query's defaults that mounts cold
+(`isLoading`, no data) and blanks to a spinner on every single switch, even though the
+previous view's data is still perfectly good to show meanwhile — the mailbox flicker #712
+fixed was exactly this. The fix is `placeholderData: keepPreviousData` on the query: the old
+data stays rendered (with a small inline `Spinner` next to the toolbar as the only signal a
+fetch is under way) until the new key's fetch resolves, then it swaps in — never an unmount.
+Two things to get right when adding it to a new query:
+- **A component that *seeds local state* from query data** (the editor's draft buffer is the
+  case here) must guard the seed on `!query.isPlaceholderData` too, not just "does data
+  exist" — otherwise the *previous* document's still-being-shown placeholder content seeds
+  into the *new* path, which can silently strand the real content unread once it arrives (or
+  worse, get saved onto the wrong path). `EditorView.tsx`'s `doc` query is the reference.
+- It only smooths a **key change** on an already-mounted query — the very first load of a
+  page has nothing to keep, so it still shows the initial spinner exactly as before.
+
+Calendar's own `module-page` query already did this (plus a `localStorage`-backed instant
+paint across full page reloads, #378/#379) before #712 — it was the reference the other three
+archetypes were audited against and brought in line with.
+
 **Calendar week view — an hourly day-grid (#631).** The `calendar` archetype's week view is a
 Google-Calendar-like grid: one column per day over hour rows, timed events **placed and sized by
 start/duration**, and **overlapping events split into side-by-side lanes** (connected overlaps are

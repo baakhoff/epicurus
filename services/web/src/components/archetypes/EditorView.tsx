@@ -601,15 +601,22 @@ export function EditorView({
     queryKey: ["module-doc", module, pageId, scope, selectedPath],
     queryFn: () => api.modulePageDoc(module, pageId, toModulePath(selectedPath as string)),
     enabled: selectedPath != null && !isNew,
+    // Keep the previous document on screen while the next one loads (#712) — switching the
+    // selected document is a new query key, so without this every switch mounts cold and
+    // blanks to a spinner even though we already have content to show meanwhile.
+    placeholderData: keepPreviousData,
   });
 
   // Seed the editor buffer when a document opens. Key the seed on the *path*, not the
   // query object: a background refetch (the list/doc re-reads after an auto-save) hands
   // back a fresh object that must NOT clobber keystrokes typed since. A document opens
   // in `preview` — it renders straight away (ADR-0042); the Edit toggle drops to source.
+  // `!doc.isPlaceholderData` matters now that the query keeps the previous doc visible
+  // (#712): right after switching, `doc.data` is still the *old* document's content for a
+  // moment — seeding from it would flash the wrong content into the new path's buffer.
   // Adjust state during render (the React-blessed alternative to a setState-in-effect).
   const [seededPath, setSeededPath] = useState<string | null>(null);
-  if (doc.data && selectedPath !== seededPath) {
+  if (doc.data && !doc.isPlaceholderData && selectedPath !== seededPath) {
     setSeededPath(selectedPath);
     setDraft(doc.data.content);
     setBaseline(doc.data.content);
@@ -1270,6 +1277,11 @@ export function EditorView({
                 {selectedPath}
                 {isNew && <span className="ml-1 text-ink-faint">(new)</span>}
               </span>
+              {/* A document switch keeps the previous one on screen (#712) — this is the
+                  only signal that a fetch is still under way behind it. */}
+              {doc.isFetching && !doc.isLoading && (
+                <Spinner className="size-3.5 shrink-0 text-ink-faint" />
+              )}
               {/* Editing controls — hidden while previewing a past version (ADR-0046). */}
               {!viewingVersion && (
                 <>

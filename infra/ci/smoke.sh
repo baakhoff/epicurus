@@ -309,6 +309,19 @@ printf '%s' "$live" | grep -q '"key":"on-ping"' \
   && die "a template was auto-instantiated — installing a module must never start an automation"
 ok "a module template is offered but never auto-instantiated (#666)"
 
+# Starter templates for every module (#705) reach the Templates tab through the *real*
+# module registry fan-out — proof this actually works on a live stack, not just the fake
+# `templates()` lookup core-app's own unit tests inject. TemplateView serializes `module`
+# before `key`, so one pattern per pair is enough.
+for pair in "mail:on-mail-received" "calendar:tomorrow-at-a-glance" "tasks:due-today-digest" \
+  "notes:weekly-notes-review" "knowledge:on-large-vault-sync"; do
+  mod="${pair%%:*}"
+  key="${pair#*:}"
+  printf '%s' "$tpl" | grep -q "\"module\":\"$mod\"[^}]*\"key\":\"$key\"" \
+    || die "$mod's starter template '$key' is not offered: $tpl"
+done
+ok "every module's starter automation templates reach the Templates tab (#705)"
+
 # Create a Notify automation on echo.pinged, then ping and watch a run appear.
 auto="$(http -X POST "http://core-app:8080/platform/v1/automations" \
   -H 'Content-Type: application/json' \

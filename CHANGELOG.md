@@ -34,7 +34,7 @@ images to GHCR.
   metering are untouched (constraint #8). The `get_model_info`/`supports_vision` lookup misses
   now warn **once per model id per process** and debug thereafter — an operator-saved alias
   outside a curated static map is expected, not anomalous. `core-app` 0.92.1→0.93.0 (MINOR) ·
-  `web` 0.118.0→0.119.0 (MINOR).
+  `web` 0.119.0→0.120.0 (MINOR).
 
 ### Fixed
 
@@ -51,7 +51,7 @@ images to GHCR.
   The clear-to-default path stages identically — a successful unlink *is* the choice on disk.
   A core predating this reports no `staged`, which defaults to `false`, so an older backend keeps
   the old copy rather than promising a restart that wouldn't help.
-  `core-app` 0.93.0→0.93.1 (PATCH) · `web` 0.119.0→0.119.1 (PATCH).
+  `core-app` 0.93.0→0.93.1 (PATCH) · `web` 0.120.0→0.120.1 (PATCH).
 - **Model catalog: re-anchored on the library's current markup** (#710) — the public model
   library dropped the `x-test-*` attributes the parser keyed on, so every refresh parsed to
   `[]`, the box served the seed indefinitely, and a `model catalog refresh failed` warning was
@@ -84,6 +84,24 @@ images to GHCR.
   (MINOR) · `websearch` 0.2.0→0.2.1 (PATCH).
 
 ### Added
+
+- **Starter automation templates for every module** (#705) — the Templates tab was
+  effectively empty (only `echo`'s reference `on-ping`); mail, calendar, tasks, notes, and
+  knowledge each now declare two curated presets — mail (triage new mail, morning unread
+  digest), calendar (tomorrow-at-a-glance, event-starting-soon — "notify on a new invitation"
+  was dropped, no such event exists yet), tasks (due-today digest, overdue alert), notes
+  (weekly review, on-note-created), knowledge (large-vault-sync notify, index-failed notify).
+  All ten are `notify`-autonomy with a `push` sink, never auto-instantiated (the operator
+  instantiates from the Templates tab, same as ever). Getting these actually useful required
+  annotating each module's read tools `side_effect="read"` (`mail_search`/`mail_read`,
+  `calendar_list_events`/`calendar_find_free`, `tasks_list`/`tasks_lists`, `notes_list`/
+  `notes_tree`, `knowledge_search`/`knowledge_list_projects`/`knowledge_tree`/
+  `knowledge_read_document`) — unannotated defaults to `write`, which a Notify automation can
+  never call, so a schedule-triggered template (no triggering-event payload to fall back on)
+  would otherwise reach zero tools and produce nothing useful. `mail` 0.14.0→0.15.0 ·
+  `calendar` 0.17.0→0.18.0 · `tasks` 0.17.0→0.18.0 · `notes` 0.9.1→0.10.0 · `knowledge`
+  0.24.1→0.25.0 (all MINOR). No `core-app` change — the templates contract already existed
+  (ADR-0105).
 
 - **Automations completion: conversational drafting + the three sinks** (#667, #672) — closes the
   automations loop opened in W7. `propose_automation` is a core built-in that drafts an automation
@@ -369,6 +387,26 @@ images to GHCR.
   §2/§3/§4. `core-app` 0.79.0→0.80.0 (MINOR), `web` 0.109.0→0.109.1 (PATCH).
 
 ### Fixed
+
+- **Web: no more cold-mount flash on a folder/search/pagination switch** (#712) — mail's
+  thread list blanked to a spinner on every folder change (search, and pagination too),
+  because each switch is a new react-query key and, left at the defaults, that mounts cold
+  with no data. `MailboxView`'s list query now keeps the previous folder's data on screen
+  (`placeholderData: keepPreviousData`) with a small inline spinner as the only sign a fetch
+  is under way, plus a tuned `staleTime`/`gcTime` so every folder visited in a session stays
+  warm and a revisit renders instantly. A borrowed placeholder also has to be guarded wherever
+  one query gates on another's success: the cache-first reconcile read (#623) waits on the list
+  query, and a placeholder resolves that to `success` before the newly-selected folder's own read
+  has landed, so the gate now also requires `!isPlaceholderData` — without it a first visit fired
+  both provider reads at once, the exact double round-trip ADR-0096's gate exists to prevent.
+  Auditing the other three archetypes for the same pattern found it live in two more places —
+  `BrowserView` (a directory/search switch) and
+  `EditorView` (opening a different document) — and fixed both; `EditorView`'s fix also
+  guards the draft-seeding effect on `!doc.isPlaceholderData`, since without it the *previous*
+  document's still-visible placeholder content would seed into the newly-selected path and
+  strand the real content unread once it arrived. `CalendarView`/`BoardView` already did this
+  (Calendar since #378/#379) and needed no change — they were the reference the audit checked
+  the others against. `web` 0.118.0→0.119.0 (MINOR — the audit landed changes beyond mail).
 
 - **CI: no gate ever checked a docs/ cross-reference — a dead one reached shipped operator
   UI** (#692). Issue #661 existed because `docs/DEPLOYMENT.md` was referenced from shipped,

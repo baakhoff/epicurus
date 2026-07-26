@@ -1193,6 +1193,10 @@ function HostedModelSettingsForm({
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["modelSettings", model] });
       void queryClient.invalidateQueries({ queryKey: ["savedModels"] });
+      // Chat's image gate reads resolved capabilities from ["modelDetails", <model>], not from
+      // savedModels — without this an override saved here stays invisible there until its
+      // staleTime lapses, so the composer can still refuse an image the operator just enabled.
+      void queryClient.invalidateQueries({ queryKey: ["modelDetails", model] });
       onSaved();
     },
   });

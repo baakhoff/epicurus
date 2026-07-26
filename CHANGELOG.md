@@ -12,6 +12,28 @@ images to GHCR.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Model catalog: re-anchored on the library's current markup** (#710) — the public model
+  library dropped the `x-test-*` attributes the parser keyed on, so every refresh parsed to
+  `[]`, the box served the seed indefinitely, and a `model catalog refresh failed` warning was
+  written every `refresh_seconds` for weeks. The parser now keys on the page's **structure and
+  user-visible copy** — the per-model `/library/<name>` link, the rounded-badge idiom, and the
+  word "Pulls" — and classifies each chip by its *text* rather than by the Tailwind colour that
+  distinguishes capabilities from sizes, so a restyle degrades instead of silently mislabelling.
+  Three regressions fall out of the live data: mixture-of-experts (`8x7b`, `128x17b`) and
+  "effective" (`e2b`) size labels are now expanded into pullable entries instead of dropped;
+  comma-grouped pull counts (`8,171`) rank correctly instead of scoring 0; and a blurb that
+  merely *mentions* "updated"/"tags"/"pulls" is no longer blanked (the stats line is told apart
+  structurally now — this affected 7 of the library's 233 families, `mistral` among them).
+  Repeated failures are **bounded**: the first failure of a streak warns, a *changed* error
+  warns again, the rest drop to debug, and the recovery reports how long the outage ran.
+  `tests/fixtures/ollama-library.html` and `ollama-tags-*.html` are trimmed verbatim captures
+  (2026-07-25) that pin the real markup, so the next redesign fails a test instead of the box.
+  The tags-page selectors (#571, #330) were verified against the same redesign and needed no
+  change — they key on the `/library/<family>:<tag>` link, which survived. `core-app`
+  0.92.0→0.92.1 (PATCH).
+
 ### Changed
 
 - **Agent grounding: local sources first, then the web — never an unsourced guess** (#703) — the

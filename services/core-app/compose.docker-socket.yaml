@@ -1,24 +1,31 @@
-# Opt-in Docker-socket access for core-app (#622, ADR-0099). NOT auto-loaded — Compose only
-# auto-merges a `compose.override.yaml` sitting beside the file it overrides, and this one
-# lives here specifically so a plain `docker compose up` / `task up` never picks it up by
-# accident. Layer it on top of the default stack explicitly:
+# Opt-in DIRECT Docker-socket access for core-app (#622, ADR-0099; #708/ADR-0109 changed what
+# this is an alternative TO). By default core-app talks to `docker-proxy-core` — an allowlist
+# proxy scoped to exactly the calls DockerController makes (see "Docker-socket access" in
+# docs/infrastructure/index.md). Layer this overlay only if you'd rather hold the raw socket
+# directly
+# — e.g. you don't want the extra proxy container, or you don't trust a third-party proxy image
+# over the mitigation the app's own `DockerController` allowlist/denylist already provides.
+# NOT auto-loaded — Compose only auto-merges a `compose.override.yaml` sitting beside the file
+# it overrides, and this one lives here specifically so a plain `docker compose up` / `task up`
+# never picks it up by accident. Layer it on top of the default stack explicitly:
 #
 #   DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose \
 #     -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
 #   # or: task docker-socket-up
 #
-# What this buys you: module removal (#127, ADR-0028) tears its container down immediately
-# instead of deferring to the next restart, and an Ollama KV-cache change (#307) applies via
-# an immediate restart instead of needing a manual one. Neither is broken without this — see
-# the Modules page, which states the deferred behavior plainly when Docker isn't reachable.
+# Both paths (proxy or this direct mount) give module removal (#127, ADR-0028) and the Ollama
+# KV-cache restart (#307) immediate effect. Neither is required for correctness — the Modules
+# page states plainly when Docker isn't reachable at all, and removal itself always succeeds
+# (only the container teardown defers).
 #
 # Security tradeoff (read before enabling): /var/run/docker.sock is ROOT-EQUIVALENT on the
 # host — anything that can reach it can control every container, image, and volume on the
-# machine. core-app only ever exercises one narrow, audited path over it (`DockerController`,
-# ADR-0028): stop + remove a *configured module's own* container, scoped to this Compose
-# project, never core-app / web / a data-plane service. That scoping is a mitigation, not a
-# substitute for treating this grant as privileged — enable it only if you want immediate
-# container teardown and accept that a core-app compromise becomes a host compromise.
+# machine, with none of `docker-proxy-core`'s path allowlist in front of it. core-app only ever
+# exercises one narrow, audited path over it (`DockerController`, ADR-0028): stop + remove a
+# *configured module's own* container, scoped to this Compose project, never core-app / web /
+# a data-plane service. That scoping is a mitigation, not a substitute for treating this grant
+# as privileged — enable it only if you accept that a core-app compromise becomes a host
+# compromise.
 #
 # The mount alone is not enough: core-app drops from root to an unprivileged uid after startup
 # (ADR-0069), and the image defines no `docker` group to inherit — DOCKER_GID (the *host's*
@@ -32,3 +39,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DOCKER_GID: ${DOCKER_GID:?set DOCKER_GID to your host's docker-socket group id — see the comments in this file}
+      # Overrides the default stack's DOCKER_HOST (which points at docker-proxy-core) back to
+      # the socket just mounted — docker.from_env() otherwise keeps talking to the proxy even
+      # with this overlay layered on, since an env var wins regardless of what's mounted.
+      DOCKER_HOST: unix:///var/run/docker.sock

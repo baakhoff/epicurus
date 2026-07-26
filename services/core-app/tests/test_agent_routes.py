@@ -228,11 +228,12 @@ def _memory_app(
     *,
     live_runs: LiveRunRegistry | None = None,
     session_models: SessionModelStore | None = None,
+    agent: object | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
         create_agent_router(
-            _FakeAgent(),  # type: ignore[arg-type]
+            agent or _FakeAgent(),  # type: ignore[arg-type]
             memory,  # type: ignore[arg-type]
             "local",
             object(),  # attachment store — unused by the memory routes  # type: ignore[arg-type]
@@ -313,6 +314,145 @@ async def test_set_session_model_persists_and_returns_it() -> None:
     assert resp.status_code == 200
     assert resp.json() == {"model": "grok/grok-4.5-latest"}
     assert await session_models.get(tenant="local", session_id="s1") == "grok/grok-4.5-latest"
+
+
+# ── the model a turn actually runs on (#707, ADR-0111) ───────────────────────
+#
+# The session row is the owner of truth, resolved server-side at turn time. These assert the
+# behaviour a client cannot be trusted to get right: it sends its own device default on every
+# turn, and a turn sent before its cached sessions list catches up must still run the model the
+# conversation was actually given.
+
+
+CHAT = "/platform/v1/agent/chat"
+# The caller's default on every turn, exactly as the web sends it.
+BODY: dict[str, Any] = {"messages": [], "model": "llama3.2"}
+
+
+class _RecordingAgent:
+    """Records the model each turn was started with — the only thing these tests assert."""
+
+    def __init__(self) -> None:
+        self.models: list[str | None] = []
+
+    async def run(
+        self,
+        messages: object,
+        *,
+        model: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+    ) -> AgentTurn:
+        self.models.append(model)
+        return AgentTurn(content="hi", stopped="completed")
+
+    async def run_stream(
+        self,
+        messages: object,
+        *,
+        model: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+        persist_input: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        self.models.append(model)
+        yield AgentEvent(type="delta", text="hi")
+        yield AgentEvent(type="done", turn=AgentTurn(content="hi", stopped="completed"))
+
+
+async def _model_store(session_id: str | None = None, model: str = "grok/grok-4.5-latest") -> Any:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    store = SessionModelStore(engine)
+    await store.init()
+    if session_id is not None:
+        await store.set(tenant="local", session_id=session_id, model=model)
+    return store
+
+
+async def _post(app: FastAPI, path: str, body: dict[str, Any]) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.post(path, json=body)
+
+
+async def test_a_turn_runs_the_sessions_model_over_the_callers_default() -> None:
+    # The point of the whole feature: set_chat_model wrote the row, and the next turn honours it
+    # even though the client is still sending the device default it had before the switch.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["grok/grok-4.5-latest"]
+
+
+async def test_a_session_with_no_model_falls_back_to_the_callers_default() -> None:
+    # A brand-new chat: nothing has been chosen for it, so the caller's own default is right.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store(), agent=agent)
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_clearing_the_override_hands_the_model_back_to_the_caller() -> None:
+    # Picking "core default" back in the picker deletes the row; the next turn must not keep
+    # running the model that row used to name.
+    agent = _RecordingAgent()
+    store = await _model_store("s1")
+    await store.clear(tenant="local", session_id="s1")
+    app = _memory_app(_FakeMemory(), session_models=store, agent=agent)
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_a_turn_without_a_session_never_consults_the_store() -> None:
+    # A one-off turn (no session_id) has no row to consult; it must not error looking for one.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, CHAT, dict(BODY))
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_a_model_lookup_failure_degrades_to_the_callers_default() -> None:
+    # A capability *hint* must never cost the user their turn — a store hiccup falls back to
+    # exactly the pre-override behaviour rather than 500ing.
+    class _BrokenSessionModels:
+        async def get(self, *, tenant: str, session_id: str) -> str | None:
+            raise RuntimeError("db down")
+
+    agent = _RecordingAgent()
+    app = _memory_app(
+        _FakeMemory(),
+        session_models=_BrokenSessionModels(),  # type: ignore[arg-type]
+        agent=agent,
+    )
+    resp = await _post(app, CHAT, {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["llama3.2"]
+
+
+async def test_the_streamed_turn_resolves_the_session_model_too() -> None:
+    # /chat/stream is the path the web app actually uses — resolving only in /chat would fix
+    # nothing a user can see.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, CHAT + "/stream", {**BODY, "session_id": "s1"})
+    assert resp.status_code == 200
+    assert agent.models == ["grok/grok-4.5-latest"]
+
+
+async def test_regenerating_keeps_the_sessions_model() -> None:
+    # Re-answering must not silently switch the conversation back to the device default.
+    agent = _RecordingAgent()
+    app = _memory_app(_FakeMemory(), session_models=await _model_store("s1"), agent=agent)
+    resp = await _post(app, "/platform/v1/agent/sessions/s1/regenerate", {"model": "llama3.2"})
+    assert resp.status_code == 200
+    assert agent.models == ["grok/grok-4.5-latest"]
 
 
 async def test_set_session_model_requires_a_store() -> None:

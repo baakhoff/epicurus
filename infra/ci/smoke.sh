@@ -193,6 +193,27 @@ printf '%s' "$cat" | grep -q '"entries"' || die "model catalog endpoint returned
 printf '%s' "$cat" | grep -q '"id"' || die "model catalog served no entries (seed missing?): $cat"
 ok "model catalog endpoint serves entries (seed or live, #269)"
 
+# Least-privilege Docker control by default (#708, ADR-0109): docker-status must report
+# reachable with no operator setup (the proxy, not the opt-in raw socket), and a real KV-cache
+# apply must round-trip through it — set, then clear, so the shared ollama-runtime volume is
+# left as this run found it. This is the acceptance check the issue itself names.
+ds="$(http "http://core-app:8080/platform/v1/modules/docker-status" || true)"
+printf '%s' "$ds" | grep -q '"available":true' \
+  || die "docker-status reports unreachable by default (docker-proxy-core not wired?): $ds"
+ok "core reaches Docker by default through docker-proxy-core (#708)"
+
+kv="$(http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
+  -H 'Content-Type: application/json' -d '{"value":"q8_0"}' || true)"
+printf '%s' "$kv" | grep -q '"applied":true' \
+  || die "KV-cache change did not apply through docker-proxy-core (restart round-trip broken?): $kv"
+ok "KV-cache change applied immediately — restart round-tripped through docker-proxy-core (#708)"
+http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
+  -H 'Content-Type: application/json' -d '{"value":null}' >/dev/null 2>&1 || true
+# Both calls above restart ollama through the proxy. Later assertions do reach the model — the
+# automations run (#666, below) goes agent -> LLM -> ollama — so block until it is back rather
+# than racing a cold container from here on.
+wait_state ollama
+
 # qdrant upgrade-recovery guard (#229): the one-shot must complete cleanly, and the
 # new /proc-based healthcheck must report healthy (a crash-looping qdrant binds no port
 # and would be unhealthy). compose-validate can't see either — only a live boot can.
@@ -308,6 +329,19 @@ live="$(http "http://core-app:8080/platform/v1/automations" || true)"
 printf '%s' "$live" | grep -q '"key":"on-ping"' \
   && die "a template was auto-instantiated — installing a module must never start an automation"
 ok "a module template is offered but never auto-instantiated (#666)"
+
+# Starter templates for every module (#705) reach the Templates tab through the *real*
+# module registry fan-out — proof this actually works on a live stack, not just the fake
+# `templates()` lookup core-app's own unit tests inject. TemplateView serializes `module`
+# before `key`, so one pattern per pair is enough.
+for pair in "mail:on-mail-received" "calendar:tomorrow-at-a-glance" "tasks:due-today-digest" \
+  "notes:weekly-notes-review" "knowledge:on-large-vault-sync"; do
+  mod="${pair%%:*}"
+  key="${pair#*:}"
+  printf '%s' "$tpl" | grep -q "\"module\":\"$mod\"[^}]*\"key\":\"$key\"" \
+    || die "$mod's starter template '$key' is not offered: $tpl"
+done
+ok "every module's starter automation templates reach the Templates tab (#705)"
 
 # Create a Notify automation on echo.pinged, then ping and watch a run appear.
 auto="$(http -X POST "http://core-app:8080/platform/v1/automations" \

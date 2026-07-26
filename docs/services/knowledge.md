@@ -102,6 +102,26 @@ All emission is best-effort — a spine hiccup never fails the change that alrea
 The legacy **`knowledge.index.completed`** declaration is gone: no code ever published it,
 and the manifest now only advertises events that actually fire.
 
+### Automation templates (#705, ADR-0105)
+
+Two starter presets on the Templates tab — never auto-instantiated, see
+[reference/automations.md#templates](../reference/automations.md#templates):
+
+| Key | Trigger | Autonomy | Sinks |
+| --- | --- | --- | --- |
+| `on-large-vault-sync` | Event: `knowledge.vault_synced`, matcher `indexed > 10` | `notify` | `push` |
+| `on-index-failed` | Event: `knowledge.index_failed` | `notify` | `push` |
+
+The "large batch" threshold (10 documents) is a sensible default, editable after
+instantiating if your vault syncs larger batches routinely. Both need `knowledge_search`/
+`knowledge_list_projects`/`knowledge_tree`/`knowledge_read_document` reachable at `notify` —
+the reason those four tools are annotated `side_effect="read"`.
+
+The six propose-shaped tools (`knowledge_propose_*` and `knowledge_create_document`) are
+annotated `side_effect="propose"` (#721), which is what lets a `propose`-autonomy automation
+reach them. That is accurate while suggestion review is on for this module; with it off they
+apply directly, exactly as they already do in chat (ADR-0112).
+
 ### Web UI (manifest, ADR-0007 Tier 1)
 
 | Panel | What it shows / does |

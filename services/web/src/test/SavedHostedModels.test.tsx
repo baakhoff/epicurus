@@ -26,9 +26,21 @@ function wrapper({ children }: { children: ReactNode }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Shaped like the real response: capabilities/override are always present (the contract
+  // defaults them), and `capabilities` is already override-resolved by the core (#711).
   mockSavedModels.mockResolvedValue([
-    { model: "claude/claude-3-5-sonnet-latest", provider: "claude" },
-    { model: "gpt/gpt-4o", provider: "gpt" },
+    {
+      model: "claude/claude-3-5-sonnet-latest",
+      provider: "claude",
+      capabilities: ["tools"],
+      override: { vision: "auto", context_length: null },
+    },
+    {
+      model: "gpt/gpt-4o",
+      provider: "gpt",
+      capabilities: ["tools"],
+      override: { vision: "auto", context_length: null },
+    },
   ]);
   mockLlmPrefs.mockResolvedValue({ global_default: "gpt/gpt-4o", hidden: [] });
   mockSetGlobalDefault.mockResolvedValue({ status: "ok" });
@@ -47,8 +59,20 @@ describe("SavedHostedModels", () => {
 
   it("shows a compact context-window chip when the model reports one (#618)", async () => {
     mockSavedModels.mockResolvedValue([
-      { model: "claude/claude-3-7-sonnet-20250219", provider: "claude", context_length: 200000 },
-      { model: "gpt/some-unlisted-model", provider: "gpt", context_length: null },
+      {
+        model: "claude/claude-3-7-sonnet-20250219",
+        provider: "claude",
+        context_length: 200000,
+        capabilities: [],
+        override: { vision: "auto", context_length: null },
+      },
+      {
+        model: "gpt/some-unlisted-model",
+        provider: "gpt",
+        context_length: null,
+        capabilities: [],
+        override: { vision: "auto", context_length: null },
+      },
     ]);
     render(<SavedHostedModels />, { wrapper });
     expect(await screen.findByText("200k")).toBeInTheDocument();
@@ -78,5 +102,41 @@ describe("SavedHostedModels", () => {
     mockSavedModels.mockResolvedValue([]);
     render(<SavedHostedModels />, { wrapper });
     expect(await screen.findByText(/pick a hosted model in a chat/i)).toBeInTheDocument();
+  });
+});
+
+describe("SavedHostedModels capability badges (#711)", () => {
+  it("badges vision when the resolved capabilities include it", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "grok/grok-latest",
+        provider: "grok",
+        // Resolved server-side: the operator's vision=on override already applied, so the row
+        // renders the badge without knowing whether it came from the override or the catalogue.
+        capabilities: ["tools", "vision"],
+        override: { vision: "on", context_length: null },
+      },
+    ]);
+
+    render(<SavedHostedModels />, { wrapper });
+
+    expect(await screen.findByLabelText("Vision")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tools")).toBeInTheDocument();
+  });
+
+  it("shows no vision badge when the model can't see", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "grok/grok-latest",
+        provider: "grok",
+        capabilities: ["tools"],
+        override: { vision: "off", context_length: null },
+      },
+    ]);
+
+    render(<SavedHostedModels />, { wrapper });
+
+    expect(await screen.findByLabelText("Tools")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Vision")).not.toBeInTheDocument();
   });
 });

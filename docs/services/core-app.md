@@ -37,7 +37,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). Returns `AgentTurn`. |
+| `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563 — an additive shape a stale client ignores) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
@@ -308,7 +308,15 @@ per-tool disable filter as module tools.
   picker reads it back (`GET /sessions` enriches each summary's `model`). An explicit picker
   change writes the *same* field via `PUT /sessions/{id}/model` (`model: null` clears the
   override back to the device default) — one owner of truth, so a tool switch and a manual
-  pick can never fight, whichever happens last simply stands. Requires an active session:
+  pick can never fight, whichever happens last simply stands. **The core resolves that row at
+  turn time** (ADR-0113): `/chat`, `/chat/stream`, `/sessions/{id}/regenerate` and
+  `/sessions/{id}/edit` each read it before starting the turn, so `model` on the request body
+  is the *caller's default* — used only while the conversation has no choice of its own — and a
+  session that has been given a model runs it whatever the caller sends. Resolving server-side
+  rather than in the client is what makes the tool trustworthy: a client computing this reads a
+  cached sessions list, so a turn sent before that cache refreshed would silently run the
+  previous model immediately after the agent said it had switched. A store failure degrades to
+  the caller's default rather than costing the turn. Requires an active session:
   with none (e.g. some headless path) it errors plainly rather than silently doing nothing.
   Classified `write` — it follows the ordinary autonomy dial exactly like `remember`/
   `ask_user` rather than a bespoke automation exclusion, and is naturally inert for the
@@ -359,13 +367,49 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
-| `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied}`; `applied` is `false` when Docker isn't wired, and the UI then shows the manual-restart path. |
+| `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied, staged}` (#709) — **two** flags because there are two degraded modes. `applied` = the running server has the new value. `staged` = the env file holds it and only a container restart is missing (the usual case without Docker access: the entrypoint re-sources the file on every start, so `docker compose restart ollama` applies it and **no environment editing is needed**). `applied` implies `staged`. Only `staged: false` — the file could not be written at all — calls for setting `OLLAMA_KV_CACHE_TYPE`/`OLLAMA_FLASH_ATTENTION` by hand, which is what the UI used to say in every degraded case. Clearing back to the default stages identically (a successful unlink is the choice on disk). |
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
-| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (remove / set-as-default), and module model slots; persisted in `saved_models`. Mutations **503** without the store. |
+| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (remove / set-as-default / edit capabilities), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, context_length}` sets the **capability override** (#711) — see *Capability resolution* below; **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Works for a **hosted** `<provider>/<model>` id too — there `context_window` is a **compaction budget** (`keep_alive`/`device` are local-only Ollama options). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 | `POST /platform/v1/llm/model-settings/suggest-context` | Compute **and persist** a recommended per-model context window for a freshly pulled model (#386), so it opens sized to itself instead of the global default. Body `{model}`. Reuses the `system/info` heuristic (VRAM-or-RAM + the named model's on-disk size + KV-cache type, capped at its trained length) but for *that* model rather than the active one. **Non-destructive** — an existing per-model context override is left untouched. Returns `{model, context_window, applied}` (`applied` is `false` when one was already set, or none could be computed — e.g. a hosted model with no local size). The web calls it when **any** pull finishes (catalog, variant, or manual tag). |
 | `GET /platform/v1/system/info` | Host spec + the context-window suggestion behind the Models page. Returns `{gpu, cpu, ram_total_mb, model:{name, size_mb, context_length, quantization}, suggested_context:{min, suggested, max}, kv_cache_type}`. The suggestion estimates how big a context the box can hold from VRAM (or RAM, no GPU), the active model's on-disk size, and the **KV-cache type** (a quantized cache `q8_0`/`q4_0` costs fewer bytes/token, so the same memory buys more context). Its ceiling is the model's **trained** `context_length` when known — no longer a flat 32k — so a long-context model on a roomy GPU is no longer clipped; 32768 remains only the fallback when the trained length is unknown. Best-effort: every probe degrades to `null`. |
+
+#### Capability resolution (#633, #618, #711)
+
+Two questions get asked about every model: **can it see images** (`supports_vision`, which gates
+an image attachment) and **how much context does it have** (a badge, and the ceiling on the
+context-window suggestion). They resolve in this order:
+
+1. **The operator's per-saved-model override**, when one is set (#711).
+2. **The local runtime's `/api/show`** for a local model — an explicit `vision` capability says
+   yes, anything else (including an unreported list on an older Ollama) says no.
+3. **LiteLLM's static model-cost map** for a hosted model.
+
+Step 1 exists because step 3 is a *curated static list* while model ids are the operator's choice
+(ADR-0010) — the two are guaranteed to drift. The map omits ids entirely (`grok/grok-latest`
+resolves to an unmapped `xai/grok-latest`) and mislabels others, and the failure is not cosmetic:
+`supports_vision()` resolves `False` and the image gate refuses image turns for a model that
+would have handled them. Renaming the saved model to a mapped id was the only workaround, which
+is not the operator's job.
+
+The override is `{vision: "auto"|"on"|"off", context_length: int|null}`, stored in two nullable
+columns on the model's `saved_models` row and edited in the Models page's hosted-model sheet.
+`auto` with no context length is the pre-override behaviour exactly, so an absent or cleared
+override changes nothing. It applies **even when the map lookup raises** — an unmapped id is
+precisely the case it exists for, so that path must not be the one that skips it.
+
+Two boundaries worth keeping straight:
+
+- **The override's `context_length` is not `ModelSettings.context_window`.** The first is *what
+  the model has* (metadata, a badge); the second is *how much of it we choose to send* (a
+  compaction budget, #570). Same word, different layer — both appear in the same sheet.
+- **Gating and display only.** Routing, provider keys, and usage metering never consult the
+  override; every model concern still lives in the core (constraint #8).
+
+A miss against the map logs **once per model id per process**, then at debug: a saved alias
+outside a curated list is expected, not anomalous, but the first sighting still explains a model
+that shows no badges.
 
 #### Model catalog (#269)
 
@@ -385,12 +429,47 @@ no tenant data, and is identical for every tenant (like the provider registry). 
 shell falls back to its own bundled list only if this endpoint is unreachable (e.g. an
 older core).
 
+##### What the parser keys on (#710)
+
+The index is HTML, so the selectors are the fragile part — and in 2026 they broke: the page
+dropped the `x-test-*` attributes the parser had keyed on, every refresh parsed to `[]`, and
+the box served the seed for weeks behind a warning repeated every refresh interval. The
+selectors are now chosen for **survivability**, in this order of preference:
+
+| Signal | Anchor | Why it was chosen |
+| --- | --- | --- |
+| Model block | the per-model `<a href="/library/<name>">` element | the link *is* the product; a redesign that removes it removes the page |
+| Name | that same `href` | one source of truth, no title/heading fallback to drift |
+| Description | the first `<p>` in the block that is **not** the stats line | structural, so a blurb that merely says "updated"/"tags"/"pulls" is kept |
+| Stats line | a `<p>` whose `Pulls`/`Tags`/`Updated` labels are *whole elements* | the labels are user-visible copy, not styling |
+| Pull count | the last count element before the word `Pulls` | ditto — anchored on copy, tolerant of markup between |
+| Chips (capability / size / cloud) | any rounded **badge** span, classified by its **text** | see below |
+
+The chip rule is the load-bearing one. Upstream distinguishes the three chip kinds only by
+Tailwind colour (`bg-indigo-50` capabilities, `bg-[#ddf4ff]` sizes, `bg-cyan-50` cloud), and
+keying on colour would mean a palette change silently reads sizes as capabilities. Classifying
+by text instead — a chip matching `^(?:e|\d+x)?\d[\d.]*[bm]$` is a size, anything else is a
+capability — partitions all 233 live blocks exactly, and a restyle degrades to "no chips
+parsed" rather than to wrong data. The size pattern deliberately admits **mixture-of-experts**
+(`8x7b`, `128x17b`) and **"effective"** (`e2b`, `e4b`) labels: each is a real pullable ref, so
+a stricter pattern drops the entry. A capability outside the tag vocabulary (`audio` is live
+today) is simply ignored.
+
+`tests/fixtures/ollama-library.html` is a trimmed **verbatim** capture of the live index; the
+tests assert against it so the next redesign fails CI instead of the running box. Regenerate it
+from a fresh capture of the same families rather than hand-editing it.
+
+**Bounded failure logging** (#710): a persistently broken upstream must not write a warning
+every `LLM_CATALOG_REFRESH_SECONDS` indefinitely. The first failure of a streak logs at
+**warn**, a *changed* error message logs at warn again (a new symptom is news), and the rest of
+the streak logs at **debug** with a running `failures` count. The recovering refresh carries a
+`recovered_after` field, so the end of a debug-quiet outage is still visible at info.
+
 **Cloud-only models** (#571): some upstream families publish no downloadable weights at all —
 their only tag is a `cloud` alias whose inference runs on the library vendor's cloud. The
-index marks them with a `cloud` pill (a plain styled span **without** the `x-test-capability`
-hook, so the parser matches it separately; verified live 2026-07-09). The parser adds `cloud`
-to the tag vocabulary (alongside the `thinking` capability, new in the same pass) — but only
-on a family's **size-less bare entry**: hybrid families (gemma3, gpt-oss, …) carry the pill
+index marks them with a `cloud` chip, which the parser reads like any other chip — by its text.
+The parser adds `cloud` to the tag vocabulary (alongside the `thinking` capability, new in the
+same pass) — but only on a family's **size-less bare entry**: hybrid families carry the chip
 too, yet their size-expanded rows are ordinary local builds and stay untagged. The web badges
 `cloud` rows, offers no Pull, and excludes them from fit — by design, with the reason in a
 tooltip.
@@ -409,6 +488,12 @@ returns 404 for it; only the tags page enumerates a model's quants.) Parsed tag 
 upstream request. It is deliberately best-effort (any failure → empty list, UI falls back to
 the manual box; a model not in the public library logs at debug, not warning) and, like the
 catalog, global rather than tenant-scoped.
+
+The tags-page selectors came through the redesign that broke the index parser **unchanged**
+(re-verified 2026-07-25, #710): they key on the `/library/<family>:<tag>` link and on the size
+string in the row's own text, neither of which the restyle touched. They are pinned the same
+way regardless — `tests/fixtures/ollama-tags-llama3.1.html` (sizes and quants) and
+`ollama-tags-glm-5.1.html` (a cloud-only family, whose row publishes no size).
 
 **GB size fill** (#571): the index page publishes no on-disk sizes, so a fresh catalog parse
 has `size_gb = null` everywhere — only the tags pages carry sizes. Rather than an eager crawl
@@ -624,22 +709,25 @@ container, and its review is mandatory (nothing self-applies, ever).
 | `GET /platform/v1/suggestions` | **Cross-module pending-suggestions feed** (#KB-refactor): every enabled module with a `review` page — the knowledge base **and** private **notes** — each item tagged with `module` + `page_id`. `operation` ∈ `create`/`update`/`append`/`delete`/`move`/`mkdir`/`mkproject` (`append` is notes-only — the agent supplies just the text to add). Best-effort aggregation — a down / disabled / erroring module is skipped, not fatal. Backs the chat composer's suggestion bubble and the Suggestions page. (Lives at `/platform/v1/suggestions`, not under `/modules`.) |
 | `GET /platform/v1/calendar-feed?start=&end=` | **Cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items (e.g. open tasks with a due date) from every enabled, healthy module — each stamped with its owning `module`. **Not a manifest-declared capability** — probes every module for `GET {base}/calendar-feed?start=&end=` and skips it on a 404/unreachable, the same best-effort tolerance `/suggestions` already relies on, so a module opts in purely by serving the path (`tasks` is the first). Item shape: `{id, title, date, status, ref_id, kind}` (`date` a floating `YYYY-MM-DD`, `end` exclusive — ADR-0023's own range convention; `kind` + `ref_id` + the stamped `module` route a click to that module's existing `GET /resolve/{kind}/{ref_id}` hover-card, ADR-0019 — no new UI contract). Backs the calendar page's read-only task-due-date overlay. (Lives at `/platform/v1/calendar-feed`, not under `/modules`.) |
 
-> **Privileged surface, opt-in (ADR-0028, #307, #382, #622/ADR-0099).** Tearing down a removed
-> module's container — and applying the Ollama KV-cache type — needs the Docker socket. The core
-> touches it through a single `DockerController`: it stops/removes **only a configured module's
-> own container**, and separately **restarts only an allowlisted infra container** (`ollama`,
-> which is never removable). Both are scoped to this Compose project and never touch core-app /
-> web / a data-plane service. Module **removal itself never needs the socket** (#382): it
-> tombstones the module (hidden + unrouted at once) regardless, and **defers** the container
-> teardown to the next startup reconcile when Docker isn't reachable — so removal always works;
-> a KV-cache change likewise saves without applying. **The socket is NOT mounted by default**
-> (#622, ADR-0099) — mounting it unconditionally bought nothing real anyway, since the app's
-> unprivileged uid (10001, the same [entrypoint privilege drop](../infrastructure/index.md#shared-file-space)
-> the shared file space uses) can't reach it without a host-matched group either way.
-> Opt in with `services/core-app/compose.docker-socket.yaml` (mounts the socket **and** forwards
-> `DOCKER_GID`, the host's docker-socket group id — the entrypoint joins it before dropping
-> privileges); see [Docker-socket access](../infrastructure/index.md#docker-socket-access-opt-in-622).
-> `GET /platform/v1/modules/docker-status` reports the live state so the Modules page states it
+> **Privileged surface, least-privilege by default (ADR-0028, #307, #382, #622/ADR-0099,
+> #708/ADR-0109).** Tearing down a removed module's container — and applying the Ollama
+> KV-cache type — needs to reach Docker. The core touches it through a single
+> `DockerController`: it stops/removes **only a configured module's own container**, and
+> separately **restarts only an allowlisted infra container** (`ollama`, which is never
+> removable). Both are scoped to this Compose project and never touch core-app / web / a
+> data-plane service. By default this goes over `DOCKER_HOST=tcp://docker-proxy-core:2375` — a
+> filtered proxy allowlisting exactly those calls and refusing exec/create/attach/images/
+> volumes/networks/system before they reach the socket at all; `services/core-app/compose.
+> docker-socket.yaml` opts into the raw socket instead (mounts it **and** forwards `DOCKER_GID`,
+> the host's docker-socket group id, since the app's unprivileged uid — 10001, the same
+> [entrypoint privilege drop](../infrastructure/index.md#shared-file-space) the shared file
+> space uses — can't reach a direct mount without a host-matched group). Either way, module
+> **removal itself never needs Docker to be reachable** (#382): it tombstones the module (hidden
+> + unrouted at once) regardless, and **defers** the container teardown to the next startup
+> reconcile when neither path is reachable — so removal always works; a KV-cache change
+> likewise saves without applying. See [Docker-socket
+> access](../infrastructure/index.md#docker-socket-access-708-adr-0109). `GET
+> /platform/v1/modules/docker-status` reports the live state so the Modules page states it
 > proactively instead of an operator finding out by attempting a removal.
 
 Caller-supplied path segments the registry interpolates into a module request —
@@ -1007,8 +1095,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `automations`** — the automations engine's definitions (ADR-0105), tenant-scoped:
   `id` (opaque uuid hex) + internal `pk`, `name`, `enabled`, `source` (`user` /
   `template:<module>` / `agent`), JSON `event_trigger` **or** `schedule_trigger` (exactly one),
-  `prompt`, `model`, `autonomy`, JSON `sinks`, `chat_mode`, `chat_session_id`,
-  `rate_cap_per_hour`, `digest_window_minutes`, timestamps, `last_run_at` / `last_status`. The
+  `prompt`, `model`, `autonomy`, JSON `sinks`, JSON `sink_config` (#672 — the notes/kb
+  document targets), `agent_gated_delivery` (#706 — the "agent decides delivery" toggle),
+  `chat_mode`, `chat_session_id`, `rate_cap_per_hour`, `digest_window_minutes`, timestamps,
+  `last_run_at` / `last_status`. The last two columns post-date the table and are reconciled
+  additively (ADR-0067), as any further one must be. The
   triggers are JSON rather than flattened columns: a trigger is a closed vocabulary the core
   owns and always reads whole, so flattening would buy nothing and cost a migration per new
   matcher op.
@@ -1016,7 +1107,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   autonomy level; for `silent_act` it is the only record that anything happened. Carries
   **both** attributions (`tenant` + `automation_id` — the SaaS metering point), `trigger_refs`
   (the `module_events` ids that caused it), `filter_verdict`, `model`, token counts, duration,
-  outcome, error, the `output`, and `sinks_fired`.
+  outcome, error, the `output`, `sinks_fired`, JSON `artifacts` (#672 — the `EntityRef`s the
+  run wrote, which the runs feed links), and `quiet_reason` (#706 — why a `quiet` outcome
+  skipped delivery). The last two are additively reconciled (ADR-0067).
 - **Postgres `automation_queue`** — matched triggers awaiting a run (the ADR-0051 durable-queue
   pattern). The matcher runs on intake, the run may be much later (an open digest window), and
   a restart in between must lose nothing.
@@ -1048,10 +1141,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   (`null` = inherit). Drives the per-model resolution chain in the gateway (see **Per-model
   settings**). A missing row means the model inherits the global pref / env defaults.
 - **Postgres `saved_models`** — per-`(tenant, model)` saved **hosted**-model ids (#496):
-  `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering).
-  Only hosted ids land here — a known `<provider>/` prefix; the route rejects locals so an
-  `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the strings
-  entered in the chat picker (the browser's `recentModels` is only a warm cache).
+  `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering), plus
+  the capability override (#711) in `vision_override` (`"on"`/`"off"`/NULL = auto) and
+  `context_length_override` (NULL = take LiteLLM's map) — both nullable and reconciled additively
+  (ADR-0067), so NULL on both is the pre-override behaviour and forgetting a model forgets its
+  override with it. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
+  locals so an `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the
+  strings entered in the chat picker (the browser's `recentModels` is only a warm cache).
 - **Postgres `module_prefs`** — per-`(tenant, module)` operator preferences: `enabled`
   holds the enable/disable flag (#126), `removed` tombstones a module after its container is
   deleted (#127), `models` holds per-slot model choices (#128), `disabled_tools` holds a JSON

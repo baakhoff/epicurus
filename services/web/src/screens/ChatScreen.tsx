@@ -943,10 +943,14 @@ export function ChatScreen() {
   // this query, so the cache is warm.
   const modules = useQuery({ queryKey: ["modules"], queryFn: () => api.modules(), staleTime: 30_000 });
 
-  // The model this chat will actually use (the per-chat choice, else the core default). Check
-  // its capabilities so we can warn when it can't use tools (local only) or can't see images
-  // (local or hosted — #633: the gateway reports hosted capabilities too, via LiteLLM).
-  const effectiveModel = model ?? llmPrefs.data?.global_default ?? null;
+  // The model this chat will actually use: its own persisted choice (#707, set by the picker or
+  // by set_chat_model) before the device default. The server resolves the same way at turn time
+  // and is the authority — this is here so the capability warnings below describe the model that
+  // will really answer, rather than whichever one this device happens to default to.
+  // Check its capabilities so we can warn when it can't use tools (local only) or can't see
+  // images (local or hosted — #633: the gateway reports hosted capabilities too, via LiteLLM).
+  const sessionModel = sessions.data?.find((s) => s.id === chat.sessionId)?.model ?? null;
+  const effectiveModel = sessionModel ?? model ?? llmPrefs.data?.global_default ?? null;
   const effectiveIsLocal = Boolean(effectiveModel) && !isHostedModelId(effectiveModel!);
   const modelDetails = useQuery({
     queryKey: ["modelDetails", effectiveModel],
@@ -1068,7 +1072,9 @@ export function ChatScreen() {
     if (composer) composer.style.height = "";
     void chat.send(
       text,
-      model,
+      // Send what we believe the chat's model to be, so the readiness prelude warms the right
+      // one. The server resolves this again from the session row and wins if we are stale (#707).
+      effectiveModel,
       async () => {
         await queryClient.refetchQueries({ queryKey: ["session", chat.sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
@@ -1114,7 +1120,7 @@ export function ChatScreen() {
       (old ?? []).slice(0, lastUserIdx + 1),
     );
     pin();
-    void chat.regenerate(model, onTurnDone);
+    void chat.regenerate(effectiveModel, onTurnDone);
   };
 
   const cancelEdit = () => {
@@ -1137,7 +1143,7 @@ export function ChatScreen() {
       return trimmed;
     });
     pin();
-    void chat.editAndRerun(content, model, onTurnDone, target.id);
+    void chat.editAndRerun(content, effectiveModel, onTurnDone, target.id);
   };
 
   // Save an edited user message. Editing the last one only replaces the answer that is about

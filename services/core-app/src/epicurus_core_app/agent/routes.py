@@ -56,13 +56,20 @@ READINESS_BUDGET_S = 2.0
 
 class AgentRequest(BaseModel):
     messages: list[ChatMessage]
+    # The caller's *default* model, not an override (#707, ADR-0111). A session that has been
+    # given a model — by the picker or by `set_chat_model` — runs that one, and this is used
+    # only while it has none. See `_turn_model`.
     model: str | None = None
     # Opt into cross-chat memory: persist this turn and recall prior context.
     session_id: str | None = None
 
 
 class RegenerateRequest(BaseModel):
-    """Body for POST /sessions/{id}/regenerate — re-answer the last user turn."""
+    """Body for POST /sessions/{id}/regenerate — re-answer the last user turn.
+
+    ``model`` is the caller's default, deferring to the session's own model when it has one
+    (#707) — re-answering never silently switches a conversation's model.
+    """
 
     model: str | None = None
 
@@ -291,9 +298,38 @@ def create_agent_router(
 
         return StreamingResponse(one(), media_type="text/event-stream", headers=SSE_HEADERS)
 
+    async def _turn_model(request_model: str | None, session_id: str | None) -> str | None:
+        """The model a turn actually runs on (#707, ADR-0111).
+
+        The session row is the owner of truth: once a conversation has been given a model — by
+        the picker or by ``set_chat_model`` — every turn on it runs that model, whoever sends
+        the turn and whatever they believe the model to be. ``model`` on the request is the
+        *caller's default*, used only while the session has no choice of its own: a brand-new
+        chat, or one whose override was cleared back to the core default.
+
+        Resolving here rather than in the client is what makes the tool trustworthy. A client
+        computing this itself reads a cached sessions list, so a turn sent in the window between
+        the tool writing the row and that cache refreshing would silently run the *old* model —
+        the agent says it switched, and the next answer proves otherwise. Nothing a caller does
+        can open that window now, and a headless run or a future client inherits the behaviour
+        without having to reimplement it.
+
+        Never raises: a store hiccup degrades to the caller's default, which is exactly the
+        pre-override behaviour, rather than costing the user their turn.
+        """
+        if session_id is None or session_models is None:
+            return request_model
+        try:
+            stored = await session_models.get(tenant=tenant, session_id=session_id)
+        except Exception as exc:
+            log.warning("session model lookup failed", session_id=session_id, error=str(exc))
+            return request_model
+        return stored or request_model
+
     @router.post("/chat", response_model=AgentTurn)
     async def chat(request: AgentRequest) -> AgentTurn:
-        return await agent.run(request.messages, model=request.model, session_id=request.session_id)
+        model = await _turn_model(request.model, request.session_id)
+        return await agent.run(request.messages, model=model, session_id=request.session_id)
 
     @router.post("/chat/stream")
     async def chat_stream(request: AgentRequest) -> StreamingResponse:
@@ -304,12 +340,11 @@ def create_agent_router(
         carrying an ``id:`` seq). A client disconnect ends only this subscriber — the turn runs
         on and persists; the client re-attaches via ``GET /runs/{id}/stream`` (ADR-0027/0055).
         """
+        model = await _turn_model(request.model, request.session_id)
         return await _start_turn_response(
-            lambda: agent.run_stream(
-                request.messages, model=request.model, session_id=request.session_id
-            ),
+            lambda: agent.run_stream(request.messages, model=model, session_id=request.session_id),
             session_id=request.session_id,
-            readiness_model=request.model,
+            readiness_model=model,
         )
 
     @router.get("/sessions", response_model=list[SessionSummary])
@@ -417,12 +452,11 @@ def create_agent_router(
         if last_user is None:
             return _one_off(AgentEvent(type="error", detail="nothing to regenerate"))
         await memory.truncate_after(tenant=tenant, session_id=session_id, after_id=last_user)
+        model = await _turn_model(request.model, session_id)
         return await _start_turn_response(
-            lambda: agent.run_stream(
-                [], model=request.model, session_id=session_id, persist_input=False
-            ),
+            lambda: agent.run_stream([], model=model, session_id=session_id, persist_input=False),
             session_id=session_id,
-            readiness_model=request.model,
+            readiness_model=model,
         )
 
     @router.post("/sessions/{session_id}/edit")
@@ -473,12 +507,11 @@ def create_agent_router(
             tenant=tenant, session_id=session_id, message_id=anchor, content=content
         )
         await memory.truncate_after(tenant=tenant, session_id=session_id, after_id=anchor)
+        model = await _turn_model(request.model, session_id)
         return await _start_turn_response(
-            lambda: agent.run_stream(
-                [], model=request.model, session_id=session_id, persist_input=False
-            ),
+            lambda: agent.run_stream([], model=model, session_id=session_id, persist_input=False),
             session_id=session_id,
-            readiness_model=request.model,
+            readiness_model=model,
         )
 
     @router.post("/runs/{run_id}/resume")

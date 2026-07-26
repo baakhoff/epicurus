@@ -47,7 +47,7 @@ tasks:
       - task: test
 
   up:
-    desc: Start the full stack (data plane + enabled modules; observability and Docker-socket access are opt-in, see `obs-up` / `docker-socket-up`)
+    desc: Start the full stack (data plane + enabled modules; Docker control is on by default through docker-proxy-core, observability is opt-in — see `obs-up` / `docker-socket-up`)
     cmds:
       - docker compose up -d
 
@@ -67,7 +67,7 @@ tasks:
       - docker compose --profile observability down {{.CLI_ARGS}}
 
   docker-socket-up:
-    desc: 'Start the stack with the opt-in Docker-socket override (#622): immediate module-removal teardown + KV-cache restart; requires DOCKER_GID (see services/core-app/compose.docker-socket.yaml)'
+    desc: 'Start the stack with core-app on the RAW Docker socket instead of the default docker-proxy-core (#622, #708) — root-equivalent, no allowlist in front of it; requires DOCKER_GID (see services/core-app/compose.docker-socket.yaml)'
     cmds:
       - docker compose -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
 

@@ -1,21 +1,27 @@
-"""Tightly-scoped Docker control for confirmed module removal (#127, ADR-0028, ADR-0099).
+"""Tightly-scoped Docker control for confirmed module removal (#127, ADR-0028, ADR-0099, ADR-0109).
 
 Removing a module deletes its **container** — a privileged action the UI gates behind a
-confirm dialog. The core reaches the Docker socket **only** through this class, which
-refuses to touch anything but a *known module's own* container:
+confirm dialog. The core reaches Docker **only** through this class, which refuses to touch
+anything but a *known module's own* container:
 
 * never ``core-app``, ``web``, or a data-plane / infra service (a hard denylist, on top of
   the registry only ever passing a *configured module* name here);
 * only within the core's **own Compose project**, so a co-located stack — e.g. the CI
   smoke run sitting next to a developer's dev stack — is never disturbed.
 
-The Docker socket is root-equivalent on the host, so this is the single audited code path
-that uses it, and it is deliberately separate from the safe enable/disable flag (#126),
-which never touches Docker. The socket mount is an explicit, documented **opt-in**
-(``services/core-app/compose.docker-socket.yaml``, ADR-0099) — absent it (the default), this
-module is simply unavailable. That does **not** disable removal (ADR-0056/#382 decoupled the
-two): the module is still tombstoned and hidden immediately; only *deleting its container* —
-and applying an Ollama KV-cache change (#307) — defers to the next restart.
+By default (#708, ADR-0109) this talks to ``docker-proxy-core`` — a filtered allowlist proxy
+in front of the real socket, reached over ``DOCKER_HOST=tcp://docker-proxy-core:2375``
+(``docker.from_env()`` below picks this up with no code change). The proxy only ever answers
+the exact calls this class makes — list/inspect a container, stop/restart/remove by id — so
+exec/create/attach/images/volumes/networks/system are refused before they ever reach the
+socket, on top of this class's own denylist and project-scoping. The opt-in
+``services/core-app/compose.docker-socket.yaml`` overlay points this at the raw socket
+instead (ADR-0099) — a documented escape hatch, not the default. Either way, this is the
+single audited code path that touches Docker, deliberately separate from the safe
+enable/disable flag (#126), which never does. Docker being unreachable at all (neither proxy
+nor raw socket, e.g. a host with no Docker) does **not** disable removal (ADR-0056/#382
+decoupled the two): the module is still tombstoned and hidden immediately; only *deleting its
+container* — and applying an Ollama KV-cache change (#307) — defers to the next restart.
 """
 
 from __future__ import annotations
@@ -96,15 +102,16 @@ class DockerController:
 
     @classmethod
     def from_env(cls) -> DockerAvailability:
-        """Probe the Docker socket; never raises.
+        """Connect to Docker — by default ``docker-proxy-core`` over ``DOCKER_HOST``, or the
+        raw socket under the ``compose.docker-socket.yaml`` overlay (ADR-0099); never raises.
 
-        Best-effort: a missing or forbidden socket **defers container teardown on module
+        Best-effort: an unreachable proxy/socket **defers container teardown on module
         removal to the next restart** (ADR-0056/#382 decoupled removal itself from the live
         socket — it always succeeds) and leaves an Ollama KV-cache change unapplied until a
         manual restart (#307). It never blocks core startup either way.
         """
         try:
-            import docker  # lazy import — the SDK is only needed when the socket is mounted
+            import docker  # lazy import — the SDK is only needed when Docker is reachable
         except Exception as exc:  # pragma: no cover - import guard
             reason = str(exc)
             log.warning("docker SDK unavailable; container teardown deferred", error=reason)
@@ -116,7 +123,7 @@ class DockerController:
             return DockerAvailability(controller=cls(client, project=project))
         except Exception as exc:
             reason = str(exc)
-            log.warning("docker socket unavailable; container teardown deferred", error=reason)
+            log.warning("docker unreachable; container teardown deferred", error=reason)
             return DockerAvailability(controller=None, reason=reason)
 
     @staticmethod

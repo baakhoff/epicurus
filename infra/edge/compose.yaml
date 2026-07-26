@@ -4,6 +4,15 @@
 # no authentication is baked in and no ingress is assumed. The operator chooses how
 # to expose and protect this entry point — Tailscale, a VPN, a reverse proxy, or an
 # auth proxy / IdP such as Keycloak or oauth2-proxy in front. See README.
+#
+# YAML anchors don't cross `include:` boundaries (#462) — this fragment now defines two
+# services, so it declares its own logging anchor rather than inlining the block twice.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   gateway:
     # v3.7+ negotiates the Docker API version with the daemon. Older Traefik (v3.3)
@@ -15,6 +24,10 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=epicurus
+      # Read-only discovery through docker-proxy-traefik (#708, ADR-0109) — no raw socket
+      # here anymore. The proxy's allowlist is GET-only (list/inspect containers, events,
+      # version); Traefik was never able to write to Docker and still can't.
+      - --providers.docker.endpoint=tcp://docker-proxy-traefik:2375
       - --entrypoints.web.address=:80
       - --api.dashboard=true
       - --api.insecure=true # dashboard has no auth — loopback-bound below; protect any wider exposure yourself
@@ -25,17 +38,42 @@ services:
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_HTTP_PORT:-8088}:80"
       - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_DASHBOARD_PORT:-8089}:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      docker-proxy-traefik:
+        condition: service_started
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 10s
       timeout: 3s
       retries: 5
     # Bounded json-file logging (#462) — unbounded default otherwise fills the disk.
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *default-logging
+    networks: [epicurus]
+
+  # Least-privilege Docker control for the gateway (#708, ADR-0109) — a read-only sibling of
+  # `docker-proxy-core` (services/core-app/compose.yaml), scoped separately so a compromised
+  # gateway (routing every inbound request, by far the bigger attack surface of the two) never
+  # inherits core-app's restart/remove grant even though both proxies front the same socket.
+  docker-proxy-traefik:
+    image: ghcr.io/wollomatic/socket-proxy:1.12.3
+    restart: unless-stopped
+    # Root is the portable choice here — see docker-proxy-core's comment in
+    # services/core-app/compose.yaml for why a host-matched GID can't be a zero-config default.
+    user: "0:0"
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=gateway
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?_ping'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?version'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/json'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/[^/]+/json'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?events'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default-logging
     networks: [epicurus]

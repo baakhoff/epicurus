@@ -232,7 +232,7 @@ class _FakeGateway:
     async def models(self, tenant_id: str | None = None) -> list[ModelInfo]:
         return self._models
 
-    async def show(self, model: str) -> ModelDetails:
+    async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
         return self._details.get(model, ModelDetails())
 
     async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None:
@@ -451,7 +451,7 @@ async def test_collect_system_info_includes_cpu() -> None:
         async def effective_default(self, tenant_id: str | None = None) -> str:
             return "llama3.2"
 
-        async def show(self, model: str) -> ModelDetails:
+        async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
             return ModelDetails()
 
         async def effective_kv_cache_type(self, tenant_id: str | None = None) -> str | None:

@@ -1,22 +1,65 @@
 """Tests for the live model catalog (#269): the HTML parser and the refresh lifecycle.
 
-The parser is exercised against a fixture modeled on the real Ollama library markup
-(the stable ``x-test-*`` anchors), so no test touches the network. ``ModelCatalog`` is
-driven with an injected fetcher + clock for deterministic, offline assertions.
+Two layers, neither of which touches the network:
+
+* a synthetic page built by :func:`_model_block`, which renders the library's **current**
+  markup and lets each behaviour be exercised against a controlled input; and
+* ``tests/fixtures/ollama-library.html`` — a trimmed *verbatim* capture of the live index
+  (2026-07-25), which pins the real markup so the next upstream redesign fails here rather
+  than silently parsing to ``[]`` on the box for weeks (#710).
+
+``ModelCatalog`` is driven with an injected fetcher + clock for deterministic assertions.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+import structlog
+from structlog.testing import capture_logs
 
 from epicurus_core_app.llm.catalog import (
+    KNOWN_TAGS,
     CatalogEntry,
     ModelCatalog,
     parse_library,
 )
 from epicurus_core_app.llm.variants import TagInfo
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _unconfigured_structlog() -> Iterator[None]:
+    """Isolate this file from another test's ``configure_logging()`` call.
+
+    Whichever test boots the real app first pins structlog's global ``wrapper_class`` to the
+    process's configured level (``info``), which silently drops every ``log.debug(...)`` —
+    including the ones the bounded-logging tests below assert on. Reset to structlog's
+    unfiltered defaults per test and restore whatever was configured beforehand.
+    """
+    was_configured = structlog.is_configured()
+    prev_config = structlog.get_config() if was_configured else None
+    structlog.reset_defaults()
+    yield
+    if was_configured and prev_config is not None:
+        structlog.configure(**prev_config)
+    else:
+        structlog.reset_defaults()
+
+
+def _chip(text: str, background: str) -> str:
+    """One badge span. The parser keys on the rounded-badge idiom + the chip's *text*, never
+    on ``background`` — the colours are here only to keep the fixture faithful."""
+    return (
+        f'<span  class="inline-flex items-center rounded-md {background} px-2 py-0.5 '
+        f'text-xs font-medium sm:text-[13px]">{text}</span>'
+    )
 
 
 def _model_block(
@@ -28,27 +71,39 @@ def _model_block(
     pulls: str,
     cloud_pill: bool = False,
 ) -> str:
-    """Render one library ``<li x-test-model>`` block like ollama.com/library does."""
-    title = f'<div x-test-model-title title="{name}" class="flex flex-col">'
-    title += f"<h2><div><span>{name}</span></div></h2>"
+    """Render one library model anchor the way ollama.com/library does today (#710).
+
+    The double space after ``<div``/``<span`` is not a typo — it is exactly what the live
+    page emits where the old ``x-test-*`` attributes used to sit.
+    """
+    title = f'<div  title="{name}" class="flex flex-col">'
+    title += (
+        '<h2 class="truncate text-xl font-medium"><div class="flex space-x-2 items-center">'
+        f'<span class="group-hover:underline truncate">{name}</span></div></h2>'
+    )
     if description is not None:
-        title += f'<p class="max-w-lg">{description}</p>'
+        title += f'<p class="max-w-lg break-words text-neutral-800 text-md">{description}</p>'
     title += "</div>"
-    pills = "".join(f"<span x-test-capability>{c}</span>" for c in caps)
+    chips = "".join(_chip(c, "bg-indigo-50") for c in caps)
     if cloud_pill:
-        # The library's cloud pill carries *no* x-test-capability hook (verified 2026-07-09):
-        # it's a plain, differently-styled span. The parser must still catch it.
-        pills += '<span class="inline-flex items-center rounded-md bg-cyan-50">cloud</span>'
-    pills += "".join(f"<span x-test-size>{s}</span>" for s in sizes)
+        # The cloud pill is a chip like any other, told apart by its text, not its colour.
+        chips += _chip("cloud", "bg-cyan-50")
+    chips += "".join(_chip(s, "bg-[#ddf4ff]") for s in sizes)
     stats = (
-        '<p class="my-4 flex"><span class="flex"><svg></svg>'
-        f"<span x-test-pull-count>{pulls}</span><span>&nbsp;Pulls</span></span>"
-        "<span><span x-test-tag-count>9</span> Tags</span>"
-        "<span x-test-updated>yesterday</span></p>"
+        '<p class="my-4 flex space-x-5 text-[13px] font-medium text-neutral-500">'
+        '<span class="flex items-center"><svg viewBox="0 0 24 24"><path d="M3 16.5v2.25">'
+        f"</path></svg><span >{pulls}</span>"
+        '<span class="hidden sm:flex">&nbsp;Pulls</span></span>'
+        '<span class="flex items-center"><span >9</span>'
+        '<span class="hidden sm:flex">&nbsp;Tags</span></span>'
+        '<span class="flex items-center"><span class="hidden sm:flex">Updated&nbsp;</span>'
+        "<span >yesterday</span></span></p>"
     )
     return (
-        f'<li x-test-model class="flex"><a href="/library/{name}" class="group">'
-        f'{title}<div class="flex flex-col">{pills}{stats}</div></a></li>'
+        '<li  class="flex items-baseline border-b border-neutral-200 py-6">'
+        f'<a href="/library/{name}" class="group w-full space-y-5">{title}'
+        f'<div class="flex flex-col space-y-2"><div class="flex flex-wrap space-x-2">'
+        f"{chips}</div>{stats}</div></a></li>"
     )
 
 
@@ -176,7 +231,7 @@ def test_parse_derives_tags() -> None:
 def test_parse_derives_cloud_and_thinking() -> None:
     entries = parse_library(FIXTURE)
     # A cloud-only family (a cloud pill, no sizes) becomes one bare entry tagged "cloud";
-    # its x-test-capability chips (tools/thinking) still map through (#571).
+    # its capability chips (tools/thinking) still map through (#571).
     cloud_only = _entry_by_id(entries, "deepseek-v4-flash")
     assert cloud_only.params == ""
     assert set(cloud_only.tags) == {"general", "tools", "thinking", "cloud"}
@@ -204,8 +259,23 @@ def test_parse_tags_only_use_the_known_vocabulary() -> None:
 def test_parse_empty_or_unrecognised_returns_empty() -> None:
     assert parse_library("") == []
     assert parse_library("<html><body>nothing here</body></html>") == []
-    # A block with no name (no href, no title) is skipped, not emitted blank.
-    assert parse_library("<li x-test-model><span x-test-size>7b</span></li>") == []
+    # A page whose model links are gone parses to nothing rather than to junk — this is the
+    # shape the 2026 redesign took (#710), and the empty result is what flags the failure.
+    assert parse_library('<li class="flex"><span>7b</span></li>') == []
+    # A blank name is skipped, not emitted as a nameless entry.
+    assert parse_library('<a href="/library/ " class="group"><span>x</span></a>') == []
+
+
+def test_parse_ignores_tags_page_links() -> None:
+    # A tags page is all ``/library/<family>:<tag>`` links. Fed here by mistake it must parse
+    # to nothing (→ a flagged failed refresh), never to a catalog of colon-bearing families.
+    document = (
+        '<a href="/library/llama3.1:8b" class="group">'
+        f"{_chip('8b', 'bg-[#ddf4ff]')}</a>"
+        '<a href="/library/llama3.1:70b" class="group">'
+        f"{_chip('70b', 'bg-[#ddf4ff]')}</a>"
+    )
+    assert parse_library(document) == []
 
 
 def test_parse_ignores_stats_paragraph_as_description() -> None:
@@ -213,6 +283,151 @@ def test_parse_ignores_stats_paragraph_as_description() -> None:
     block = _model_block("ghost", description=None, sizes=["7b"], caps=["tools"], pulls="1M")
     entry = _entry_by_id(parse_library(block), "ghost:7b")
     assert entry.description == ""
+
+
+def test_parse_keeps_a_blurb_that_mentions_the_stats_words() -> None:
+    # The stats line is told apart structurally (its labels are whole elements), not by
+    # keyword — so a blurb that merely *says* "updated"/"tags"/"pulls" survives. The previous
+    # word-boundary guard blanked 7 of the library's 233 families this way, mistral included.
+    block = _model_block(
+        "mistral",
+        description="The 7B model released by Mistral AI, updated to version 0.3.",
+        sizes=["7b"],
+        caps=["tools"],
+        pulls="31.4M",
+    )
+    entry = _entry_by_id(parse_library(block), "mistral:7b")
+    assert entry.description == "The 7B model released by Mistral AI, updated to version 0.3."
+
+
+def test_parse_reads_moe_and_effective_size_chips() -> None:
+    # Sizes are not all "<number>b": mixture-of-experts families publish "8x7b"/"128x17b" and
+    # Gemma-3n-style families publish "effective" sizes "e2b"/"e4b". Each is a real pullable
+    # ref, so a stricter size pattern would silently drop the entry entirely.
+    document = _model_block(
+        "mixtral",
+        description="A Mixture of Experts model.",
+        sizes=["8x7b", "8x22b"],
+        caps=["tools"],
+        pulls="2.8M",
+    ) + _model_block(
+        "gemma3n",
+        description="Efficient on-device models.",
+        sizes=["e2b", "e4b"],
+        caps=[],
+        pulls="1.9M",
+    )
+    ids = {e.id for e in parse_library(document)}
+    assert {"mixtral:8x7b", "mixtral:8x22b", "gemma3n:e2b", "gemma3n:e4b"} <= ids
+
+
+def test_parse_ignores_a_capability_outside_the_known_vocabulary() -> None:
+    # Upstream ships capabilities we have no tag for ("audio" is live today). An unknown chip
+    # must be dropped, never mistaken for a size and expanded into an unpullable entry.
+    block = _model_block(
+        "gemma4",
+        description="Frontier multimodal models.",
+        sizes=["12b"],
+        caps=["vision", "audio"],
+        pulls="19.5M",
+    )
+    entries = parse_library(block)
+    assert {e.id for e in entries} == {"gemma4:12b"}
+    assert "audio" not in entries[0].tags
+    assert "vision" in entries[0].tags
+
+
+def test_parse_ranks_comma_grouped_pull_counts() -> None:
+    # Counts under 10K are rendered in full with separators ("8,171"). They must rank below a
+    # millions-count model rather than parsing to 0 and sorting arbitrarily.
+    document = _model_block(
+        "tiny-new", description="A brand-new model.", sizes=["7b"], caps=[], pulls="8,171"
+    ) + _model_block(
+        "popular", description="An established model.", sizes=["7b"], caps=[], pulls="1.2M"
+    )
+    entries = parse_library(document)
+    assert [e.family for e in entries] == ["popular", "tiny-new"]
+    assert _entry_by_id(entries, "tiny-new:7b").pulls == "8,171"
+
+
+# ── the live-markup pin (#710) ────────────────────────────────────────────────
+#
+# These run against ``fixtures/ollama-library.html`` — twelve blocks kept verbatim from the
+# live index. Their job is to fail when upstream restyles the page, which is what the
+# ``x-test-*`` selectors did *not* do: they simply parsed nothing, and the box served the
+# seed with a repeating warn for weeks. Regenerate the fixture from a fresh capture (same
+# families) when it does; never hand-edit it to make a test pass.
+
+
+def _live_index() -> str:
+    return (FIXTURES / "ollama-library.html").read_text(encoding="utf-8")
+
+
+def test_live_index_parses_every_captured_family() -> None:
+    entries = parse_library(_live_index())
+    families: list[str] = []
+    for entry in entries:
+        if entry.family not in families:
+            families.append(entry.family)
+    # Popularity order, straight off the real page's pull counts (117.7M … 5,650).
+    assert families == [
+        "llama3.1",
+        "deepseek-r1",
+        "nomic-embed-text",
+        "gemma3",
+        "mistral",
+        "gemma4",
+        "llava",
+        "mixtral",
+        "glm-5.1",
+        "internlm2",
+        "laguna-s-2.1",
+        "granite4.1-guardian",
+    ]
+    assert len(entries) == 34  # one per published size, plus one per size-less family
+
+
+def test_live_index_expands_real_size_labels() -> None:
+    ids = {e.id for e in parse_library(_live_index())}
+    # Plain sizes, sub-1B sizes, mixture-of-experts sizes, and "effective" sizes alike.
+    assert {"llama3.1:405b", "gemma3:270m", "internlm2:1m"} <= ids
+    assert {"mixtral:8x7b", "mixtral:8x22b"} <= ids
+    assert {"gemma4:e2b", "gemma4:e4b"} <= ids
+    # A size-less family stays a single bare, pullable ref.
+    assert "nomic-embed-text" in ids and "nomic-embed-text:" not in ids
+
+
+def test_live_index_reads_descriptions_pulls_and_capabilities() -> None:
+    entries = parse_library(_live_index())
+    llama = _entry_by_id(entries, "llama3.1:8b")
+    assert llama.pulls == "117.7M"
+    assert llama.description.startswith("Llama 3.1 is a new state-of-the-art model from Meta")
+    assert llama.tags == ["general", "tools"]
+    # A blurb containing the word "updated" is kept (the guard is structural, not keyword).
+    assert "updated to version 0.3" in _entry_by_id(entries, "mistral:7b").description
+    # A non-ASCII blurb survives entity-unescaping intact.
+    assert _entry_by_id(entries, "llava:7b").description.strip()
+    # Counts under 10K carry separators and still rank (they sort last here, not first).
+    assert _entry_by_id(entries, "laguna-s-2.1").pulls == "8,171"
+
+
+def test_live_index_distinguishes_cloud_only_from_hybrid() -> None:
+    entries = parse_library(_live_index())
+    # A cloud-only family: one bare entry, tagged cloud.
+    assert set(_entry_by_id(entries, "glm-5.1").tags) >= {"cloud", "thinking", "tools"}
+    # A hybrid carries the cloud pill *and* downloadable sizes; its size rows are ordinary
+    # local builds and stay untagged. Its "audio" capability has no tag and is dropped.
+    for entry_id in ("gemma4:e2b", "gemma4:12b", "gemma4:31b"):
+        tags = _entry_by_id(entries, entry_id).tags
+        assert "cloud" not in tags and "audio" not in tags
+        assert "vision" in tags
+    # An embedding family is tagged embedding and, deliberately, not "general".
+    assert _entry_by_id(entries, "nomic-embed-text").tags == ["embedding"]
+
+
+def test_live_index_tags_stay_within_the_known_vocabulary() -> None:
+    known = set(KNOWN_TAGS)
+    assert all(set(e.tags) <= known for e in parse_library(_live_index()))
 
 
 # ── ModelCatalog ──────────────────────────────────────────────────────────────
@@ -276,6 +491,101 @@ async def test_refresh_empty_parse_is_treated_as_failure() -> None:
     )
     assert await catalog.refresh() is False
     assert (await catalog.snapshot()).entries == _SEED
+
+
+# ── bounded failure logging (#710) ────────────────────────────────────────────
+
+
+def _events(logs: list[dict[str, object]], level: str) -> list[dict[str, object]]:
+    return [entry for entry in logs if entry.get("log_level") == level]
+
+
+async def test_a_failure_streak_warns_once_then_drops_to_debug() -> None:
+    catalog = ModelCatalog(
+        source_url="http://example/library",
+        refresh_seconds=3600,
+        seed=_SEED,
+        fetch=_raising_fetch,
+    )
+    with capture_logs() as logs:
+        for _ in range(5):
+            await catalog.refresh()
+    # One warn for the streak — not one per refresh, which is what wrote the same line to the
+    # box's log every few minutes for weeks while upstream's markup was broken.
+    warnings = _events(logs, "warning")
+    assert len(warnings) == 1
+    assert warnings[0]["error"] == "network down"
+    debugs = _events(logs, "debug")
+    assert len(debugs) == 4
+    assert debugs[-1]["failures"] == 5
+
+
+async def test_a_new_error_warns_again() -> None:
+    errors = iter(["network down", "network down", "parsed catalog was empty"])
+
+    async def fetch(_url: str) -> str:
+        raise RuntimeError(next(errors))
+
+    catalog = ModelCatalog(
+        source_url="http://example/library", refresh_seconds=3600, seed=_SEED, fetch=fetch
+    )
+    with capture_logs() as logs:
+        for _ in range(3):
+            await catalog.refresh()
+    # A *changed* symptom is news even mid-streak, so it warns rather than staying quiet.
+    assert [w["error"] for w in _events(logs, "warning")] == [
+        "network down",
+        "parsed catalog was empty",
+    ]
+
+
+async def test_recovery_reports_the_streak_and_rearms_the_warning() -> None:
+    failing = True
+
+    async def fetch(_url: str) -> str:
+        if failing:
+            raise RuntimeError("network down")
+        return FIXTURE
+
+    catalog = ModelCatalog(
+        source_url="http://example/library",
+        refresh_seconds=3600,
+        seed=_SEED,
+        fetch=fetch,
+        clock=lambda: _FIXED_NOW,
+    )
+    with capture_logs() as logs:
+        for _ in range(3):
+            await catalog.refresh()
+        failing = False
+        assert await catalog.refresh() is True
+    # The recovery says how long the (mostly debug-quiet) outage ran — otherwise the one
+    # thing an operator never sees is that it ended.
+    recovered = [entry for entry in logs if entry.get("recovered_after")]
+    assert len(recovered) == 1
+    assert recovered[0]["recovered_after"] == 3
+
+    # The streak is closed, so the next failure warns again instead of staying at debug.
+    failing = True
+    with capture_logs() as logs:
+        await catalog.refresh()
+    assert len(_events(logs, "warning")) == 1
+
+
+async def test_a_successful_refresh_logs_no_recovery_field() -> None:
+    async def fetch(_url: str) -> str:
+        return FIXTURE
+
+    catalog = ModelCatalog(
+        source_url="http://example/library",
+        refresh_seconds=3600,
+        seed=_SEED,
+        fetch=fetch,
+        clock=lambda: _FIXED_NOW,
+    )
+    with capture_logs() as logs:
+        assert await catalog.refresh() is True
+    assert all("recovered_after" not in entry for entry in logs)
 
 
 async def test_disabled_catalog_never_fetches() -> None:

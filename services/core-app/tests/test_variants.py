@@ -1,12 +1,20 @@
 """Tests for the on-demand quant-variant lookup (#330) and its tags-page size parse (#571).
 
 The tag parser is pure and exercised directly; ``VariantLookup`` is driven with an injected
-text fetcher (the library tags HTML page) and clock so no test touches the network. The page
-fixture mirrors the real markup's key property: every tag row is rendered **twice** (a mobile
-and a desktop layout), both carrying the same size string.
+text fetcher (the library tags HTML page) and clock so no test touches the network. The
+synthetic page mirrors the real markup's key property: every tag row is rendered **twice** (a
+mobile and a desktop layout), both carrying the same size string.
+
+Alongside it, ``tests/fixtures/ollama-tags-*.html`` are trimmed *verbatim* captures of the
+live tags pages (2026-07-25). The index parser's selectors were broken by that redesign
+(#710); these pin the tags-page selectors — which the redesign left intact, because they key
+on the ``/library/<family>:<tag>`` link rather than on markup styling — so the next one is
+caught here too.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import httpx
 import pytest
@@ -18,6 +26,8 @@ from epicurus_core_app.llm.variants import (
     size_text_to_gb,
     tags_from_page,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 # A realistic library tag list spanning two sizes, several quants, and the "latest" alias,
 # each with the size string its tags-page row shows (None = a cloud tag with no weights).
@@ -173,6 +183,55 @@ def test_tags_from_page_size_never_bleeds_from_the_next_row() -> None:
     infos = {t.tag: t.size_gb for t in tags_from_page("mixed", document)}
     assert infos["cloud"] is None
     assert infos["7b"] == pytest.approx(4.7)
+
+
+# ── the live-markup pin (#710) ────────────────────────────────────────────────
+
+
+def _live_tags(family: str) -> str:
+    return (FIXTURES / f"ollama-tags-{family}.html").read_text(encoding="utf-8")
+
+
+def test_live_tags_page_parses_every_row_with_its_size() -> None:
+    infos = tags_from_page("llama3.1", _live_tags("llama3.1"))
+    sizes = {t.tag: t.size_gb for t in infos}
+    # The family's own index link is ignored; every captured row yields exactly one tag.
+    assert list(sizes) == [
+        "latest",
+        "8b",
+        "70b",
+        "405b",
+        "8b-instruct-q8_0",
+        "8b-instruct-fp16",
+        "70b-instruct-q4_0",
+    ]
+    # Real sizes off the real rows — the double (mobile + desktop) rendering yields one each.
+    assert sizes["latest"] == pytest.approx(4.9)
+    assert sizes["8b"] == pytest.approx(4.9)
+    assert sizes["405b"] == pytest.approx(243.0)
+    assert sizes["8b-instruct-fp16"] == pytest.approx(16.0)
+    # A "128K context window" label on every row is never mistaken for a size.
+    assert all(size is not None and size > 1 for size in sizes.values())
+
+
+def test_live_tags_page_drives_the_variant_picker() -> None:
+    rows = tags_from_page("llama3.1", _live_tags("llama3.1"))
+    by_tag = {v.tag: v for v in parse_variant_tags("llama3.1", "8b", rows)}
+    assert set(by_tag) == {
+        "llama3.1:8b",
+        "llama3.1:8b-instruct-q8_0",
+        "llama3.1:8b-instruct-fp16",
+    }
+    assert by_tag["llama3.1:8b"].quant == ""  # the bare size is the default build
+    assert by_tag["llama3.1:8b-instruct-q8_0"].quant == "q8_0"
+    assert by_tag["llama3.1:8b-instruct-q8_0"].size_gb == pytest.approx(8.5)
+
+
+def test_live_cloud_only_tags_page_has_one_sizeless_tag() -> None:
+    infos = tags_from_page("glm-5.1", _live_tags("glm-5.1"))
+    assert [t.tag for t in infos] == ["cloud"]
+    # A cloud tag has no local weights, so its row publishes no size — never a guess.
+    assert infos[0].size_gb is None
 
 
 # ── VariantLookup ─────────────────────────────────────────────────────────────

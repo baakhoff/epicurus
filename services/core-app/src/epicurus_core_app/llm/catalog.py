@@ -58,21 +58,38 @@ _SMALL_PARAMS_B = 2.0
 
 _USER_AGENT = "epicurus-core/model-catalog (+https://github.com/baakhoff/epicurus)"
 
-# How the model library marks each block. These ``x-test-*`` hooks are the page's own
-# test anchors and have been stable across redesigns — far steadier than CSS classes.
-_MODEL_BLOCK = re.compile(r"<li\b[^>]*\bx-test-model\b.*?</li>", re.S)
-_HREF = re.compile(r'href="/library/([^"?#]+)"')
-_TITLE = re.compile(r'x-test-model-title[^>]*\btitle="([^"]*)"')
-_TITLE_MARK = re.compile(r"x-test-model-title")
+# How the model library marks each block. The page used to carry ``x-test-*`` hooks and the
+# parser keyed on them; the 2026 redesign dropped every one, which parsed the catalog to []
+# and wedged the box on the seed (#710). The selectors below therefore key on the page's
+# *structure and user-visible copy* — the per-model link, the badge idiom, the word "Pulls" —
+# never on the Tailwind colours that distinguish the chip kinds. Copy and structure survive a
+# restyle; colours are the first thing a redesign changes. Verified against all 233 blocks of
+# the live index, 2026-07-25 (``tests/fixtures/ollama-library.html`` is a trimmed capture).
+#
+# One model = one library anchor: ``<a href="/library/NAME" class="…">…</a>`` (not nested).
+_MODEL_BLOCK = re.compile(r'<a\b[^>]*\bhref="/library/([^"?#]+)"[^>]*>(.*?)</a>', re.S)
 _PARA = re.compile(r"<p\b[^>]*>(.*?)</p>", re.S)
-_SIZE = re.compile(r"x-test-size[^>]*>([^<]+)<")
-_CAP = re.compile(r"x-test-capability[^>]*>([^<]+)<")
-_PULLS = re.compile(r"x-test-pull-count[^>]*>([^<]+)<")
 _TAG = re.compile(r"<[^>]+>")
-# The library's "cloud" pill is styled apart from the capability chips and carries *no*
-# ``x-test-capability`` hook (verified live 2026-07-09), so it needs its own match: an element
-# whose entire text is "cloud". Kept alongside ``_CAP`` in case upstream ever adds the hook.
-_CLOUD_PILL = re.compile(r">\s*cloud\s*<")
+
+# Every chip — capability, parameter size, and the cloud pill alike — is a rounded badge span;
+# its *text* says which kind it is. Classifying by text rather than by the per-kind colour
+# (``bg-indigo-50`` / ``bg-[#ddf4ff]`` / ``bg-cyan-50``) means a palette change degrades to
+# "no chips parsed" instead of silently reading sizes as capabilities.
+_PILL = re.compile(r'<span\b[^>]*\bclass="[^"]*\brounded-md\b[^"]*"[^>]*>([^<]*)</span>')
+# A parameter-size chip: "8b", "1.5b", "270m", a mixture-of-experts "8x7b" / "128x17b", or a
+# Gemma-3n "effective" size "e2b". Every other chip on the row is a capability (incl. "cloud").
+_SIZE_LABEL = re.compile(r"^(?:e|\d+x)?\d[\d.]*[bm]$", re.I)
+
+# The stats line renders each count in its own element immediately before its label, e.g.
+# ``<span>117.7M</span><span>&nbsp;Pulls</span>`` — so the pull count is the last count
+# element before the word "Pulls".
+_PULLS_LABEL = re.compile(r"(?:\s|&nbsp;)*Pulls\b", re.I)
+_COUNT = re.compile(r">\s*([\d.,]+\s*[kmb]?)\s*<", re.I)
+# Those same labels are whole elements, never prose — which is how the stats paragraph is told
+# apart from a blurb. The previous word-boundary guard (``\bupdated\b`` over the stripped text)
+# blanked any description that merely *said* "updated"/"tags"/"pulls": 7 of 233 families,
+# mistral's "…updated to version 0.3." among them.
+_STATS_LABEL = re.compile(r">(?:\s|&nbsp;)*(?:Pulls|Tags|Updated)(?:\s|&nbsp;)*<", re.I)
 
 
 class CatalogEntry(BaseModel):
@@ -200,15 +217,19 @@ def _params_to_billions(label: str) -> float | None:
 
 
 def _pulls_to_rank(label: str | None) -> int:
-    """Parse a pull-count label (``116.3M``, ``1M``, ``500``) to an int for ordering."""
+    """Parse a pull-count label (``116.3M``, ``1M``, ``8,171``) to an int for ordering.
+
+    Counts below 10K are rendered in full with thousands separators (``8,171``), so the
+    separator has to be tolerated or the least-pulled models all rank 0 and sort arbitrarily.
+    """
     if not label:
         return 0
-    match = re.fullmatch(r"\s*([\d.]+)\s*([kmb]?)\s*", label.strip(), re.I)
+    match = re.fullmatch(r"\s*([\d.,]+)\s*([kmb]?)\s*", label.strip(), re.I)
     if not match:
         return 0
     scale = {"": 1, "k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[match.group(2).lower()]
     try:
-        return int(float(match.group(1)) * scale)
+        return int(float(match.group(1).replace(",", "")) * scale)
     except ValueError:
         return 0
 
@@ -243,34 +264,43 @@ def _derive_tags(name: str, description: str, caps: set[str], params: str) -> li
     return [tag for tag in KNOWN_TAGS if tag in tags]
 
 
-def _parse_block(block: str, order: int) -> _RawModel | None:
-    """Parse one ``<li x-test-model>`` block into a :class:`_RawModel` (None if nameless)."""
-    href = _HREF.search(block)
-    title = _TITLE.search(block)
-    name = (href.group(1) if href else title.group(1) if title else "").strip()
-    if not name:
+def _find_pulls(body: str) -> str | None:
+    """The pull-count label from a block's stats line, or None when it publishes none."""
+    label = _PULLS_LABEL.search(body)
+    if label is None:
+        return None
+    counts = [m.group(1).strip() for m in _COUNT.finditer(body, 0, label.start())]
+    return counts[-1] if counts else None
+
+
+def _parse_block(name: str, body: str, order: int) -> _RawModel | None:
+    """Parse one library model anchor into a :class:`_RawModel` (None when it isn't one)."""
+    name = name.strip()
+    # A ``family:tag`` ref or a nested path is a *tags*-page link, never a library entry —
+    # so a tags page fed here parses to nothing rather than to a catalog of bogus families.
+    if not name or ":" in name or "/" in name:
         return None
 
-    # The description is the first <p> after the title marker (the title div's blurb).
-    # A later <p> holds the pulls/tags/updated stats; guard against grabbing that one.
+    # The blurb is the first paragraph that isn't the pulls/tags/updated stats line.
     description = ""
-    mark = _TITLE_MARK.search(block)
-    para = _PARA.search(block, mark.end() if mark else 0)
-    if para:
-        text = _strip_html(para.group(1))
-        if not re.search(r"\b(pulls|tags|updated)\b", text, re.I):
-            description = text
+    for para in _PARA.finditer(body):
+        if not _STATS_LABEL.search(para.group(1)):
+            description = _strip_html(para.group(1))
+            break
 
     sizes: list[str] = []
-    for raw in _SIZE.findall(block):
-        size = raw.strip().lower()
-        if size and size not in sizes:
-            sizes.append(size)
-    caps = {c.strip().lower() for c in _CAP.findall(block) if c.strip()}
-    if _CLOUD_PILL.search(block):
-        caps.add("cloud")
-    pulls_match = _PULLS.search(block)
-    pulls = pulls_match.group(1).strip() if pulls_match else None
+    caps: set[str] = set()
+    for raw in _PILL.findall(body):
+        chip = raw.strip()
+        if not chip:
+            continue
+        if _SIZE_LABEL.match(chip):
+            if chip.lower() not in sizes:
+                sizes.append(chip.lower())
+        else:
+            caps.add(chip.lower())
+
+    pulls = _find_pulls(body)
     return _RawModel(
         name=name,
         description=description,
@@ -292,8 +322,8 @@ def parse_library(document: str, *, max_models: int = 0) -> list[CatalogEntry]:
     for an empty or unrecognised document — the caller treats that as a failed refresh.
     """
     models: list[_RawModel] = []
-    for order, block in enumerate(_MODEL_BLOCK.findall(document)):
-        parsed = _parse_block(block, order)
+    for order, match in enumerate(_MODEL_BLOCK.finditer(document)):
+        parsed = _parse_block(match.group(1), match.group(2), order)
         if parsed is not None:
             models.append(parsed)
 
@@ -403,6 +433,11 @@ class ModelCatalog:
         self._generation = 0
         self._fill_generation = -1
         self._fill_attempted: set[str] = set()
+        # Failure-streak bookkeeping, so a *persistently* broken upstream is reported once
+        # rather than every ``refresh_seconds`` forever (#710): the box logged the same warn
+        # every few minutes for weeks while ollama.com's redesign broke the parse.
+        self._failures = 0
+        self._last_error = ""
 
     async def refresh(self) -> bool:
         """Fetch + parse the source once, swapping in the result on success.
@@ -410,6 +445,10 @@ class ModelCatalog:
         Never raises (except on cancellation): a fetch/parse failure or an empty parse
         leaves the previous snapshot in place and flags it stale. Returns whether the
         snapshot was updated.
+
+        Logging is bounded by failure streak (#710): the first failure warns, and so does a
+        *change* of error (a new symptom is news), but a streak of the same failure drops to
+        debug — a broken upstream must not write a warn every few minutes indefinitely.
         """
         if not self._enabled:
             return False
@@ -421,13 +460,26 @@ class ModelCatalog:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            error = str(exc)
             async with self._lock:
                 self._stale = True
-            log.warning(
-                "model catalog refresh failed; serving last-good/seed",
-                source=self._source,
-                error=str(exc),
-            )
+                first = self._failures == 0 or error != self._last_error
+                self._failures += 1
+                failures = self._failures
+                self._last_error = error
+            if first:
+                log.warning(
+                    "model catalog refresh failed; serving last-good/seed",
+                    source=self._source,
+                    error=error,
+                )
+            else:
+                log.debug(
+                    "model catalog refresh still failing",
+                    source=self._source,
+                    error=error,
+                    failures=failures,
+                )
             return False
         async with self._lock:
             # Carry known sizes across the swap: a fresh index parse has size_gb=None
@@ -444,7 +496,17 @@ class ModelCatalog:
             self._updated_at = self._clock()
             self._stale = False
             self._generation += 1
-        log.info("model catalog refreshed", source=self._source, entries=len(entries))
+            # Close the streak, and report how long it ran — a recovery after a debug-quiet
+            # stretch would otherwise be the one thing the operator never sees.
+            recovered_after = self._failures
+            self._failures = 0
+            self._last_error = ""
+        log.info(
+            "model catalog refreshed",
+            source=self._source,
+            entries=len(entries),
+            **({"recovered_after": recovered_after} if recovered_after else {}),
+        )
         return True
 
     async def snapshot(self) -> CatalogResponse:

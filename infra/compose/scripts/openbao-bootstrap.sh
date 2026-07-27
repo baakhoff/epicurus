@@ -7,7 +7,7 @@
 #   2. Unseals OpenBao using the generated key.
 #   3. Enables the KV v2 secrets engine on the `secret/` mount.
 #   4. Creates the `epicurus-core` policy (full tenant-scoped KV access).
-#   5. Creates a non-expiring app token for the core service.
+#   5. Creates a periodic app token for the core service (renewed by core-app).
 #   6. Writes OPENBAO_UNSEAL_KEY and OPENBAO_TOKEN to infra/compose/.env.secrets.
 #
 # After running:
@@ -108,6 +108,8 @@ path "secret/metadata/tenants/*" {
 # paths the default policy would have. core-app's SecretStore calls hvac's
 # is_authenticated() (a token lookup-self) before every connection; without this
 # the token works for KV but the auth preflight 403s and core-app refuses to start.
+# renew-self is what keeps the periodic token alive (#728) — the core renews on a
+# daily loop, so this grant is load-bearing, not just default-policy parity.
 path "auth/token/lookup-self" {
   capabilities = ["read"]
 }
@@ -116,13 +118,21 @@ path "auth/token/renew-self" {
 }
 POLICY
 
-# ── 5. App token (non-expiring) ────────────────────────────────────────────────
-echo "Creating non-expiring app token..."
+# ── 5. App token (periodic) ────────────────────────────────────────────────────
+# A *periodic* token is the only non-root token with an unlimited lifetime (#728). The
+# earlier `-explicit-max-ttl=0` was a no-op — it removes the explicit cap, leaving a plain
+# service token that falls back to the system default lease TTL (768h), so every secret read
+# started 403ing exactly 32 days after bootstrap. `-period` instead means: this lease is
+# always renewable back to the full period, forever, as long as something renews inside it.
+# The core does (SecretStore.run_token_renewal, daily). `-orphan` so the token survives a
+# future rotation of the root token that minted it.
+echo "Creating periodic app token (768h period, renewed by core-app)..."
 token_json=$(BAO_TOKEN="$OPENBAO_ROOT_TOKEN" BAO token create \
     -display-name=epicurus-core-app \
     -policy=epicurus-core \
     -no-default-policy \
-    -explicit-max-ttl=0 \
+    -orphan \
+    -period=768h \
     -format=json)
 # Flatten the pretty-printed JSON (as with init above) before extracting the token.
 token_json=$(printf '%s' "$token_json" | tr -d ' \t\r\n')

@@ -28,7 +28,8 @@ add service-specific fields.
 | `nats_password` | `NATS_PASSWORD` | `str \| None` | `None` | Bus auth password for the role (the server-side `NATS_{CORE,MODULE,SYS}_PASSWORD` it matches are documented in [NATS](../infrastructure/nats.md)). |
 | `openbao_url` | `OPENBAO_URL` | `str` | `http://localhost:8200` | Secrets — see [`secrets`](secrets.md). |
 | `openbao_token` | `OPENBAO_TOKEN` | `str \| None` | `None` | Bootstrap token, injected at runtime. |
-| `openbao_token_file` | `OPENBAO_TOKEN_FILE` | `str \| None` | `None` | Path to a file holding the token (e.g. a mounted Docker secret); used when `openbao_token` is unset. |
+| `openbao_token_file` | `OPENBAO_TOKEN_FILE` | `str \| None` | `None` | Path to a file holding the token (e.g. a mounted Docker secret); used when `openbao_token` is unset. Re-read on every re-authentication, so rotation needs no restart. |
+| `openbao_renew_interval_s` | `OPENBAO_RENEW_INTERVAL_S` | `float` | `86400.0` | How often the core renews the app token's lease. The token is periodic (768h), so daily leaves weeks of runway; `0` disables the loop. |
 | `otel_traces_enabled` | `OTEL_TRACES_ENABLED` | `bool` | `False` | Emit OpenTelemetry traces to Tempo — see [tracing](observability.md#tracing-57-adr-0068). |
 | `otel_exporter_otlp_endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` | `str` | `http://tempo:4318` | OTLP/HTTP base URL for traces; the exporter appends `/v1/traces`. |
 

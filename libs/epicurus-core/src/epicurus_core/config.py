@@ -66,6 +66,13 @@ class CoreSettings(BaseSettings):
     openbao_token: str | None = None
     openbao_token_file: str | None = None
 
+    # How often the core renews the app token's lease (#728). The bootstrap token is
+    # periodic — unlimited lifetime, but each lease expires after the period (768h), so an
+    # unrenewed deployment loses every secret read a month after bootstrap. Daily is far
+    # inside that window, leaving weeks of runway if renewal starts failing. Set to 0 to
+    # disable the loop (e.g. when the token is a non-expiring dev root token).
+    openbao_renew_interval_s: float = 86_400.0
+
     # OpenTelemetry tracing (epicurus_core.tracing, #57). Off by default — the lean
     # stack pays nothing and disabled tracing is a runtime no-op. Set
     # OTEL_TRACES_ENABLED=true (with the `observability` profile up, so Tempo is

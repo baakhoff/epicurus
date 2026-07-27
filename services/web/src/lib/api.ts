@@ -33,6 +33,7 @@ import {
   LlmPrefs,
   LogEntry,
   MaintenanceCurrentRun,
+  MaintenanceRunPage,
   type MaintenanceScheduleUpdate,
   MaintenanceStatus,
   MemoryListing,
@@ -159,6 +160,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(update),
     }),
+  // Persisted run history (#733), newest-first — pass a prior page's `next_cursor` to page
+  // further back.
+  maintenanceRunHistory: (opts?: { cursor?: number; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.cursor != null) params.set("cursor", String(opts.cursor));
+    if (opts?.limit != null) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return request(MaintenanceRunPage, `/platform/v1/maintenance/runs${qs ? `?${qs}` : ""}`);
+  },
   setContextWindow: (value: number | null) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
       method: "PUT",

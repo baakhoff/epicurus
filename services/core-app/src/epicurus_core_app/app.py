@@ -115,7 +115,9 @@ from epicurus_core_app.maintenance import (
     module_reindex_job,
     playbook_reflection_job,
     profile_synthesis_job,
+    prune_run_history_job,
 )
+from epicurus_core_app.maintenance_history import MaintenanceRunStore
 from epicurus_core_app.maintenance_routes import create_maintenance_router
 from epicurus_core_app.maintenance_schedule_prefs import MaintenanceScheduleStore
 from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
@@ -682,6 +684,15 @@ def create_app() -> FastAPI:
         if settings.files_backend == "local" and settings.files_watch
         else None
     )
+    # Persisted maintenance-run history (#733): the durable counterpart to the orchestrator's
+    # in-memory `last_run` — survives a restart, and distinguishes a scheduled fire from a
+    # manual "run now". Built before the orchestrator below since its own prune job (registered
+    # into the same jobs list) closes over it.
+    maintenance_history = MaintenanceRunStore(
+        engine,
+        max_rows=settings.maintenance_run_history_max_rows,
+        max_age_days=settings.maintenance_run_history_max_age_days,
+    )
     # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
     # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out
     # (heavy, manual-only). The manual "run everything" trigger is always available; the nightly
@@ -694,12 +705,14 @@ def create_app() -> FastAPI:
             playbook_reflection_job(playbook_reflector.run),
             module_reindex_job(registry.reembed),
             facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
+            prune_run_history_job(lambda: maintenance_history.prune(settings.default_tenant_id)),
         ],
         bus=bus,
         default_tenant=settings.default_tenant_id,
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         schedule=lambda: maintenance_schedule_prefs.get(settings.default_tenant_id),
         poll_interval_s=settings.maintenance_poll_interval_s,
+        on_recorded=maintenance_history.record,
     )
 
     @asynccontextmanager
@@ -756,6 +769,13 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error(
                 "maintenance schedule prefs init failed; schedule falls back to env config",
+                error=str(exc),
+            )
+        try:
+            await maintenance_history.init()
+        except Exception as exc:
+            log.error(
+                "maintenance run history init failed; last_run/run history unavailable",
                 error=str(exc),
             )
         try:
@@ -969,6 +989,7 @@ def create_app() -> FastAPI:
         create_maintenance_router(
             maintenance,
             schedule_store=maintenance_schedule_prefs,
+            history=maintenance_history,
             timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
             default_tenant=settings.default_tenant_id,
         )

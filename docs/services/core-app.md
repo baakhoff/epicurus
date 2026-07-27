@@ -769,15 +769,16 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Five
+registers by being added to the list; the run / route / schedule machinery is unchanged. Six
 ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
 deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light, nightly-eligible
 — `ProfileSynthesizer.run` distils each tenant's facts into its statically-injected profile,
 ADR-0094), the **playbook reflection** pass (light, nightly-eligible — `PlaybookReflector.run`
 proposes edits to the agent's own guidance for the operator to approve, ADR-0093; see *Governed
 playbooks* above), the **module re-index** fan-out (heavy, manual-only — the same `reembed`
-fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
-`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
+fan-out as above), **memory facts re-embed** (heavy, manual-only — calls
+`UserFactStore.reembed_all` for the default tenant, #436), and the **run-history prune** (light,
+nightly-eligible — trims its own persisted history, below, #733). Jobs run **sequenced** (gentle on a
 single GPU) and each is contained:
 one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs follow a
 runtime-editable **schedule** (below, #621); the manual "run everything" trigger is always
@@ -793,16 +794,33 @@ the run already going. `MaintenanceOrchestrator.shutdown()` cancels an in-flight
 app shutdown (marking whatever hadn't finished `error`) rather than orphaning it against
 infra that's about to close.
 
+**Persisted run history (#733).** `maintenance_history.py`'s `MaintenanceRunStore` — a
+tenant-scoped `maintenance_runs` table — is the durable counterpart to the orchestrator's own
+in-memory `last_run`, which a restart erases. The orchestrator takes an `on_recorded` callback
+(mirrors `AutomationRunner.on_recorded` → the live runs feed) invoked with every completed run,
+success or per-job error alike; `app.py` wires `on_recorded=maintenance_history.record`, so the
+orchestrator itself never imports the store. A **shutdown-interrupted** batch is still recorded —
+just from `MaintenanceOrchestrator.shutdown()` rather than from `_drive`'s own
+`except CancelledError`, which cannot safely `await` again once caught (see its docstring) — a
+crashed batch leaves a row, not a mystery, even though (like today) it publishes no
+`maintenance.completed` event. Every run also carries a `source` (`"scheduled"` | `"manual"`,
+defaulting to `"manual"` — the only two real callers, `_tick` and `POST /run`, always pass it
+explicitly) that the old in-memory `last_run` never distinguished. Retention is both a row cap
+and an age cutoff (`MAINTENANCE_RUN_HISTORY_MAX_ROWS`/`_MAX_AGE_DAYS`, default 200/90) — pruned by
+the run-history-prune job above, the same "count or age" posture the module-event log and
+notification center each apply to their own retention question.
+
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_cadence, schedule_hour, schedule_weekday, next_run_at, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the *effective* schedule (the tenant's own override, else the env-configured default), an ISO `next_run_at` estimate (`null` when disabled — a display estimate only; the scheduler's own due-check additionally avoids re-firing within an already-run window), the last *completed* run (or `null`), and the in-flight run (or `null`) with its live per-job progress. |
+| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_cadence, schedule_hour, schedule_weekday, next_run_at, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the *effective* schedule (the tenant's own override, else the env-configured default), an ISO `next_run_at` estimate (`null` when disabled — a display estimate only; the scheduler's own due-check additionally avoids re-firing within an already-run window), the newest persisted history row (`last_run` — reads the store, survives a restart; `null` before any run has completed), and the in-flight run (or `null`) with its live per-job progress. |
+| `GET /platform/v1/maintenance/runs` | Persisted history, newest-first — `{runs:[{id,started_at,finished_at,scope,source,jobs:[{key,label,status,detail}]}], next_cursor}`. Query params `cursor` (a prior page's `next_cursor`; omit for the newest page) and `limit` (1-200, default 50). `next_cursor` is `null` past the last page. |
 | `PUT /platform/v1/maintenance/schedule` | Set the tenant's schedule — body `{enabled, cadence: "hourly"\|"daily"\|"weekly", hour: 0-23, weekday: 0-6\|null}` (#621). Validated as a whole (**400** on an invalid shape — an unknown cadence, an out-of-range hour, a `weekly` with no/bad weekday, or a weekday given for a non-weekly cadence) before it persists; returns the full refreshed `GET` shape. |
-| `POST /platform/v1/maintenance/run` | **202** — starts every job now (`scope: "all"`) as a background task and returns its live progress immediately: `MaintenanceCurrentRun` `{started_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `pending`/`running`/`ok`/`skipped`/`error`). **409** if a batch is already running — the body is a plain `{detail}` message; re-`GET` for the in-flight run. |
+| `POST /platform/v1/maintenance/run` | **202** — starts every job now (`scope: "all"`, `source: "manual"`) as a background task and returns its live progress immediately: `MaintenanceCurrentRun` `{started_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `pending`/`running`/`ok`/`skipped`/`error`). **409** if a batch is already running — the body is a plain `{detail}` message; re-`GET` for the in-flight run. |
 
 The **manual** trigger (the web **Settings → Maintenance** card) is always available and runs all
 jobs regardless of the schedule; the card rehydrates onto `current_run` on mount and polls a few
 seconds apart while one is live, so a page refresh mid-batch lands back on the same run instead of
-losing it.
+losing it. A **Run history** list underneath pages back through the persisted history.
 
 **The nightly schedule is a real, per-tenant, runtime-editable trigger (#621, ADR-0098)** —
 enable/disable, an `hourly`/`daily`/`weekly` cadence, an hour, and (weekly only) a weekday,
@@ -820,8 +838,8 @@ since a schedule editable at runtime could change while that sleep was in progre
 and the current local time; the "last fired" bookkeeping that dedupes a window is in-memory only
 (a restart re-evaluates fresh against the wall clock, same as before). Consolidating the
 per-runner nightly schedules onto this orchestrator remains the named follow-up. Every *completed*
-run publishes a tenant-scoped `maintenance.completed`; a run interrupted by shutdown is discarded,
-not published.
+run publishes a tenant-scoped `maintenance.completed` **and** is persisted to history; a run
+interrupted by shutdown is recorded to history too (#733) but publishes no event, same as before.
 
 ### Scheduled turns (ADR-0092)
 

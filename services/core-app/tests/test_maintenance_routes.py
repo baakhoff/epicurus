@@ -11,15 +11,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.maintenance import JobStatus, MaintenanceJob, MaintenanceOrchestrator
+from epicurus_core_app.maintenance_history import MaintenanceRunStore
 from epicurus_core_app.maintenance_routes import create_maintenance_router
 from epicurus_core_app.maintenance_schedule_prefs import MaintenanceScheduleStore
 
@@ -56,38 +57,59 @@ def _gated_job(key: str, gate: asyncio.Event, *, nightly: bool = True) -> Mainte
 
 @contextlib.asynccontextmanager
 async def _client_for(
-    jobs: list[MaintenanceJob], *, default_enabled: bool = False, default_hour: int = 4
+    tmp_path: Path,
+    jobs: list[MaintenanceJob],
+    *,
+    default_enabled: bool = False,
+    default_hour: int = 4,
 ) -> AsyncIterator[AsyncClient]:
-    engine = create_async_engine(
-        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
-    )
-    schedule_store = MaintenanceScheduleStore(
-        engine, default_enabled=default_enabled, default_hour=default_hour
-    )
-    await schedule_store.init()
-    orch = MaintenanceOrchestrator(
-        jobs,
-        bus=_FakeBus(),  # type: ignore[arg-type]
-        default_tenant=TENANT,
-        timezone=_tz,
-        schedule=lambda: schedule_store.get(TENANT),
-    )
-    app = FastAPI()
-    app.include_router(
-        create_maintenance_router(
-            orch, schedule_store=schedule_store, timezone=_tz, default_tenant=TENANT
+    # File-backed, not `:memory:` on StaticPool: `POST /run` fires the batch as a detached
+    # background task (#561) that writes history concurrently with this fixture's own request
+    # handlers reading the schedule store — two tasks against one shared StaticPool connection
+    # races a reader's checkout-return ROLLBACK against the writer's BEGIN…COMMIT and can
+    # silently drop the write (the in-memory-SQLite/StaticPool trap; mirrors
+    # test_automations_feed.py's `_engine`). A file is one shared DB across as many
+    # connections/tasks as touch it.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'maintenance.db'}")
+    try:
+        schedule_store = MaintenanceScheduleStore(
+            engine, default_enabled=default_enabled, default_hour=default_hour
         )
-    )
-    async with AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
-        base_url="http://test",
-    ) as c:
-        yield c
+        await schedule_store.init()
+        history = MaintenanceRunStore(engine)
+        await history.init()
+        orch = MaintenanceOrchestrator(
+            jobs,
+            bus=_FakeBus(),  # type: ignore[arg-type]
+            default_tenant=TENANT,
+            timezone=_tz,
+            schedule=lambda: schedule_store.get(TENANT),
+            on_recorded=history.record,
+        )
+        app = FastAPI()
+        app.include_router(
+            create_maintenance_router(
+                orch,
+                schedule_store=schedule_store,
+                history=history,
+                timezone=_tz,
+                default_tenant=TENANT,
+            )
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app),  # type: ignore[arg-type]
+            base_url="http://test",
+        ) as c:
+            yield c
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    async with _client_for([_job("memory-extraction"), _job("module-reindex", nightly=False)]) as c:
+async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
+    async with _client_for(
+        tmp_path, [_job("memory-extraction"), _job("module-reindex", nightly=False)]
+    ) as c:
         yield c
 
 
@@ -165,9 +187,9 @@ async def test_put_schedule_rejects_an_out_of_range_hour(client: AsyncClient) ->
     assert resp.status_code == 400
 
 
-async def test_get_reflects_the_env_configured_default_when_never_set() -> None:
+async def test_get_reflects_the_env_configured_default_when_never_set(tmp_path: Path) -> None:
     async with _client_for(
-        [_job("a")], default_enabled=True, default_hour=7
+        tmp_path, [_job("a")], default_enabled=True, default_hour=7
     ) as client_with_default:
         status = (await client_with_default.get("/platform/v1/maintenance")).json()
         assert status["schedule_enabled"] is True
@@ -194,14 +216,14 @@ async def test_run_returns_202_with_pending_progress_then_completion_updates_las
     assert all(j["status"] == "ok" for j in status["last_run"]["jobs"])
 
 
-async def test_post_run_does_not_block_on_a_gated_job() -> None:
+async def test_post_run_does_not_block_on_a_gated_job(tmp_path: Path) -> None:
     """The core #561 fix: the request returns without waiting for the batch to finish.
 
     The gate is never set — if ``POST /run`` still awaited the batch inline (the pre-#561
     bug), this would hang until pytest's global timeout kills it rather than returning 202.
     """
     gate = asyncio.Event()
-    async with _client_for([_gated_job("slow", gate)]) as client:
+    async with _client_for(tmp_path, [_gated_job("slow", gate)]) as client:
         resp = await asyncio.wait_for(client.post("/platform/v1/maintenance/run"), timeout=2)
         assert resp.status_code == 202
         assert resp.json()["jobs"][0]["status"] in ("pending", "running")
@@ -214,9 +236,9 @@ async def test_post_run_does_not_block_on_a_gated_job() -> None:
         await _poll_until_idle(client)
 
 
-async def test_concurrent_post_run_returns_409_and_joins_the_inflight_run() -> None:
+async def test_concurrent_post_run_returns_409_and_joins_the_inflight_run(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    async with _client_for([_gated_job("slow", gate)]) as client:
+    async with _client_for(tmp_path, [_gated_job("slow", gate)]) as client:
         first = await client.post("/platform/v1/maintenance/run")
         assert first.status_code == 202
         started_at = first.json()["started_at"]
@@ -232,9 +254,9 @@ async def test_concurrent_post_run_returns_409_and_joins_the_inflight_run() -> N
         await _poll_until_idle(client)
 
 
-async def test_get_exposes_current_run_shape_while_running() -> None:
+async def test_get_exposes_current_run_shape_while_running(tmp_path: Path) -> None:
     gate = asyncio.Event()
-    async with _client_for([_gated_job("slow", gate, nightly=False)]) as client:
+    async with _client_for(tmp_path, [_gated_job("slow", gate, nightly=False)]) as client:
         await client.post("/platform/v1/maintenance/run")
         status = (await client.get("/platform/v1/maintenance")).json()
         current = status["current_run"]
@@ -252,3 +274,54 @@ async def test_get_exposes_current_run_shape_while_running() -> None:
 
         gate.set()
         await _poll_until_idle(client)
+
+
+# ── persisted run history (#733) ──────────────────────────────────────────────────
+
+
+async def test_manual_run_history_reports_source_manual(client: AsyncClient) -> None:
+    await client.post("/platform/v1/maintenance/run")
+    status = await _poll_until_idle(client)
+    last = status["last_run"]
+    assert last["source"] == "manual"
+    assert last["id"] is not None
+    assert last["started_at"] and last["finished_at"]
+
+
+async def test_run_history_page_lists_newest_first(client: AsyncClient) -> None:
+    await client.post("/platform/v1/maintenance/run")
+    await _poll_until_idle(client)
+    await client.post("/platform/v1/maintenance/run")
+    await _poll_until_idle(client)
+
+    page = (await client.get("/platform/v1/maintenance/runs")).json()
+    assert len(page["runs"]) == 2
+    assert page["runs"][0]["id"] > page["runs"][1]["id"]  # newest first
+    assert page["next_cursor"] is None  # both runs fit on one page
+
+
+async def test_run_history_page_respects_limit_and_cursor(client: AsyncClient) -> None:
+    for _ in range(3):
+        await client.post("/platform/v1/maintenance/run")
+        await _poll_until_idle(client)
+
+    first_page = (await client.get("/platform/v1/maintenance/runs", params={"limit": 2})).json()
+    assert len(first_page["runs"]) == 2
+    assert first_page["next_cursor"] is not None
+
+    second_page = (
+        await client.get(
+            "/platform/v1/maintenance/runs",
+            params={"limit": 2, "cursor": first_page["next_cursor"]},
+        )
+    ).json()
+    assert len(second_page["runs"]) == 1
+    assert second_page["next_cursor"] is None
+    # no overlap between pages
+    first_ids = {r["id"] for r in first_page["runs"]}
+    assert second_page["runs"][0]["id"] not in first_ids
+
+
+async def test_run_history_is_empty_before_any_run(client: AsyncClient) -> None:
+    page = (await client.get("/platform/v1/maintenance/runs")).json()
+    assert page == {"runs": [], "next_cursor": None}

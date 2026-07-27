@@ -27,6 +27,7 @@ from epicurus_core_app.maintenance import (
     module_reindex_job,
     playbook_reflection_job,
     profile_synthesis_job,
+    prune_run_history_job,
 )
 from epicurus_core_app.maintenance_schedule_prefs import MaintenanceSchedule
 
@@ -429,3 +430,114 @@ async def test_playbook_reflection_job_failure_is_contained() -> None:
     run = await _orch([playbook_reflection_job(reflect)]).run()
     assert [j.status for j in run.jobs] == ["error"]
     assert "the model exploded" in run.jobs[0].detail
+
+
+async def test_prune_run_history_job_reports_count() -> None:
+    async def prune() -> int:
+        return 4
+
+    job = prune_run_history_job(prune)
+    assert job.key == "run-history-prune" and job.nightly is True
+    assert await job.run() == ("ok", "pruned 4 old run(s)")
+
+
+# ── persisted history hook (#733) ─────────────────────────────────────────────────
+
+
+async def test_source_defaults_to_manual() -> None:
+    orch = _orch([_job("a")])
+    run = await orch.run()
+    assert run.source == "manual"
+
+
+async def test_source_scheduled_is_threaded_through_run() -> None:
+    orch = _orch([_job("a")])
+    run = await orch.run(source="scheduled")
+    assert run.source == "scheduled"
+
+
+async def test_tick_records_source_scheduled() -> None:
+    recorded: list[Any] = []
+
+    async def on_recorded(run: Any) -> None:
+        recorded.append(run)
+
+    orch = _orch(
+        [_job("a")],
+        schedule=MaintenanceSchedule(enabled=True, cadence="daily", hour=4),
+        on_recorded=on_recorded,
+    )
+    with _frozen_at(datetime(2026, 1, 1, 4, 0, tzinfo=UTC)):
+        await orch._tick()
+    assert len(recorded) == 1
+    assert recorded[0].source == "scheduled"
+
+
+async def test_on_recorded_fires_with_the_completed_run() -> None:
+    recorded: list[Any] = []
+
+    async def on_recorded(run: Any) -> None:
+        recorded.append(run)
+
+    orch = _orch([_job("a"), _job("b")], on_recorded=on_recorded)
+    run = await orch.run(tenant="t9", source="manual")
+    assert len(recorded) == 1
+    assert recorded[0] is run
+    assert recorded[0].tenant == "t9"
+    assert recorded[0].finished_at != ""
+
+
+async def test_on_recorded_failure_does_not_fail_the_run() -> None:
+    async def boom(_run: Any) -> None:
+        raise RuntimeError("db is down")
+
+    orch = _orch([_job("a")], on_recorded=boom)
+    run = await orch.run()  # must not raise
+    assert run.jobs[0].status == "ok"
+
+
+async def test_on_recorded_is_not_called_for_a_normally_running_batch_until_it_finishes() -> None:
+    gate = asyncio.Event()
+    recorded: list[Any] = []
+
+    async def on_recorded(run: Any) -> None:
+        recorded.append(run)
+
+    orch = _orch([_gated_job("a", gate)], on_recorded=on_recorded)
+    orch.start_run()
+    assert recorded == []
+    gate.set()
+    await _until_idle(orch)
+    assert len(recorded) == 1
+
+
+async def test_shutdown_records_the_interrupted_run() -> None:
+    gate = asyncio.Event()  # never set — the batch is wedged
+    recorded: list[Any] = []
+
+    async def on_recorded(run: Any) -> None:
+        recorded.append(run)
+
+    orch = _orch([_gated_job("a", gate), _job("b")], on_recorded=on_recorded)
+    orch.start_run(tenant="t7", source="scheduled")
+
+    await asyncio.wait_for(orch.shutdown(), timeout=2)
+
+    assert orch.last_run() is None  # unchanged: still discarded from the in-memory slot
+    assert len(recorded) == 1
+    interrupted = recorded[0]
+    assert interrupted.tenant == "t7"
+    assert interrupted.source == "scheduled"
+    assert {j.key: j.status for j in interrupted.jobs} == {"a": "error", "b": "error"}
+    assert all("interrupted" in j.detail for j in interrupted.jobs)
+
+
+async def test_shutdown_when_idle_never_calls_on_recorded() -> None:
+    recorded: list[Any] = []
+
+    async def on_recorded(run: Any) -> None:
+        recorded.append(run)
+
+    orch = _orch([_job("a")], on_recorded=on_recorded)
+    await asyncio.wait_for(orch.shutdown(), timeout=2)
+    assert recorded == []

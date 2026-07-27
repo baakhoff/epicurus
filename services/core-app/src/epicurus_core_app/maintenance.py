@@ -84,11 +84,20 @@ class MaintenanceJobResult:
 
 @dataclass
 class MaintenanceRun:
-    """The aggregate result of one maintenance batch."""
+    """The aggregate result of one maintenance batch.
+
+    ``tenant``/``source``/``finished_at`` exist for :attr:`MaintenanceOrchestrator._on_recorded`
+    (#733's persisted history) — the in-memory :meth:`MaintenanceOrchestrator.last_run` getter
+    that predates them ignores all three, so they default harmlessly for any caller that
+    doesn't care.
+    """
 
     ran_at: str
     scope: Literal["all", "nightly"]
     jobs: list[MaintenanceJobResult] = field(default_factory=list)
+    tenant: str = ""
+    source: Literal["scheduled", "manual"] = "manual"
+    finished_at: str = ""
 
 
 @dataclass
@@ -129,6 +138,13 @@ class MaintenanceRunConflictError(RuntimeError):
         self.current = current
 
 
+def _terminal(status: JobProgressStatus) -> JobStatus:
+    """A live-progress status, narrowed to the three terminal outcomes `MaintenanceJobResult`
+    accepts. By the time `shutdown` calls this, every entry has already been forced out of
+    "pending"/"running" — this only satisfies the type checker, which cannot see that."""
+    return status if status in ("ok", "skipped", "error") else "error"
+
+
 class MaintenanceOrchestrator:
     """Runs the registered maintenance jobs as one coordinated, sequenced batch.
 
@@ -151,6 +167,7 @@ class MaintenanceOrchestrator:
         timezone: TimezoneProvider,
         schedule: MaintenanceScheduleProvider,
         poll_interval_s: int = 60,
+        on_recorded: Callable[[MaintenanceRun], Awaitable[None]] | None = None,
     ) -> None:
         self._jobs = list(jobs)
         self._bus = bus
@@ -158,6 +175,11 @@ class MaintenanceOrchestrator:
         self._timezone = timezone
         self._schedule = schedule
         self._poll_interval_s = poll_interval_s
+        # Invoked with every completed run — success, per-job errors, or shutdown-interrupted
+        # (#733's persisted history). Mirrors AutomationRunner.on_recorded: this class stays
+        # unaware of what consumes it, and a write failure here must never cost the batch that
+        # already did its real work — see the try/except at each call site below.
+        self._on_recorded = on_recorded
         # In-memory only, like the rest of this scheduler's state (a restart re-evaluates due-ness
         # fresh against the wall clock — the same characteristic the old sleep_until_hour design
         # had). Set right before attempting a fire (not only on success), so a run that skips on
@@ -166,6 +188,12 @@ class MaintenanceOrchestrator:
         self._last_scheduled_fire: datetime | None = None
         self._last_run: MaintenanceRun | None = None
         self._current: MaintenanceCurrentRun | None = None
+        # The tenant/source behind the in-flight run, if any — `shutdown` needs them to build
+        # an interrupted `MaintenanceRun` for `_on_recorded`, since `MaintenanceCurrentRun`
+        # itself carries neither (see `shutdown`'s docstring for why persistence lives there,
+        # not in `_drive`'s own `except CancelledError`).
+        self._current_tenant: str | None = None
+        self._current_source: Literal["scheduled", "manual"] | None = None
         self._current_task: asyncio.Task[MaintenanceRun] | None = None
 
     def descriptors(self) -> list[dict[str, object]]:
@@ -181,7 +209,11 @@ class MaintenanceOrchestrator:
         return self._current
 
     def start_run(
-        self, *, tenant: str | None = None, scope: Literal["all", "nightly"] = "all"
+        self,
+        *,
+        tenant: str | None = None,
+        scope: Literal["all", "nightly"] = "all",
+        source: Literal["scheduled", "manual"] = "manual",
     ) -> MaintenanceCurrentRun:
         """Start the batch as a detached background task and return its live progress immediately.
 
@@ -189,7 +221,9 @@ class MaintenanceOrchestrator:
         of whether the caller is still around to see it (#561) — the batch is not tied to a
         request's lifetime. Raises :class:`MaintenanceRunConflictError` (carrying the in-flight
         run) if a batch is already running, so a racing manual trigger or an overlapping nightly
-        schedule joins it instead of starting a second one.
+        schedule joins it instead of starting a second one. ``source`` defaults to ``"manual"``
+        — today's only other caller, :meth:`_tick`, passes ``"scheduled"`` explicitly; it exists
+        for #733's persisted run history, which the ledger fields below feed.
         """
         if self._current is not None:
             raise MaintenanceRunConflictError(self._current)
@@ -201,11 +235,17 @@ class MaintenanceOrchestrator:
             jobs=[MaintenanceJobProgress(key=j.key, label=j.label) for j in selected],
         )
         self._current = current
-        self._current_task = asyncio.create_task(self._drive(current, selected, who))
+        self._current_tenant = who
+        self._current_source = source
+        self._current_task = asyncio.create_task(self._drive(current, selected, who, source))
         return current
 
     async def run(
-        self, *, tenant: str | None = None, scope: Literal["all", "nightly"] = "all"
+        self,
+        *,
+        tenant: str | None = None,
+        scope: Literal["all", "nightly"] = "all",
+        source: Literal["scheduled", "manual"] = "manual",
     ) -> MaintenanceRun:
         """Run the batch to completion and return its result (for the nightly scheduler + tests).
 
@@ -213,21 +253,27 @@ class MaintenanceOrchestrator:
         driver task, so it shares the exact same live progress and sequencing. The HTTP route
         uses :meth:`start_run` directly instead, since it must return without waiting (#561).
         """
-        self.start_run(tenant=tenant, scope=scope)
+        self.start_run(tenant=tenant, scope=scope, source=source)
         task = self._current_task
         assert task is not None  # start_run always sets it when it doesn't raise
         return await task
 
     async def _drive(
-        self, current: MaintenanceCurrentRun, jobs: list[MaintenanceJob], tenant: str
+        self,
+        current: MaintenanceCurrentRun,
+        jobs: list[MaintenanceJob],
+        tenant: str,
+        source: Literal["scheduled", "manual"],
     ) -> MaintenanceRun:
         """Sequence *jobs*, updating *current*'s per-job status live; publish + cache on completion.
 
         A shutdown cancellation (:meth:`shutdown`) marks whatever hasn't finished as ``error`` and
         clears the current-run pointer **synchronously** — no ``await`` after catching
         ``CancelledError``, so cleanup can't be re-cancelled or race torn-down infra (the same
-        rule ``agent/live_runs.py`` follows) — then re-raises; the batch is discarded rather than
-        published, same as a cancelled chat turn.
+        rule ``agent/live_runs.py`` follows) — then re-raises; the batch is discarded (not
+        published, not handed to ``_on_recorded``) the same as a cancelled chat turn. It is
+        still persisted to history, but from :meth:`shutdown` after the cancellation has been
+        absorbed — the one place downstream of this method that can safely ``await`` again.
         """
         results: list[MaintenanceJobResult] = []
         try:
@@ -250,8 +296,25 @@ class MaintenanceOrchestrator:
                     progress.detail = "interrupted by shutdown"
             self._current = None
             raise
-        run = MaintenanceRun(ran_at=current.started_at, scope=current.scope, jobs=results)
+        run = MaintenanceRun(
+            ran_at=current.started_at,
+            scope=current.scope,
+            jobs=results,
+            tenant=tenant,
+            source=source,
+            finished_at=datetime.now(UTC).isoformat(),
+        )
         self._last_run = run
+        # Persist BEFORE clearing `_current`, not after: the HTTP status route reads `last_run`
+        # from the history store and `current_run` from `_current` as two independent calls with
+        # no shared transaction, so a poller must never be able to observe `current_run: None`
+        # (this run just finished) and `last_run: None` (the write hasn't landed yet) at once —
+        # exactly the window this ordering closes.
+        if self._on_recorded is not None:
+            try:
+                await self._on_recorded(run)
+            except Exception as exc:  # a history-store hiccup must not fail the run itself
+                log.warning("maintenance run history not recorded", error=str(exc))
         self._current = None
         try:
             await self._bus.publish(
@@ -284,7 +347,13 @@ class MaintenanceOrchestrator:
         would wedge non-``None`` forever (the same trap ``LiveRunRegistry.cancel`` in
         ``agent/live_runs.py`` guards against). Mirrors its cancel-then-await dance otherwise:
         never leave a task running against infra (the bus, the DB engine) that's about to close.
-        An interrupted batch is discarded, not published — see :meth:`_drive`.
+
+        An interrupted batch is discarded, not published (see :meth:`_drive`) — but it *is*
+        handed to ``_on_recorded`` (#733), from here rather than from ``_drive``'s own
+        ``except CancelledError``, which cannot safely ``await`` again once caught. Infra is
+        still up at this point (shutdown order: this runs before the engine/bus close), so the
+        write is safe; a failure is logged and swallowed, same posture as every other
+        ``_on_recorded`` call.
         """
         task = self._current_task
         current = self._current
@@ -299,6 +368,24 @@ class MaintenanceOrchestrator:
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if current is not None and self._on_recorded is not None:
+            interrupted = MaintenanceRun(
+                ran_at=current.started_at,
+                scope=current.scope,
+                jobs=[
+                    MaintenanceJobResult(
+                        key=p.key, label=p.label, status=_terminal(p.status), detail=p.detail
+                    )
+                    for p in current.jobs
+                ],
+                tenant=self._current_tenant or self._tenant,
+                source=self._current_source or "manual",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            try:
+                await self._on_recorded(interrupted)
+            except Exception as exc:
+                log.warning("interrupted maintenance run not recorded", error=str(exc))
 
     async def run_periodic(self) -> None:
         """Poll every ``poll_interval_s`` and run the nightly batch when the schedule is due.
@@ -329,7 +416,7 @@ class MaintenanceOrchestrator:
             return
         self._last_scheduled_fire = datetime.now(UTC)
         try:
-            await self.run(scope="nightly")
+            await self.run(scope="nightly", source="scheduled")
         except MaintenanceRunConflictError:
             log.info("nightly maintenance skipped; a manual run is already in progress")
         except Exception as exc:  # never let the scheduler die on a transient error
@@ -432,4 +519,23 @@ def facts_reembed_job(reembed: Callable[[], Awaitable[int]]) -> MaintenanceJob:
 
     return MaintenanceJob(
         key="facts-reembed", label="Memory facts re-embed", run=_run, nightly=False
+    )
+
+
+def prune_run_history_job(prune: Callable[[], Awaitable[int]]) -> MaintenanceJob:
+    """Trim the persisted maintenance-run history (#733) — light, so nightly-eligible.
+
+    *prune* is a zero-arg closure over :meth:`MaintenanceRunStore.prune` for the default
+    tenant; it drops rows past the retention cap (row count and/or age). Runs as an ordinary
+    job in the batch it is itself trimming history *for* — the row this very run produces is
+    written only after the whole batch (this job included) completes, so a job never prunes
+    its own about-to-be-inserted row.
+    """
+
+    async def _run() -> tuple[JobStatus, str]:
+        pruned = await prune()
+        return "ok", f"pruned {pruned} old run(s)"
+
+    return MaintenanceJob(
+        key="run-history-prune", label="Maintenance run history prune", run=_run, nightly=True
     )

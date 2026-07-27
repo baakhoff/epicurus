@@ -312,6 +312,14 @@ there is no separate delete control. See
 [the reference page](../reference/notifications.md#event-alerts-732-adr-0114) for the API
 contract.
 
+**Settings → Maintenance → Run history** (#733): under the existing schedule editor and
+manual-trigger button (unchanged), a paginated list reading `GET /maintenance/runs` — one row
+per persisted batch, newest first: local time, `Scheduled`/`Manual`, duration, and a `Dot` per
+job colored by outcome (plus an "N failed" callout when any job errored). A row expands on
+click to each job's label and detail line. "Load more" fetches the next page with the previous
+page's `next_cursor` — each page is its own `useQuery` keyed on that cursor (react-query caches
+them independently) rather than accumulating into local state.
+
 ### Notification center (#671, ADR-0104)
 
 `NotificationsScreen.tsx` — a fixed top-level surface (`/notifications`, `SURFACES` in

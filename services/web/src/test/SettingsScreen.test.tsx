@@ -48,6 +48,7 @@ vi.mock("@/lib/api", async () => {
           current_run: null,
         }),
       runMaintenance: vi.fn(),
+      maintenanceRunHistory: () => Promise.resolve({ runs: [], next_cursor: null }),
     },
   };
 });

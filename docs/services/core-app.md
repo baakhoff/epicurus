@@ -1006,12 +1006,22 @@ VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service 
 
 `/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
 service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
-/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, and `POST /test` (the settings UI's "send test
-notification" button — the only caller today; no event source triggers a real push yet).
+/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below), and
+`POST /test` (the settings UI's "send test notification" button — the only caller of
+category-based `notify` today; the automations engine's push sink is still deferred).
 `/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
 `GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
 [the reference page](../reference/notifications.md) for the full contract and the web-side
 subscribe flow.
+
+**Event alerts (#732, ADR-0114).** `push/event_subscriptions.py` + `push/event_alerts.py`:
+a tenant-scoped `(module, event_type) -> ChannelPrefs` store, off by default, and a listener
+wired to the same `EventIntake.on_event` seam the automations matcher uses — a dumb fan-out,
+not an automation (no agent turn, no ledger). `PushService.notify_effective` is the send path
+for a caller (this listener) whose channel prefs come from somewhere other than `PushPrefs`
+categories. An automation triggered by the same event still fires independently — two
+notifications, by design. See [the reference page](../reference/notifications.md#event-alerts-732-adr-0114)
+for the full contract.
 
 ### Core-emitted spine events (#665)
 

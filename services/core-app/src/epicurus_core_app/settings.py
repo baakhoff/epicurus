@@ -241,6 +241,14 @@ class CoreAppSettings(CoreSettings):
     # just ended (a plain poll, mirroring maintenance/scheduled-turns — see their settings).
     push_quiet_poll_interval_s: int = 60
 
+    # ── Per-event alerts (#732) ─────────────────────────────────────────────────
+    # Max notifications per (tenant, module, event_type) per hour — independent of, and in
+    # addition to, PUSH_RATE_CAP_PER_HOUR above. A sanity valve on one chatty subscription,
+    # not a per-tenant budget: without it, a single noisy event type could spend the whole
+    # tenant-wide push cap and starve every other alert/category. In-memory, single-instance
+    # v1, the same trade as the cap above. 0 disables it.
+    event_alerts_rate_cap_per_hour: int = 20
+
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.
     # Must exactly match the URI registered with each OAuth provider.

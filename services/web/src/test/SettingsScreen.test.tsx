@@ -24,6 +24,8 @@ vi.mock("@/lib/api", async () => {
     api: {
       info: () => Promise.resolve({ core_version: "0.0.0", contract_version: "0.1", tenant: "default" }),
       modules: () => mockModules(),
+      eventSubscriptions: () => Promise.resolve([]),
+      setEventSubscription: vi.fn(),
       oauthClientStatus: () => Promise.resolve({ configured: true }),
       oauthStatus: () => Promise.resolve({ connected: false, scope: null }),
       oauthConnect: vi.fn(),

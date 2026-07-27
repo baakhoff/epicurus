@@ -75,6 +75,10 @@ beforeEach(() => {
   mockVersion.mockReset();
   mockMoveItem.mockReset();
   mockDeleteDoc.mockReset();
+  // The editor now persists scope/fold-state/selection and tree width to localStorage
+  // (#730, #743) — jsdom's `localStorage` is shared across every test in this file, so a
+  // clean slate here is what keeps them independent.
+  localStorage.clear();
 });
 
 describe("EditorView", () => {
@@ -996,9 +1000,7 @@ describe("EditorView — knowledge bases (scopes)", () => {
 // ── resizable tree panel (#730) ───────────────────────────────────────────────
 
 describe("EditorView — resizable tree panel (#730)", () => {
-  beforeEach(() => {
-    localStorage.clear();
-  });
+  // localStorage is cleared by the file-level beforeEach (#743).
 
   function separator() {
     return screen.getByRole("separator", { name: "Resize document tree" });
@@ -1101,5 +1103,137 @@ describe("EditorView — resizable tree panel (#730)", () => {
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     await screen.findByText("a");
     expect(separator()).toHaveAttribute("aria-valuenow", "16");
+  });
+});
+
+// ── restore last state (#743) ─────────────────────────────────────────────────
+
+describe("EditorView — restore last state (#743)", () => {
+  it("restores the active scope, folder state, and open document after a remount", async () => {
+    mockModulePage.mockImplementation((_m, _p, params) => {
+      const s = (params && params.scope) || "kb";
+      if (s === "work") {
+        return Promise.resolve({
+          ...SCOPED,
+          scope: "work",
+          docs: [
+            { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+            { id: "docs/beta.md", title: "beta", path: "docs/beta.md", type: "file" as const },
+            { id: "gamma.md", title: "gamma", path: "gamma.md", type: "file" as const },
+          ],
+        });
+      }
+      return Promise.resolve(SCOPED);
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "work/gamma.md", title: "gamma", content: "# Gamma" });
+
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "kb" }));
+    fireEvent.click(await screen.findByText("work"));
+    await screen.findByText("beta"); // "docs" starts expanded
+    fireEvent.click(screen.getByRole("button", { name: "Collapse folder" }));
+    expect(screen.queryByText("beta")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("gamma"));
+    await screen.findByTestId("wysiwyg");
+
+    unmount(); // stands in for navigating away to a different route, or a full reload
+
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    // Same project, same open document (in preview) — and "docs" is still collapsed, so
+    // its child never re-appears.
+    expect(await screen.findByRole("button", { name: "work" })).toBeInTheDocument();
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Gamma");
+    expect(screen.queryByText("beta")).not.toBeInTheDocument();
+  });
+
+  it("a ?doc= deep-link still wins over restored state", async () => {
+    localStorage.setItem(
+      "editor-state:knowledge/vault/kb",
+      JSON.stringify({ collapsed: [], selectedPath: "alpha.md" }),
+    );
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+        { id: "beta.md", title: "beta", path: "beta.md", type: "file" as const },
+      ],
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      Promise.resolve({ path, title: path, content: `# ${path}` }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/knowledge/vault?doc=kb/beta.md"]}>
+          <EditorView module="knowledge" pageId="vault" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# kb/beta.md");
+    expect(mockModulePageDoc).not.toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md");
+  });
+
+  it("gracefully decays a restored document that no longer exists — no error, just the empty state", async () => {
+    localStorage.setItem(
+      "editor-state:knowledge/vault/kb",
+      JSON.stringify({ collapsed: [], selectedPath: "deleted.md" }),
+    );
+    mockModulePage.mockResolvedValue(SCOPED); // docs: only "alpha.md" — "deleted.md" is gone
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    await screen.findByText("alpha");
+    expect(screen.queryByTestId("wysiwyg")).not.toBeInTheDocument();
+    expect(screen.getByText(/select a document/i)).toBeInTheDocument();
+    expect(mockModulePageDoc).not.toHaveBeenCalled();
+  });
+
+  it("gracefully decays a restored scope that's gone — falls back to the module default", async () => {
+    localStorage.setItem("editor-scope:knowledge/vault", "deleted-kb");
+    mockModulePage.mockResolvedValue(SCOPED); // scope "kb", scopes [kb, work, __docs__] — no "deleted-kb"
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    expect(await screen.findByRole("button", { name: "kb" })).toBeInTheDocument();
+  });
+
+  it("Notes restores its own state independently of Knowledge", async () => {
+    localStorage.setItem(
+      "editor-state:knowledge/vault/kb",
+      JSON.stringify({ collapsed: [], selectedPath: "alpha.md" }),
+    );
+    mockModulePage.mockResolvedValue({
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+      can_create: true,
+    });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    await screen.findByText("a");
+    // Notes has no stored selection of its own — nothing opens, and Knowledge's stashed
+    // selection (a different module/pageId key) never leaks in.
+    expect(screen.queryByTestId("wysiwyg")).not.toBeInTheDocument();
+  });
+
+  it("Notes also restores its own fold state and open document across a remount", async () => {
+    // Notes has no project concept — its resolved `scope` is permanently "", not a
+    // transient "hasn't loaded yet" value like Knowledge's can be. A guard that skipped
+    // persistence for a falsy scope would silently never persist anything for Notes at all.
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "folder", title: "folder", path: "folder", type: "dir" as const },
+        { id: "folder/note.md", title: "note", path: "folder/note.md", type: "file" as const },
+      ],
+      can_create: true,
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "folder/note.md", title: "note", content: "# Note" });
+    const { unmount } = render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("note"));
+    await screen.findByTestId("wysiwyg");
+    unmount();
+
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Note");
   });
 });

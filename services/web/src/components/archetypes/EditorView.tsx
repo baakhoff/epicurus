@@ -139,6 +139,66 @@ function writeTreeWidth(module: string, pageId: string, rem: number): void {
   }
 }
 
+// ── Restore last state (#743) ───────────────────────────────────────────────────
+
+const scopeStorageKey = (module: string, pageId: string): string => `editor-scope:${module}/${pageId}`;
+
+/** The operator's last-chosen scope (knowledge base / project) for this page, else "" —
+ *  meaning let the module default to its first project, same as an empty starting value
+ *  always has. */
+function readScope(module: string, pageId: string): string {
+  try {
+    return localStorage.getItem(scopeStorageKey(module, pageId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeScope(module: string, pageId: string, scope: string): void {
+  try {
+    if (scope) {
+      localStorage.setItem(scopeStorageKey(module, pageId), scope);
+    } else {
+      localStorage.removeItem(scopeStorageKey(module, pageId));
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+interface PersistedTreeState {
+  collapsed: string[];
+  selectedPath: string | null;
+}
+
+const treeStateStorageKey = (module: string, pageId: string, scope: string): string =>
+  `editor-state:${module}/${pageId}/${scope}`;
+
+/** Fold state and open document are scope-relative (tree paths are), so they're keyed by
+ *  (module, pageId, scope) — restoring the wrong project's open folders onto this one would
+ *  be worse than restoring nothing. */
+function readTreeState(module: string, pageId: string, scope: string): PersistedTreeState {
+  try {
+    const raw = localStorage.getItem(treeStateStorageKey(module, pageId, scope));
+    if (!raw) return { collapsed: [], selectedPath: null };
+    const parsed = JSON.parse(raw) as Partial<PersistedTreeState>;
+    return {
+      collapsed: Array.isArray(parsed.collapsed) ? parsed.collapsed : [],
+      selectedPath: typeof parsed.selectedPath === "string" ? parsed.selectedPath : null,
+    };
+  } catch {
+    return { collapsed: [], selectedPath: null };
+  }
+}
+
+function writeTreeState(module: string, pageId: string, scope: string, state: PersistedTreeState): void {
+  try {
+    localStorage.setItem(treeStateStorageKey(module, pageId, scope), JSON.stringify(state));
+  } catch {
+    /* best-effort */
+  }
+}
+
 // ── Tree builder ───────────────────────────────────────────────────────────────
 
 interface TreeNode {
@@ -812,7 +872,9 @@ export function EditorView({
   // The active scope (knowledge base / project, #KB-refactor). Empty = let the module
   // default to the first project; the switcher and create-project flow drive it. Paths in
   // the tree are scope-relative; `toModulePath` prepends the scope at the API boundary.
-  const [activeScope, setActiveScope] = useState("");
+  // Restored per (module, pageId) on mount (#743) — empty still means "module default",
+  // now doubling as "no scope was ever explicitly chosen (or restored) for this page".
+  const [activeScope, setActiveScope] = useState(() => readScope(module, pageId));
   const [creatingProject, setCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   // The knowledge base awaiting a delete confirm (#340); null = no dialog open.
@@ -891,6 +953,61 @@ export function EditorView({
       { replace: true },
     );
   }, [newParam, setSearchParams]);
+
+  // Restore last state (#743): once the module page's data resolves, restore this scope's
+  // fold state and previously-open document — only the first time we see this exact scope
+  // value, so it doesn't fight the operator's own live changes afterward. It naturally
+  // re-fires (restoring THAT scope's own state) whenever `scope` resolves to something new,
+  // whether from a fresh mount or the operator switching knowledge bases mid-session.
+  // Doubles as graceful decay: a restored scope that's gone falls back to the module
+  // default (which re-triggers this effect for the newly-resolved scope); a restored
+  // document that no longer exists is simply never selected, so it never gets a doc-fetch
+  // to 404 on — no error flash, just the ordinary "select a document" empty state.
+  // `?doc=`/the `doc` prop always win: they set `selectedPath` during render, above, so by
+  // the time this runs the `selectedPath === null` guard only ever restores an untouched slot.
+  const restoredScopeRef = useRef<string | null>(null);
+  useEffect(() => {
+    // `list.isPlaceholderData` matters here the same way it does for the doc query (#712):
+    // right after switching scopes, `listData` still holds the *previous* scope's data for
+    // a moment. Restoring (and marking this scope "handled") against that stale snapshot
+    // would validate against the wrong scope's docs/scopes and then never get a second
+    // chance once the real data for the new scope arrives.
+    if (!listData || list.isPlaceholderData || restoredScopeRef.current === scope) return;
+    restoredScopeRef.current = scope;
+    if (activeScope && !listData.scopes.some((s) => s.id === activeScope)) {
+      setActiveScope(""); // gone — fall back to the module default; scope resolves again
+      return;
+    }
+    const restored = readTreeState(module, pageId, scope);
+    setCollapsed(new Set(restored.collapsed));
+    if (
+      selectedPath === null &&
+      restored.selectedPath &&
+      listData.docs.some((d) => d.path === restored.selectedPath)
+    ) {
+      setSelectedPath(restored.selectedPath);
+    }
+  }, [listData, scope, activeScope, module, pageId, selectedPath]);
+
+  // Persist the operator's scope choice (#743) — keyed by (module, pageId) only, separate
+  // from the fold-state/selection below, which are keyed by scope too.
+  useEffect(() => {
+    writeScope(module, pageId, activeScope);
+  }, [module, pageId, activeScope]);
+
+  // Persist fold state and the open document per (module, pageId, scope) (#743) — including
+  // for Notes, where `scope` is permanently "" (it has no project concept, so this is just
+  // one more valid key, not a special case). Fires on every change, including the restore
+  // effect's own — a harmless write-back of what was just read. Gated on that restore
+  // having already run *for this scope* (not on `scope` being non-empty, which "" legitimately
+  // is for Notes): on a fresh mount `collapsed`/`selectedPath` still hold their plain
+  // defaults for a render or two while Knowledge's `scope` resolves ahead of any data
+  // loading — writing during that window would clobber the very state the restore effect
+  // above is about to read.
+  useEffect(() => {
+    if (restoredScopeRef.current !== scope) return;
+    writeTreeState(module, pageId, scope, { collapsed: [...collapsed], selectedPath });
+  }, [module, pageId, scope, collapsed, selectedPath]);
 
   const doc = useQuery({
     queryKey: ["module-doc", module, pageId, scope, selectedPath],

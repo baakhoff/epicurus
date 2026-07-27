@@ -501,6 +501,21 @@ against a file that doesn't exist yet); deleting it abandons the draft the same 
 both actions go through the normal server-backed path, unchanged. Both views write back to the
 same markdown buffer, so the save/version flow below is unchanged.
 
+Knowledge's file rows carry a **⋯ actions menu** (#741) instead of the three separate hover
+icons this used to be — one of which was, confusingly, the bare ⋯ icon itself wired straight to
+Delete. The menu holds Rename, Move to… (a compact folder picker), New file in folder
+(folders only), and Delete (still gated by the same themed confirm, #488). Files are also
+**drag-and-drop movable**: drop one on a folder row to move it in, or on the tree's own
+background to move it to the top level; a collapsed folder auto-expands the moment a drag
+hovers over it, and Escape — or dropping outside any target — cancels cleanly for free, since
+the browser fires `dragend` regardless of how the drag ended. Moving the currently open document
+keeps it open at its new path (no dead pane, no 404 fetch). Both Move to… and drag-and-drop
+reuse the same not-yet-saved guard #740 added for rename: moving an unsaved document swaps its
+path locally instead of a server call that would 404. This is desktop-only by design — native
+HTML5 drag-and-drop doesn't fire from touch input at all, so the menu is what covers mobile.
+None of this touches Notes: `can_manage_files` stays false there, so its tree shows no hover
+actions, same as before.
+
 The list pane is **resizable** (#730): drag the divider between it and the editor to widen or
 narrow it (12rem–40rem), double-click the divider to reset to the 18rem default, or focus it
 (it's a keyboard-accessible `role="separator"`) and use the arrow keys. The width is remembered

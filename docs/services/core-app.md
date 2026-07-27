@@ -1228,9 +1228,18 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   above.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):
   `tenant`, `instructions` (nullable). A NULL/blank row falls back to the shipped
-  `DEFAULT_AGENT_INSTRUCTIONS` — which establishes voice, tool use, and the source-grounding
+  `DEFAULT_AGENT_INSTRUCTIONS` — which establishes voice; tool use, including the #742
+  verify-before-mutate rule (an entity known only from earlier turns, not a tool result just
+  now, gets re-checked — list/stat/read/search — before a mutating call relies on it) and its
+  recover-on-not-found counterpart (a tool reporting something missing means re-ground and
+  report reality, never blind-retry the same call); and the source-grounding
   ladder (module data first, then web search, never an unsourced guess, #703); resolved per turn
-  and injected first in `Agent._assemble`.
+  and injected first in `Agent._assemble`. **Porting note (#742):** these are prompt *text*,
+  not code — a tenant that has already replaced the default via `PUT /agent/instructions` does
+  not pick up new rules automatically. An operator running a heavily customized prompt should
+  port the verify-before-mutate/recover-on-not-found paragraph (or the gist of it) into their
+  own instructions if they want the same behavior; there is no mechanism that layers the shipped
+  default's rules onto a custom one.
 - **Postgres `agent_instructions_versions`** — snapshots of the base prompt (ADR-0046 via
   ADR-0093 §3): `id`, `vid`, `tenant`, `content`, `created_at`. Each `set_instructions` records the
   prompt it **replaced** (the first edit therefore captures the shipped default), deduplicated,

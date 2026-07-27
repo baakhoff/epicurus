@@ -81,6 +81,23 @@ async def test_default_encodes_the_source_grounding_ladder() -> None:
     assert "guess" in text  # the never-guess rule
 
 
+async def test_default_encodes_verify_before_mutate() -> None:
+    """#742: an entity known only from earlier turns must be re-checked before a mutating
+    call relies on it — pins the policy, not the prose (mirrors #703's ladder test)."""
+    text = DEFAULT_AGENT_INSTRUCTIONS.lower()
+    assert "re-check it" in text
+    assert "mutating call" in text
+    assert "earlier in this conversation" in text
+
+
+async def test_default_encodes_recover_on_not_found() -> None:
+    """#742: a not-found (or similarly stale) tool result means re-ground, never blind-retry."""
+    text = DEFAULT_AGENT_INSTRUCTIONS.lower()
+    assert "don't retry the same call" in text
+    assert "re-ground" in text
+    assert "propose what to do next" in text
+
+
 async def test_init_heals_legacy_table_without_instructions_column() -> None:
     """A pre-existing table missing ``instructions`` is migrated in place (mirrors llm_prefs)."""
     engine = create_async_engine(

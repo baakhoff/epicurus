@@ -63,6 +63,22 @@ images to GHCR.
 
 ### Fixed
 
+- **The agent now verifies a stale-memory entity before mutating it, and recovers instead of
+  blind-retrying a not-found** (#742) — reported from a real trace: create a file via chat,
+  delete it in the Files UI, come back to the same chat and ask to move it — the agent acted on
+  the path it remembered from earlier in the conversation and failed on a nonexistent file.
+  `DEFAULT_AGENT_INSTRUCTIONS`'s "Doing things" paragraph gains two rules: **verify before
+  mutating** — something known only from earlier turns, not a tool result just now, gets
+  re-checked (list/stat/read/search) before a mutating call relies on it; **recover on
+  not-found** — when a tool reports something missing or different from expected, re-ground
+  with a list/search and report reality rather than retrying the same call. Both are prompt
+  text, so an operator who has already replaced the default doesn't inherit them automatically
+  — a docs note covers porting them into a custom prompt. Alongside: `files_routes.py`'s
+  `read`/`stat`/`move` 404s now name the path and suggest a recovery step (`"<path>" does not
+  exist — it may have been deleted or moved; list the folder for current contents`) instead of
+  a bare `"not found"` — the platform file API's own contract, hardened independently of which
+  specific tool a caller used. `core-app` 0.99.0→0.100.0 (MINOR — a behavior-visible
+  instructions change, the #704 precedent).
 - **PDF attachments reach the model as real text, not mojibake** (#738) — the attachment
   expander decoded every non-image file as UTF-8, so a PDF arrived as `[file: report.pdf]`
   followed by thousands of replacement characters — the same noise images used to produce

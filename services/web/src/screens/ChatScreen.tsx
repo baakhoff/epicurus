@@ -25,6 +25,7 @@ import {
   Trash2,
   WifiOff,
   Wrench,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -40,6 +41,7 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { AttachButton, AttachmentPill, PendingAttachmentPill } from "@/components/AttachMenu";
 import {
+  EntityRefChip,
   EntityRefsContext,
   SourcesPill,
   inlinedRefIds,
@@ -267,6 +269,85 @@ function AskUserPrompt({
                 <SendHorizonal size={16} />
               </Button>
             </div>
+          </div>
+        </div>
+      </div>
+    </AssistantRow>
+  );
+}
+
+/* ── ask_approval prompt (#745, ADR-0117) ───────────────────────────────── */
+
+/**
+ * The inline card shown when a turn pauses on `ask_approval` (ADR-0117): the model's summary of
+ * what it staged, the entity ref(s) it staged (as the usual hover/click chips, ADR-0019), and
+ * Approve/Reject. Either button first resolves each ref directly against its owning module's own
+ * review-decision endpoint (the operator's own click — the agent never approves its own work,
+ * see `suggestions.py`), then resumes the suspended turn (`chat.resolveApproval`); the main
+ * composer stays available as an escape hatch, same as {@link AskUserPrompt}.
+ */
+function ApprovalPrompt({
+  summary,
+  refs,
+  onDecide,
+}: {
+  summary: string;
+  refs: EntityRef[];
+  onDecide: (decision: "approved" | "rejected") => void;
+}) {
+  const [deciding, setDeciding] = useState<"approved" | "rejected" | null>(null);
+  const rejectRef = useRef<HTMLButtonElement>(null);
+  // Same connection gate as the composer + ask_user prompt (#494/#530): both buttons here make
+  // a real module call, unlike a draft's safe-to-click-offline Decline.
+  const connectionLost = useConnection((s) => s.coreDown || !s.online);
+  // Shell dialog conventions (#487): focus the safe action (Reject) on open.
+  useEffect(() => {
+    rejectRef.current?.focus();
+  }, []);
+  const decide = (decision: "approved" | "rejected") => {
+    if (connectionLost) return;
+    setDeciding(decision);
+    onDecide(decision);
+  };
+  return (
+    <AssistantRow>
+      <div className="rounded-(--radius-card) border border-accent/40 bg-surface p-4">
+        <div className="flex items-start gap-2.5">
+          <Check size={16} className="mt-0.5 shrink-0 text-accent" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm leading-relaxed text-ink">
+              {summary || "The assistant staged a change and is waiting on your review."}
+            </p>
+            {refs.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {refs.map((ref) => (
+                  <EntityRefChip key={`${ref.module}:${ref.kind}:${ref.ref_id}`} entref={ref} />
+                ))}
+              </div>
+            )}
+            <div className="mt-3 flex items-center gap-2">
+              <Button
+                variant="primary"
+                disabled={deciding !== null || connectionLost}
+                onClick={() => decide("approved")}
+              >
+                <Check size={14} /> Approve
+              </Button>
+              <Button
+                ref={rejectRef}
+                variant="outline"
+                disabled={deciding !== null || connectionLost}
+                onClick={() => decide("rejected")}
+              >
+                <X size={14} /> Reject
+              </Button>
+            </div>
+            {connectionLost && (
+              <p className="mt-2 flex items-center gap-1.5 text-[11px] text-ink-dim">
+                <WifiOff size={12} className="shrink-0 text-ink-faint" />
+                can&apos;t resolve this right now — it stays pending until epicurus is reachable.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -987,7 +1068,7 @@ export function ChatScreen() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [chat.segments, chat.pendingUser, chat.awaiting, history.data]);
+  }, [chat.segments, chat.pendingUser, chat.awaiting, chat.awaitingApproval, history.data]);
 
   // Mirror a draft-review pause (ADR-0085, #563) into the right panel: while `awaitingDraft` is set,
   // keep the composed email in the split-pane for Confirm/Decline — open it when the pause begins,
@@ -1101,7 +1182,8 @@ export function ChatScreen() {
     !showPending &&
     editingIdx === null &&
     chat.awaiting === null &&
-    chat.awaitingDraft === null;
+    chat.awaitingDraft === null &&
+    chat.awaitingApproval === null;
 
   // What a pending mid-history edit would discard: every message after the edited one — the
   // answer to it and every turn since (#552).
@@ -1470,6 +1552,18 @@ export function ChatScreen() {
                 onSubmit={(answer) => {
                   pin();
                   void chat.resume(answer, onTurnDone);
+                }}
+              />
+            </div>
+          )}
+          {chat.awaitingApproval && (
+            <div className="ep-settle">
+              <ApprovalPrompt
+                summary={chat.awaitingApproval.summary}
+                refs={chat.awaitingApproval.refs}
+                onDecide={(decision) => {
+                  pin();
+                  void chat.resolveApproval(decision, onTurnDone);
                 }}
               />
             </div>

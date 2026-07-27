@@ -39,6 +39,23 @@ images to GHCR.
   time, source, duration, per-job status chips, expandable detail, "Load more" pagination.
   `core-app` 0.97.0→0.98.0 (MINOR) · `web` 0.123.0→0.124.0 (MINOR). ADR-0116 (amends ADR-0060).
 
+- **`ask_approval` — pause a turn for an inline Approve/Reject of a staged change** (#745) — a
+  third sibling of `ask_user` (ADR-0053) and draft-first send (ADR-0085): after the model stages
+  a change through an existing propose tool, it can call `ask_approval(summary, refs)` to pause
+  in place rather than telling the user to go check Suggestions separately. The chat UI renders
+  an inline card (summary + a chip per staged entity); Approve/Reject each call the linked
+  change's owning module's *own* review-decision endpoint directly — the operator's own click,
+  never the agent, preserving `suggestions.py`'s existing "the agent must never approve its own
+  work" boundary — then resume the turn with the outcome. Chat-only by construction: the tool is
+  spliced only into the interactive streaming path, which has no `automation_id` concept at all,
+  so it is structurally absent from every automation/scheduled/inbound-bridge turn regardless of
+  autonomy level — those keep today's async review-queue behavior unchanged, no new toggle
+  needed. A new `agent_pending_approvals` table (a third sibling of
+  `agent_suspended_runs`/`agent_pending_drafts`) holds the pause; it decays to the same async
+  queue on expiry (`ASK_APPROVAL_TTL_HOURS`, default 24h) — nothing lost either way.
+  `core-app` 0.100.0→0.101.0 (MINOR) · `web` 0.124.0→0.125.0 (MINOR). ADR-0117 (extends ADR-0053,
+  ADR-0033, ADR-0085).
+
 - **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
   operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
   only source for a hosted model's vision support and context length, and it is missing ids

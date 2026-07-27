@@ -55,6 +55,7 @@ from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.instructions_routes import create_instructions_router
 from epicurus_core_app.agent.live_runs import LiveRunRegistry
 from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.playbook_review import (
     CORE_MODULE_NAME,
@@ -414,6 +415,9 @@ def create_app() -> FastAPI:
     # Durable state behind draft-first send Confirm/Decline (ADR-0085, #563): a turn paused on a
     # composed outbound draft lives here until the operator confirms/declines (or it expires).
     pending_drafts = PendingDraftStore(engine, ttl_hours=settings.draft_review_ttl_hours)
+    # Durable state behind ask_approval Approve/Reject (#745, ADR-0117): a turn paused on a staged
+    # change lives here until the operator decides (or it expires, decaying to the async queue).
+    pending_approvals = PendingApprovalStore(engine, ttl_hours=settings.ask_approval_ttl_hours)
     # In-flight turns, decoupled from the request that started them (#376): a turn runs in a
     # detached task that buffers its events, so a client disconnect (PWA backgrounded, refresh)
     # no longer aborts it — the answer still persists and a reconnecting client re-attaches.
@@ -555,6 +559,7 @@ def create_app() -> FastAPI:
         prefs=prefs,
         suspended=suspended_runs,
         pending_drafts=pending_drafts,
+        pending_approvals=pending_approvals,
         # The editable base system prompt (#497), resolved per turn and injected first — so both
         # chat and the headless bridge consumer below run with the same instructions.
         instructions=agent_instructions,
@@ -816,6 +821,13 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("pending-draft store init failed; draft-first send off", error=str(exc))
         try:
+            await pending_approvals.init()
+        except Exception as exc:
+            log.error(
+                "pending-approval store init failed; ask_approval pause/resume off",
+                error=str(exc),
+            )
+        try:
             await registry.reconcile_tombstones()
         except Exception as exc:  # best-effort — a Docker hiccup must never block startup
             log.error("tombstone reconcile failed", error=str(exc))
@@ -1041,6 +1053,7 @@ def create_app() -> FastAPI:
             probe=readiness,
             suspended=suspended_runs,
             pending_drafts=pending_drafts,
+            pending_approvals=pending_approvals,
             # Draft-first send (ADR-0085, #563): on Confirm the route transmits the reviewed draft
             # via the owning module's ``POST /send`` — the one place the core sends outbound mail.
             send_draft=registry.send_draft,

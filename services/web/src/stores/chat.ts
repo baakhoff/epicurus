@@ -7,7 +7,8 @@
  * persists its `sessionId` (the transcript rehydrates on reload) and, on a dropped stream /
  * reload / app-resume, **re-attaches** to the still-running turn instead of losing it. Live
  * state (segments/streaming/abort) is deliberately *not* persisted — only `sessionId`, `draft`,
- * and any pending `ask_user` question (`awaiting`), whose suspended run is durable server-side.
+ * and any pending pause (`awaiting`/`awaitingDraft`/`awaitingApproval`), whose suspended run is
+ * durable server-side.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
@@ -19,6 +20,7 @@ import {
   AgentEvent,
   type Attachment,
   EmailDraft,
+  type EntityRef,
   type Readiness,
   type WrittenDocument,
 } from "@/lib/contracts";
@@ -149,6 +151,12 @@ interface ChatState {
    *  is pending. Persisted like `awaiting` so a reload mid-review keeps the pane and the pending
    *  draft — the suspended run stays durable server-side (24h). Mutually exclusive with `awaiting`. */
   awaitingDraft: { runId: string; draft: EmailDraft } | null;
+  /** A staged change the turn paused on for Approve/Reject (`ask_approval`, #745, ADR-0117): the
+   *  suspended `runId` to resolve + the `summary` and entity `refs` (possibly empty) to render
+   *  as an approval card. Null when nothing is pending. Persisted like `awaiting`/`awaitingDraft`
+   *  so a reload mid-review keeps the card — the suspended run stays durable server-side (24h).
+   *  Mutually exclusive with both. */
+  awaitingApproval: { runId: string; summary: string; refs: EntityRef[] } | null;
   /** The document the turn is writing, for the pane beside the chat (#541, ADR-0101). Set from
    *  a `tool` event whose module annotated the tool; null when this turn writes none. Not
    *  persisted: the body rides the SSE stream and never reaches the transcript (ADR-0041's caps
@@ -217,6 +225,17 @@ interface ChatState {
     decision: "send" | "decline",
     onDone: () => Promise<void>,
     reason?: string,
+  ) => Promise<void>;
+  /** Approve or Reject the pending staged change (`ask_approval`, #745, ADR-0117): first call
+   *  each ref's owning module's own review-decision endpoint directly (the agent never approves
+   *  its own work — only the operator's own click here does), then POST the outcome to resolve
+   *  the suspended run and stream the continuation like any turn. A module call failure doesn't
+   *  block the resume — it is reported to the model as part of the outcome, same as a failed
+   *  draft send. A no-op if nothing is pending or a stream is live. */
+  resolveApproval: (
+    decision: "approved" | "rejected",
+    onDone: () => Promise<void>,
+    comment?: string,
   ) => Promise<void>;
   stop: () => void;
   clearError: () => void;
@@ -330,15 +349,24 @@ export const useChat = create<ChatState>()(
             } else if (event.type === "gone") return "gone";
             else if (event.type === "awaiting_input") {
               // The turn paused for the user. A `draft_review` pause (ADR-0085, #563) carries a
-              // composed email to Confirm/Decline in the split-pane; anything else is an ask_user
-              // clarifying question shown inline (ADR-0053). Either keeps the run durable
-              // server-side, so a refresh mid-pause can still resolve it. A blank question still
-              // pauses (the prompt shows a generic fallback).
+              // composed email to Confirm/Decline in the split-pane; an `approval` pause (#745,
+              // ADR-0117) carries a summary + entity refs to Approve/Reject inline; anything else
+              // is an ask_user clarifying question shown inline (ADR-0053). Every kind keeps the
+              // run durable server-side, so a refresh mid-pause can still resolve it. A blank
+              // question/summary still pauses (the prompt shows a generic fallback).
               if (event.run_id && event.awaiting_kind === "draft_review")
                 set({
                   awaitingDraft: {
                     runId: event.run_id,
                     draft: EmailDraft.parse(event.draft ?? {}),
+                  },
+                });
+              else if (event.run_id && event.awaiting_kind === "approval")
+                set({
+                  awaitingApproval: {
+                    runId: event.run_id,
+                    summary: event.summary ?? "",
+                    refs: event.refs ?? [],
                   },
                 });
               else if (event.run_id)
@@ -499,6 +527,7 @@ export const useChat = create<ChatState>()(
           segments: [],
           awaiting: null,
           awaitingDraft: null,
+          awaitingApproval: null,
           streaming: true,
           readiness: null,
           error: null,
@@ -549,6 +578,7 @@ export const useChat = create<ChatState>()(
         lastSeq: 0,
         awaiting: null,
         awaitingDraft: null,
+        awaitingApproval: null,
         liveDocument: null,
         unseenFinished: new Set(),
 
@@ -574,6 +604,7 @@ export const useChat = create<ChatState>()(
             sessionId: freshId(),
             awaiting: null,
             awaitingDraft: null,
+            awaitingApproval: null,
             // A different conversation: whatever the last one was writing isn't this one's.
             liveDocument: null,
             pendingUser: null,
@@ -603,6 +634,7 @@ export const useChat = create<ChatState>()(
               sessionId: id,
               awaiting: null,
               awaitingDraft: null,
+              awaitingApproval: null,
               // A different conversation: whatever the last one was writing isn't this one's.
               liveDocument: null,
               pendingUser: null,
@@ -695,6 +727,44 @@ export const useChat = create<ChatState>()(
           );
         },
 
+        resolveApproval: async (decision, onDone, comment) => {
+          const awaitingApproval = get().awaitingApproval;
+          if (awaitingApproval === null || get().streaming) return;
+          set({ awaitingApproval: null });
+          // The operator's own click drives each linked change's decision directly, against the
+          // owning module's own review-decision endpoint — the agent never approves its own work
+          // (suggestions.py). "review" is the review archetype's one fixed page id (ADR-0033,
+          // ADR-0018; every adopting module uses it, e.g. knowledge/notes suggestions.py). A
+          // module call failure doesn't block the resume — the operator already decided, so a
+          // network hiccup shouldn't strand the turn — but it IS told to the model plainly
+          // rather than letting it believe every linked change updated (mirrors the backend's
+          // own _send_confirmed_draft failure handling for a declined/failed draft send).
+          const failures: string[] = [];
+          for (const ref of awaitingApproval.refs) {
+            try {
+              if (decision === "approved") {
+                await api.approveSuggestion(ref.module, "review", ref.ref_id);
+              } else {
+                await api.rejectSuggestion(ref.module, "review", ref.ref_id);
+              }
+            } catch (err) {
+              const detail = err instanceof Error ? err.message : "the request failed";
+              failures.push(`${ref.title}: ${detail}`);
+            }
+          }
+          const trimmed = comment?.trim();
+          const note =
+            failures.length > 0
+              ? `Note: ${failures.join("; ")} — the decision may not have taken effect there; check directly if unsure.`
+              : undefined;
+          const fullComment = [note, trimmed].filter(Boolean).join(" ");
+          await runTurn(
+            `/platform/v1/agent/runs/${encodeURIComponent(awaitingApproval.runId)}/approval`,
+            fullComment ? { decision, comment: fullComment } : { decision },
+            onDone,
+          );
+        },
+
         resumeIfActive: async (onDone, isConnectivitySignal) => {
           const abort = get().abort;
           // A live stream is already running (a fresh send) — don't open a competing one.
@@ -729,6 +799,7 @@ export const useChat = create<ChatState>()(
         draft: state.draft,
         awaiting: state.awaiting,
         awaitingDraft: state.awaitingDraft,
+        awaitingApproval: state.awaitingApproval,
       }),
     },
   ),

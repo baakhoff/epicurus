@@ -99,6 +99,10 @@ class CoreAppSettings(CoreSettings):
     # How long a draft paused for review (ADR-0085, #563) waits for the operator's Confirm/Decline
     # before its pending-draft run is reaped (hours). If it expires the model can compose again.
     draft_review_ttl_hours: int = 24
+    # How long a turn paused by `ask_approval` (#745, ADR-0117) waits for the operator's
+    # Approve/Reject before its pending-approval run is reaped (hours); expiry decays to the
+    # existing async review-queue behavior (the staged change simply waits there instead).
+    ask_approval_ttl_hours: int = 24
     # How long a *finished* in-flight run (#376) stays re-attachable in memory before it is
     # reaped (seconds). A reconnecting client within this window replays the buffered turn;
     # after it, the client falls back to the durable transcript. Pure cache — the answer is

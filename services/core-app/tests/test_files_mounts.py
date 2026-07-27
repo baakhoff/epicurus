@@ -116,6 +116,14 @@ async def _make_client(
     async def _on_path_escape(_request: Request, exc: PathEscapeError) -> JSONResponse:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    # Mirror app.py's production wiring exactly (#731): a mount is host content the core
+    # doesn't control, so an OS-level failure (permission denied, disk full) is realistic in
+    # a way it isn't for the core-managed tenant space — this turns a bare, undiagnosable 500
+    # into one that names the underlying OS error.
+    @app.exception_handler(OSError)
+    async def _on_os_error(_request: Request, exc: OSError) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
     client = AsyncClient(
         transport=ASGITransport(app=app),  # type: ignore[arg-type]
         base_url="http://test",
@@ -313,6 +321,28 @@ async def test_write_into_rw_mount_succeeds_and_persists(tmp_path: Path) -> None
     assert resp.status_code == 200
     assert resp.json()["path"] == "mount:docs/new.txt"
     assert (root / "new.txt").read_text(encoding="utf-8") == "hello"
+
+
+async def test_os_error_writing_to_a_mount_is_a_diagnosable_500(tmp_path: Path) -> None:
+    """A mount is host content the core doesn't control — an OS-level write failure is a
+    realistic misconfiguration (declared `rw` but the host path isn't actually writable,
+    #731), and must surface *why*, not crash opaquely.
+
+    Reproduced portably (no chmod — Windows doesn't enforce POSIX permission bits the same
+    way CI's Linux runner does, which is exactly how this shipped broken the first time,
+    caught only in CI): declare the mount's root as an existing *file*, not a directory, so
+    the write's ``target.parent.mkdir(...)`` genuinely raises an ``OSError``.
+    """
+    not_a_dir = tmp_path / "docs-is-actually-a-file"
+    not_a_dir.write_text("oops", encoding="utf-8")
+    spec = MountSpec(name="docs", path=not_a_dir, read_only=False, indexed=False, exclude=())
+    client, _, _ = await _make_client(tmp_path, mount_specs=[spec])
+    async with client:
+        resp = await client.put(
+            WRITE, params={"path": "mount:docs/new.txt"}, json={"content": "hello"}
+        )
+    assert resp.status_code == 500
+    assert resp.json()["detail"]  # names the underlying OS error, not a bare crash
 
 
 async def test_mkdir_in_rw_mount_succeeds(tmp_path: Path) -> None:

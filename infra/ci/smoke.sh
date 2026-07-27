@@ -37,9 +37,18 @@ SECRETS_FILE="$(mktemp)"
 # roots don't always include the OS temp dir, but they always include the checkout itself
 # (the build context already has to be reachable). Seeded with one pre-existing file so the
 # assertions can check a list sees it, not only a round-tripped write.
+#
+# world-writable (0777): core-app runs as a non-root uid (10001, ADR-0069) inside the
+# container, but this directory is created here by whatever user runs the CI job — on a
+# real Linux runner those are different uids, and a bind mount does not remap ownership.
+# Without this, `mkdir`'s default (umask-restricted) permissions leave the mount root
+# unwritable by the container and the write assertion below 500s with a bare "Internal
+# Server Error" — invisible on Docker Desktop for Windows, whose bind-mount translation
+# does not enforce host-side ownership the same way, which is why this was missed locally.
 SMOKE_MOUNT_DIR="$ROOT/.smoke-mount"
 rm -rf "$SMOKE_MOUNT_DIR"
 mkdir -p "$SMOKE_MOUNT_DIR"
+chmod 0777 "$SMOKE_MOUNT_DIR"
 printf 'seed\n' > "$SMOKE_MOUNT_DIR/seed.txt"
 BOOT_LOG="$(mktemp)"
 DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml --env-file $ENV_FILE"

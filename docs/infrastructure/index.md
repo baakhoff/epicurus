@@ -193,6 +193,16 @@ create and doesn't control. Traversal and symlink-escape attempts are rejected s
 (400) regardless, but a *legitimately reachable* file inside a mount is exactly that —
 reachable — so scope the mount to what should be reachable.
 
+**An `rw` mount needs the host directory actually writable by the container.** `core-app`
+drops from root to an unprivileged uid (10001, ADR-0069) after startup — unlike `/data`
+(chowned by the entrypoint), a mount is the operator's own filesystem, so it is **never**
+auto-chowned; that would mean recursively changing ownership of arbitrary host content the
+moment a whole drive is mounted, a destructive surprise nobody wants. If the host directory
+isn't writable by uid 10001, a write attempt fails with a 500 naming the underlying OS
+error (e.g. `Permission denied`) rather than a silent no-op. Fix it on the host side —
+`chmod` or `chown` the directory to a group/uid the container can write as — before
+declaring the mount `rw`.
+
 ## Ollama (local LLM runtime)
 
 Runs **as a container** (ADR-0011), CPU by default and GPU opt-in via an overlay

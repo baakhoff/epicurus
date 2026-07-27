@@ -1149,6 +1149,18 @@ def create_app() -> FastAPI:
     async def _on_path_escape(_request: Request, exc: PathEscapeError) -> JSONResponse:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    # An external mount (#731) is host-filesystem content the core does not control — unlike
+    # the tenant space (core-managed, chowned at startup), a mount can genuinely fail an I/O
+    # call for reasons outside the request itself: the operator declared it `rw` but the host
+    # directory isn't actually writable by the container's uid (ADR-0069), a full disk, and so
+    # on. Left uncaught this was an opaque 500 with no detail; this surfaces the OS's own
+    # message (e.g. "[Errno 13] Permission denied: …") so the failure is diagnosable instead
+    # of a bare crash. Still a 500 — it is a server/environment condition, not a client error.
+    @app.exception_handler(OSError)
+    async def _on_os_error(_request: Request, exc: OSError) -> JSONResponse:
+        log.warning("unhandled OSError from a route handler", error=str(exc))
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
     return app
 
 

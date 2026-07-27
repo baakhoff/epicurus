@@ -88,12 +88,23 @@ function slugify(name: string): string {
   return base || "note";
 }
 
-/** Disambiguate a slug against the ones already in the list (append -2, -3, …). */
+/** Disambiguate a slug against the ones already in the list (append -2, -3, …) — inserted
+ *  before a trailing `.md`, so a repeat lands on "name-2.md" rather than "name.md-2". */
 function uniqueSlug(base: string, taken: Set<string>): string {
   if (!taken.has(base)) return base;
+  const match = /^(.*)(\.md)$/.exec(base);
+  const stem = match ? match[1] : base;
+  const ext = match ? match[2] : "";
   let n = 2;
-  while (taken.has(`${base}-${n}`)) n++;
-  return `${base}-${n}`;
+  while (taken.has(`${stem}-${n}${ext}`)) n++;
+  return `${stem}-${n}${ext}`;
+}
+
+/** Display title for a not-yet-saved document, before the server has a chance to derive
+ *  one — the filename without its extension, matching Knowledge's own `doc_title`. */
+function basenameTitle(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.md$/, "");
 }
 
 // ── Resizable tree panel (#730) ─────────────────────────────────────────────────
@@ -200,6 +211,12 @@ interface TreeItemProps {
   onRenameChange: (value: string) => void;
   onRenameSubmit: (oldPath: string) => void;
   onRenameDismiss: () => void;
+  /** The folder currently showing its inline "new file" row (#740), else null. */
+  creatingInFolder: string | null;
+  newFileName: string;
+  onNewFileNameChange: (value: string) => void;
+  onSubmitNewFile: (event: FormEvent) => void;
+  onCancelNewFile: () => void;
 }
 
 function TreeItem({
@@ -222,6 +239,11 @@ function TreeItem({
   onRenameChange,
   onRenameSubmit,
   onRenameDismiss,
+  creatingInFolder,
+  newFileName,
+  onNewFileNameChange,
+  onSubmitNewFile,
+  onCancelNewFile,
 }: TreeItemProps) {
   const isDir = node.type === "dir";
   const isCollapsed = collapsed.has(node.path);
@@ -348,9 +370,35 @@ function TreeItem({
         </div>
       </li>
 
-      {/* children (rendered when not collapsed) */}
-      {isDir && !isCollapsed && node.children.length > 0 && (
+      {/* children (rendered when not collapsed) — plus this folder's own inline "new file"
+          row (#740), even when it has no children yet. */}
+      {isDir && !isCollapsed && (node.children.length > 0 || creatingInFolder === node.path) && (
         <>
+          {creatingInFolder === node.path && (
+            <li>
+              <form
+                onSubmit={onSubmitNewFile}
+                className="flex items-center gap-1.5 py-1"
+                style={{ paddingLeft: `${8 + (node.depth + 1) * 12}px` }}
+              >
+                <FileText size={14} className="shrink-0 text-ink-faint" />
+                <TextInput
+                  autoFocus
+                  value={newFileName}
+                  onChange={(e) => onNewFileNameChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") onCancelNewFile();
+                  }}
+                  placeholder="File title…"
+                  aria-label="New file title"
+                  className="h-6 flex-1 py-0 text-xs"
+                />
+                <Button type="submit" variant="primary" className="h-6 px-2 py-0 text-xs">
+                  OK
+                </Button>
+              </form>
+            </li>
+          )}
           {node.children.map((child) => (
             <TreeItem
               key={child.path}
@@ -373,6 +421,11 @@ function TreeItem({
               onRenameChange={onRenameChange}
               onRenameSubmit={onRenameSubmit}
               onRenameDismiss={onRenameDismiss}
+              creatingInFolder={creatingInFolder}
+              newFileName={newFileName}
+              onNewFileNameChange={onNewFileNameChange}
+              onSubmitNewFile={onSubmitNewFile}
+              onCancelNewFile={onCancelNewFile}
             />
           ))}
         </>
@@ -881,13 +934,29 @@ export function EditorView({
   }
 
   const data = listData ?? EditorData.parse({});
-  const tree = buildTree(data.docs);
+
+  // A just-created, not-yet-saved document (#740) isn't in the server's list yet — inject it
+  // into the tree so it's visible right where it belongs, and so its hover rename/delete reach
+  // the isNew-safe paths above instead of being unreachable like before this fix. can_create
+  // (Notes) never shows tree actions at all (canManageFiles gates them), so this only changes
+  // anything for can_manage_files (Knowledge) — Notes' tree is built from `data.docs` same as
+  // always via `fileDocs`/`filterMatches` below, which deliberately don't see this entry.
+  const treeDocs =
+    data.can_manage_files && isNew && selectedPath && !data.docs.some((d) => d.path === selectedPath)
+      ? [
+          ...data.docs,
+          { id: selectedPath, title: basenameTitle(selectedPath), path: selectedPath, type: "file" as const },
+        ]
+      : data.docs;
+  const tree = buildTree(treeDocs);
 
   // Tree search (#339): a client-side filter over the active scope's documents. When a query
   // is present the tree is replaced by a flat list of matching files (title or path match);
   // the box only appears when there are files to search.
   const fileDocs = data.docs.filter((d) => d.type === "file");
-  const hasAnyDocs = data.docs.length > 0;
+  // Based on `treeDocs`, not `data.docs` — otherwise creating the first document in an empty
+  // scope would leave the empty-state message showing instead of the document it just created.
+  const hasAnyDocs = treeDocs.length > 0;
   const filterQuery = treeFilter.trim().toLowerCase();
   const filterMatches = filterQuery
     ? fileDocs.filter(
@@ -928,20 +997,22 @@ export function EditorView({
     setSelectedPath(path);
   };
 
-  // can_manage_files: start a new document at the scope root ("New document"). Lands in
-  // preview like every other open (#729) — the seeded heading is what the first preview
-  // renders instead of a blank pane.
+  // can_manage_files: open the naming form for a new document at the scope root (#740) — the
+  // same naming step the can_create flow already has, rather than the hardcoded "new-note.md"
+  // this door used to materialize with no chance to name it.
   const handleStartNewDocument = () => {
-    const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug("new-note.md", taken);
     setViewingVersion(null);
     setHistoryOpen(false);
-    setIsNew(true);
-    setSelectedPath(slug);
-    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
-    setDraft("# Untitled\n\n");
-    setBaseline("");
-    setMode("preview");
+    setNewFileInFolder(null);
+    setCreating(true);
+  };
+
+  // Cancel any in-progress naming (root toolbar form or an in-folder inline row) — creates
+  // nothing (#740's "Escape/cancel creates nothing").
+  const cancelCreating = () => {
+    setCreating(false);
+    setNewName("");
+    setNewFileInFolder(null);
   };
 
   // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
@@ -965,14 +1036,19 @@ export function EditorView({
     applyRestore();
   };
 
-  // can_create: the existing "New note" flow (used by Notes module)
-  const startNewNote = (event: FormEvent) => {
+  // Shared "create a new document" submit (#740) — used by Notes' can_create toolbar and,
+  // now, Knowledge's can_manage_files doors (root + in-folder). Knowledge's documents are
+  // real files and always end in `.md` (its pre-existing hardcoded doors already did this);
+  // Notes' slugs never have had an extension — unchanged. Lands in preview (#729).
+  const submitNewDoc = (event: FormEvent) => {
     event.preventDefault();
     const name = newName.trim();
     if (!name) return;
     const folderPrefix = newFileInFolder ? `${newFileInFolder}/` : "";
+    const slugBase = slugify(name);
+    const fileName = data.can_manage_files ? `${slugBase}.md` : slugBase;
     const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug(folderPrefix + slugify(name), taken);
+    const slug = uniqueSlug(folderPrefix + fileName, taken);
     setViewingVersion(null);
     setHistoryOpen(false);
     setIsNew(true);
@@ -986,20 +1062,19 @@ export function EditorView({
     setNewFileInFolder(null);
   };
 
-  // can_manage_files: start a new file inside a folder. Lands in preview like every other
-  // open (#729) — the seeded heading is what the first preview renders instead of a blank pane.
+  // can_manage_files: open the naming form for a new file inside a folder (#740), expanding
+  // the folder if it's collapsed so the inline input is actually visible.
   const handleStartNewFileInFolder = (folderPath: string) => {
-    setNewFileInFolder(folderPath);
-    const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug(`${folderPath}/new-note.md`, taken);
     setViewingVersion(null);
     setHistoryOpen(false);
-    setIsNew(true);
-    setSelectedPath(slug);
-    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
-    setDraft("# Untitled\n\n");
-    setBaseline("");
-    setMode("preview");
+    setCollapsed((prev) => {
+      if (!prev.has(folderPath)) return prev;
+      const next = new Set(prev);
+      next.delete(folderPath);
+      return next;
+    });
+    setNewFileInFolder(folderPath);
+    setCreating(true);
   };
 
   const handleDeleteFile = (path: string) => setPathToDelete(path);
@@ -1019,6 +1094,17 @@ export function EditorView({
     const newPath = parts.join("/");
     if (newPath === oldPath) {
       setRenamingPath(null);
+      return;
+    }
+    // The doc hasn't been created server-side yet (#740) — a move would 404 before the
+    // first save lands. Swap the local slug directly; the next save (idle/leave/explicit)
+    // creates it at the new path. Once saved, isNew is false and this falls through to the
+    // normal server-side move below, unchanged.
+    if (isNew && oldPath === selectedPath) {
+      setSelectedPath(newPath);
+      setSeededPath(newPath); // same buffer, just a new home — don't treat it as unseeded
+      setRenamingPath(null);
+      setRenameValue("");
       return;
     }
     moveItem.mutate({ from: oldPath, to: newPath });
@@ -1092,6 +1178,11 @@ export function EditorView({
     onStartRename: handleStartRename,
     onRenameChange: setRenameValue,
     onRenameSubmit: handleRenameSubmit,
+    creatingInFolder: creating ? newFileInFolder : null,
+    newFileName: newName,
+    onNewFileNameChange: setNewName,
+    onSubmitNewFile: submitNewDoc,
+    onCancelNewFile: cancelCreating,
     onRenameDismiss: () => {
       setRenamingPath(null);
       setRenameValue("");
@@ -1174,16 +1265,13 @@ export function EditorView({
         {data.can_create && (
           <div className="border-b border-edge p-2">
             {creating ? (
-              <form onSubmit={startNewNote} className="flex items-center gap-2">
+              <form onSubmit={submitNewDoc} className="flex items-center gap-2">
                 <TextInput
                   autoFocus
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      setCreating(false);
-                      setNewName("");
-                    }
+                    if (e.key === "Escape") cancelCreating();
                   }}
                   placeholder="Note title…"
                   aria-label="New note title"
@@ -1228,6 +1316,22 @@ export function EditorView({
                   disabled={!newFolderName.trim()}
                   busy={createFolder.isPending}
                 >
+                  Create
+                </Button>
+              </form>
+            ) : creating && newFileInFolder === null ? (
+              <form onSubmit={submitNewDoc} className="flex items-center gap-2">
+                <TextInput
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") cancelCreating();
+                  }}
+                  placeholder="Document title…"
+                  aria-label="New document title"
+                />
+                <Button type="submit" variant="primary" disabled={!newName.trim()}>
                   Create
                 </Button>
               </form>
@@ -1605,7 +1709,19 @@ export function EditorView({
         confirmLabel="Delete"
         onCancel={() => setPathToDelete(null)}
         onConfirm={() => {
-          if (pathToDelete) deleteDoc.mutate(pathToDelete);
+          if (pathToDelete) {
+            // Same reachability the rename guard above exists for (#740): the synthetic
+            // tree entry makes an unsaved doc's own delete action reachable too — abandon
+            // locally rather than calling a server delete that would 404.
+            if (isNew && pathToDelete === selectedPath) {
+              setSelectedPath(null);
+              setIsNew(false);
+              setDraft("");
+              setBaseline("");
+            } else {
+              deleteDoc.mutate(pathToDelete);
+            }
+          }
           setPathToDelete(null);
         }}
       />

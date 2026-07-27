@@ -486,8 +486,14 @@ column is a no-op), with the action/form path as the pointer-free fallback.
 The `editor` archetype (knowledge, notes) opens a document **rendered and editable** — its
 markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —
 ProseMirror + remark — lazy-loaded so it never enters the main bundle, #377), and an Edit/Preview
-toggle drops to the **raw markdown source** when you prefer it (ADR-0042). Both views write back
-to the same markdown buffer, so the save/version flow below is unchanged. Because notes/knowledge **re-embed on every save**, the editor does not
+toggle drops to the **raw markdown source** when you prefer it (ADR-0042). **Creating** a
+document lands in preview too (#729) — render-first is not just an opening behavior: every
+create door (Notes' named "New note" form, Knowledge's root "New document", its in-folder
+create, and the command palette's `?new=1` deep-link, which funnels into the same doors) seeds a
+heading — the typed name for the named door, `# Untitled` for the two that don't collect one —
+so the first preview renders a title instead of a blank pane; Edit is still one click away. Both
+views write back to the same markdown buffer, so the save/version flow below is unchanged.
+Because notes/knowledge **re-embed on every save**, the editor does not
 save on each keystroke: a save fires only when you **leave** (switch document, go back, or
 the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
 or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →

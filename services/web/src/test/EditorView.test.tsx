@@ -286,7 +286,7 @@ describe("EditorView", () => {
     expect(screen.queryByText(/empty vault/i)).toBeNull();
   });
 
-  it("creates a note: seeds an H1 title and saves to a fresh slug", async () => {
+  it("creates a note: seeds an H1 title, lands in preview (#729), and saves to a fresh slug", async () => {
     mockModulePage.mockResolvedValue({ title: "Notes", docs: [], can_create: true });
     mockSave.mockResolvedValue({ path: "my-idea", indexed: true, chunk_count: 1 });
     // After a create-save the now-saved note may be fetched, but the local buffer is
@@ -302,8 +302,11 @@ describe("EditorView", () => {
     fireEvent.change(screen.getByLabelText("New note title"), { target: { value: "My Idea" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
-    const textarea = (await screen.findByLabelText("Edit my-idea")) as HTMLTextAreaElement;
-    expect(textarea.value).toBe("# My Idea\n\n");
+    // Render-first now applies to create too (#729): the new note opens in preview, not
+    // the raw source — Edit is still one click away.
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# My Idea\n\n");
+    expect(screen.queryByLabelText("Edit my-idea")).toBeNull();
     // A brand-new note never fetches the (absent) document.
     expect(mockModulePageDoc).not.toHaveBeenCalled();
 
@@ -325,6 +328,10 @@ describe("EditorView", () => {
     fireEvent.change(screen.getByLabelText("New note title"), { target: { value: "My Idea" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
+    // Lands in preview first (#729); the Edit toggle is one click away and still reveals
+    // the disambiguated slug.
+    await screen.findByTestId("wysiwyg");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(await screen.findByLabelText("Edit my-idea-2")).toBeInTheDocument();
   });
 
@@ -476,16 +483,48 @@ describe("EditorView — knowledge bases (scopes)", () => {
     );
   });
 
-  it("New document creates at the scope root and saves with the scope prefix", async () => {
+  it("New document lands in preview with a seeded heading (#729), and saves with the scope prefix", async () => {
     mockModulePage.mockResolvedValue(SCOPED);
     mockSave.mockResolvedValue({ path: "kb/new-note.md", indexed: true, chunk_count: 0 });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
-    const ta = await screen.findByLabelText("Edit new-note.md");
-    fireEvent.change(ta, { target: { value: "# Fresh" } });
+
+    // Render-first applies to create too (#729): lands in preview with the seeded
+    // heading, not a blank pane; Edit is still one click away.
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# Untitled\n\n");
+    expect(screen.queryByLabelText("Edit new-note.md")).toBeNull();
+
+    fireEvent.change(wys, { target: { value: "# Fresh" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "kb/new-note.md", "# Fresh"),
+    );
+  });
+
+  it("New file in folder lands in preview with a seeded heading (#729)", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [{ id: "docs", title: "docs", path: "docs", type: "dir" as const }],
+    });
+    mockSave.mockResolvedValue({ path: "kb/docs/new-note.md", indexed: true, chunk_count: 0 });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    const folderRow = (await screen.findByText("docs")).closest("div") as HTMLElement;
+    fireEvent.mouseEnter(folderRow);
+    fireEvent.click(screen.getByTitle("New file in folder"));
+
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# Untitled\n\n");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith(
+        "knowledge",
+        "vault",
+        "kb/docs/new-note.md",
+        "# Untitled\n\n",
+      ),
     );
   });
 

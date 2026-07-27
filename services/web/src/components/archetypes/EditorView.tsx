@@ -880,7 +880,9 @@ export function EditorView({
     setSelectedPath(path);
   };
 
-  // can_manage_files: start a new document at the scope root ("New document").
+  // can_manage_files: start a new document at the scope root ("New document"). Lands in
+  // preview like every other open (#729) — the seeded heading is what the first preview
+  // renders instead of a blank pane.
   const handleStartNewDocument = () => {
     const taken = new Set(data.docs.map((d) => d.path));
     const slug = uniqueSlug("new-note.md", taken);
@@ -888,9 +890,10 @@ export function EditorView({
     setHistoryOpen(false);
     setIsNew(true);
     setSelectedPath(slug);
-    setDraft("");
+    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
+    setDraft("# Untitled\n\n");
     setBaseline("");
-    setMode("edit");
+    setMode("preview");
   };
 
   // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
@@ -929,13 +932,14 @@ export function EditorView({
     setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
     setDraft(`# ${name}\n\n`);
     setBaseline("");
-    setMode("edit");
+    setMode("preview"); // render-first applies to create too (#729)
     setCreating(false);
     setNewName("");
     setNewFileInFolder(null);
   };
 
-  // can_manage_files: start a new file inside a folder
+  // can_manage_files: start a new file inside a folder. Lands in preview like every other
+  // open (#729) — the seeded heading is what the first preview renders instead of a blank pane.
   const handleStartNewFileInFolder = (folderPath: string) => {
     setNewFileInFolder(folderPath);
     const taken = new Set(data.docs.map((d) => d.path));
@@ -945,9 +949,9 @@ export function EditorView({
     setIsNew(true);
     setSelectedPath(slug);
     setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
-    setDraft("");
+    setDraft("# Untitled\n\n");
     setBaseline("");
-    setMode("edit");
+    setMode("preview");
   };
 
   const handleDeleteFile = (path: string) => setPathToDelete(path);

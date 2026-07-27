@@ -19,12 +19,18 @@ The operator ``upload`` and ``delete`` doors mirror the module-facing ``write`` 
 same underlying seam, but the operator doors add the #479 ownership guard (a module owns its
 top-level subtree; that lifecycle belongs to its own page) which the module doors must not have
 — modules write and delete *inside* their own subtrees through the platform contract.
+
+**External mounts** (#731): a ``path`` prefixed ``mount:<name>/<sub-path>`` (see
+:mod:`epicurus_core_app.mounts`) is transparently redirected to that mount's own store by
+:func:`_target` — every handler below resolves through it before touching *any* store, so
+the tenant-space code paths run unchanged when no prefix is present. A mount's read-only flag
+is enforced here (not just hidden in the UI) via :func:`_require_writable`.
 """
 
 from __future__ import annotations
 
 import mimetypes
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from urllib.parse import quote
 
@@ -33,10 +39,11 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from epicurus_core import FileEntry, FileStore
-from epicurus_core.files import normalize_rel
+from epicurus_core.files import PathEscapeError, normalize_rel
 from epicurus_core.tenancy import TenantError, validate_tenant_id
 from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.file_index import FileIndex
+from epicurus_core_app.mounts import MOUNT_PREFIX, Mount
 from epicurus_core_app.object_backend import ObjectBackend
 from epicurus_core_app.upload_limits import (
     DEFAULT_ALLOWED_UPLOAD_TYPES,
@@ -163,6 +170,7 @@ def create_files_router(
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
     locked_prefixes: frozenset[str] = frozenset(),
     events: CoreEventEmitter | None = None,
+    mounts: Mapping[str, Mount] | None = None,
 ) -> APIRouter:
     """Build the ``/platform/v1/files`` router over a :class:`FileStore`.
 
@@ -174,9 +182,12 @@ def create_files_router(
     hostnames, ADR-0063): files under them are not movable in the UI and not upload targets.
     *events* announces mutations on the spine (``files.*``, #665): the API is the one seam
     every file mutation passes through — operator doors and module bridges alike — so this
-    router is where the core emits them. ``None`` disables emission (tests).
+    router is where the core emits them. ``None`` disables emission (tests). *mounts*
+    (#731) are operator-declared external roots addressed as ``mount:<name>/<sub-path>``;
+    empty/``None`` means no mounts are declared.
     """
     router = APIRouter(prefix="/platform/v1/files", tags=["files"])
+    mounts = mounts or {}
 
     def _tenant(tenant_id: str | None) -> str:
         try:
@@ -191,8 +202,29 @@ def create_files_router(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    def _target(path: str) -> tuple[FileStore, str, Mount | None]:
+        """Resolve *path* to ``(store, path-within-that-store, mount-or-None)`` (#731).
+
+        A ``mount:<name>/<sub>`` path redirects to that mount's own store (*sub* is the
+        remainder, ``""`` for the mount's own root); anything else addresses the tenant
+        *store* unchanged, so every existing tenant-space call site is unaffected. 404s an
+        unrecognised mount name before any filesystem call is made.
+        """
+        if not path.startswith(MOUNT_PREFIX):
+            return store, path, None
+        name, _, sub = path[len(MOUNT_PREFIX) :].partition("/")
+        mount = mounts.get(name)
+        if mount is None:
+            raise HTTPException(status_code=404, detail=f"unknown mount: {name!r}")
+        return mount.store, sub, mount
+
+    def _require_writable(mount: Mount | None) -> None:
+        """403 a mutation on a mount declared read-only (enforced here, not just hidden in UI)."""
+        if mount is not None and mount.read_only:
+            raise HTTPException(status_code=403, detail=f"mount {mount.name!r} is read-only")
+
     def _fs_movable(path: str, kind: str) -> bool:
-        """Whether a file-space entry may be moved from the Files UI (#479).
+        """Whether a tenant-space entry may be moved from the Files UI (#479).
 
         Operator-space *files* are movable, like object uploads; directories and anything
         under a module-owned top-level folder (*locked_prefixes*) stay read-only — moving a
@@ -203,7 +235,7 @@ def create_files_router(
         return path.split("/", 1)[0] not in locked_prefixes
 
     def _deletable(path: str) -> bool:
-        """Whether an entry may be deleted from the Files UI (#564).
+        """Whether a tenant-space entry may be deleted from the Files UI (#564).
 
         Broader than movability: *directories are deletable* (the delete seam is recursive —
         a folder takes its whole subtree), and it spans both stores (file-space files and
@@ -214,6 +246,52 @@ def create_files_router(
         """
         return path.split("/", 1)[0] not in locked_prefixes
 
+    def _movable_for(mount: Mount | None, path: str, kind: str) -> bool:
+        """:func:`_fs_movable`, mount-aware (#731): a file in a RW mount is movable, like a
+        tenant-space file; anything in a RO mount (including directories) is not."""
+        if mount is not None:
+            return not mount.read_only and kind == "file"
+        return _fs_movable(path, kind)
+
+    def _deletable_for(mount: Mount | None, path: str) -> bool:
+        """:func:`_deletable`, mount-aware (#731): RW mirrors the tenant space, RO never is."""
+        if mount is not None:
+            return not mount.read_only
+        return _deletable(path)
+
+    def _full_path(mount: Mount | None, rel: str) -> str:
+        """Reconstruct the caller-facing address for *rel* within *mount* (or the tenant space).
+
+        A mount's own :class:`FileStore` knows nothing of the ``mount:<name>/`` addressing
+        scheme (that's a router-level concept) — every response that echoes a path back (an
+        entry, an event, an index row) must reprefix it, or a caller round-tripping that path
+        (read-after-write, a follow-up move) would silently address the tenant space instead.
+        """
+        if mount is None:
+            return rel
+        return f"{MOUNT_PREFIX}{mount.name}/{rel}" if rel else f"{MOUNT_PREFIX}{mount.name}"
+
+    def _reprefix(mount: Mount | None, entry: FileEntry) -> FileEntry:
+        """Reprefix *entry*'s path with its mount address, if any (see :func:`_full_path`)."""
+        if mount is None:
+            return entry
+        return entry.model_copy(update={"path": _full_path(mount, entry.path)})
+
+    def _mount_for_indexed_path(path: str) -> Mount | None:
+        """Which declared mount (if any) an already-indexed path (e.g. a search hit) is under.
+
+        ``None`` both for a plain tenant-space path *and* for a stale row under a mount name
+        that is no longer declared — the caller treats both the same way (tenant-space rules).
+        """
+        if not path.startswith(MOUNT_PREFIX):
+            return None
+        name, _, _sub = path[len(MOUNT_PREFIX) :].partition("/")
+        return mounts.get(name)
+
+    def _indexable(mount: Mount | None) -> bool:
+        """Whether a mutation on *mount* should touch the index — opt-in per mount (#731)."""
+        return mount is None or mount.indexed
+
     # ── Module-facing I/O (Phase 1) ──────────────────────────────────────────────
 
     @router.get("/list", response_model=FileListResponse)
@@ -222,8 +300,10 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileListResponse:
         tenant = _tenant(tenant_id)
-        _safe(path)
-        return FileListResponse(entries=await store.list_dir(tenant=tenant, path=path))
+        target, sub, mount = _target(path)
+        _safe(sub)
+        entries = await target.list_dir(tenant=tenant, path=sub)
+        return FileListResponse(entries=[_reprefix(mount, e) for e in entries])
 
     @router.get("/read", response_model=FileReadResponse)
     async def read_file(
@@ -231,23 +311,29 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileReadResponse:
         tenant = _tenant(tenant_id)
-        rel = _safe(path)
+        target, sub, mount = _target(path)
+        rel = _safe(sub)
         try:
-            content = await store.read_text(tenant=tenant, path=path)
+            content = await target.read_text(tenant=tenant, path=sub)
         except FileNotFoundError:
             # Not in the file space — it may be an object-store entry (upload / agent object).
-            if objects is not None:
+            # A mount has no object-store equivalent, so the fallback is tenant-space only.
+            if objects is not None and mount is None:
                 obj = await objects.read(tenant=tenant, path=rel)
                 if obj is not None:
                     return FileReadResponse(path=obj.path, name=obj.name, content=obj.content)
             raise HTTPException(status_code=404, detail="not found") from None
+        except PathEscapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:  # the 256 KB text cap (traversal already handled by _safe)
             raise HTTPException(
                 status_code=413, detail="file is too large to read as text"
             ) from exc
         except UnicodeDecodeError as exc:
             raise HTTPException(status_code=415, detail="file is not UTF-8 text") from exc
-        return FileReadResponse(path=rel, name=rel.rsplit("/", 1)[-1], content=content)
+        return FileReadResponse(
+            path=_full_path(mount, rel), name=rel.rsplit("/", 1)[-1], content=content
+        )
 
     @router.get("/stat", response_model=FileEntry)
     async def stat_file(
@@ -255,11 +341,12 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
-        _safe(path)
-        entry = await store.stat(tenant=tenant, path=path)
+        target, sub, mount = _target(path)
+        _safe(sub)
+        entry = await target.stat(tenant=tenant, path=sub)
         if entry is None:
             raise HTTPException(status_code=404, detail="not found")
-        return entry
+        return _reprefix(mount, entry)
 
     @router.put("/write", response_model=FileEntry)
     async def write_file(
@@ -268,18 +355,22 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
-        _safe(path)
+        target, sub, mount = _target(path)
+        _require_writable(mount)
+        _safe(sub)
         # Whether this write brings the path into existence — an overwrite emits nothing
         # (#665: there is deliberately no file_updated; content owners emit their own
         # *.updated events, so a mirror save must not double-signal here).
-        created = events is not None and await store.stat(tenant=tenant, path=path) is None
+        created = events is not None and await target.stat(tenant=tenant, path=sub) is None
         try:
-            entry = await store.write_text(tenant=tenant, path=path, content=body.content)
-        except ValueError as exc:  # e.g. writing to the tenant root itself
+            entry = await target.write_text(tenant=tenant, path=sub, content=body.content)
+        except PathEscapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:  # e.g. writing to the store root itself
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if created and events is not None:
-            await events.file_added(tenant, entry.path, size=entry.size)
-        return entry
+            await events.file_added(tenant, _full_path(mount, entry.path), size=entry.size)
+        return _reprefix(mount, entry)
 
     @router.delete("", response_model=FileDeleteResponse)
     async def delete_file(
@@ -287,13 +378,17 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileDeleteResponse:
         tenant = _tenant(tenant_id)
-        _safe(path)
+        target, sub, mount = _target(path)
+        _require_writable(mount)
+        _safe(sub)
         try:
-            deleted = await store.delete(tenant=tenant, path=path)
-        except ValueError as exc:  # deleting the tenant root is rejected
+            deleted = await target.delete(tenant=tenant, path=sub)
+        except PathEscapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:  # deleting the store root is rejected
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if deleted and events is not None:
-            await events.file_deleted(tenant, normalize_rel(path))
+            await events.file_deleted(tenant, _full_path(mount, normalize_rel(sub)))
         return FileDeleteResponse(deleted=deleted)
 
     @router.post("/dir", response_model=FileEntry)
@@ -302,8 +397,10 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
-        _safe(path)
-        return await store.ensure_dir(tenant=tenant, path=path)
+        target, sub, mount = _target(path)
+        _require_writable(mount)
+        _safe(sub)
+        return _reprefix(mount, await target.ensure_dir(tenant=tenant, path=sub))
 
     @router.post("/move", response_model=FileEntry)
     async def move_file(
@@ -311,27 +408,47 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
-        src = _safe(body.src)
-        dst = _safe(body.dst)
+        src_store, src_sub, src_mount = _target(body.src)
+        _dst_store, dst_sub, dst_mount = _target(body.dst)
+        # A move stays within one store: the tenant space, or one named mount. Crossing
+        # between them would mean copying real bytes between two independent filesystem
+        # roots (or the tenant space and one) — a materially different operation from a
+        # rename, and out of scope for v1 (#731); mounts stay isolated compartments, mirroring
+        # how a module's own top-level subtree is already isolated via locked_prefixes below.
+        src_name = src_mount.name if src_mount is not None else None
+        dst_name = dst_mount.name if dst_mount is not None else None
+        if src_name != dst_name:
+            raise HTTPException(
+                status_code=400,
+                detail="cannot move between the tenant space and a mount, or across mounts",
+            )
+        _require_writable(dst_mount)
+        src = _safe(src_sub)
+        dst = _safe(dst_sub)
         _reject_pathological(dst)
         # Mirror the upload guard (#479) on the move/rename path (#554): refuse landing a file
-        # *into* a module-owned top-level subtree from outside it. The src-top ≠ dst-top
-        # condition preserves a module's self-moves (it manages its own subtree, and the
+        # *into* a module-owned top-level subtree from outside it. Tenant space only — a mount
+        # is a separate namespace with its own RO/RW gate, already checked above. The src-top ≠
+        # dst-top condition preserves a module's self-moves (it manages its own subtree, and the
         # module-facing files_move relies on that) — a foreign file landing behind a module's
         # back would desync its index, exactly what the upload 400 prevents. A rename whose typed
         # name smuggled in a leading path (making dst_top a locked module) is caught here too.
-        src_top = src.split("/", 1)[0]
-        dst_top = dst.split("/", 1)[0]
-        if dst_top in locked_prefixes and src_top != dst_top:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{dst_top}' belongs to the {dst_top} module — move into your own folders",
-            )
+        if src_mount is None:
+            src_top = src.split("/", 1)[0]
+            dst_top = dst.split("/", 1)[0]
+            if dst_top in locked_prefixes and src_top != dst_top:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"'{dst_top}' belongs to the {dst_top} module — move into your own folders"
+                    ),
+                )
         try:
-            moved = await store.move(tenant=tenant, src=src, dst=dst)
+            moved = await src_store.move(tenant=tenant, src=src, dst=dst)
         except FileNotFoundError:
             # Not a file-space entry — try the object store (a movable upload/agent object).
-            if objects is not None:
+            # Mounts have no object-store equivalent.
+            if objects is not None and src_mount is None:
                 entry = await objects.move(tenant=tenant, src=src, dst=dst)
                 if events is not None:
                     await events.file_moved(tenant, src, entry.path)
@@ -339,17 +456,22 @@ def create_files_router(
             raise HTTPException(status_code=404, detail="source not found") from None
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail="destination already exists") from exc
-        except ValueError as exc:  # tenant root, or a move into the path itself
+        except PathEscapeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:  # store root, or a move into the path itself
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        full_src = _full_path(src_mount, src)
+        full_dst = _full_path(src_mount, moved.path)
         # Keep the index in step immediately so a moved file is searchable at once (the watcher
         # would also catch it, debounced). Best-effort: the move itself already succeeded.
-        if index is not None:
+        # Opt-in per mount (#731): skip entirely for a mount that never joined the index.
+        if index is not None and _indexable(src_mount):
             with suppress(Exception):  # index freshness is best-effort; the move already stands
                 await index.upsert_batch(
                     tenant=tenant,
                     entries=[
                         {
-                            "path": moved.path,
+                            "path": full_dst,
                             "name": moved.name,
                             "size": moved.size,
                             "mtime": moved.mtime,
@@ -358,16 +480,17 @@ def create_files_router(
                     ],
                 )
         if events is not None:
-            await events.file_moved(tenant, src, moved.path)
-        return moved
+            await events.file_moved(tenant, full_src, full_dst)
+        return _reprefix(src_mount, moved)
 
     # ── Operator-facing Files UI (Phase 2) ───────────────────────────────────────
 
-    async def _unused_path(*, tenant: str, rel_dir: str, name: str) -> str:
+    async def _unused_path(*, store: FileStore, tenant: str, rel_dir: str, name: str) -> str:
         """The first collision-free path for *name* under *rel_dir* (photo.jpg → photo-2.jpg).
 
         Uploading must never silently replace an existing file; suffix the stem instead.
         Best-effort under concurrency (stat-then-write), which is fine for an operator UI.
+        *store* is the resolved destination store — the tenant space or a mount (#731).
         """
         stem, dot, ext = name.rpartition(".")
         if not dot or not stem:  # "README", or a dotfile like ".env" — suffix the whole name
@@ -385,23 +508,27 @@ def create_files_router(
         dir: str = Query(default="", description="Destination directory (empty = tenant root)"),
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
-        """Upload one file into the tenant file space — the Files page's upload door (#479).
+        """Upload one file into the tenant file space or a declared mount — the Files page's
+        upload door (#479; mounts: #731).
 
         Enforces the shared #175 caps — content-type allowlist (415) and byte cap (413) —
         then lands the bytes through the FileStore seam (local-FS ↔ S3, constraint #3) and
         indexes the entry immediately, so it is listed and searchable with no rescan. The
         multi-file UI sends one request per file, which is what per-file progress and
-        failure states want. Module-owned destinations are refused (400); a name collision
-        gets a ``-2``/``-3``… suffix rather than overwriting.
+        failure states want. Module-owned destinations are refused (400), as is a read-only
+        mount (403); a name collision gets a ``-2``/``-3``… suffix rather than overwriting.
         """
         tenant = _tenant(tenant_id)
-        rel_dir = _safe(dir)
-        top = rel_dir.split("/", 1)[0]
-        if top and top in locked_prefixes:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{top}' belongs to the {top} module — upload into your own folders",
-            )
+        target, sub_dir, mount = _target(dir)
+        _require_writable(mount)
+        rel_dir = _safe(sub_dir)
+        if mount is None:
+            top = rel_dir.split("/", 1)[0]
+            if top and top in locked_prefixes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{top}' belongs to the {top} module — upload into your own folders",
+                )
         kind = file.content_type or "application/octet-stream"
         if not content_type_allowed(kind, allowed_upload_types):
             raise HTTPException(status_code=415, detail=f"unsupported file type: {kind}")
@@ -419,21 +546,28 @@ def create_files_router(
         if name in ("", ".", ".."):
             name = "file"
         _reject_pathological(name)
-        target = await _unused_path(tenant=tenant, rel_dir=rel_dir, name=name)
-        entry = await store.write_bytes(tenant=tenant, path=target, data=data, content_type=kind)
+        rel_target = await _unused_path(store=target, tenant=tenant, rel_dir=rel_dir, name=name)
+        try:
+            entry = await target.write_bytes(
+                tenant=tenant, path=rel_target, data=data, content_type=kind
+            )
+        except PathEscapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        full = _full_path(mount, entry.path)
         # An upload always lands at an unused path (collisions get a suffix), so it is
         # always a genuinely-new file (#665).
         if events is not None:
-            await events.file_added(tenant, entry.path, size=entry.size)
+            await events.file_added(tenant, full, size=entry.size)
         # Keep the index in step immediately so the upload is searchable at once (the
         # watcher would also catch it, debounced). Best-effort: the write already stands.
-        if index is not None:
+        # Opt-in per mount (#731): skip entirely for a mount that never joined the index.
+        if index is not None and _indexable(mount):
             with suppress(Exception):
                 await index.upsert_batch(
                     tenant=tenant,
                     entries=[
                         {
-                            "path": entry.path,
+                            "path": full,
                             "name": entry.name,
                             "size": entry.size,
                             "mtime": entry.mtime,
@@ -441,14 +575,15 @@ def create_files_router(
                         }
                     ],
                 )
-        return entry
+        return _reprefix(mount, entry)
 
     @router.delete("/entry", response_model=FileDeleteResponse)
     async def delete_entry(
         path: str = Query(..., description="Entry to delete (its whole subtree, if a folder)"),
         tenant_id: str | None = Query(default=None),
     ) -> FileDeleteResponse:
-        """Delete an entry from the unified Files view — the Files page's delete door (#564).
+        """Delete an entry from the unified Files view — the Files page's delete door (#564;
+        mounts: #731).
 
         The operator counterpart to the module-facing ``DELETE`` (they mirror ``upload`` vs
         ``write``): same FileStore seam, but this door adds the #479 ownership guard, an
@@ -458,39 +593,49 @@ def create_files_router(
           (*locked_prefixes*) is refused (400) — that lifecycle belongs to the owning page
           (#216/#340). This is the same rule the UI hides behind ``deletable``, enforced here so
           a crafted request cannot bypass the missing button (the module ``DELETE`` stays
-          unguarded precisely so modules *can* delete inside their own subtrees).
+          unguarded precisely so modules *can* delete inside their own subtrees). A read-only
+          mount is refused (403) the same way.
         * **Object fallback.** ``store.delete`` returns ``False`` when the path is not in the
           file space; then it may be a chat upload / agent object, so the delete falls through to
-          the object store (symmetric to ``move``).
+          the object store (symmetric to ``move``) — tenant space only, mounts have no object
+          store equivalent.
         * **De-index.** A file-space delete removes the entry (and its subtree) from the core
           index at once, so it drops out of search/listing immediately; the #390 watcher is the
-          backstop. Best-effort — the on-disk delete already stands.
+          backstop. Best-effort — the on-disk delete already stands. Skipped for a mount that
+          never opted into indexing.
 
         Delete is recursive (a folder takes its whole subtree) and hard — no trash/undo in v1.
-        The tenant root is refused by the seam (400). Returns ``{deleted}`` — ``False`` if
+        The store root is refused by the seam (400). Returns ``{deleted}`` — ``False`` if
         nothing was at *path*.
         """
         tenant = _tenant(tenant_id)
-        rel = _safe(path)
-        top = rel.split("/", 1)[0]
-        if top and top in locked_prefixes:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{top}' belongs to the {top} module — delete it from its own page",
-            )
+        target, sub, mount = _target(path)
+        _require_writable(mount)
+        rel = _safe(sub)
+        if mount is None:
+            top = rel.split("/", 1)[0]
+            if top and top in locked_prefixes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{top}' belongs to the {top} module — delete it from its own page",
+                )
         try:
-            deleted = await store.delete(tenant=tenant, path=rel)
-        except ValueError as exc:  # deleting the tenant root is rejected by the seam
+            deleted = await target.delete(tenant=tenant, path=rel)
+        except PathEscapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:  # deleting the store root is rejected by the seam
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if deleted:
-            if index is not None:
+            full = _full_path(mount, rel)
+            if index is not None and _indexable(mount):
                 with suppress(Exception):  # de-index is best-effort; the delete already stands
-                    await index.remove_subtree(tenant=tenant, path=rel)
+                    await index.remove_subtree(tenant=tenant, path=full)
             if events is not None:
-                await events.file_deleted(tenant, rel)
+                await events.file_deleted(tenant, full)
             return FileDeleteResponse(deleted=True)
         # Not in the file space — it may be an object-store entry (chat upload / agent object).
-        if objects is not None:
+        # Mounts have no object-store equivalent.
+        if objects is not None and mount is None:
             object_deleted = await objects.delete(tenant=tenant, path=rel)
             if object_deleted and events is not None:
                 await events.file_deleted(tenant, rel)
@@ -505,16 +650,21 @@ def create_files_router(
     ) -> dict[str, object]:
         """Serve the Files browser page data (ADR-0018) over the unified file space.
 
-        Returns a ``BrowserData``-shaped payload: ``{title, path, search_enabled, items}``.
-        Merges the file-space tree (folders the user navigates, files they read/download) with
-        the storage module's objects. Object entries (uploads / agent-written) and operator-
-        space file-space files are ``movable``; directories and module-owned subtrees
-        (*locked_prefixes*) are read-only in the UI (#479).
+        Returns a ``BrowserData``-shaped payload: ``{title, path, search_enabled, items,
+        read_only}``. Merges the file-space tree (folders the user navigates, files they
+        read/download) with the storage module's objects. Object entries (uploads /
+        agent-written) and operator-space file-space files are ``movable``; directories and
+        module-owned subtrees (*locked_prefixes*) are read-only in the UI (#479). Declared
+        mounts (#731) render as additional top-level roots at ``path=""``; browsing into one
+        lists its own tree (RW: same movable/deletable rules as the tenant space; RO: neither,
+        and the page-level ``read_only`` flag tells the shell to hide Upload too — mutations are
+        refused server-side regardless, this only spares the operator a doomed click).
         """
         tenant = _tenant(tenant_id)
         query = q.strip()
         items: list[dict[str, object]] = []
         seen: set[tuple[str, str]] = set()
+        read_only = False
 
         def _add(
             *, path: str, name: str, kind: str, size: int, movable: bool, deletable: bool
@@ -538,32 +688,52 @@ def create_files_router(
                 )
             )
 
+        current_mount: Mount | None = None
         if query:
             fs_hits = await index.search(tenant=tenant, query=query, limit=200) if index else []
             for e in fs_hits:
+                hit_mount = _mount_for_indexed_path(e.path)
                 _add(
                     path=e.path,
                     name=e.name,
                     kind=e.kind,
                     size=e.size,
-                    movable=_fs_movable(e.path, e.kind),
-                    deletable=_deletable(e.path),
+                    movable=_movable_for(hit_mount, e.path, e.kind),
+                    deletable=_deletable_for(hit_mount, e.path),
                 )
             title = f"Files — {query}"
         else:
-            rel = _safe(path)
-            for fe in await store.list_dir(tenant=tenant, path=rel):
+            target, sub, current_mount = _target(path)
+            rel = _safe(sub)
+            read_only = current_mount is not None and current_mount.read_only
+            for fe in await target.list_dir(tenant=tenant, path=rel):
+                full = _full_path(current_mount, fe.path)
                 _add(
-                    path=fe.path,
+                    path=full,
                     name=fe.name,
                     kind=fe.kind,
                     size=fe.size,
-                    movable=_fs_movable(fe.path, fe.kind),
-                    deletable=_deletable(fe.path),
+                    movable=_movable_for(current_mount, fe.path, fe.kind),
+                    deletable=_deletable_for(current_mount, fe.path),
                 )
+            # Declared mounts render as top-level roots, like a drive listing (#731) — only at
+            # the tenant root; a mount's own children never nest another mount.
+            if not rel and current_mount is None:
+                for m in sorted(mounts.values(), key=lambda m: m.name):
+                    _add(
+                        path=f"{MOUNT_PREFIX}{m.name}",
+                        name=m.name,
+                        kind="dir",
+                        size=0,
+                        movable=False,
+                        deletable=False,
+                    )
             title = f"Files — {path}" if path else "Files"
 
-        if objects is not None:
+        # Objects (chat uploads / agent objects) are tenant-scoped — never merged in while
+        # browsing inside a mount subtree (`current_mount` stays None throughout a search, so
+        # this still runs then, exactly as before).
+        if objects is not None and current_mount is None:
             for oe in await objects.list(tenant=tenant, path=path, query=query):
                 _add(
                     path=oe.path,
@@ -576,7 +746,13 @@ def create_files_router(
 
         # Dirs before files, then by name — the merged view reads like one tree.
         items.sort(key=lambda it: (it["icon"] != "folder", str(it["title"]).lower()))
-        return {"title": title, "path": path, "search_enabled": True, "items": items}
+        return {
+            "title": title,
+            "path": path,
+            "search_enabled": True,
+            "items": items,
+            "read_only": read_only,
+        }
 
     @router.get("/search", response_model=FileSearchResponse)
     async def search_files(
@@ -584,7 +760,12 @@ def create_files_router(
         limit: int = Query(default=50, ge=1, le=200),
         tenant_id: str | None = Query(default=None),
     ) -> FileSearchResponse:
-        """Search the core file index by name/path fragment (backs ``files_search``)."""
+        """Search the core file index by name/path fragment (backs ``files_search``).
+
+        Spans every indexed mount alongside the tenant space with no extra code — an indexed
+        mount's rows already carry their ``mount:<name>/`` address (#731), the same string the
+        other file routes resolve, so a hit here is directly addressable.
+        """
         tenant = _tenant(tenant_id)
         if index is None or not q.strip():
             return FileSearchResponse(entries=[])
@@ -603,17 +784,21 @@ def create_files_router(
     ) -> Response:
         """Stream a file from the unified file space — file-space first, then the object store."""
         tenant = _tenant(tenant_id)
-        rel = _safe(path)
-        entry = await store.stat(tenant=tenant, path=rel)
+        target, sub, mount = _target(path)
+        rel = _safe(sub)
+        try:
+            entry = await target.stat(tenant=tenant, path=rel)
+        except PathEscapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if entry is not None and entry.kind == "file":
-            data = await store.read_bytes(tenant=tenant, path=rel)
+            data = await target.read_bytes(tenant=tenant, path=rel)
             media = mimetypes.guess_type(entry.name)[0] or "application/octet-stream"
             return Response(
                 content=data,
                 media_type=media,
                 headers={"content-disposition": _disposition(entry.name)},
             )
-        if objects is not None:
+        if objects is not None and mount is None:
             dl = await objects.download(tenant=tenant, path=rel)
             if dl is not None:
                 return StreamingResponse(

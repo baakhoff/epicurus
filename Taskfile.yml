@@ -76,6 +76,16 @@ tasks:
     cmds:
       - docker compose -f compose.yaml -f services/core-app/compose.docker-socket.yaml down {{.CLI_ARGS}}
 
+  external-mounts-up:
+    desc: 'Start the stack with operator-declared external file mounts (#731) — additional Files roots bound from the host; requires EXTERNAL_MOUNT_*_HOST_PATH + FILES_EXTERNAL_MOUNTS (see services/core-app/compose.external-mounts.yaml)'
+    cmds:
+      - docker compose -f compose.yaml -f services/core-app/compose.external-mounts.yaml up -d
+
+  external-mounts-down:
+    desc: Stop the stack including the external-mounts override (append `-- -v` to drop volumes)
+    cmds:
+      - docker compose -f compose.yaml -f services/core-app/compose.external-mounts.yaml down {{.CLI_ARGS}}
+
   smoke:
     desc: Boot an isolated copy of the stack and assert the integration last mile (mirrors the CI gate)
     cmds:

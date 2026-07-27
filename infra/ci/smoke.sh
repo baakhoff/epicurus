@@ -32,6 +32,15 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-epicurus-ci}"
 NET="$COMPOSE_PROJECT_NAME"
 ENV_FILE="$(mktemp)"
 SECRETS_FILE="$(mktemp)"
+# External mounts round trip (#731): a real host directory bind-mounted into core-app (see
+# infra/ci/compose.ci.yaml), not a system tmp path — Docker Desktop's default file-sharing
+# roots don't always include the OS temp dir, but they always include the checkout itself
+# (the build context already has to be reachable). Seeded with one pre-existing file so the
+# assertions can check a list sees it, not only a round-tripped write.
+SMOKE_MOUNT_DIR="$ROOT/.smoke-mount"
+rm -rf "$SMOKE_MOUNT_DIR"
+mkdir -p "$SMOKE_MOUNT_DIR"
+printf 'seed\n' > "$SMOKE_MOUNT_DIR/seed.txt"
 BOOT_LOG="$(mktemp)"
 DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml --env-file $ENV_FILE"
 CURL_IMG="curlimages/curl:8.11.1"
@@ -89,6 +98,7 @@ cleanup() {
   else
     log "Tearing down"
     $DC down -v --remove-orphans >/dev/null 2>&1 || true
+    rm -rf "$SMOKE_MOUNT_DIR"  # still bind-mounted into core-app while KEEP_UP holds it up
   fi
   rm -f "$ENV_FILE" "$SECRETS_FILE" "$BOOT_LOG"
   exit "$rc"
@@ -100,6 +110,7 @@ cat > "$ENV_FILE" <<EOF
 APP_ENV=ci
 LOG_LEVEL=warning
 DEFAULT_TENANT_ID=local
+SMOKE_MOUNT_DIR=$SMOKE_MOUNT_DIR
 EOF
 
 log "Smoke project '$COMPOSE_PROJECT_NAME' (network $NET, no host ports)"
@@ -155,6 +166,30 @@ log "Asserting the integration last mile"
 
 http -f "http://core-app:8080/health" >/dev/null || die "core-app /health unreachable or non-200"
 ok "core-app /health"
+
+# External mounts (#731): a declared RW mount round-trips list/write/read through the platform
+# API against the real bind-mounted directory (infra/ci/compose.ci.yaml) — the one thing a
+# unit test (LocalFileStore directly, no container) and compose-validate (YAML only, no `up`)
+# can't prove: the container actually sees the host bytes, and a write through the API
+# actually lands on disk, not just in an in-memory fake.
+mlist="$(http "http://core-app:8080/platform/v1/files/list?path=mount:smoketest")"
+printf '%s' "$mlist" | grep -q '"name":"seed.txt"' \
+  || die "declared mount did not list its pre-existing seed file: $mlist"
+ok "external mount lists pre-existing host content (#731)"
+
+mwrite="$(http -X PUT "http://core-app:8080/platform/v1/files/write?path=mount:smoketest/hello.txt" \
+  -H 'Content-Type: application/json' -d '{"content":"hello from smoke"}' || true)"
+printf '%s' "$mwrite" | grep -q '"path":"mount:smoketest/hello.txt"' \
+  || die "write into a declared RW mount failed: $mwrite"
+[ -f "$SMOKE_MOUNT_DIR/hello.txt" ] || die "mount write did not land on the real host directory"
+[ "$(cat "$SMOKE_MOUNT_DIR/hello.txt")" = "hello from smoke" ] \
+  || die "mount write landed with the wrong content"
+ok "write through the platform API lands on the real host directory"
+
+mread="$(http "http://core-app:8080/platform/v1/files/read?path=mount:smoketest/hello.txt")"
+printf '%s' "$mread" | grep -q '"content":"hello from smoke"' \
+  || die "read-after-write through a mount did not round-trip: $mread"
+ok "read-after-write round-trips through an external mount (#731)"
 
 mods="$(http "http://core-app:8080/platform/v1/modules")"
 for m in $EXPECT_MODULES; do

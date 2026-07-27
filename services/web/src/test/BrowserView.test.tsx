@@ -316,6 +316,20 @@ describe("BrowserView upload (#479)", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Upload" })).toBeNull());
   });
 
+  it("hides Upload when the directory is read-only, e.g. a read-only mount (#731)", async () => {
+    const source = fakeSource({
+      fetchPage: vi.fn().mockResolvedValue({
+        title: "Files",
+        items: [{ id: "photo.jpg", title: "photo.jpg" }],
+        read_only: true,
+      }),
+      upload: { send: vi.fn() },
+    });
+    render(<BrowserView source={source} />, { wrapper });
+    await screen.findByText("photo.jpg");
+    expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
+  });
+
   it("keeps the Upload button discoverable while its label collapses on phone (#620)", async () => {
     const { source } = uploadSource();
     render(<BrowserView source={source} />, { wrapper });

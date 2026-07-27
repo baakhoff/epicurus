@@ -24,6 +24,14 @@ services:
     ports: !reset []
   core-app:
     ports: !reset []
+    # External mounts round trip (#731): a bind-mounted RW temp dir the smoke script creates
+    # and seeds, asserting list/write/read through /platform/v1/files/* — the runtime-smoke
+    # gate's only way to prove containment/RO-RW wiring against a real filesystem the tenant
+    # tree never exercises (unit tests use LocalFileStore directly, not this bind-mount path).
+    volumes:
+      - ${SMOKE_MOUNT_DIR}:/mnt/spaces/smoketest
+    environment:
+      FILES_EXTERNAL_MOUNTS: smoketest:/mnt/spaces/smoketest:rw
   echo:
     ports: !reset []
   storage:

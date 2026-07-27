@@ -14,6 +14,23 @@ images to GHCR.
 
 ### Added
 
+- **External file mounts** (#731) — add a directory to Files the way you'd add a drive: an
+  operator binds a host folder (or a whole drive) into `core-app` via a compose overlay
+  (`services/core-app/compose.external-mounts.yaml`, `task external-mounts-up` — never a
+  default bind, never auto-loaded), and it shows up as an additional top-level root on the
+  Files page and in the agent's `storage_list`/`storage_search`/`storage_read` tools,
+  addressed as `mount:<name>/<sub-path>`. Read-only by default; a declared `rw` mount is
+  writable through the same operations the tenant space has (upload/write/delete/move/mkdir)
+  — enforced **server-side** (403), not just hidden in the UI. Traversal and symlink-escape
+  attempts are rejected (400) via `PathEscapeError`, a new `epicurus_core.files` exception
+  type an app-level handler catches uniformly. Indexing/watching is **opt-in per mount**
+  (`FILES_EXTERNAL_MOUNTS_INDEXED`, with exclude globs) — a whole-drive mount never
+  auto-indexes by default. `LocalFileStore` gained a `tenant_subdir` flag so a mount can
+  address its own root directly rather than nesting a `<tenant>/` segment inside the
+  operator's drive. A move never crosses between the tenant space and a mount, or between two
+  mounts — mounts are isolated compartments. `epicurus-core` 0.31.0→0.32.0 (MINOR) ·
+  `core-app` 0.96.0→0.97.0 (MINOR) · `web` 0.122.0→0.123.0 (MINOR).
+
 - **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
   operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
   only source for a hosted model's vision support and context length, and it is missing ids

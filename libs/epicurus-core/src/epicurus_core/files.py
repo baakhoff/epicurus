@@ -32,6 +32,7 @@ __all__ = [
     "FileStore",
     "FileStoreBackend",
     "LocalFileStore",
+    "PathEscapeError",
     "S3FileStore",
     "build_file_store",
     "normalize_rel",
@@ -57,6 +58,16 @@ class FileEntry(BaseModel):
     kind: FileKind
     size: int = 0
     mtime: float = 0.0
+
+
+class PathEscapeError(ValueError):
+    """A resolved path escapes the store's root — traversal, or a symlink pointing outward.
+
+    A :class:`ValueError` subclass (existing ``except ValueError`` callers are unaffected);
+    raise/catch this specific type where telling an escape apart from the *other* reasons a
+    store call raises ``ValueError`` (a tenant-root write, the text-read size cap) matters —
+    e.g. mapping it to a clean 400 without also mis-mapping those.
+    """
 
 
 def normalize_rel(path: str) -> str:
@@ -158,15 +169,25 @@ class LocalFileStore(FileStore):
     """Local-filesystem backend (self-host): the tenant tree under ``<root>/<tenant>``.
 
     Blocking disk I/O is offloaded to a worker thread so the event loop stays free. Every
-    resolved path is confined under the tenant root (``relative_to`` check), so a crafted
-    key cannot escape even past :func:`normalize_rel`.
+    resolved path is confined under the store root (``relative_to`` check), so a crafted key
+    or an outward-pointing symlink cannot escape even past :func:`normalize_rel`.
+
+    ``tenant_subdir=False`` addresses *root* itself rather than ``root/<tenant>`` — the seam
+    an operator-declared external mount uses (#731): the mount root already names one
+    directory, so nesting a tenant segment under it would require the operator to create that
+    subfolder inside their own drive. ``tenant`` is still validated on every call (constraint
+    #1's gate stays in force) even though it no longer shapes the path.
     """
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, tenant_subdir: bool = True) -> None:
         self._root = Path(root)
+        self._tenant_subdir = tenant_subdir
 
     def _tenant_root(self, tenant: str) -> Path:
-        return (self._root / validate_tenant_id(tenant)).resolve()
+        validate_tenant_id(tenant)
+        if not self._tenant_subdir:
+            return self._root.resolve()
+        return (self._root / tenant).resolve()
 
     def _abs(self, tenant: str, path: str) -> Path:
         base = self._tenant_root(tenant)
@@ -174,7 +195,7 @@ class LocalFileStore(FileStore):
         # Defence in depth: normalize_rel already rejects "..", but confirm containment in case
         # of a symlink inside the tree pointing outward.
         if resolved != base and base not in resolved.parents:
-            raise ValueError(f"path escapes the tenant root: {path!r}")
+            raise PathEscapeError(f"path escapes the store root: {path!r}")
         return resolved
 
     def _entry(self, tenant: str, target: Path) -> FileEntry:

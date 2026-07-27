@@ -152,6 +152,47 @@ for the probe's own exception text. Module removal always still works regardless
 the module at once, ADR-0056/#382); only the container teardown and a KV-cache restart defer to
 the next restart.
 
+## External file mounts (#731)
+
+Add a directory to Files the way you'd add a drive: bind a host folder — or an entire drive —
+into `core-app` and it shows up as an additional top-level root on the Files page, browsable
+and (if opted in) searchable by both the operator and the agent, alongside the tenant space.
+
+core-app runs in a container, so an arbitrary host path can't be attached at runtime — this is
+a **compose-file change plus a container recreate**, the same opt-in-overlay shape as the
+[Docker-socket escape hatch](#docker-socket-access-708-adr-0109) above:
+
+```bash
+docker compose -f compose.yaml -f services/core-app/compose.external-mounts.yaml up -d
+# or: task external-mounts-up
+```
+
+`services/core-app/compose.external-mounts.yaml` ships **one** example mount — read-only,
+bound at `/mnt/spaces/media` — with its host path templated as `EXTERNAL_MOUNT_MEDIA_HOST_PATH`
+(set it in the root `.env`, e.g. `EXTERNAL_MOUNT_MEDIA_HOST_PATH=D:\media`). Duplicate the
+`volumes:` line for more than one mount, and extend `FILES_EXTERNAL_MOUNTS` (comma-separated
+`name:container-path[:ro|rw]`) to match — the container path in each entry **must** match what
+that line actually binds, or the declared mount has nothing to serve. Full config knobs
+(`FILES_EXTERNAL_MOUNTS_INDEXED`, `FILES_EXTERNAL_MOUNTS_EXCLUDE`), the `mount:<name>/<path>`
+addressing scheme, and the read-only/read-write enforcement are documented in
+[Files reference → External mounts](../reference/files.md#external-mounts-731); this section is
+the infra/compose side only.
+
+**Persisting the opt-in across reconciles**, same mechanism as the Docker-socket overlay (#655):
+`task reconcile` includes `compose.external-mounts.yaml` automatically once
+`EXTERNAL_MOUNT_MEDIA_HOST_PATH` (or whichever host-path variable a duplicated mount block
+uses) is set in the root `.env`; leave it unset and reconcile stays on the default stack with no
+mounts.
+
+**Security — read before enabling.** A mount exposes that host subtree to the operator's Files
+page *and* the agent's file tools — mount deliberately, and prefer read-only (`ro`, the
+default) unless the agent specifically needs to write there. Never bind the host home directory
+(`~`/`$HOME`) or any path containing credentials/SSH keys/cloud config — the same standing
+bind-mount pitfall as `EPICURUS_FILES_ROOT` above, just pointed at content the core didn't
+create and doesn't control. Traversal and symlink-escape attempts are rejected server-side
+(400) regardless, but a *legitimately reachable* file inside a mount is exactly that —
+reachable — so scope the mount to what should be reachable.
+
 ## Ollama (local LLM runtime)
 
 Runs **as a container** (ADR-0011), CPU by default and GPU opt-in via an overlay

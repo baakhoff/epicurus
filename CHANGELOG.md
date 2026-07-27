@@ -14,6 +14,21 @@ images to GHCR.
 
 ### Added
 
+- **Resizable tree panel for Knowledge and Notes** (#730) — the editor archetype's document
+  list fixed the tree column at 18rem, so long titles truncated on a narrow tree and a wide
+  screen couldn't give the tree more room. A drag handle now sits between the tree and the
+  editor: pointer-drag resizes live (clamped to 12rem–40rem), double-click resets to the
+  18rem default, and the handle is keyboard-accessible (`role="separator"`, arrow keys nudge
+  the width) rather than mouse-only. The width persists per `(module, pageId)` in
+  `localStorage` (`editor-tree-width:<module>/<pageId>`) — the same pattern CalendarView
+  already uses for its own view state — so Knowledge and Notes remember independent
+  preferences. Below the `sm` breakpoint the layout is unchanged (a single stacked pane, so
+  there's nothing to divide); the fixed-width grid column becomes a CSS custom property
+  (`--tree-w`) read only by the `sm:` grid-template, so the responsive stack is undisturbed
+  by the same inline style always being present. One archetype change covers both pages
+  (Notes and Knowledge share the `editor` archetype, ADR-0018) — a shared `ResizableSplit`
+  component is deliberately not extracted yet; that's for if/when a second consumer (e.g. the
+  Files browser) actually needs one. `web` 0.122.1→0.123.0 (MINOR).
 - **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
   operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
   only source for a hosted model's vision support and context length, and it is missing ids

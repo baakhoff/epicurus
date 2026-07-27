@@ -493,6 +493,14 @@ create, and the command palette's `?new=1` deep-link, which funnels into the sam
 heading — the typed name for the named door, `# Untitled` for the two that don't collect one —
 so the first preview renders a title instead of a blank pane; Edit is still one click away. Both
 views write back to the same markdown buffer, so the save/version flow below is unchanged.
+
+The list pane is **resizable** (#730): drag the divider between it and the editor to widen or
+narrow it (12rem–40rem), double-click the divider to reset to the 18rem default, or focus it
+(it's a keyboard-accessible `role="separator"`) and use the arrow keys. The width is remembered
+per `(module, pageId)` in `localStorage`, so Knowledge and Notes keep independent preferences —
+the same pattern CalendarView already uses for its own view-state persistence. Below the `sm`
+breakpoint the layout is still a single stacked pane, so there is nothing to divide there.
+
 Because notes/knowledge **re-embed on every save**, the editor does not
 save on each keystroke: a save fires only when you **leave** (switch document, go back, or
 the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,

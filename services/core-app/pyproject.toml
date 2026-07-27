@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core-app"
-version = "0.98.0"
+version = "0.99.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
@@ -26,6 +26,10 @@ dependencies = [
     # Web Push send path (#670, ADR-0102): VAPID signing (RFC 8292) + the aes128gcm payload
     # encryption (RFC 8291), so the core signs/encrypts pushes itself rather than shelling out.
     "pywebpush>=2.0",
+    # Pure-Python PDF text extraction (#738) — no system deps (unlike poppler/pdftotext),
+    # so the attachment expander can read a PDF's text layer instead of decoding its bytes
+    # as UTF-8 (mojibake).
+    "pypdf>=6.14.2",
 ]
 
 [build-system]

@@ -83,6 +83,27 @@ never reaches the provider at all — it ends immediately with a canned explanat
 normal answer), just skipping the extraction hand-off (a canned rejection is nothing to learn
 facts from).
 
+**A PDF attachment gets a real reader, not a naive decode (#738).** Before this, every
+non-image file — including a PDF — was decoded as UTF-8 (`errors="replace"`), which for a
+PDF meant `[file: report.pdf]` followed by thousands of replacement characters: the same
+noise images used to produce, just as text instead of an obviously-binary blob.
+`agent/document_extraction.py`'s `extract_pdf` (pure-Python `pypdf`, no system deps) reads
+the real text layer instead, page by page (`[page N]` markers), bounded to 20k characters
+with a truncation note — larger than the plain-text excerpt cap (`_EXCERPT_CHARS`, 4k) since a
+document attachment is the point of the turn, not incidental context. An encrypted PDF (beyond
+an empty/owner-only password — the common "restricts editing, not reading" case) or a scanned
+(image-only, no text layer) one renders an honest metadata block instead —
+`[file: report.pdf — PDF, 12 pages, no extractable text]` — never mojibake, and the attachment
+is never silently dropped either. The same honest-block treatment catches any *other* file
+whose UTF-8 decode turns out mostly replacement characters (`is_mostly_binary`, a zip renamed
+`.bin`) — no format gets to pretend binary is text. Out of scope, deliberately: OCR (a scanned
+PDF reports "no extractable text", full stop), docx/pptx extractors (the seam is built to make
+adding one trivial, not built yet), and native PDF pass-through for a hosted model that
+accepts documents directly (extraction is the portable, local-first answer — Ollama can't take
+a PDF at all; a capability-gated pass-through can layer on top of this seam later without
+changing it). The platform read door (`GET /platform/v1/files/read`) is untouched — this seam
+applies only at the attachment expander, the one place the mojibake actually reached the model.
+
 **Tool results that carry entity refs also teach the model the ids** (ADR-0079). When a module
 tool returns an envelope (`tool_envelope(text, [EntityRef…])`), the loop lifts the refs onto the
 turn for UI chips — and appends a compact `title → id` listing to the tool result the **model**

@@ -145,8 +145,9 @@ app_token="$(grep -E '^OPENBAO_TOKEN=' "$SECRETS_FILE" | tail -1 | cut -d= -f2-)
 token_period="$($DC exec -T -e BAO_TOKEN="$app_token" openbao \
     bao token lookup -format=json 2>/dev/null | tr -d ' \t\r\n' \
     | grep -o '"period":[0-9]*' | cut -d: -f2)"
-[ -n "$token_period" ] && [ "$token_period" -gt 0 ] 2>/dev/null \
-  || die "app token is not periodic (period='${token_period:-unset}') — it will expire, see #728"
+case "$token_period" in
+  ''|*[!0-9]*|0) die "app token is not periodic (period='${token_period:-unset}') — it expires, see #728" ;;
+esac
 ok "app token is periodic (${token_period}s), so renewal can keep it alive indefinitely"
 
 log "Starting the auto-unseal sidecar, core, and modules"

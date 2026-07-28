@@ -26,6 +26,19 @@ images to GHCR.
   grouped by module with a Custom section for a free-typed `(module, event_type)` pair.
   `core-app` 0.96.0→0.97.0 (MINOR) · `web` 0.122.0→0.123.0 (MINOR). ADR-0114.
 
+- **Persisted maintenance-run history** (#733) — the Maintenance orchestrator's `last_run` was
+  a single in-memory slot, gone on restart, with no record of whether a run was scheduled or
+  manually triggered. A new tenant-scoped `maintenance_runs` table is the durable counterpart,
+  written via an `on_recorded` hook (mirroring `AutomationRunner`'s live-runs-feed pattern) on
+  every completion — including a shutdown-interrupted batch, persisted from `shutdown()` itself
+  since the driver's own `except CancelledError` can't safely await again once caught. Every run
+  now carries a `source` (`scheduled` | `manual`). `GET /platform/v1/maintenance`'s `last_run`
+  reads the store (survives a restart); a new paginated `GET /platform/v1/maintenance/runs`
+  pages back through it, newest-first; retention prunes past a row cap or age cutoff as its own
+  nightly-eligible maintenance job. Settings' Maintenance card gains a "Run history" list —
+  time, source, duration, per-job status chips, expandable detail, "Load more" pagination.
+  `core-app` 0.97.0→0.98.0 (MINOR) · `web` 0.123.0→0.124.0 (MINOR). ADR-0116 (amends ADR-0060).
+
 - **Knowledge and Notes remember where you left off** (#743) — opening the page always
   landed on the module's default project, with every folder collapsed back to its initial
   state and no document open, no matter where you'd actually been working: the active

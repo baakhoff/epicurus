@@ -1,13 +1,16 @@
 """The maintenance-orchestrator platform API (ADR-0060), under ``/platform/v1/maintenance``.
 
 ``GET`` reports the registered jobs, the effective schedule + next planned run, the last
-completed run, and any run currently in flight. ``PUT /schedule`` sets the schedule — enable/
-disable, cadence, hour, weekday (#621) — validated before it's persisted. ``POST /run`` starts
-the manual "run everything" batch as a background task and returns immediately (202) with that
-run's live progress — it does not wait for the batch, which can take minutes (#561). A second
-``POST`` while one is already running responds 409 rather than starting a competing batch; the
-caller re-``GET``s to observe/join the in-flight run. The shell's Settings screen drives it: it
-rehydrates onto ``current_run`` on mount and polls while one is live.
+completed run, and any run currently in flight. ``last_run`` reads the persisted history
+(#733, ``maintenance_history.py``), not the orchestrator's in-memory slot — it survives a
+restart. ``GET /runs`` pages further back through that same history, newest-first. ``PUT
+/schedule`` sets the schedule — enable/disable, cadence, hour, weekday (#621) — validated
+before it's persisted. ``POST /run`` starts the manual "run everything" batch as a background
+task and returns immediately (202) with that run's live progress — it does not wait for the
+batch, which can take minutes (#561). A second ``POST`` while one is already running responds
+409 rather than starting a competing batch; the caller re-``GET``s to observe/join the
+in-flight run. The shell's Settings screen drives it: it rehydrates onto ``current_run`` on
+mount and polls while one is live.
 """
 
 from __future__ import annotations
@@ -15,15 +18,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
 from epicurus_core_app.maintenance import (
     MaintenanceCurrentRun,
     MaintenanceOrchestrator,
-    MaintenanceRun,
     MaintenanceRunConflictError,
 )
+from epicurus_core_app.maintenance_history import MaintenanceRunRecord, MaintenanceRunStore
 from epicurus_core_app.maintenance_schedule_prefs import (
     MaintenanceSchedule,
     MaintenanceScheduleStore,
@@ -50,12 +53,22 @@ class MaintenanceJobResultView(BaseModel):
     detail: str
 
 
-class MaintenanceRunView(BaseModel):
-    """The aggregate result of one completed batch."""
+class MaintenanceRunHistoryView(BaseModel):
+    """One persisted history row (#733) — a completed, or shutdown-interrupted, batch."""
 
-    ran_at: str
+    id: int
+    started_at: str
+    finished_at: str
     scope: str
+    source: str
     jobs: list[MaintenanceJobResultView]
+
+
+class MaintenanceRunHistoryPageView(BaseModel):
+    """One page of ``GET /runs`` — newest-first. ``next_cursor`` is ``None`` past the last page."""
+
+    runs: list[MaintenanceRunHistoryView]
+    next_cursor: int | None
 
 
 class MaintenanceJobProgressView(BaseModel):
@@ -86,7 +99,7 @@ class MaintenanceStatusView(BaseModel):
     # (the scheduler's own due-check additionally avoids re-firing within an already-run window).
     next_run_at: str | None
     jobs: list[MaintenanceJobView]
-    last_run: MaintenanceRunView | None
+    last_run: MaintenanceRunHistoryView | None
     current_run: MaintenanceCurrentRunView | None
 
 
@@ -99,13 +112,16 @@ class MaintenanceScheduleUpdate(BaseModel):
     weekday: int | None = None
 
 
-def _run_view(run: MaintenanceRun) -> MaintenanceRunView:
-    return MaintenanceRunView(
-        ran_at=run.ran_at,
-        scope=run.scope,
+def _history_view(record: MaintenanceRunRecord) -> MaintenanceRunHistoryView:
+    return MaintenanceRunHistoryView(
+        id=record.id,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+        scope=record.scope,
+        source=record.source,
         jobs=[
             MaintenanceJobResultView(key=r.key, label=r.label, status=r.status, detail=r.detail)
-            for r in run.jobs
+            for r in record.jobs
         ],
     )
 
@@ -125,14 +141,17 @@ def create_maintenance_router(
     orchestrator: MaintenanceOrchestrator,
     *,
     schedule_store: MaintenanceScheduleStore,
+    history: MaintenanceRunStore,
     timezone: TimezoneProvider,
     default_tenant: str = "local",
 ) -> APIRouter:
     """Build the ``/platform/v1/maintenance`` router over a :class:`MaintenanceOrchestrator`.
 
     ``schedule_store``/``timezone`` back the schedule GET/PUT surface directly (#621) — the
-    orchestrator itself only ever *reads* the current schedule (via the same store, wired as its
-    own provider in ``app.py``); the route is what writes it.
+    orchestrator itself only ever *reads* the current schedule (via the same store, wired as
+    its own provider in ``app.py``); the route is what writes it. ``history`` (#733) is the
+    durable record ``last_run``/``GET /runs`` read from — the orchestrator's own
+    ``on_recorded`` hook, wired separately in ``app.py``, is what writes it.
     """
     router = APIRouter(prefix="/platform/v1/maintenance", tags=["maintenance"])
 
@@ -144,7 +163,7 @@ def create_maintenance_router(
 
     @router.get("", response_model=MaintenanceStatusView)
     async def maintenance_status() -> MaintenanceStatusView:
-        last = orchestrator.last_run()
+        last = await history.most_recent(default_tenant)
         current = orchestrator.current_run()
         schedule = await schedule_store.get(default_tenant)
         return MaintenanceStatusView(
@@ -161,8 +180,19 @@ def create_maintenance_router(
                 )
                 for d in orchestrator.descriptors()
             ],
-            last_run=_run_view(last) if last else None,
+            last_run=_history_view(last) if last else None,
             current_run=_current_view(current) if current else None,
+        )
+
+    @router.get("/runs", response_model=MaintenanceRunHistoryPageView)
+    async def run_history(
+        cursor: int | None = Query(None),
+        limit: int = Query(50, ge=1, le=200),
+    ) -> MaintenanceRunHistoryPageView:
+        """Persisted run history, newest-first. ``cursor`` is a prior page's ``next_cursor``."""
+        page = await history.page(default_tenant, cursor=cursor, limit=limit)
+        return MaintenanceRunHistoryPageView(
+            runs=[_history_view(r) for r in page.runs], next_cursor=page.next_cursor
         )
 
     @router.put("/schedule", response_model=MaintenanceStatusView)
@@ -184,7 +214,7 @@ def create_maintenance_router(
     )
     async def run_maintenance() -> MaintenanceCurrentRunView:
         try:
-            current = orchestrator.start_run(tenant=default_tenant, scope="all")
+            current = orchestrator.start_run(tenant=default_tenant, scope="all", source="manual")
         except MaintenanceRunConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         return _current_view(current)

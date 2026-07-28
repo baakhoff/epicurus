@@ -23,7 +23,7 @@ import {
   cn,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import type { MaintenanceStatus, ModuleSnapshot } from "@/lib/contracts";
+import type { MaintenanceRun, MaintenanceStatus, ModuleSnapshot } from "@/lib/contracts";
 import { usePrefs } from "@/stores/prefs";
 
 /** Union of the OAuth API scopes every installed module declares for *provider* (#241). */
@@ -615,6 +615,118 @@ function ScheduleControls({ status }: { status: MaintenanceStatus }) {
   );
 }
 
+const RUN_HISTORY_PAGE_SIZE = 20;
+
+function jobTone(status: string): "ok" | "dim" | "accent" | "danger" {
+  return status === "ok" ? "ok" : status === "running" ? "accent" : status === "error" ? "danger" : "dim";
+}
+
+/** "3m 12s" / "42s" — blank if either timestamp is unparseable (never block the row on it). */
+function formatDuration(startedAt: string, finishedAt: string): string {
+  const ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+}
+
+/** One history row — collapsed to a one-line summary, expandable to each job's detail. */
+function RunHistoryRow({ run }: { run: MaintenanceRun }) {
+  const [open, setOpen] = useState(false);
+  const errorCount = run.jobs.filter((j) => j.status === "error").length;
+  const duration = formatDuration(run.started_at, run.finished_at);
+
+  return (
+    <li className="rounded-(--radius-card) border border-edge bg-surface-2 p-2.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 text-left"
+      >
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-ink">{formatWhen(run.started_at)}</span>
+          <span className="text-ink-faint">· {run.source === "scheduled" ? "Scheduled" : "Manual"}</span>
+          {duration && <span className="text-ink-faint">· {duration}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {errorCount > 0 && <span className="text-[10px] text-danger">{errorCount} failed</span>}
+          <div className="flex items-center gap-1">
+            {run.jobs.map((j) => (
+              <Dot key={j.key} tone={jobTone(j.status)} />
+            ))}
+          </div>
+        </div>
+      </button>
+      {open && (
+        <ul className="mt-2 flex flex-col gap-1 border-t border-edge pt-2">
+          {run.jobs.map((j) => (
+            <li key={j.key} className="flex items-center gap-1.5 text-[11px]">
+              <Dot tone={jobTone(j.status)} />
+              <span className="text-ink">{j.label}</span>
+              {j.detail && <span className="text-ink-dim">· {j.detail}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/** One fetched page of history — a plain `useQuery` per cursor (react-query caches each page
+ *  independently), rather than accumulating into local state. "Load more" only ever renders on
+ *  the last page currently mounted (`onLoadMore` is unset on every earlier one). */
+function RunHistoryPage({
+  cursor,
+  onLoadMore,
+}: {
+  cursor: number | undefined;
+  onLoadMore?: (next: number) => void;
+}) {
+  const page = useQuery({
+    queryKey: ["maintenance-runs", cursor],
+    queryFn: () => api.maintenanceRunHistory({ cursor, limit: RUN_HISTORY_PAGE_SIZE }),
+  });
+
+  if (page.isLoading) return <Spinner />;
+  if (page.isError || !page.data) {
+    return <p className="text-xs text-danger">Could not load run history.</p>;
+  }
+  return (
+    <>
+      {page.data.runs.map((run) => (
+        <RunHistoryRow key={run.id} run={run} />
+      ))}
+      {onLoadMore && page.data.next_cursor != null && (
+        <Button variant="ghost" onClick={() => onLoadMore(page.data.next_cursor as number)}>
+          Load more
+        </Button>
+      )}
+    </>
+  );
+}
+
+function RunHistoryList() {
+  const [cursors, setCursors] = useState<(number | undefined)[]>([undefined]);
+
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-medium tracking-wide text-ink-dim uppercase">Run history</h4>
+      <ul className="flex flex-col gap-1.5">
+        {cursors.map((cursor, i) => (
+          <RunHistoryPage
+            key={cursor ?? "first"}
+            cursor={cursor}
+            onLoadMore={
+              i === cursors.length - 1 ? (next) => setCursors((cs) => [...cs, next]) : undefined
+            }
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function MaintenanceCard() {
   const qc = useQueryClient();
   const status = useQuery({
@@ -630,10 +742,7 @@ export function MaintenanceCard() {
   });
 
   const current = status.data?.current_run ?? null;
-  const last = status.data?.last_run ?? null;
   const conflict = run.error instanceof ApiError && run.error.status === 409;
-  const tone = (s: string): "ok" | "dim" | "accent" | "danger" =>
-    s === "ok" ? "ok" : s === "running" ? "accent" : s === "error" ? "danger" : "dim";
 
   const runningJob = current?.jobs.find((j) => j.status === "running");
   const doneCount =
@@ -668,36 +777,24 @@ export function MaintenanceCard() {
           {run.isError && !conflict && (
             <p className="text-sm text-danger">{(run.error as Error).message}</p>
           )}
-          {current ? (
+          {current && (
             <div className="text-[11px] text-ink-dim">
               {runningJob ? `${runningJob.label} — running` : "Starting"} · {doneCount}/
               {current.jobs.length} jobs
               <ul className="mt-1 flex flex-col gap-0.5">
                 {current.jobs.map((j) => (
                   <li key={j.key} className="flex items-center gap-1.5">
-                    <Dot tone={tone(j.status)} />
+                    <Dot tone={jobTone(j.status)} />
                     <span className="text-ink">{j.label}</span>
                     {j.detail && <span>· {j.detail}</span>}
                   </li>
                 ))}
               </ul>
             </div>
-          ) : (
-            last && (
-              <div className="text-[11px] text-ink-dim">
-                Last run{last.scope === "nightly" ? " (nightly)" : ""}:
-                <ul className="mt-1 flex flex-col gap-0.5">
-                  {last.jobs.map((j) => (
-                    <li key={j.key} className="flex items-center gap-1.5">
-                      <Dot tone={tone(j.status)} />
-                      <span className="text-ink">{j.label}</span>
-                      <span>· {j.detail}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )
           )}
+          <div className="border-t border-edge pt-3">
+            <RunHistoryList />
+          </div>
         </div>
       )}
     </Card>

@@ -1494,13 +1494,27 @@ export const MaintenanceJobResult = z.object({
 });
 export type MaintenanceJobResult = z.infer<typeof MaintenanceJobResult>;
 
-/** The aggregate result of one maintenance batch (#383). */
+/**
+ * One persisted maintenance-run history row (#733) — a completed, or shutdown-interrupted,
+ * batch. Backs both `MaintenanceStatus.last_run` (the newest row — survives a restart, unlike
+ * the pre-#733 in-memory-only `last_run`) and `GET /maintenance/runs`' paginated list.
+ */
 export const MaintenanceRun = z.object({
-  ran_at: z.string(),
+  id: z.number(),
+  started_at: z.string(),
+  finished_at: z.string(),
   scope: z.string(),
+  source: z.string(), // "scheduled" | "manual"
   jobs: z.array(MaintenanceJobResult).default([]),
 });
 export type MaintenanceRun = z.infer<typeof MaintenanceRun>;
+
+/** One page of `GET /maintenance/runs`, newest-first (#733). */
+export const MaintenanceRunPage = z.object({
+  runs: z.array(MaintenanceRun).default([]),
+  next_cursor: z.number().nullish(),
+});
+export type MaintenanceRunPage = z.infer<typeof MaintenanceRunPage>;
 
 /** One job's live status within an in-flight maintenance run (#561). */
 export const MaintenanceJobProgress = z.object({

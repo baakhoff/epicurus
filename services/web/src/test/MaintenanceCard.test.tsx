@@ -9,6 +9,7 @@ import { MaintenanceCard } from "@/screens/SettingsScreen";
 const mockStatus = vi.fn();
 const mockRun = vi.fn();
 const mockSetSchedule = vi.fn();
+const mockRunHistory = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -18,6 +19,7 @@ vi.mock("@/lib/api", async () => {
       maintenanceStatus: () => mockStatus(),
       runMaintenance: () => mockRun(),
       setMaintenanceSchedule: (update: unknown) => mockSetSchedule(update),
+      maintenanceRunHistory: (opts?: { cursor?: number; limit?: number }) => mockRunHistory(opts),
     },
   };
 });
@@ -65,10 +67,43 @@ const CURRENT_RUN = (over: Partial<CurrentRun> = {}): CurrentRun => ({
   ...over,
 });
 
+type HistoryRun = {
+  id: number;
+  started_at: string;
+  finished_at: string;
+  scope: string;
+  source: string;
+  jobs: JobProgress[];
+};
+
+const HISTORY_RUN = (over: Partial<HistoryRun> = {}): HistoryRun => ({
+  id: 1,
+  started_at: "2026-06-29T04:00:00+00:00",
+  finished_at: "2026-06-29T04:00:42+00:00",
+  scope: "all",
+  source: "scheduled",
+  jobs: [
+    {
+      key: "memory-extraction",
+      label: "Memory fact extraction",
+      status: "ok",
+      detail: "distilled 3 pending exchange(s)",
+    },
+    {
+      key: "module-reindex",
+      label: "Module re-index / re-embed",
+      status: "skipped",
+      detail: "no reindexable modules",
+    },
+  ],
+  ...over,
+});
+
 beforeEach(() => {
   mockStatus.mockReset();
   mockRun.mockReset();
   mockSetSchedule.mockReset();
+  mockRunHistory.mockReset().mockResolvedValue({ runs: [], next_cursor: null });
 });
 
 describe("MaintenanceCard", () => {
@@ -187,32 +222,76 @@ describe("MaintenanceCard", () => {
     expect(screen.getByText(/manual only/i)).toBeInTheDocument(); // unchanged — the PUT failed
   });
 
-  it("renders the last run's per-job result when idle (#383)", async () => {
-    mockStatus.mockResolvedValue(
-      STATUS({
-        last_run: {
-          ran_at: "2026-06-29T04:00:00+00:00",
-          scope: "all",
-          jobs: [
-            {
-              key: "memory-extraction",
-              label: "Memory fact extraction",
-              status: "ok",
-              detail: "distilled 3 pending exchange(s)",
-            },
-            {
-              key: "module-reindex",
-              label: "Module re-index / re-embed",
-              status: "skipped",
-              detail: "no reindexable modules",
-            },
-          ],
-        },
-      }),
-    );
+  it("renders a run history row, labeled by source, with per-job detail on expand (#733)", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockRunHistory.mockResolvedValue({ runs: [HISTORY_RUN()], next_cursor: null });
     render(<MaintenanceCard />, { wrapper });
+
+    expect(await screen.findByText(/scheduled/i)).toBeInTheDocument();
+    // Collapsed: no per-job detail visible yet.
+    expect(screen.queryByText(/distilled 3 pending exchange/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
     expect(await screen.findByText(/distilled 3 pending exchange/i)).toBeInTheDocument();
     expect(screen.getByText(/no reindexable modules/i)).toBeInTheDocument();
+  });
+
+  it("labels a manually-triggered run distinctly from a scheduled one", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockRunHistory.mockResolvedValue({ runs: [HISTORY_RUN({ source: "manual" })], next_cursor: null });
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/manual/i)).toBeInTheDocument();
+    expect(screen.queryByText(/scheduled/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a failed-job count on a row with an error", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockRunHistory.mockResolvedValue({
+      runs: [
+        HISTORY_RUN({
+          jobs: [{ key: "a", label: "A", status: "error", detail: "boom" }],
+        }),
+      ],
+      next_cursor: null,
+    });
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/1 failed/i)).toBeInTheDocument();
+  });
+
+  it("shows an empty run history without erroring", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockRunHistory.mockResolvedValue({ runs: [], next_cursor: null });
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/run history/i)).toBeInTheDocument();
+    await waitFor(() => expect(mockRunHistory).toHaveBeenCalled());
+  });
+
+  it("shows an error state when run history fails to load", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockRunHistory.mockRejectedValue(new ApiError(500, "boom"));
+    render(<MaintenanceCard />, { wrapper });
+    expect(await screen.findByText(/could not load run history/i)).toBeInTheDocument();
+  });
+
+  it("Load more fetches the next page using the previous page's cursor", async () => {
+    mockStatus.mockResolvedValue(STATUS());
+    mockRunHistory.mockImplementation((opts?: { cursor?: number }) =>
+      Promise.resolve(
+        opts?.cursor
+          ? { runs: [HISTORY_RUN({ id: 2, source: "manual" })], next_cursor: null }
+          : { runs: [HISTORY_RUN({ id: 1 })], next_cursor: 1 },
+      ),
+    );
+    render(<MaintenanceCard />, { wrapper });
+
+    expect(await screen.findByRole("button", { name: /load more/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    await waitFor(() =>
+      expect(mockRunHistory).toHaveBeenCalledWith(expect.objectContaining({ cursor: 1 })),
+    );
+    // The next page has no further cursor — the button doesn't reappear for it.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load more/i })).not.toBeInTheDocument());
   });
 
   it("rehydrates onto an in-flight run on mount and shows live per-job progress (#561)", async () => {

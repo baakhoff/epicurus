@@ -182,6 +182,12 @@ class CoreAppSettings(CoreSettings):
     # since the schedule is now runtime-editable and a fixed sleep-until-hour can't react to a
     # change made while it's sleeping. 60s keeps the worst-case delivery lag under a minute.
     maintenance_poll_interval_s: int = 60
+    # Persisted run history retention (#733) — a row cap and an age cutoff, whichever catches a
+    # given row first (the same "count or age" posture EVENTS_RETENTION_DAYS/the notification
+    # center's max_per_tenant each take on their own retention question). 200 runs covers months
+    # of even an hourly cadence; 90 days is a comfortable "what happened last quarter" window.
+    maintenance_run_history_max_rows: int = 200
+    maintenance_run_history_max_age_days: int = 90
 
     # ── Scheduled turns (ADR-0092) ────────────────────────────────────────────────
     # How often the scheduler checks for a due row (a plain poll, not one sleep-until-hour task

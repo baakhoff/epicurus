@@ -41,7 +41,7 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.11.0"
+    assert manifest.version == "0.12.0"
 
 
 async def test_manifest_declares_propose_tool_side_effects() -> None:
@@ -91,8 +91,12 @@ async def test_exposes_write_and_list_tools_but_no_read() -> None:
         "notes_append",
         "notes_delete",
     } <= names
-    # Notes are private: there must be NO tool that returns a note's body.
-    assert not any("get" in n or "read" in n for n in names)
+    # Notes are private: there must be NO tool that returns a note's *stored* body.
+    # notes_read_suggestion (#744) is a deliberate, narrow exception — it echoes back only
+    # the agent's own pending proposal, never a note's stored body; see its dedicated
+    # coverage in test_notes_suggestions.py
+    # (test_read_suggestion_tool_never_reads_a_notes_stored_body).
+    assert not any("get" in n or "read" in n for n in names - {"notes_read_suggestion"})
 
 
 async def test_is_attachable() -> None:

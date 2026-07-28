@@ -101,6 +101,33 @@ $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
 docker compose exec openbao bao operator unseal $plainKey
 ```
 
+### Every secret read fails with "permission denied" {#openbao-token-expired}
+
+Symptom: hosted-model turns fail with
+`failed to read secret tenants/local/llm/<provider>: permission denied`, the Models page
+shows every provider as "key not set", and Google mail/calendar stop authenticating — all at
+once. After a restart it becomes `OpenBao client is not authenticated` and core-app refuses
+to start. The vault is unsealed and the policy is fine: **the token was rejected**, not the
+path.
+
+On deployments bootstrapped before the periodic-token fix this happens exactly 32 days after
+bootstrap, because the app token was a plain service token on the 768h default lease. Newer
+bootstraps mint a periodic token that core-app renews daily, so this should only appear if
+renewal has been failing — check for `openbao token renewal failed` in the core's logs, which
+warns weeks before the lease actually runs out.
+
+**Confirm** (a live token prints a TTL; an expired one 403s):
+
+```powershell
+docker compose exec -e BAO_TOKEN=$env:OPENBAO_TOKEN openbao bao token lookup
+```
+
+**Recover** — mint a periodic replacement with the root token from `.env.secrets`, put it in
+`.env` as `OPENBAO_TOKEN`, then **recreate** (not restart) the services that hold it. The full
+procedure, including what to verify afterwards, is in
+[Secrets → Token lifetime & renewal](secrets.md#token-lifetime--renewal). No secrets are lost;
+only the credential used to read them.
+
 ### Disk space is low
 
 The DiskSpaceHigh alert fires when the WSL2 VM filesystem is above 85% full.

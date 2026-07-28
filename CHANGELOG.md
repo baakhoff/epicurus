@@ -163,6 +163,33 @@ images to GHCR.
 
 ### Fixed
 
+- **The OpenBao app token no longer silently expires 32 days after bootstrap** (#728) — the
+  bootstrap minted the token with `-explicit-max-ttl=0` and called it "non-expiring". That flag
+  only removes the *explicit cap*: the result was a plain service token falling back to the
+  system default lease TTL of 768h, and nothing ever renewed it. Every self-hosted deployment
+  therefore lost **all** secret reads exactly one month after bootstrap — provider keys, OAuth
+  clients and tokens, module config, bridge credentials, push VAPID keys — presenting as a
+  per-path `permission denied` that reads like a policy bug (and, after a restart, as
+  `OpenBao client is not authenticated`, with core-app refusing to start). No test shape catches
+  this: CI's vault is minutes old, so the defense has to be design. The bootstrap now mints a
+  **periodic orphan** token (`-orphan -period=768h`) — the only non-root token with an unlimited
+  lifetime — and `SecretStore` grows the maintenance to match: `renew_self()`, a
+  `run_token_renewal()` loop core-app starts from its lifespan (daily against a 768h period, so
+  renewal can fail for weeks before it becomes an outage), and a **403 self-heal** that drops
+  the cached client, re-authenticates, and retries the operation once. Because the token is
+  re-resolved on rebuild, a rotated `OPENBAO_TOKEN_FILE` now takes effect without a process
+  bounce. Renewal failures are bounded warnings (the first, then every 7th) with a recovery
+  line, never a crash; a non-renewable dev root token is detected with a lookup-self and the
+  loop exits quietly. A 403 that survives the retry now names token expiry as the likely cause
+  instead of reporting a bare "permission denied". `messaging` holds the same token, so the
+  core's single renewer covers it too. **Existing deployments must still mint a periodic
+  replacement by hand** — this prevents future expiry, it cannot revive an already-expired
+  token; the migration is in [docs/infrastructure/secrets.md](docs/infrastructure/secrets.md),
+  and the symptom now has a runbook entry in `startup-and-recovery.md`. Also repairs a drift the
+  release process missed: `epicurus_core.__version__` still read `0.30.0` while the package
+  published `0.31.0` — a test now pins the two together. `epicurus-core` 0.31.0→0.32.0 (MINOR) ·
+  `core-app` 0.96.0→0.97.0 (MINOR).
+
 - **The agent now verifies a stale-memory entity before mutating it, and recovers instead of
   blind-retrying a not-found** (#742) — reported from a real trace: create a file via chat,
   delete it in the Files UI, come back to the same chat and ask to move it — the agent acted on

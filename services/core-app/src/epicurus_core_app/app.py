@@ -921,6 +921,11 @@ def create_app() -> FastAPI:
         # Coordinated maintenance batch on an opt-in nightly schedule (ADR-0060) — a no-op task when
         # the schedule is disabled; the manual trigger stays available either way.
         maintenance_task = asyncio.create_task(maintenance.run_periodic())
+        # Keep the OpenBao app token's lease alive (#728). The bootstrap token is periodic:
+        # unlimited lifetime, but each lease expires after 768h, so an unrenewed deployment
+        # 403s on every secret read a month after bootstrap. The core is the only renewer —
+        # the modules that hold a token hold the *same* one, so one loop covers the fleet.
+        token_renewal_task = asyncio.create_task(secrets.run_token_renewal())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
@@ -937,6 +942,7 @@ def create_app() -> FastAPI:
             push_digest_task.cancel()
             live_run_reaper.cancel()
             maintenance_task.cancel()
+            token_renewal_task.cancel()
             with suppress(asyncio.CancelledError):
                 await catalog_task
             with suppress(asyncio.CancelledError):
@@ -955,6 +961,8 @@ def create_app() -> FastAPI:
                 await event_retention_task
             with suppress(asyncio.CancelledError):
                 await automation_task
+            with suppress(asyncio.CancelledError):
+                await token_renewal_task
             # The nightly-schedule loop above is separate from an in-flight batch it (or a manual
             # trigger) may have started — cancel that too so it isn't orphaned against infra about
             # to close (#561).

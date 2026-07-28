@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import difflib
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import DateTime, String, Text, delete, func, select
@@ -208,6 +208,44 @@ class SuggestionStore:
             )
             return _to_value(row) if row is not None else None
 
+    async def update(
+        self,
+        *,
+        tenant: str,
+        sid: str,
+        proposed_content: str | None = None,
+        note: str | None = None,
+        to_path: str | None = None,
+    ) -> Suggestion | None:
+        """Revise a pending suggestion's mutable fields in place (#744).
+
+        ``None`` for a field leaves it unchanged (only ``path``/``operation``/``origin`` are
+        never revisable — a suggestion's identity and kind don't change, only its content).
+        ``created_at`` refreshes to now, so the review queue shows this as the current
+        proposal, not a stale one. Returns the updated row, or ``None`` if *sid* isn't in the
+        pending queue — unknown, or already resolved (approve/reject/withdraw all *delete*
+        the row); the caller tells those apart via the audit trail.
+        """
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredSuggestion).where(
+                    _StoredSuggestion.tenant == tenant,
+                    _StoredSuggestion.sid == sid,
+                )
+            )
+            if row is None:
+                return None
+            if proposed_content is not None:
+                row.proposed_content = proposed_content
+            if note is not None:
+                row.note = note
+            if to_path is not None:
+                row.to_path = to_path
+            row.created_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(row)
+            return _to_value(row)
+
     async def delete(self, *, tenant: str, sid: str) -> bool:
         """Remove a suggestion (on approve-applied or reject). True if a row was deleted."""
         async with self._session() as session:
@@ -278,6 +316,23 @@ class _StoredDecision(_AuditBase):
     decision: Mapped[str] = mapped_column(String(16))
     proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+def _decision_to_value(row: _StoredDecision) -> ReviewDecision:
+    return ReviewDecision(
+        id=row.sid,
+        title=doc_title(row.path),
+        path=row.path,
+        operation=row.operation,
+        origin=row.origin,
+        note=row.note,
+        created_at=row.proposed_at.isoformat(),
+        decided_at=row.decided_at.isoformat(),
+        decision=row.decision,
+        proposed_content=row.proposed_content,
+        applied_content=row.applied_content,
+        to_path=row.to_path,
+    )
 
 
 class SuggestionAuditStore:
@@ -353,23 +408,23 @@ class SuggestionAuditStore:
                 .order_by(_StoredDecision.id.desc())
                 .limit(limit)
             )
-            return [
-                ReviewDecision(
-                    id=row.sid,
-                    title=doc_title(row.path),
-                    path=row.path,
-                    operation=row.operation,
-                    origin=row.origin,
-                    note=row.note,
-                    created_at=row.proposed_at.isoformat(),
-                    decided_at=row.decided_at.isoformat(),
-                    decision=row.decision,
-                    proposed_content=row.proposed_content,
-                    applied_content=row.applied_content,
-                    to_path=row.to_path,
-                )
-                for row in rows
-            ]
+            return [_decision_to_value(row) for row in rows]
+
+    async def get(self, *, tenant: str, sid: str) -> ReviewDecision | None:
+        """The resolved decision for *sid*, if any (#744).
+
+        Lets a caller distinguish "no such suggestion" from "already {approved,rejected,
+        withdrawn}" when a pending-only operation (update/withdraw) is refused — a
+        model-actionable message (#697 precedent) rather than a bare 404. The newest match
+        wins on the (practically impossible) chance a ``sid`` were ever reused.
+        """
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredDecision)
+                .where(_StoredDecision.tenant == tenant, _StoredDecision.sid == sid)
+                .order_by(_StoredDecision.id.desc())
+            )
+            return None if row is None else _decision_to_value(row)
 
 
 # ── review orchestration ──────────────────────────────────────────────────────
@@ -550,6 +605,80 @@ class SuggestionReview:
         await self._store.delete(tenant=self._tenant, sid=sid)
         log.info("suggestion rejected", sid=sid, operation=s.operation, path=s.path)
         return ApplyResult(id=sid, status="rejected", path=s.path, operation=s.operation)
+
+    async def read(self, sid: str) -> Suggestion:
+        """A single pending suggestion's full content — agent-initiated (#744).
+
+        404 if unknown or already resolved — see :meth:`_unresolved_reason`.
+        """
+        s = await self._store.get(tenant=self._tenant, sid=sid)
+        if s is None:
+            raise HTTPException(status_code=404, detail=await self._unresolved_reason(sid))
+        return s
+
+    async def _unresolved_reason(self, sid: str) -> str:
+        """Why *sid* isn't in the pending queue: already resolved (with its verdict), or
+        genuinely unknown — the two are told apart via the audit trail (#744, #697 precedent:
+        a model-actionable message beats a bare 404 the caller can't act on)."""
+        decision = await self._audit.get(tenant=self._tenant, sid=sid)
+        if decision is not None:
+            return (
+                f"suggestion {sid} was already {decision.decision} (on {decision.decided_at}) —"
+                " approved/rejected/withdrawn suggestions are immutable history"
+            )
+        return f"no such suggestion: {sid}"
+
+    async def update(
+        self,
+        sid: str,
+        *,
+        content: str | None = None,
+        note: str | None = None,
+        to_path: str | None = None,
+    ) -> Suggestion:
+        """Revise a **pending** suggestion in place — agent-initiated (#744).
+
+        Use instead of proposing a near-duplicate when a change already staged needs
+        adjusting before the operator reviews it: it stays pending, ``created_at`` refreshes,
+        and the review shows the latest revision as one queue entry, never two. Nothing
+        touches the vault (the ADR-0033 approval gate is unchanged). 404 if unknown or
+        already resolved — see :meth:`_unresolved_reason`.
+        """
+        updated = await self._store.update(
+            tenant=self._tenant, sid=sid, proposed_content=content, note=note, to_path=to_path
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail=await self._unresolved_reason(sid))
+        log.info("suggestion revised", sid=sid, operation=updated.operation, path=updated.path)
+        return updated
+
+    async def withdraw(self, sid: str) -> ApplyResult:
+        """Retract a **pending** suggestion — agent-initiated (#744).
+
+        Mirrors :meth:`reject` exactly (same audit-then-delete shape), except the audit
+        ``decision`` is ``"withdrawn"``: the agent's own conclusion that a suggestion is
+        stale (e.g. superseded by a later edit), not an operator's review verdict. 404 if
+        unknown or already resolved — see :meth:`_unresolved_reason`.
+        """
+        s = await self._store.get(tenant=self._tenant, sid=sid)
+        if s is None:
+            raise HTTPException(status_code=404, detail=await self._unresolved_reason(sid))
+        await self._audit.record(
+            tenant=self._tenant,
+            sid=sid,
+            path=s.path,
+            operation=s.operation,
+            origin=s.origin,
+            note=s.note,
+            proposed_at=s.created_at,
+            decision="withdrawn",
+            proposed_content=s.proposed_content,
+            applied_content="",
+            to_path=s.to_path,
+        )
+        await self._store.delete(tenant=self._tenant, sid=sid)
+        log.info("suggestion withdrawn", sid=sid, operation=s.operation, path=s.path)
+        return ApplyResult(id=sid, status="withdrawn", path=s.path, operation=s.operation)
 
     async def list_audit(self, limit: int = 50) -> ReviewAuditData:
         """The resolved-decision audit trail for this tenant, newest first (ADR-0090)."""

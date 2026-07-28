@@ -487,12 +487,19 @@ The `editor` archetype (knowledge, notes) opens a document **rendered and editab
 markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —
 ProseMirror + remark — lazy-loaded so it never enters the main bundle, #377), and an Edit/Preview
 toggle drops to the **raw markdown source** when you prefer it (ADR-0042). **Creating** a
-document lands in preview too (#729) — render-first is not just an opening behavior: every
-create door (Notes' named "New note" form, Knowledge's root "New document", its in-folder
-create, and the command palette's `?new=1` deep-link, which funnels into the same doors) seeds a
-heading — the typed name for the named door, `# Untitled` for the two that don't collect one —
-so the first preview renders a title instead of a blank pane; Edit is still one click away. Both
-views write back to the same markdown buffer, so the save/version flow below is unchanged.
+document lands in preview too (#729), and every create door prompts for a name first (#740):
+Notes' "New note" toolbar form, Knowledge's root "New document" form, and Knowledge's in-folder
+create — an inline row in the tree, right at the folder you clicked, rather than a form up in
+the toolbar. All three slugify the typed name and seed a `# <name>` heading so the first preview
+renders a title instead of a blank pane; Escape/cancel creates nothing. Knowledge's slugs keep
+the `.md` extension its file store has always used; Notes' never have had one. The command
+palette's `?new=1` deep-link funnels into the same doors. A freshly-created document isn't in
+the server's list until the first save, so the shell injects it into the tree anyway — Knowledge
+only, since Notes doesn't expose tree actions at all — so its hover rename/delete are reachable
+immediately: renaming it before that first save swaps the slug locally (a server move would 404
+against a file that doesn't exist yet); deleting it abandons the draft the same way. Once saved,
+both actions go through the normal server-backed path, unchanged. Both views write back to the
+same markdown buffer, so the save/version flow below is unchanged.
 
 The list pane is **resizable** (#730): drag the divider between it and the editor to widen or
 narrow it (12rem–40rem), double-click the divider to reset to the 18rem default, or focus it

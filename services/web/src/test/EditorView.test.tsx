@@ -13,6 +13,8 @@ const mockCreateProject = vi.fn();
 const mockDeleteProject = vi.fn();
 const mockVersions = vi.fn();
 const mockVersion = vi.fn();
+const mockMoveItem = vi.fn();
+const mockDeleteDoc = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
@@ -22,6 +24,8 @@ vi.mock("@/lib/api", () => ({
     deleteModuleProject: (...args: unknown[]) => mockDeleteProject(...args),
     modulePageDocVersions: (...args: unknown[]) => mockVersions(...args),
     modulePageDocVersion: (...args: unknown[]) => mockVersion(...args),
+    moveModuleItem: (...args: unknown[]) => mockMoveItem(...args),
+    deleteModuleDoc: (...args: unknown[]) => mockDeleteDoc(...args),
   },
 }));
 
@@ -61,6 +65,8 @@ beforeEach(() => {
   mockDeleteProject.mockReset();
   mockVersions.mockReset();
   mockVersion.mockReset();
+  mockMoveItem.mockReset();
+  mockDeleteDoc.mockReset();
 });
 
 describe("EditorView", () => {
@@ -483,49 +489,172 @@ describe("EditorView — knowledge bases (scopes)", () => {
     );
   });
 
-  it("New document lands in preview with a seeded heading (#729), and saves with the scope prefix", async () => {
+  it("New document prompts for a name (#740), lands in preview (#729), and saves with the scope prefix", async () => {
     mockModulePage.mockResolvedValue(SCOPED);
-    mockSave.mockResolvedValue({ path: "kb/new-note.md", indexed: true, chunk_count: 0 });
+    mockSave.mockResolvedValue({ path: "kb/my-doc.md", indexed: true, chunk_count: 0 });
+    // Saving flips isNew false, which un-gates the doc query (it refetches in the
+    // background) — the local buffer stays authoritative either way (seeded by path).
+    mockModulePageDoc.mockResolvedValue({ path: "kb/my-doc.md", title: "My Doc", content: "# Fresh" });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
 
+    const nameInput = await screen.findByLabelText("New document title");
+    fireEvent.change(nameInput, { target: { value: "My Doc" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
     // Render-first applies to create too (#729): lands in preview with the seeded
-    // heading, not a blank pane; Edit is still one click away.
+    // heading, not a blank pane; Edit is still one click away. Knowledge documents keep
+    // the `.md` extension its pre-existing hardcoded doors always used.
     const wys = await screen.findByTestId("wysiwyg");
-    expect(wys).toHaveValue("# Untitled\n\n");
-    expect(screen.queryByLabelText("Edit new-note.md")).toBeNull();
+    expect(wys).toHaveValue("# My Doc\n\n");
+    expect(screen.queryByLabelText("Edit my-doc.md")).toBeNull();
 
     fireEvent.change(wys, { target: { value: "# Fresh" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "kb/new-note.md", "# Fresh"),
+      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "kb/my-doc.md", "# Fresh"),
     );
   });
 
-  it("New file in folder lands in preview with a seeded heading (#729)", async () => {
+  it("Escape cancels New document without creating anything", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+
+    const nameInput = await screen.findByLabelText("New document title");
+    fireEvent.change(nameInput, { target: { value: "Abandoned" } });
+    fireEvent.keyDown(nameInput, { key: "Escape" });
+
+    expect(screen.queryByLabelText("New document title")).toBeNull();
+    expect(screen.queryByTestId("wysiwyg")).toBeNull();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("disambiguates a Knowledge slug that collides, landing on name-2.md rather than name.md-2", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [{ id: "my-doc.md", title: "my-doc", path: "my-doc.md", type: "file" as const }],
+    });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await screen.findByTestId("wysiwyg");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByLabelText("Edit my-doc-2.md")).toBeInTheDocument();
+  });
+
+  it("New file in folder opens an inline naming row, lands in preview (#729), and saves nested", async () => {
     mockModulePage.mockResolvedValue({
       ...SCOPED,
       docs: [{ id: "docs", title: "docs", path: "docs", type: "dir" as const }],
     });
-    mockSave.mockResolvedValue({ path: "kb/docs/new-note.md", indexed: true, chunk_count: 0 });
+    mockSave.mockResolvedValue({ path: "kb/docs/my-file.md", indexed: true, chunk_count: 0 });
+    mockModulePageDoc.mockResolvedValue({
+      path: "kb/docs/my-file.md",
+      title: "My File",
+      content: "# My File\n\n",
+    });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
 
     const folderRow = (await screen.findByText("docs")).closest("div") as HTMLElement;
     fireEvent.mouseEnter(folderRow);
     fireEvent.click(screen.getByTitle("New file in folder"));
 
+    const nameInput = await screen.findByLabelText("New file title");
+    fireEvent.change(nameInput, { target: { value: "My File" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
     const wys = await screen.findByTestId("wysiwyg");
-    expect(wys).toHaveValue("# Untitled\n\n");
+    expect(wys).toHaveValue("# My File\n\n");
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(mockSave).toHaveBeenCalledWith(
         "knowledge",
         "vault",
-        "kb/docs/new-note.md",
-        "# Untitled\n\n",
+        "kb/docs/my-file.md",
+        "# My File\n\n",
       ),
     );
+  });
+
+  it("the just-created, not-yet-saved document appears in the tree so it can be found and renamed", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("wysiwyg");
+
+    // Even though the scope started with only "alpha", the unsaved doc now shows in the
+    // tree alongside it (#740) — not just open in the editor pane.
+    expect(screen.getByText("my-doc")).toBeInTheDocument();
+    expect(screen.getByText("alpha")).toBeInTheDocument();
+  });
+
+  it("renaming a just-created, not-yet-saved document swaps the slug locally — no move request", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("wysiwyg");
+
+    const row = (await screen.findByText("my-doc")).closest("div") as HTMLElement;
+    fireEvent.mouseEnter(row);
+    fireEvent.click(screen.getByTitle("Rename file"));
+    const renameInput = screen.getByLabelText("Rename file");
+    fireEvent.change(renameInput, { target: { value: "Renamed Doc" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    // The slug swapped locally — still open, still in preview with the same buffer — and
+    // no server move was ever attempted (the doc doesn't exist server-side yet).
+    await waitFor(() => expect(screen.getByText("renamed-doc.md")).toBeInTheDocument());
+    expect(screen.getByTestId("wysiwyg")).toHaveValue("# My Doc\n\n");
+    expect(mockMoveItem).not.toHaveBeenCalled();
+  });
+
+  it("renaming an already-saved document still goes through the server move, unchanged", async () => {
+    mockModulePage.mockResolvedValue(SCOPED); // "alpha.md" is already saved server-side
+    mockMoveItem.mockResolvedValue({ path: "kb/beta.md" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    const row = (await screen.findByText("alpha")).closest("div") as HTMLElement;
+    fireEvent.mouseEnter(row);
+    fireEvent.click(screen.getByTitle("Rename file"));
+    fireEvent.change(screen.getByLabelText("Rename file"), { target: { value: "beta" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() =>
+      expect(mockMoveItem).toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md", "kb/beta.md"),
+    );
+  });
+
+  it("deleting a just-created, not-yet-saved document abandons it locally — no delete request", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("wysiwyg");
+
+    const row = (await screen.findByText("my-doc")).closest("div") as HTMLElement;
+    fireEvent.mouseEnter(row);
+    fireEvent.click(screen.getByTitle("Delete file"));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(screen.queryByTestId("wysiwyg")).toBeNull());
+    expect(mockDeleteDoc).not.toHaveBeenCalled();
   });
 
   it("creates a knowledge base via the switcher", async () => {

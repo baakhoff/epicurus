@@ -30,6 +30,7 @@ images to GHCR.
   component is deliberately not extracted yet; that's for if/when a second consumer (e.g. the
   Files browser) actually needs one. `web` 0.122.1→0.123.0 (MINOR).
 
+
 - **Knowledge/notes: suggestion lifecycle tools** (#744) — the agent could only *add* to its
   review queue; "change that suggestion" had no better option than proposing a near-duplicate,
   and the agent had no way to see what was already pending. Four new tools per module —
@@ -70,6 +71,28 @@ images to GHCR.
   `web` 0.119.0→0.120.0 (MINOR).
 
 ### Fixed
+
+- **Editor: Knowledge's "New document" can now be named at creation** (#740) — it used to
+  materialize as `new-note.md` (then `new-note-2.md`, …) with no chance to name it: the
+  `can_create` flow (Notes) already prompted for a name and slugified it, but Knowledge's
+  `can_manage_files` doors — the root "New document" and the in-folder create — hardcoded the
+  slug instead, and rename couldn't rescue it because an unsaved doc isn't in the tree yet (a
+  `moveItem` call against it would 404 before the first save). Both Knowledge doors now open
+  the same naming step Notes has: the root door reuses its toolbar form, and the in-folder door
+  gets a new inline row right in the tree at the folder you clicked, rather than a form that
+  pops up disconnected from it in the toolbar. A single shared submit now backs all three doors
+  (`can_create`'s form and both `can_manage_files` doors), slugifying the name and seeding the
+  same `# <name>` heading (Knowledge's slugs keep the `.md` extension its file store has always
+  used; Notes' never have had one) — and lands in preview per #729, same as any other door.
+  Rename is now safe for an unsaved document too: the shell shows a just-created, not-yet-saved
+  doc in the tree (Knowledge only — Notes never exposes tree actions) precisely so its hover
+  rename/delete are reachable, and both are guarded to act **locally** — swap the slug, abandon
+  the draft — instead of firing a server call that would 404; once the first save lands, both
+  fall through to the existing server-backed behavior unchanged. Incidental fix while touching
+  the shared slug helper: `uniqueSlug`'s collision suffix now lands before a `.md` extension
+  (`name-2.md`) instead of after it (the pre-existing, never-before-exercised `name.md-2`).
+  `web` 0.123.0→0.123.1 (PATCH).
+
 
 - **Editor: create lands in preview — render-first now applies to creation, not just
   opening** (#729) — creating a document (Knowledge or Notes) opened it in **edit** mode,

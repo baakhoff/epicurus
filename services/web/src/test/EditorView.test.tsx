@@ -13,6 +13,8 @@ const mockCreateProject = vi.fn();
 const mockDeleteProject = vi.fn();
 const mockVersions = vi.fn();
 const mockVersion = vi.fn();
+const mockMoveItem = vi.fn();
+const mockDeleteDoc = vi.fn();
 vi.mock("@/lib/api", () => ({
   api: {
     modulePage: (...args: unknown[]) => mockModulePage(...args),
@@ -22,6 +24,8 @@ vi.mock("@/lib/api", () => ({
     deleteModuleProject: (...args: unknown[]) => mockDeleteProject(...args),
     modulePageDocVersions: (...args: unknown[]) => mockVersions(...args),
     modulePageDocVersion: (...args: unknown[]) => mockVersion(...args),
+    moveModuleItem: (...args: unknown[]) => mockMoveItem(...args),
+    deleteModuleDoc: (...args: unknown[]) => mockDeleteDoc(...args),
   },
 }));
 
@@ -53,6 +57,14 @@ function wrapper({ children }: { children: ReactNode }) {
   );
 }
 
+/** Hover a tree row and open its "more actions" menu (#741) — every per-item action now
+ *  lives behind this one button. */
+async function openRowMenu(rowText: string): Promise<void> {
+  const row = (await screen.findByText(rowText)).closest("div") as HTMLElement;
+  fireEvent.mouseEnter(row);
+  fireEvent.click(await screen.findByTitle("More actions"));
+}
+
 beforeEach(() => {
   mockModulePage.mockReset();
   mockModulePageDoc.mockReset();
@@ -61,6 +73,12 @@ beforeEach(() => {
   mockDeleteProject.mockReset();
   mockVersions.mockReset();
   mockVersion.mockReset();
+  mockMoveItem.mockReset();
+  mockDeleteDoc.mockReset();
+  // The editor now persists scope/fold-state/selection and tree width to localStorage
+  // (#730, #743) — jsdom's `localStorage` is shared across every test in this file, so a
+  // clean slate here is what keeps them independent.
+  localStorage.clear();
 });
 
 describe("EditorView", () => {
@@ -286,7 +304,7 @@ describe("EditorView", () => {
     expect(screen.queryByText(/empty vault/i)).toBeNull();
   });
 
-  it("creates a note: seeds an H1 title and saves to a fresh slug", async () => {
+  it("creates a note: seeds an H1 title, lands in preview (#729), and saves to a fresh slug", async () => {
     mockModulePage.mockResolvedValue({ title: "Notes", docs: [], can_create: true });
     mockSave.mockResolvedValue({ path: "my-idea", indexed: true, chunk_count: 1 });
     // After a create-save the now-saved note may be fetched, but the local buffer is
@@ -302,8 +320,11 @@ describe("EditorView", () => {
     fireEvent.change(screen.getByLabelText("New note title"), { target: { value: "My Idea" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
-    const textarea = (await screen.findByLabelText("Edit my-idea")) as HTMLTextAreaElement;
-    expect(textarea.value).toBe("# My Idea\n\n");
+    // Render-first now applies to create too (#729): the new note opens in preview, not
+    // the raw source — Edit is still one click away.
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# My Idea\n\n");
+    expect(screen.queryByLabelText("Edit my-idea")).toBeNull();
     // A brand-new note never fetches the (absent) document.
     expect(mockModulePageDoc).not.toHaveBeenCalled();
 
@@ -325,6 +346,10 @@ describe("EditorView", () => {
     fireEvent.change(screen.getByLabelText("New note title"), { target: { value: "My Idea" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
+    // Lands in preview first (#729); the Edit toggle is one click away and still reveals
+    // the disambiguated slug.
+    await screen.findByTestId("wysiwyg");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(await screen.findByLabelText("Edit my-idea-2")).toBeInTheDocument();
   });
 
@@ -476,17 +501,331 @@ describe("EditorView — knowledge bases (scopes)", () => {
     );
   });
 
-  it("New document creates at the scope root and saves with the scope prefix", async () => {
+  it("New document prompts for a name (#740), lands in preview (#729), and saves with the scope prefix", async () => {
     mockModulePage.mockResolvedValue(SCOPED);
-    mockSave.mockResolvedValue({ path: "kb/new-note.md", indexed: true, chunk_count: 0 });
+    mockSave.mockResolvedValue({ path: "kb/my-doc.md", indexed: true, chunk_count: 0 });
+    // Saving flips isNew false, which un-gates the doc query (it refetches in the
+    // background) — the local buffer stays authoritative either way (seeded by path).
+    mockModulePageDoc.mockResolvedValue({ path: "kb/my-doc.md", title: "My Doc", content: "# Fresh" });
     render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
     fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
-    const ta = await screen.findByLabelText("Edit new-note.md");
-    fireEvent.change(ta, { target: { value: "# Fresh" } });
+
+    const nameInput = await screen.findByLabelText("New document title");
+    fireEvent.change(nameInput, { target: { value: "My Doc" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    // Render-first applies to create too (#729): lands in preview with the seeded
+    // heading, not a blank pane; Edit is still one click away. Knowledge documents keep
+    // the `.md` extension its pre-existing hardcoded doors always used.
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# My Doc\n\n");
+    expect(screen.queryByLabelText("Edit my-doc.md")).toBeNull();
+
+    fireEvent.change(wys, { target: { value: "# Fresh" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "kb/new-note.md", "# Fresh"),
+      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "kb/my-doc.md", "# Fresh"),
     );
+  });
+
+  it("Escape cancels New document without creating anything", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+
+    const nameInput = await screen.findByLabelText("New document title");
+    fireEvent.change(nameInput, { target: { value: "Abandoned" } });
+    fireEvent.keyDown(nameInput, { key: "Escape" });
+
+    expect(screen.queryByLabelText("New document title")).toBeNull();
+    expect(screen.queryByTestId("wysiwyg")).toBeNull();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("disambiguates a Knowledge slug that collides, landing on name-2.md rather than name.md-2", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [{ id: "my-doc.md", title: "my-doc", path: "my-doc.md", type: "file" as const }],
+    });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await screen.findByTestId("wysiwyg");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByLabelText("Edit my-doc-2.md")).toBeInTheDocument();
+  });
+
+  it("New file in folder opens an inline naming row, lands in preview (#729), and saves nested", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [{ id: "docs", title: "docs", path: "docs", type: "dir" as const }],
+    });
+    mockSave.mockResolvedValue({ path: "kb/docs/my-file.md", indexed: true, chunk_count: 0 });
+    mockModulePageDoc.mockResolvedValue({
+      path: "kb/docs/my-file.md",
+      title: "My File",
+      content: "# My File\n\n",
+    });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    await openRowMenu("docs");
+    fireEvent.click(screen.getByRole("button", { name: "New file in folder" }));
+
+    const nameInput = await screen.findByLabelText("New file title");
+    fireEvent.change(nameInput, { target: { value: "My File" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("# My File\n\n");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith(
+        "knowledge",
+        "vault",
+        "kb/docs/my-file.md",
+        "# My File\n\n",
+      ),
+    );
+  });
+
+  it("the just-created, not-yet-saved document appears in the tree so it can be found and renamed", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("wysiwyg");
+
+    // Even though the scope started with only "alpha", the unsaved doc now shows in the
+    // tree alongside it (#740) — not just open in the editor pane.
+    expect(screen.getByText("my-doc")).toBeInTheDocument();
+    expect(screen.getByText("alpha")).toBeInTheDocument();
+  });
+
+  it("renaming a just-created, not-yet-saved document swaps the slug locally — no move request", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("wysiwyg");
+
+    await openRowMenu("my-doc");
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const renameInput = screen.getByLabelText("Rename file");
+    fireEvent.change(renameInput, { target: { value: "Renamed Doc" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    // The slug swapped locally — still open, still in preview with the same buffer — and
+    // no server move was ever attempted (the doc doesn't exist server-side yet).
+    await waitFor(() => expect(screen.getByText("renamed-doc.md")).toBeInTheDocument());
+    expect(screen.getByTestId("wysiwyg")).toHaveValue("# My Doc\n\n");
+    expect(mockMoveItem).not.toHaveBeenCalled();
+  });
+
+  it("renaming an already-saved document still goes through the server move, unchanged", async () => {
+    mockModulePage.mockResolvedValue(SCOPED); // "alpha.md" is already saved server-side
+    mockMoveItem.mockResolvedValue({ path: "kb/beta.md" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    await openRowMenu("alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    fireEvent.change(screen.getByLabelText("Rename file"), { target: { value: "beta" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() =>
+      expect(mockMoveItem).toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md", "kb/beta.md"),
+    );
+  });
+
+  it("deleting a just-created, not-yet-saved document abandons it locally — no delete request", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    fireEvent.click(await screen.findByRole("button", { name: /new document/i }));
+    fireEvent.change(await screen.findByLabelText("New document title"), {
+      target: { value: "My Doc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("wysiwyg");
+
+    await openRowMenu("my-doc");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" })); // the menu item
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" })); // the themed confirm
+
+    await waitFor(() => expect(screen.queryByTestId("wysiwyg")).toBeNull());
+    expect(mockDeleteDoc).not.toHaveBeenCalled();
+  });
+
+  it("the bare More-actions click opens a menu instead of deleting (#741)", async () => {
+    mockModulePage.mockResolvedValue(SCOPED);
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    const row = (await screen.findByText("alpha")).closest("div") as HTMLElement;
+    fireEvent.mouseEnter(row);
+    fireEvent.click(await screen.findByTitle("More actions"));
+
+    expect(mockDeleteDoc).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "Rename" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Move to…" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("drags a file onto a folder to move it there", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+      ],
+    });
+    mockMoveItem.mockResolvedValue({ path: "kb/docs/alpha.md" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    const fileRow = (await screen.findByText("alpha")).closest("div") as HTMLElement;
+    const folderRow = (await screen.findByText("docs")).closest("div") as HTMLElement;
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn() };
+    fireEvent.dragStart(fileRow, { dataTransfer });
+    fireEvent.dragOver(folderRow, { dataTransfer });
+    fireEvent.drop(folderRow, { dataTransfer });
+    fireEvent.dragEnd(fileRow, { dataTransfer });
+
+    await waitFor(() =>
+      expect(mockMoveItem).toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md", "kb/docs/alpha.md"),
+    );
+  });
+
+  it("drags a nested file onto the root whitespace to move it to the top level", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+        { id: "docs/alpha.md", title: "alpha", path: "docs/alpha.md", type: "file" as const },
+      ],
+    });
+    mockMoveItem.mockResolvedValue({ path: "kb/alpha.md" });
+    const { container } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    const fileRow = (await screen.findByText("alpha")).closest("div") as HTMLElement;
+    const rootList = container.querySelector("ul") as HTMLElement;
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn() };
+    fireEvent.dragStart(fileRow, { dataTransfer });
+    fireEvent.dragOver(rootList, { dataTransfer });
+    fireEvent.drop(rootList, { dataTransfer });
+    fireEvent.dragEnd(fileRow, { dataTransfer });
+
+    await waitFor(() =>
+      expect(mockMoveItem).toHaveBeenCalledWith("knowledge", "vault", "kb/docs/alpha.md", "kb/alpha.md"),
+    );
+  });
+
+  it("auto-expands a collapsed folder when a drag hovers over it", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+        { id: "docs/nested.md", title: "nested", path: "docs/nested.md", type: "file" as const },
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+      ],
+    });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Collapse folder" }));
+    expect(screen.queryByText("nested")).not.toBeInTheDocument();
+
+    const fileRow = (await screen.findByText("alpha")).closest("div") as HTMLElement;
+    const folderRow = (await screen.findByText("docs")).closest("div") as HTMLElement;
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn() };
+    fireEvent.dragStart(fileRow, { dataTransfer });
+    fireEvent.dragOver(folderRow, { dataTransfer });
+
+    expect(await screen.findByText("nested")).toBeInTheDocument();
+  });
+
+  it("Move to… picker moves a file into the chosen folder", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+      ],
+    });
+    mockMoveItem.mockResolvedValue({ path: "kb/docs/alpha.md" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    await openRowMenu("alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Move to…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Move to docs" }));
+
+    await waitFor(() =>
+      expect(mockMoveItem).toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md", "kb/docs/alpha.md"),
+    );
+  });
+
+  it("Move to… picker offers (root) to move a nested file back to the top level", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+        { id: "docs/alpha.md", title: "alpha", path: "docs/alpha.md", type: "file" as const },
+      ],
+    });
+    mockMoveItem.mockResolvedValue({ path: "kb/alpha.md" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    await openRowMenu("alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Move to…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Move to the top level" }));
+
+    await waitFor(() =>
+      expect(mockMoveItem).toHaveBeenCalledWith("knowledge", "vault", "kb/docs/alpha.md", "kb/alpha.md"),
+    );
+  });
+
+  it("moving the currently open document keeps it open at its new path", async () => {
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+      ],
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "kb/alpha.md", title: "alpha", content: "# Alpha" });
+    mockMoveItem.mockResolvedValue({ path: "kb/docs/alpha.md" });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("alpha"));
+    await screen.findByTestId("wysiwyg");
+
+    const fileRow = screen.getByText("alpha").closest("div") as HTMLElement;
+    const folderRow = screen.getByText("docs").closest("div") as HTMLElement;
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn() };
+    fireEvent.dragStart(fileRow, { dataTransfer });
+    fireEvent.dragOver(folderRow, { dataTransfer });
+    fireEvent.drop(folderRow, { dataTransfer });
+
+    // Still open — no dead pane, no 404 — just at its new, moved path.
+    await waitFor(() => expect(screen.getByText("docs/alpha.md")).toBeInTheDocument());
+    expect(screen.getByTestId("wysiwyg")).toHaveValue("# Alpha");
+  });
+
+  it("Notes keeps no per-item actions menu — can_manage_files stays false", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+      can_create: true,
+    });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    const row = (await screen.findByText("a")).closest("div") as HTMLElement;
+    fireEvent.mouseEnter(row);
+    expect(screen.queryByTitle("More actions")).not.toBeInTheDocument();
   });
 
   it("creates a knowledge base via the switcher", async () => {
@@ -655,5 +994,246 @@ describe("EditorView — knowledge bases (scopes)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const ta = (await screen.findByLabelText("Edit index.md")) as HTMLTextAreaElement;
     expect(ta.readOnly).toBe(true);
+  });
+});
+
+// ── resizable tree panel (#730) ───────────────────────────────────────────────
+
+describe("EditorView — resizable tree panel (#730)", () => {
+  // localStorage is cleared by the file-level beforeEach (#743).
+
+  function separator() {
+    return screen.getByRole("separator", { name: "Resize document tree" });
+  }
+
+  it("defaults to 18rem with no stored preference", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+    expect(separator()).toHaveAttribute("aria-valuenow", "18");
+    expect(separator()).toHaveAttribute("aria-valuemin", "12");
+    expect(separator()).toHaveAttribute("aria-valuemax", "40");
+  });
+
+  it("drags to resize live and persists the width for this (module, pageId)", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    // jsdom's default root font-size resolves to 16px, so a 160px drag is a 10rem delta.
+    fireEvent.pointerMove(handle, { clientX: 160, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 160, pointerId: 1 });
+
+    expect(handle).toHaveAttribute("aria-valuenow", "28");
+    expect(localStorage.getItem("editor-tree-width:knowledge/vault")).toBe("28");
+  });
+
+  it("clamps drag resize to [12rem, 40rem]", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 5000, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "40");
+
+    fireEvent.pointerMove(handle, { clientX: -5000, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "12");
+    fireEvent.pointerUp(handle, { clientX: -5000, pointerId: 1 });
+  });
+
+  it("double-click resets to the 18rem default", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 160, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 160, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "28");
+
+    fireEvent.doubleClick(handle);
+    expect(handle).toHaveAttribute("aria-valuenow", "18");
+    expect(localStorage.getItem("editor-tree-width:knowledge/vault")).toBe("18");
+  });
+
+  it("nudges the width with arrow keys", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(handle).toHaveAttribute("aria-valuenow", "19");
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(handle).toHaveAttribute("aria-valuenow", "17");
+  });
+
+  it("remembers Knowledge and Notes widths independently", async () => {
+    localStorage.setItem("editor-tree-width:knowledge/vault", "24");
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+    expect(separator()).toHaveAttribute("aria-valuenow", "24");
+    unmount();
+
+    mockModulePage.mockResolvedValue({ docs: [{ id: "b.md", title: "b", path: "b.md" }] });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    await screen.findByText("b");
+    // Notes has no stored width of its own — the 24rem stashed for Knowledge doesn't leak in.
+    expect(separator()).toHaveAttribute("aria-valuenow", "18");
+  });
+
+  it("survives a reload — the persisted width comes back on the next mount", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: -32, pointerId: 1 }); // -2rem → 16rem
+    fireEvent.pointerUp(handle, { clientX: -32, pointerId: 1 });
+    unmount();
+
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+    expect(separator()).toHaveAttribute("aria-valuenow", "16");
+  });
+});
+
+// ── restore last state (#743) ─────────────────────────────────────────────────
+
+describe("EditorView — restore last state (#743)", () => {
+  it("restores the active scope, folder state, and open document after a remount", async () => {
+    mockModulePage.mockImplementation((_m, _p, params) => {
+      const s = (params && params.scope) || "kb";
+      if (s === "work") {
+        return Promise.resolve({
+          ...SCOPED,
+          scope: "work",
+          docs: [
+            { id: "docs", title: "docs", path: "docs", type: "dir" as const },
+            { id: "docs/beta.md", title: "beta", path: "docs/beta.md", type: "file" as const },
+            { id: "gamma.md", title: "gamma", path: "gamma.md", type: "file" as const },
+          ],
+        });
+      }
+      return Promise.resolve(SCOPED);
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "work/gamma.md", title: "gamma", content: "# Gamma" });
+
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "kb" }));
+    fireEvent.click(await screen.findByText("work"));
+    await screen.findByText("beta"); // "docs" starts expanded
+    fireEvent.click(screen.getByRole("button", { name: "Collapse folder" }));
+    expect(screen.queryByText("beta")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("gamma"));
+    await screen.findByTestId("wysiwyg");
+
+    unmount(); // stands in for navigating away to a different route, or a full reload
+
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    // Same project, same open document (in preview) — and "docs" is still collapsed, so
+    // its child never re-appears.
+    expect(await screen.findByRole("button", { name: "work" })).toBeInTheDocument();
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Gamma");
+    expect(screen.queryByText("beta")).not.toBeInTheDocument();
+  });
+
+  it("a ?doc= deep-link still wins over restored state", async () => {
+    localStorage.setItem(
+      "editor-state:knowledge/vault/kb",
+      JSON.stringify({ collapsed: [], selectedPath: "alpha.md" }),
+    );
+    mockModulePage.mockResolvedValue({
+      ...SCOPED,
+      docs: [
+        { id: "alpha.md", title: "alpha", path: "alpha.md", type: "file" as const },
+        { id: "beta.md", title: "beta", path: "beta.md", type: "file" as const },
+      ],
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      Promise.resolve({ path, title: path, content: `# ${path}` }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/m/knowledge/vault?doc=kb/beta.md"]}>
+          <EditorView module="knowledge" pageId="vault" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# kb/beta.md");
+    expect(mockModulePageDoc).not.toHaveBeenCalledWith("knowledge", "vault", "kb/alpha.md");
+  });
+
+  it("gracefully decays a restored document that no longer exists — no error, just the empty state", async () => {
+    localStorage.setItem(
+      "editor-state:knowledge/vault/kb",
+      JSON.stringify({ collapsed: [], selectedPath: "deleted.md" }),
+    );
+    mockModulePage.mockResolvedValue(SCOPED); // docs: only "alpha.md" — "deleted.md" is gone
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    await screen.findByText("alpha");
+    expect(screen.queryByTestId("wysiwyg")).not.toBeInTheDocument();
+    expect(screen.getByText(/select a document/i)).toBeInTheDocument();
+    expect(mockModulePageDoc).not.toHaveBeenCalled();
+  });
+
+  it("gracefully decays a restored scope that's gone — falls back to the module default", async () => {
+    localStorage.setItem("editor-scope:knowledge/vault", "deleted-kb");
+    mockModulePage.mockResolvedValue(SCOPED); // scope "kb", scopes [kb, work, __docs__] — no "deleted-kb"
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    expect(await screen.findByRole("button", { name: "kb" })).toBeInTheDocument();
+  });
+
+  it("Notes restores its own state independently of Knowledge", async () => {
+    localStorage.setItem(
+      "editor-state:knowledge/vault/kb",
+      JSON.stringify({ collapsed: [], selectedPath: "alpha.md" }),
+    );
+    mockModulePage.mockResolvedValue({
+      docs: [{ id: "a.md", title: "a", path: "a.md" }],
+      can_create: true,
+    });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    await screen.findByText("a");
+    // Notes has no stored selection of its own — nothing opens, and Knowledge's stashed
+    // selection (a different module/pageId key) never leaks in.
+    expect(screen.queryByTestId("wysiwyg")).not.toBeInTheDocument();
+  });
+
+  it("Notes also restores its own fold state and open document across a remount", async () => {
+    // Notes has no project concept — its resolved `scope` is permanently "", not a
+    // transient "hasn't loaded yet" value like Knowledge's can be. A guard that skipped
+    // persistence for a falsy scope would silently never persist anything for Notes at all.
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "folder", title: "folder", path: "folder", type: "dir" as const },
+        { id: "folder/note.md", title: "note", path: "folder/note.md", type: "file" as const },
+      ],
+      can_create: true,
+    });
+    mockModulePageDoc.mockResolvedValue({ path: "folder/note.md", title: "note", content: "# Note" });
+    const { unmount } = render(<EditorView module="notes" pageId="notes" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("note"));
+    await screen.findByTestId("wysiwyg");
+    unmount();
+
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Note");
   });
 });

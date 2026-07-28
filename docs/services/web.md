@@ -523,6 +523,19 @@ per `(module, pageId)` in `localStorage`, so Knowledge and Notes keep independen
 the same pattern CalendarView already uses for its own view-state persistence. Below the `sm`
 breakpoint the layout is still a single stacked pane, so there is nothing to divide there.
 
+The editor also **remembers where you left off** (#743): the active project/knowledge-base,
+which folders were expanded, and which document was open all persist to `localStorage` — the
+scope choice keyed by `(module, pageId)`, the fold-state and selection by `(module, pageId,
+scope)` (tree paths are scope-relative, so restoring one project's folds onto another would be
+worse than restoring nothing). Reopening the page — after navigating away and back, switching
+projects and back within one visit, or a full reload — restores all three, in that order: scope,
+then folds, then the open document (which lands in preview, per #729, same as any other open).
+An explicit `?doc=` deep-link (or a host-provided document, #541) always wins over restored
+state, exactly as before. Decay is graceful: a restored scope that's gone falls back to the
+module's own default; a restored document that's gone is simply never selected, so there's no
+404 or error flash — just the ordinary "select a document" empty state. Scroll position and
+read-position within a document are out of scope.
+
 Because notes/knowledge **re-embed on every save**, the editor does not
 save on each keystroke: a save fires only when you **leave** (switch document, go back, or
 the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,

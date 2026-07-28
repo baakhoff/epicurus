@@ -14,6 +14,31 @@ images to GHCR.
 
 ### Added
 
+- **Knowledge and Notes remember where you left off** (#743) — opening the page always
+  landed on the module's default project, with every folder collapsed back to its initial
+  state and no document open, no matter where you'd actually been working: the active
+  scope, fold state, and open document were all plain component state, hydrated from
+  nothing on every mount. All three now persist to `localStorage` — the scope choice keyed
+  by `(module, pageId)`, fold state and selection by `(module, pageId, scope)` since tree
+  paths are scope-relative (restoring one project's folds onto another would be worse than
+  restoring nothing). Reopening the page — navigating away and back, switching projects and
+  back within one visit, or a full reload — restores scope, then folds, then the open
+  document, in that order; the document lands in preview per #729, same as any other open.
+  An explicit `?doc=` deep-link or a host-provided document (#541) still always wins over
+  restored state — they set the selection during render, before the restore effect (which
+  only ever fills an untouched slot) gets a chance to run. Decay is graceful: a restored
+  scope that no longer exists falls back to the module's own default (which re-triggers the
+  same restore for whatever that default resolves to); a restored document that's gone is
+  simply never selected, so it never gets a doc-fetch to 404 on — no error flash, just the
+  ordinary empty-state prompt. A real bug surfaced while testing this against a genuine
+  remount (not just a scope switch within one mount): the write-back effect was gated only
+  on `scope` being known, not on the restore having actually run for it yet, so on a fresh
+  mount it fired one render early with the plain in-memory defaults and clobbered the very
+  state the restore was about to read — fixed by gating the write on the same "restored for
+  this scope" marker the restore effect itself sets. Scroll position and in-document
+  read-position are out of scope. `web` 0.124.0→0.125.0 (MINOR).
+
+
 - **Move Knowledge documents by drag-and-drop, and an honest actions menu** (#741) — there
   was no way to move a document to another folder (or back to the root) at all, and the
   row's "three dots" — the icon that universally means "more actions" — just deleted the
@@ -35,6 +60,7 @@ images to GHCR.
   moves are out of scope for this pass — files only. Notes is untouched: `can_manage_files`
   stays false there, so it shows no hover actions, same as always. `web` 0.123.1→0.124.0
   (MINOR).
+
 
 
 - **Resizable tree panel for Knowledge and Notes** (#730) — the editor archetype's document

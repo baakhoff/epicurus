@@ -480,6 +480,112 @@ function TreeItem({
 }
 
 /**
+ * The open menu's body (#741). Its own component so each open mounts fresh `showMoveTo`
+ * state — the same reason CommandPalette's dialog body is separate, and why neither needs
+ * a reset effect (react-hooks/set-state-in-effect). Closing the menu unmounts this, so the
+ * next open always starts on the actions list rather than wherever it was left.
+ */
+function TreeItemMenuPanel({
+  isDir,
+  destinations,
+  onRename,
+  onMoveTo,
+  onNewFileInFolder,
+  onDelete,
+  onClose,
+}: {
+  isDir: boolean;
+  destinations: { path: string; title: string }[];
+  onRename: () => void;
+  onMoveTo: (destination: string) => void;
+  onNewFileInFolder: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [showMoveTo, setShowMoveTo] = useState(false);
+
+  return (
+    <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 text-left shadow-(--ep-shadow)">
+      {showMoveTo ? (
+        <>
+          <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">Move to…</div>
+          <div className="max-h-56 overflow-y-auto">
+            <button
+              aria-label="Move to the top level"
+              onClick={() => {
+                onMoveTo("");
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              (root)
+            </button>
+            {destinations.map((f) => (
+              <button
+                key={f.path}
+                aria-label={`Move to ${f.path}`}
+                onClick={() => {
+                  onMoveTo(f.path);
+                  onClose();
+                }}
+                className="block w-full truncate px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+              >
+                {f.path}
+              </button>
+            ))}
+            {destinations.length === 0 && (
+              <p className="px-3 py-2 text-xs text-ink-faint">No other folders.</p>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          {!isDir && (
+            <button
+              onClick={() => {
+                onRename();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Rename
+            </button>
+          )}
+          {!isDir && (
+            <button
+              onClick={() => setShowMoveTo(true)}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Move to…
+            </button>
+          )}
+          {isDir && (
+            <button
+              onClick={() => {
+                onNewFileInFolder();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              New file in folder
+            </button>
+          )}
+          <button
+            onClick={() => {
+              onDelete();
+              onClose();
+            }}
+            className="block w-full px-3 py-1.5 text-left text-sm text-danger hover:bg-danger/10"
+          >
+            Delete
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
  * The per-item "more actions" menu (#741) — replaces what used to be three separate hover
  * icons (one of which, confusingly, was the bare ⋯ icon wired to Delete). Rename and Move to…
  * are file-only (folders don't rename or move in this version); New file in folder is
@@ -505,11 +611,6 @@ function TreeItemMenu({
   onNewFileInFolder: () => void;
   onDelete: () => void;
 }) {
-  const [showMoveTo, setShowMoveTo] = useState(false);
-  useEffect(() => {
-    if (!isOpen) setShowMoveTo(false);
-  }, [isOpen]);
-
   const isDir = node.type === "dir";
   const currentParent = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : "";
   // A file's own current folder is a no-op move (nothing to offer it as); a folder never
@@ -538,83 +639,15 @@ function TreeItemMenu({
               className="fixed inset-0 z-10 cursor-default"
               onClick={() => onOpenChange(false)}
             />
-            <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 text-left shadow-(--ep-shadow)">
-              {showMoveTo ? (
-                <>
-                  <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">Move to…</div>
-                  <div className="max-h-56 overflow-y-auto">
-                    <button
-                      aria-label="Move to the top level"
-                      onClick={() => {
-                        onMoveTo("");
-                        onOpenChange(false);
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      (root)
-                    </button>
-                    {destinations.map((f) => (
-                      <button
-                        key={f.path}
-                        aria-label={`Move to ${f.path}`}
-                        onClick={() => {
-                          onMoveTo(f.path);
-                          onOpenChange(false);
-                        }}
-                        className="block w-full truncate px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                      >
-                        {f.path}
-                      </button>
-                    ))}
-                    {destinations.length === 0 && (
-                      <p className="px-3 py-2 text-xs text-ink-faint">No other folders.</p>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  {!isDir && (
-                    <button
-                      onClick={() => {
-                        onRename();
-                        onOpenChange(false);
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      Rename
-                    </button>
-                  )}
-                  {!isDir && (
-                    <button
-                      onClick={() => setShowMoveTo(true)}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      Move to…
-                    </button>
-                  )}
-                  {isDir && (
-                    <button
-                      onClick={() => {
-                        onNewFileInFolder();
-                        onOpenChange(false);
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      New file in folder
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      onDelete();
-                      onOpenChange(false);
-                    }}
-                    className="block w-full px-3 py-1.5 text-left text-sm text-danger hover:bg-danger/10"
-                  >
-                    Delete
-                  </button>
-                </>
-              )}
-            </div>
+            <TreeItemMenuPanel
+              isDir={isDir}
+              destinations={destinations}
+              onRename={onRename}
+              onMoveTo={onMoveTo}
+              onNewFileInFolder={onNewFileInFolder}
+              onDelete={onDelete}
+              onClose={() => onOpenChange(false)}
+            />
           </>
         )}
       </div>

@@ -946,3 +946,276 @@ async def test_review_audit_endpoint_returns_decisions(tmp_path: Path) -> None:
     assert len(body["decisions"]) == 1
     assert body["decisions"][0]["decision"] == "approved"
     assert body["decisions"][0]["path"] == "note.md"
+
+
+# ── suggestion lifecycle: read/update/withdraw (#744) ─────────────────────────
+
+
+async def test_store_update_revises_content_note_and_to_path() -> None:
+    store = await _store()
+    sid = await _add(store, path="a.md", operation="update", content="old", note="why")
+    before = await store.get(tenant=TENANT, sid=sid)
+    assert before is not None
+    updated = await store.update(
+        tenant=TENANT, sid=sid, proposed_content="new", note="revised why", to_path="b.md"
+    )
+    assert updated is not None
+    assert updated.proposed_content == "new"
+    assert updated.note == "revised why"
+    assert updated.to_path == "b.md"
+    assert updated.created_at >= before.created_at  # "proposed-at refreshes"
+
+
+async def test_store_update_leaves_omitted_fields_unchanged() -> None:
+    store = await _store()
+    sid = await _add(store, path="a.md", operation="update", content="keep-me", note="keep-note")
+    updated = await store.update(tenant=TENANT, sid=sid, note="only note changes")
+    assert updated is not None
+    assert updated.proposed_content == "keep-me"
+    assert updated.note == "only note changes"
+
+
+async def test_store_update_unknown_sid_returns_none() -> None:
+    store = await _store()
+    assert await store.update(tenant=TENANT, sid="nope", note="x") is None
+
+
+async def test_store_update_is_tenant_scoped() -> None:
+    store = await _store()
+    sid = await _add(store, path="a.md", operation="update", content="x", tenant="tenant-a")
+    assert await store.update(tenant="tenant-b", sid=sid, note="cross-tenant") is None
+    still = await store.get(tenant="tenant-a", sid=sid)
+    assert still is not None and still.note == ""
+
+
+async def test_audit_get_returns_none_for_unknown_sid() -> None:
+    audit_store = await _audit_store()
+    assert await audit_store.get(tenant=TENANT, sid="nope") is None
+
+
+async def test_audit_get_finds_a_recorded_decision() -> None:
+    from datetime import UTC, datetime
+
+    audit_store = await _audit_store()
+    await audit_store.record(
+        tenant=TENANT,
+        sid="s1",
+        path="a.md",
+        operation="create",
+        origin="agent",
+        note="",
+        proposed_at=datetime.now(UTC),
+        decision="rejected",
+        proposed_content="a\n",
+        applied_content="",
+    )
+    got = await audit_store.get(tenant=TENANT, sid="s1")
+    assert got is not None
+    assert got.decision == "rejected"
+
+
+async def test_review_read_returns_full_suggestion(tmp_path: Path) -> None:
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="a.md", operation="create", content="# A\n", note="rationale")
+    s = await review.read(sid)
+    assert s.sid == sid
+    assert s.proposed_content == "# A\n"
+    assert s.note == "rationale"
+
+
+async def test_review_read_unknown_404s_with_no_such_suggestion(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    review, _, _ = await _review(tmp_path)
+    with pytest.raises(HTTPException) as err:
+        await review.read("nope")
+    assert err.value.status_code == 404
+    assert "no such suggestion" in str(err.value.detail).lower()
+
+
+async def test_review_read_resolved_404s_with_the_verdict(tmp_path: Path) -> None:
+    """A caller can tell 'never existed' from 'already resolved' (#744, #697 precedent)."""
+    from fastapi import HTTPException
+
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="a.md", operation="create", content="# A\n")
+    await review.approve(sid)
+    with pytest.raises(HTTPException) as err:
+        await review.read(sid)
+    assert err.value.status_code == 404
+    assert "already approved" in str(err.value.detail).lower()
+
+
+async def test_review_update_revises_and_stays_pending(tmp_path: Path) -> None:
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="a.md", operation="create", content="draft v1")
+    updated = await review.update(sid, content="draft v2")
+    assert updated.proposed_content == "draft v2"
+    pending = await store.list(tenant=TENANT)
+    assert len(pending) == 1  # still one queue entry, never two
+    assert pending[0].sid == sid
+
+
+async def test_review_update_unknown_404s(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    review, _, _ = await _review(tmp_path)
+    with pytest.raises(HTTPException) as err:
+        await review.update("nope", content="x")
+    assert err.value.status_code == 404
+
+
+async def test_review_update_already_rejected_404s_with_the_verdict(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="a.md", operation="create", content="x")
+    await review.reject(sid)
+    with pytest.raises(HTTPException) as err:
+        await review.update(sid, content="too late")
+    assert err.value.status_code == 404
+    assert "already rejected" in str(err.value.detail).lower()
+
+
+async def test_review_withdraw_removes_from_pending_keeps_history(tmp_path: Path) -> None:
+    review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="a.md", operation="create", content="stale")
+    result = await review.withdraw(sid)
+    assert result.status == "withdrawn"
+    assert await store.list(tenant=TENANT) == []  # left the pending queue
+    assert indexer.indexed == [] and indexer.removed == []  # never touched the vault
+    audit = (await review.list_audit()).decisions
+    assert len(audit) == 1
+    assert audit[0].decision == "withdrawn"
+    assert audit[0].proposed_content == "stale"
+
+
+async def test_review_withdraw_unknown_404s(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    review, _, _ = await _review(tmp_path)
+    with pytest.raises(HTTPException) as err:
+        await review.withdraw("nope")
+    assert err.value.status_code == 404
+
+
+async def test_review_withdraw_already_withdrawn_404s(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    review, store, _ = await _review(tmp_path)
+    sid = await _add(store, path="a.md", operation="create", content="x")
+    await review.withdraw(sid)
+    with pytest.raises(HTTPException) as err:
+        await review.withdraw(sid)
+    assert err.value.status_code == 404
+    assert "already withdrawn" in str(err.value.detail).lower()
+
+
+# ── the suggestion-lifecycle MCP tools (#744) ─────────────────────────────────
+
+
+async def test_list_suggestions_tool_shows_pending(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    await module.mcp.call_tool(
+        "knowledge_create_document", {"path": "a.md", "content": "# A\n", "note": "first"}
+    )
+    content, _ = await module.mcp.call_tool("knowledge_list_suggestions", {})
+    text = content[0].text
+    assert "a.md" in text
+    assert "first" in text
+
+
+async def test_list_suggestions_tool_empty_queue(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    content, _ = await module.mcp.call_tool("knowledge_list_suggestions", {})
+    assert "no suggestions" in content[0].text.lower()
+
+
+async def test_list_suggestions_tool_rejects_non_pending_status(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    with pytest.raises(ToolError, match=r"(?i)status must be"):
+        await module.mcp.call_tool("knowledge_list_suggestions", {"status": "approved"})
+
+
+async def test_read_suggestion_tool_returns_full_content(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    await module.mcp.call_tool(
+        "knowledge_create_document", {"path": "ideas/a.md", "content": "# Idea\nbody"}
+    )
+    sid = (await store.list(tenant=TENANT))[0].sid
+    content, _ = await module.mcp.call_tool("knowledge_read_suggestion", {"id": sid})
+    text = content[0].text
+    assert "ideas/a.md" in text
+    assert "# Idea" in text
+    assert "body" in text
+
+
+async def test_read_suggestion_tool_unknown_id_raises(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    with pytest.raises(ToolError, match=r"(?i)no such suggestion"):
+        await module.mcp.call_tool("knowledge_read_suggestion", {"id": "nope"})
+
+
+async def test_update_suggestion_tool_revises_in_place(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    await module.mcp.call_tool("knowledge_create_document", {"path": "a.md", "content": "draft v1"})
+    sid = (await store.list(tenant=TENANT))[0].sid
+    content, _ = await module.mcp.call_tool(
+        "knowledge_update_suggestion", {"id": sid, "content": "draft v2"}
+    )
+    assert "revised" in content[0].text.lower()
+    rows = await store.list(tenant=TENANT)
+    assert len(rows) == 1  # still one entry
+    assert rows[0].proposed_content == "draft v2"
+
+
+async def test_update_suggestion_tool_on_resolved_raises_model_actionable_message(
+    tmp_path: Path,
+) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    await module.mcp.call_tool("knowledge_create_document", {"path": "a.md", "content": "x"})
+    sid = (await store.list(tenant=TENANT))[0].sid
+    # Withdraw it via the MCP tool itself, then try to update the now-resolved suggestion —
+    # the refusal message must say *why* (already withdrawn), not just 404 (#697 precedent).
+    await module.mcp.call_tool("knowledge_withdraw_suggestion", {"id": sid})
+    with pytest.raises(ToolError, match=r"(?i)already withdrawn"):
+        await module.mcp.call_tool(
+            "knowledge_update_suggestion", {"id": sid, "content": "too late"}
+        )
+
+
+async def test_withdraw_suggestion_tool_removes_from_queue(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    await module.mcp.call_tool("knowledge_create_document", {"path": "a.md", "content": "x"})
+    sid = (await store.list(tenant=TENANT))[0].sid
+    content, _ = await module.mcp.call_tool("knowledge_withdraw_suggestion", {"id": sid})
+    assert "withdrawn" in content[0].text.lower()
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_withdraw_suggestion_tool_unknown_id_raises(tmp_path: Path) -> None:
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    with pytest.raises(ToolError, match=r"(?i)no such suggestion"):
+        await module.mcp.call_tool("knowledge_withdraw_suggestion", {"id": "nope"})
+
+
+async def test_suggestion_lifecycle_tools_are_not_side_effect_write(tmp_path: Path) -> None:
+    """list/read are 'read'; update/withdraw are 'propose' — never 'write' (#744, ADR-0112):
+    both stay inside the pending queue and never touch the vault."""
+    store = await _store()
+    module = await _module_with_store(store, tmp_path)
+    manifest = await module.manifest()
+    by_name = {t.name: t for t in manifest.tools}
+    assert by_name["knowledge_list_suggestions"].side_effect == "read"
+    assert by_name["knowledge_read_suggestion"].side_effect == "read"
+    assert by_name["knowledge_update_suggestion"].side_effect == "propose"
+    assert by_name["knowledge_withdraw_suggestion"].side_effect == "propose"

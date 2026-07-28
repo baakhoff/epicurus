@@ -21,6 +21,19 @@ has no direct vault-write tool:
 * ``knowledge_propose_folder`` — create a folder.
 * ``knowledge_propose_project`` — create a new knowledge base.
 * ``knowledge_reindex`` — re-scan all sources (vault projects, platform docs, module docs).
+
+Suggestion lifecycle (#744) — the agent's own view of its pending review queue, so "change
+that suggestion" revises it in place instead of piling up a near-duplicate:
+
+* ``knowledge_list_suggestions`` — the pending queue (id, kind, target, a content preview).
+* ``knowledge_read_suggestion`` — one suggestion's full proposed content.
+* ``knowledge_update_suggestion`` — revise a pending suggestion's content/note/target.
+* ``knowledge_withdraw_suggestion`` — retract a pending suggestion (kept as history).
+
+Approve/reject stay off the MCP surface (:class:`~epicurus_knowledge.suggestions.
+SuggestionReview` — exposing them would let the agent approve its own proposals); update and
+withdraw are safe to expose because both stay inside the pending queue and never touch the
+vault.
 """
 
 from __future__ import annotations
@@ -220,6 +233,32 @@ optional ``note``.
 
 Propose creating a new knowledge base (staged for review). Parameters: ``name`` (a single
 folder name), optional ``note``.
+
+## Your pending suggestions
+
+Every propose tool above stages a change instead of writing it. Before proposing, check
+what's already pending — revise it instead of piling up a near-duplicate.
+
+## knowledge_list_suggestions
+
+List your own pending suggestions: id, kind, target, a short content preview. Optional
+``status`` (only ``"pending"`` is supported today).
+
+## knowledge_read_suggestion
+
+Read one pending suggestion's full proposed content and target. Parameter: ``id``.
+
+## knowledge_update_suggestion
+
+Revise a pending suggestion's content/note/target in place — it stays pending, and the
+operator's review shows the latest revision as one queue entry. Parameters: ``id``, optional
+``content``/``note``/``to_path`` (omit a field to leave it unchanged). Refuses if the
+suggestion was already approved/rejected/withdrawn.
+
+## knowledge_withdraw_suggestion
+
+Retract a pending suggestion you no longer want applied (e.g. superseded by a later edit).
+Parameter: ``id``. Kept as history; refuses if already approved/rejected/withdrawn.
 """,
     },
 ]
@@ -258,7 +297,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.26.0",
+        version="0.27.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -553,6 +592,10 @@ def build_module(
         created immediately. To change an existing note use ``knowledge_propose_edit``; for
         folders or knowledge bases use ``knowledge_propose_folder`` / ``knowledge_propose_project``.
 
+        Check ``knowledge_list_suggestions`` first — if you already proposed this note and it's
+        still pending, revise it with ``knowledge_update_suggestion`` instead of creating a
+        near-duplicate.
+
         Args:
             path: Vault-relative path of the new note, e.g. ``projects/goals.md``. Must end in
                 ``.md``, stay inside the vault (no ``..`` traversal), and not already exist.
@@ -584,6 +627,10 @@ def build_module(
 
         To **create** a new note, prefer ``knowledge_create_document`` — the single-purpose
         create tool. This tool still accepts ``operation="create"`` for completeness.
+
+        If the user asks you to change or fix a suggestion you already made, check
+        ``knowledge_list_suggestions`` — if it's still pending, revise it with
+        ``knowledge_update_suggestion`` rather than proposing this edit a second time.
 
         Args:
             path: Vault-relative path of the note, e.g. ``projects/goals.md``. Must end
@@ -679,6 +726,9 @@ def build_module(
         reorganise the knowledge base: move a note into a folder, rename it, or move a whole
         folder. Paths are knowledge-base-relative (``<project>/<path>``).
 
+        Check ``knowledge_list_suggestions`` first — if a similar move is already pending,
+        revise it with ``knowledge_update_suggestion`` instead of proposing it again.
+
         Args:
             from_path: The current path of the document or folder.
             to_path: The destination path.
@@ -718,6 +768,9 @@ def build_module(
         A convenience over knowledge_propose_move: supply the item's *path* and just the new
         leaf *new_name* (no slashes) — the same folder is kept. For a ``.md`` document the
         ``.md`` suffix is preserved. Staged as a move suggestion; applied only on approval.
+
+        Check ``knowledge_list_suggestions`` first — if a similar rename is already pending,
+        revise it with ``knowledge_update_suggestion`` instead of proposing it again.
 
         Args:
             path: The current path, ``<project>/<…>/<name>``.
@@ -767,6 +820,10 @@ def build_module(
 
         Staged as a suggestion. *path* is ``<project>/<folder>``. (You can also just propose
         a document at a new path — its parent folders are created with it on approval.)
+
+        Check ``knowledge_list_suggestions`` first — if this folder is already proposed,
+        there is nothing more to do; revise the pending one with
+        ``knowledge_update_suggestion`` instead of proposing it again.
         """
         rel = path.strip()
         try:
@@ -797,6 +854,10 @@ def build_module(
 
         A knowledge base is a top-level collection of notes. Staged as a suggestion; it is
         created only on approval. *name* is a single folder name (no slashes).
+
+        Check ``knowledge_list_suggestions`` first — if this knowledge base is already
+        proposed, revise the pending one with ``knowledge_update_suggestion`` instead of
+        proposing it again.
         """
         try:
             safe_project(vault_path, name)
@@ -817,6 +878,126 @@ def build_module(
             f"Proposed new knowledge base '{name.strip()}' (suggestion {suggestion.sid[:8]})."
             " Pending your review in Knowledge → Suggestions.",
         )
+
+    # ── Suggestion lifecycle (#744): see and revise what's already pending ───────
+    #
+    # Before #744 the agent was write-only into the review queue — "change that suggestion"
+    # could only create a second one. These let it see the pending queue and revise/withdraw
+    # its own entries in place, so it stops accumulating near-duplicates. Approve/reject stay
+    # off the MCP surface (SuggestionReview, "not MCP tools" — module docstring above): letting
+    # the agent approve its own proposals would defeat the review gate. Update/withdraw don't
+    # have that problem — both stay strictly within the pending queue and never touch the vault.
+
+    def _preview(content: str, limit: int = 80) -> str:
+        """A short single-line preview of *content* for a suggestion-queue listing."""
+        flat = " ".join(content.split())
+        return flat if len(flat) <= limit else f"{flat[:limit].rstrip()}…"
+
+    @module.tool(side_effect="read")
+    async def knowledge_list_suggestions(status: str = "pending") -> str:
+        """List your own suggestions awaiting operator review (#744).
+
+        **Check this before proposing a change** — if something similar is already pending,
+        revise it with ``knowledge_update_suggestion`` instead of creating a near-duplicate
+        the operator's review queue would otherwise accumulate.
+
+        Args:
+            status: Must be ``"pending"`` — the only queryable state today. Approved,
+                rejected, and withdrawn suggestions are immutable history, not listed here.
+        """
+        if status != "pending":
+            raise ValueError(
+                f"status must be 'pending', got {status!r} — approved/rejected/withdrawn"
+                " suggestions are immutable history, not listed here"
+            )
+        pending = await suggestions.list(tenant=tenant)
+        if not pending:
+            return "No suggestions pending review."
+        lines = ["Pending suggestions:"]
+        for s in pending:
+            target = f"{s.path} -> {s.to_path}" if s.to_path else s.path
+            bits = [f"- {s.sid} [{s.operation}] {target}", f"proposed {s.created_at.isoformat()}"]
+            preview = _preview(s.proposed_content) if s.proposed_content else ""
+            if preview:
+                bits.append(f'"{preview}"')
+            if s.note:
+                bits.append(f"note: {s.note}")
+            lines.append(" — ".join(bits))
+        return "\n".join(lines)
+
+    @module.tool(side_effect="read")
+    async def knowledge_read_suggestion(id: str) -> str:
+        """Read one pending suggestion's full proposed content and target (#744).
+
+        Args:
+            id: The suggestion id, from ``knowledge_list_suggestions``.
+        """
+        try:
+            s = await review.read(id)
+        except Exception as exc:
+            raise ValueError(getattr(exc, "detail", str(exc))) from exc
+        lines = [f"Suggestion {s.sid} — {s.operation} — {s.path}"]
+        if s.to_path:
+            lines.append(f"To: {s.to_path}")
+        lines.append(f"Proposed: {s.created_at.isoformat()}")
+        if s.note:
+            lines.append(f"Note: {s.note}")
+        if s.proposed_content:
+            lines.extend(["", s.proposed_content])
+        return "\n".join(lines)
+
+    @module.tool(side_effect="propose")
+    async def knowledge_update_suggestion(
+        id: str,
+        content: str | None = None,
+        note: str | None = None,
+        to_path: str | None = None,
+    ) -> str:
+        """Revise a PENDING suggestion in place, instead of proposing a near-duplicate (#744).
+
+        Use this when you want to change a suggestion you already made, before the operator
+        has reviewed it — e.g. the user asked you to adjust it. It stays pending; the
+        operator's review shows the latest revision as one queue entry, never two. Nothing
+        touches the vault — the ADR-0033 approval gate is unchanged. Pass only the fields you
+        want to change; the rest keep their current value.
+
+        Args:
+            id: The suggestion id.
+            content: New proposed content — meaningful for create/update suggestions; omit
+                to leave unchanged.
+            note: New rationale shown to the operator; omit to leave unchanged.
+            to_path: New destination — meaningful for move suggestions; omit to leave
+                unchanged.
+
+        Refuses with an explanatory error if the suggestion was already approved, rejected,
+        or withdrawn (immutable history), or does not exist.
+        """
+        try:
+            updated = await review.update(id, content=content, note=note, to_path=to_path)
+        except Exception as exc:
+            raise ValueError(getattr(exc, "detail", str(exc))) from exc
+        return (
+            f"Suggestion {updated.sid} revised; still pending your review in"
+            " Knowledge → Suggestions."
+        )
+
+    @module.tool(side_effect="propose")
+    async def knowledge_withdraw_suggestion(id: str) -> str:
+        """Retract a PENDING suggestion you no longer want applied (#744).
+
+        Use this when a suggestion you made has gone stale — e.g. superseded by a later
+        edit, or the user changed their mind. Removes it from the pending queue (kept as
+        history); nothing in the vault is touched. Refuses with an explanatory error if it
+        was already approved, rejected, or withdrawn, or does not exist.
+
+        Args:
+            id: The suggestion id.
+        """
+        try:
+            result = await review.withdraw(id)
+        except Exception as exc:
+            raise ValueError(getattr(exc, "detail", str(exc))) from exc
+        return f"Suggestion {result.id} withdrawn."
 
     return module
 

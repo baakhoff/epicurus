@@ -35,6 +35,8 @@ images to GHCR.
   moves are out of scope for this pass — files only. Notes is untouched: `can_manage_files`
   stays false there, so it shows no hover actions, same as always. `web` 0.123.1→0.124.0
   (MINOR).
+
+
 - **Resizable tree panel for Knowledge and Notes** (#730) — the editor archetype's document
   list fixed the tree column at 18rem, so long titles truncated on a narrow tree and a wide
   screen couldn't give the tree more room. A drag handle now sits between the tree and the
@@ -50,6 +52,25 @@ images to GHCR.
   (Notes and Knowledge share the `editor` archetype, ADR-0018) — a shared `ResizableSplit`
   component is deliberately not extracted yet; that's for if/when a second consumer (e.g. the
   Files browser) actually needs one. `web` 0.122.1→0.123.0 (MINOR).
+
+
+- **Knowledge/notes: suggestion lifecycle tools** (#744) — the agent could only *add* to its
+  review queue; "change that suggestion" had no better option than proposing a near-duplicate,
+  and the agent had no way to see what was already pending. Four new tools per module —
+  `{knowledge,notes}_list_suggestions` (the pending queue: id, kind, target, a content
+  preview), `_read_suggestion` (one suggestion's full proposed content), `_update_suggestion`
+  (revise content/note/target in place — stays pending, `proposed-at` refreshes, one queue
+  entry never two), `_withdraw_suggestion` (retract a pending suggestion, kept as history) —
+  let it check first and revise instead of duplicating. Update/withdraw stay strictly inside
+  the pending queue and never touch the vault/note, so they're safe to expose even though
+  approve/reject correctly stay off the MCP surface (letting the agent approve its own
+  proposals would defeat the review gate, ADR-0033). A refusal on an already-resolved or
+  unknown suggestion raises with a message naming *why* (already approved/rejected/withdrawn,
+  or unknown outright) rather than a bare 404 the model can't act on (#697 precedent). Notes'
+  `notes_read_suggestion` is a deliberate, narrow exception to "notes are private, no read
+  tool" — it echoes back only the agent's own draft, never a note's stored body. Every
+  existing propose-shaped tool in both modules now nudges the agent to check the pending
+  queue first. `knowledge` 0.26.0→0.27.0 (MINOR) · `notes` 0.11.0→0.12.0 (MINOR).
 - **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
   operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
   only source for a hosted model's vision support and context length, and it is missing ids
@@ -94,6 +115,9 @@ images to GHCR.
   the shared slug helper: `uniqueSlug`'s collision suffix now lands before a `.md` extension
   (`name-2.md`) instead of after it (the pre-existing, never-before-exercised `name.md-2`).
   `web` 0.123.0→0.123.1 (PATCH).
+
+
+
 - **Editor: create lands in preview — render-first now applies to creation, not just
   opening** (#729) — creating a document (Knowledge or Notes) opened it in **edit** mode,
   while opening an *existing* document landed in **preview** (render-first, ADR-0042); create

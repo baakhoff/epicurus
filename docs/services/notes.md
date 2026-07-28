@@ -26,9 +26,12 @@ one-time startup backfill of pre-existing notes.
 
 Notes are private. The boundary is enforced in two places (#KB-refactor):
 
-- **No read tool.** The module exposes structure-only and write tools, but **no get/read
-  tool** — the agent can never pull a note's body through MCP. It learns titles and slugs
-  (to target the right note), and it proposes changes, but it does not see content.
+- **No note-body read tool.** The module exposes structure-only and write tools, but **no
+  get/read tool over a note's stored body** — the agent can never pull a note's body through
+  MCP. It learns titles and slugs (to target the right note), and it proposes changes, but
+  it does not see content. The one narrow exception (#744): `notes_read_suggestion` echoes
+  back a *pending suggestion's* proposed content — text the agent itself already supplied,
+  never a note's stored body — so the agent can review and revise its own unreviewed drafts.
 - **Hidden from the file tools.** The `.md` mirror lives under `notes/` in the shared file
   space. The storage module hides that subtree from the **agent's** file tools, so the agent
   cannot read a note body via `storage_read`/`storage_list`/`storage_search` either (see
@@ -66,11 +69,31 @@ directly; the operator approves or rejects it in the **Note suggestions** page:
 | `notes_append(slug, text, note="")` | `slug`; `text`: the text to add; `note` | A confirmation that an `append` was staged. The agent supplies **only the text to add** (it cannot read the note); the server concatenates it onto the current body **on approval**. |
 | `notes_delete(slug, note="")` | `slug`; `note` | A confirmation that a `delete` was staged; the note is removed only on approval. |
 
-There is **deliberately no read/get tool** — a note's content reaches the agent only via
-attach (see below). A slug is validated (non-empty, ≤ 512 chars, no control characters); an
-invalid slug or operation **fails the call** (a raised error, MCP `isError`) rather than
-returning a success-shaped result — the live document pane keys off that structural signal,
-not the reply text, so a rejected write must never look like a staged suggestion (#690).
+There is **deliberately no tool that reads a note's stored body** — a note's content reaches
+the agent only via attach (see below). A slug is validated (non-empty, ≤ 512 chars, no
+control characters); an invalid slug or operation **fails the call** (a raised error, MCP
+`isError`) rather than returning a success-shaped result — the live document pane keys off
+that structural signal, not the reply text, so a rejected write must never look like a
+staged suggestion (#690).
+
+**Suggestion lifecycle** (#744) — the agent's own view of its pending review queue, so
+"change that suggestion" revises it in place instead of piling up a near-duplicate. This is
+the one narrow, deliberate exception to "no read tool": it echoes back only the agent's own
+draft (content it already supplied), never a note's stored body — privacy is unaffected.
+Update and withdraw stay inside the pending queue and never touch a note; approve/reject
+stay off the MCP surface entirely (exposing them would let the agent approve its own
+proposals):
+
+| Tool | Inputs | Returns |
+| --- | --- | --- |
+| `notes_list_suggestions(status="pending")` | `status`: must be `"pending"` (the only queryable state) | The pending queue: id, kind, slug, proposed-at, and a short content preview, one per line. **Check this before proposing** — revise a similar pending suggestion instead of duplicating it. |
+| `notes_read_suggestion(id)` | `id`: a suggestion id | The full proposed content for one pending suggestion — the agent's own draft. |
+| `notes_update_suggestion(id, content=None, note=None)` | `id`: a suggestion id; the rest: whichever fields to revise (omit to leave unchanged) | A confirmation that the suggestion was revised in place — still pending, `proposed-at` refreshed, one queue entry (never two). |
+| `notes_withdraw_suggestion(id)` | `id`: a suggestion id | A confirmation that the suggestion was withdrawn (removed from the pending queue, kept as history). |
+
+`notes_update_suggestion` and `notes_withdraw_suggestion` refuse (raised error, MCP
+`isError`, #697 precedent) with a message naming *why* — already approved/rejected/withdrawn
+(immutable history) or unknown outright — rather than a bare 404 the model can't act on.
 
 ### Chat attachments (ADR-0019)
 
@@ -248,7 +271,7 @@ data flows through the core.
 | `POST /pages/review/suggestions/{sid}/reject` | Discard a staged change, note untouched → `{id, status, path, operation}`. 404 if unknown. Operator-only. |
 | `GET /attachments` | Attachment picker (see above). |
 | `GET /attachments/{ref_id}` | Attachment resolve (see above). |
-| `GET /mcp` (streamable-HTTP) | MCP surface: the structure (`notes_list`/`notes_tree`) and write (`notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete`) tools — **no read tool**. |
+| `GET /mcp` (streamable-HTTP) | MCP surface: the structure (`notes_list`/`notes_tree`) and write (`notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete`) tools — **no note-body read tool** — plus the suggestion-lifecycle tools (`notes_list_suggestions`/`notes_read_suggestion`/`notes_update_suggestion`/`notes_withdraw_suggestion`, #744), which read/revise only the agent's own pending drafts. |
 
 ## How saving + indexing works
 
@@ -359,8 +382,8 @@ Package `epicurus_notes`:
 | `indexer.py` | Chunk + embed + upsert into `<tenant>__notes` (`NotesIndexer`); no search method (private + attach-only). |
 | `mirror.py` | The write-only `.md` mirror to the shared file space via **the core file API** (#KB-refactor; #357/ADR-0065): `NotesMirror` maps a slug to core path `notes/<rel>` and calls `PlatformClient.files_write` / `files_delete` (`write` per save, `delete` on note removal, a one-time `backfill`), best-effort throughout. No direct disk I/O — the core performs the on-disk write. |
 | `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + version snapshot + re-index), `delete_doc`, the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following), and `list_versions`/`get_version` (ADR-0046). |
-| `suggestions.py` | The `review` page surface (ADR-0033; edit-before-approve + audit, ADR-0090): the `notes_suggestions` store, `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional edited `content`), the `notes_suggestion_decisions` audit store (`NoteSuggestionAuditStore`, capped at `MAX_DECISIONS`), and `create_note_review_router`. The shared wire contract is imported from `epicurus_core.review`, not locally redefined. Approve/reject are operator-only — never MCP tools. |
+| `suggestions.py` | The `review` page surface (ADR-0033; edit-before-approve + audit, ADR-0090): the `notes_suggestions` store (`.update` revises a pending row in place, refreshing `created_at` — #744), `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional edited `content`; `read`/`update`/`withdraw` — #744 — are the agent-facing pending-only lifecycle ops, 404ing via `_unresolved_reason` with the resolved verdict when a suggestion is no longer pending), the `notes_suggestion_decisions` audit store (`NoteSuggestionAuditStore`, capped at `MAX_DECISIONS`; `.get` looks up one decision by id — #744), and `create_note_review_router`. The shared wire contract is imported from `epicurus_core.review`, not locally redefined. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |
-| `service.py` | The manifest — `pages` (editor + review), `attachable`, the spine event declarations (#665), and the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no read tool**). |
+| `service.py` | The manifest — `pages` (editor + review), `attachable`, the spine event declarations (#665), the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no note-body read tool**), and the suggestion-lifecycle tools (`notes_list_suggestions`/`notes_read_suggestion`/`notes_update_suggestion`/`notes_withdraw_suggestion` — #744, over `NoteSuggestionReview.read`/`.update`/`.withdraw`). |
 | `app.py` | Lifespan (incl. the suggestion-store + folder-store init + mirror backfill), `GET /status`, the review router (registered first) + the `/pages/*` and `/attachments/*` routers, event publish. |
 | `settings.py` | `NotesSettings` (adds Qdrant, DB, platform URL, chunk size, `notes_root`). |

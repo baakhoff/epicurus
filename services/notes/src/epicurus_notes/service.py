@@ -9,9 +9,23 @@ manually attach) and Knowledge (your vault, agent-retrievable).
 The agent *can* see what notes exist and propose changes (#KB-refactor):
 
 * ``notes_list`` / ``notes_tree`` — titles + structure only (never bodies).
-* ``notes_propose_create`` / ``_edit`` / ``_append`` / ``_delete`` — staged for operator
-  review (ADR-0033), exactly like the knowledge base. Nothing is written until approved;
-  ``append`` adds text the agent supplies (it can't read the note) onto the current body.
+* ``notes_create`` / ``notes_propose_edit`` / ``notes_append`` / ``notes_delete`` — staged
+  for operator review (ADR-0033), exactly like the knowledge base. Nothing is written until
+  approved; ``append`` adds text the agent supplies (it can't read the note) onto the
+  current body.
+
+Suggestion lifecycle (#744) — the agent's own view of its pending review queue, so "change
+that suggestion" revises it in place instead of piling up a near-duplicate:
+
+* ``notes_list_suggestions`` — the pending queue (id, kind, slug, a content preview).
+* ``notes_read_suggestion`` — one suggestion's full proposed content (its own draft — not
+  a note body the agent otherwise can't read).
+* ``notes_update_suggestion`` — revise a pending suggestion's content/note.
+* ``notes_withdraw_suggestion`` — retract a pending suggestion (kept as history).
+
+Approve/reject stay off the MCP surface (exposing them would let the agent approve its own
+proposals); update and withdraw are safe to expose because both stay inside the pending
+queue and never touch a note.
 
 The left-nav **Notes** page is the ``editor`` archetype; the **Note suggestions** page is
 the ``review`` archetype — both core-rendered (this module supplies data only).
@@ -67,7 +81,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.12.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -253,6 +267,10 @@ def build_module(
         Staged as a suggestion — nothing is written until you approve it. *slug* is the
         note's id (e.g. ``meeting-2026-06-24`` or ``work/ideas``); the title is derived from
         the body. *note* is an optional rationale shown beside the diff.
+
+        Check ``notes_list_suggestions`` first — if you already proposed this note and it's
+        still pending, revise it with ``notes_update_suggestion`` instead of creating a
+        near-duplicate.
         """
         return await _stage(slug, "create", content, note)
 
@@ -268,6 +286,10 @@ def build_module(
         Staged as a suggestion. Since notes are private you cannot read the current body —
         you propose the full new content and the operator reviews the diff. For purely
         additive changes prefer ``notes_append``.
+
+        If the user asks you to change or fix a suggestion you already made, check
+        ``notes_list_suggestions`` — if it's still pending, revise it with
+        ``notes_update_suggestion`` rather than proposing this edit a second time.
         """
         return await _stage(slug, "update", content, note)
 
@@ -279,6 +301,10 @@ def build_module(
 
         Staged as a suggestion. The server concatenates *text* onto the current body on
         approval (you supply only what to add — you cannot read the note).
+
+        Check ``notes_list_suggestions`` first — if you already proposed an append here and
+        it's still pending, revise it with ``notes_update_suggestion`` instead of appending
+        it again on top.
         """
         return await _stage(slug, "append", text, note)
 
@@ -289,7 +315,124 @@ def build_module(
         """Propose deleting note *slug*, for operator review (ADR-0033).
 
         Staged as a suggestion; the note is removed only on approval.
+
+        Check ``notes_list_suggestions`` first — a delete already proposed for this slug
+        needs no second one.
         """
         return await _stage(slug, "delete", "", note)
+
+    # ── Suggestion lifecycle (#744): see and revise what's already pending ───────
+    #
+    # Before #744 the agent was write-only into the review queue — "change that suggestion"
+    # could only create a second one. These let it see the pending queue and revise/withdraw
+    # its own entries in place. Approve/reject stay off the MCP surface (letting the agent
+    # approve its own proposals would defeat the review gate); update/withdraw don't have
+    # that problem — both stay strictly within the pending queue and never touch a note.
+
+    def _preview(content: str, limit: int = 80) -> str:
+        """A short single-line preview of *content* for a suggestion-queue listing."""
+        flat = " ".join(content.split())
+        return flat if len(flat) <= limit else f"{flat[:limit].rstrip()}…"
+
+    @module.tool(side_effect="read")
+    async def notes_list_suggestions(status: str = "pending") -> str:
+        """List your own suggestions awaiting operator review (#744).
+
+        **Check this before proposing a change** — if something similar is already pending,
+        revise it with ``notes_update_suggestion`` instead of creating a near-duplicate the
+        operator's review queue would otherwise accumulate.
+
+        Args:
+            status: Must be ``"pending"`` — the only queryable state today. Approved,
+                rejected, and withdrawn suggestions are immutable history, not listed here.
+        """
+        if status != "pending":
+            raise ValueError(
+                f"status must be 'pending', got {status!r} — approved/rejected/withdrawn"
+                " suggestions are immutable history, not listed here"
+            )
+        pending = await suggestions.list(tenant=tenant)
+        if not pending:
+            return "No suggestions pending review."
+        lines = ["Pending suggestions:"]
+        for s in pending:
+            bits = [f"- {s.sid} [{s.operation}] {s.slug}", f"proposed {s.created_at.isoformat()}"]
+            preview = _preview(s.proposed_content) if s.proposed_content else ""
+            if preview:
+                bits.append(f'"{preview}"')
+            if s.note:
+                bits.append(f"note: {s.note}")
+            lines.append(" — ".join(bits))
+        return "\n".join(lines)
+
+    @module.tool(side_effect="read")
+    async def notes_read_suggestion(id: str) -> str:
+        """Read one pending suggestion's full proposed content (#744).
+
+        This is your own draft, not a note body you otherwise can't read — notes stay
+        private; you're only seeing back what you proposed.
+
+        Args:
+            id: The suggestion id, from ``notes_list_suggestions``.
+        """
+        try:
+            s = await review.read(id)
+        except Exception as exc:
+            raise ValueError(getattr(exc, "detail", str(exc))) from exc
+        lines = [f"Suggestion {s.sid} — {s.operation} — {s.slug}"]
+        lines.append(f"Proposed: {s.created_at.isoformat()}")
+        if s.note:
+            lines.append(f"Note: {s.note}")
+        if s.proposed_content:
+            lines.extend(["", s.proposed_content])
+        return "\n".join(lines)
+
+    @module.tool(side_effect="propose")
+    async def notes_update_suggestion(
+        id: str, content: str | None = None, note: str | None = None
+    ) -> str:
+        """Revise a PENDING suggestion in place, instead of proposing a near-duplicate (#744).
+
+        Use this when you want to change a suggestion you already made, before the operator
+        has reviewed it. It stays pending; the operator's review shows the latest revision
+        as one queue entry, never two. Nothing touches the note — the review gate is
+        unchanged. Pass only the fields you want to change; the rest keep their current
+        value.
+
+        Args:
+            id: The suggestion id.
+            content: New proposed content (the full body for create/update; the fragment
+                to append for an append suggestion); omit to leave unchanged.
+            note: New rationale shown to the operator; omit to leave unchanged.
+
+        Refuses with an explanatory error if the suggestion was already approved, rejected,
+        or withdrawn (immutable history), or does not exist.
+        """
+        try:
+            updated = await review.update(id, content=content, note=note)
+        except Exception as exc:
+            raise ValueError(getattr(exc, "detail", str(exc))) from exc
+        return (
+            f"Suggestion {updated.sid} revised; still pending your review in"
+            " Notes → Note suggestions."
+        )
+
+    @module.tool(side_effect="propose")
+    async def notes_withdraw_suggestion(id: str) -> str:
+        """Retract a PENDING suggestion you no longer want applied (#744).
+
+        Use this when a suggestion you made has gone stale — e.g. superseded by a later
+        edit, or the user changed their mind. Removes it from the pending queue (kept as
+        history); nothing about the note is touched. Refuses with an explanatory error if
+        it was already approved, rejected, or withdrawn, or does not exist.
+
+        Args:
+            id: The suggestion id.
+        """
+        try:
+            result = await review.withdraw(id)
+        except Exception as exc:
+            raise ValueError(getattr(exc, "detail", str(exc))) from exc
+        return f"Suggestion {result.id} withdrawn."
 
     return module

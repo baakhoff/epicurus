@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 from epicurus_core_app.agent import routes as agent_routes
 from epicurus_core_app.agent.agent import AgentEvent, AgentTurn
 from epicurus_core_app.agent.live_runs import LiveRun, LiveRunRegistry
+from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.session_model import SessionModelStore
@@ -807,6 +808,7 @@ def _runs_app(
     probe: object | None = None,
     suspended: object | None = None,
     pending_drafts: object | None = None,
+    pending_approvals: object | None = None,
     send_draft: object | None = None,
 ) -> FastAPI:
     app = FastAPI()
@@ -819,6 +821,7 @@ def _runs_app(
             probe=probe,  # type: ignore[arg-type]
             suspended=suspended,  # type: ignore[arg-type]
             pending_drafts=pending_drafts,  # type: ignore[arg-type]
+            pending_approvals=pending_approvals,  # type: ignore[arg-type]
             send_draft=send_draft,  # type: ignore[arg-type]
             live_runs=registry,
         )
@@ -1159,4 +1162,110 @@ async def test_draft_unknown_run_emits_error() -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         resp = await client.post("/platform/v1/agent/runs/nope/draft", json={"decision": "send"})
+    assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
+
+
+# ── ask_approval Approve / Reject (#745, ADR-0117) ────────────────────────────
+
+
+async def _approval_run(store: PendingApprovalStore) -> str:
+    return await store.save(
+        tenant="local",
+        session_id="s1",
+        model="m",
+        pending_call_id="c1",
+        summary="Update goals.md to add a Q3 milestone",
+        refs=[
+            {"ref_id": "sugg-1", "module": "knowledge", "kind": "suggestion", "title": "goals.md"}
+        ],
+        conversation=[{"role": "user", "content": "update my goals note"}],
+    )
+
+
+async def test_approval_approved_resumes_with_the_outcome() -> None:
+    store = PendingApprovalStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await _approval_run(store)
+
+    agent = _CapturingAgent()
+    app = _runs_app(agent, registry=LiveRunRegistry(), pending_approvals=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/approval", json={"decision": "approved"}
+        )
+    assert [event for event, _ in _parse_sse(resp.text)] == ["done"]
+    # No module was called (core-app never approves on the model's behalf) — the route only
+    # appends the already-made decision as the ask_approval call's tool result.
+    assert agent.resume_convo is not None
+    last = agent.resume_convo[-1]
+    assert last.tool_call_id == "c1" and last.name == "ask_approval"
+    assert last.content == "The operator approved this change."
+    # The suspension was consumed (a double-submit can't resume twice).
+    assert await store.take(tenant="local", run_id=run_id) is None
+
+
+async def test_approval_rejected_carries_a_trimmed_comment() -> None:
+    store = PendingApprovalStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await _approval_run(store)
+
+    agent = _CapturingAgent()
+    app = _runs_app(agent, registry=LiveRunRegistry(), pending_approvals=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/approval",
+            json={"decision": "rejected", "comment": "  wrong milestone  "},
+        )
+    assert [event for event, _ in _parse_sse(resp.text)] == ["done"]
+    assert agent.resume_convo is not None
+    content = agent.resume_convo[-1].content or ""
+    assert content == "The operator rejected this change. Their comment: wrong milestone"
+    assert await store.take(tenant="local", run_id=run_id) is None
+
+
+async def test_approval_rejected_without_a_comment_omits_the_trailer() -> None:
+    store = PendingApprovalStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    run_id = await _approval_run(store)
+
+    agent = _CapturingAgent()
+    app = _runs_app(agent, registry=LiveRunRegistry(), pending_approvals=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            f"/platform/v1/agent/runs/{run_id}/approval", json={"decision": "rejected"}
+        )
+    assert [event for event, _ in _parse_sse(resp.text)] == ["done"]
+    assert agent.resume_convo is not None
+    assert agent.resume_convo[-1].content == "The operator rejected this change."
+
+
+async def test_approval_unknown_run_emits_error() -> None:
+    store = PendingApprovalStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    app = _runs_app(_FakeAgent(), registry=LiveRunRegistry(), pending_approvals=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/runs/nope/approval", json={"decision": "approved"}
+        )
+    assert [event for event, _ in _parse_sse(resp.text)] == ["error"]
+
+
+async def test_approval_no_store_wired_emits_error() -> None:
+    # pending_approvals=None (a build with the store disabled) degrades the same way an
+    # unknown run does — never a 500.
+    app = _runs_app(_FakeAgent(), registry=LiveRunRegistry())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/agent/runs/anything/approval", json={"decision": "approved"}
+        )
     assert [event for event, _ in _parse_sse(resp.text)] == ["error"]

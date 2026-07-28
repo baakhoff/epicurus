@@ -111,10 +111,12 @@ says so) that `mail_send` does not carry.
 > `notes_propose_edit`, `notes_append`, `notes_delete`. Those three are the only modules that
 > stage: tasks, calendar, storage and websearch apply every write directly, and messaging
 > exposes no agent tools, so nothing there is propose-shaped. Their remaining write tools stay
-> unannotated, and any tool this page has not named defaults to `write`. `finish_quiet` is
-> deliberately absent from all of this: it is bound to the tool surface by
-> `automation_id`/`quiet_capable` rather than by the side-effect dial — see
-> [Agent-gated delivery](#agent-gated-delivery-706).
+> unannotated, and any tool this page has not named defaults to `write`. `finish_quiet` and
+> `ask_approval` are deliberately absent from all of this: neither reaches the dial at all —
+> `finish_quiet` is bound to the tool surface by `automation_id`/`quiet_capable` (see
+> [Agent-gated delivery](#agent-gated-delivery-706)); `ask_approval` is bound to the
+> interactive streaming path itself, so it is never even offered to an automation turn
+> regardless of autonomy — see [ask_approval is chat-only](#ask_approval-is-chat-only-745).
 >
 > **The review-toggle interaction (#721, ADR-0112).** Knowledge's and notes' propose tools
 > stage a suggestion *unless* the operator has turned suggestion review off for that specific
@@ -237,6 +239,27 @@ The mail-triage example this shipped for: an `act`-level automation configured t
 read and push a summary, with agent-gated delivery on. Unimportant mail → the turn marks it
 read, calls `finish_quiet("not important")`, outcome `quiet`, no push. Important mail → the
 turn never calls it, so the summary pushes as normal.
+
+### ask_approval is chat-only (#745)
+
+`ask_approval` (a sibling of `ask_user`, ADR-0053 — full reference in
+[core-app → Built-in agent tools](../services/core-app.md#built-in-agent-tools-adr-0039)) pauses
+a turn for the operator to Approve/Reject a change the model just staged, and it is bound to the
+tool surface even more strictly than `finish_quiet`:
+
+- **No gate to configure, because there's no path to reach.** `finish_quiet` is offered when
+  `automation_id`/`quiet_capable` are set; `ask_approval` is spliced only into `run_stream` (the
+  interactive SSE path — `/chat/stream`, `/resume`, `/draft`, `/edit`, `/regenerate`), never into
+  `Agent._loop` (`run()` — what `AutomationRunner`, the scheduled-turns loop, and the inbound
+  chat-bridge consumer all call). There is no `automation_id` parameter on `run_stream` at all, so
+  the tool is structurally absent from every one of those callers regardless of autonomy level —
+  an `act`/`silent_act` automation that stages a knowledge suggestion never sees `ask_approval` in
+  its tool list to begin with.
+- **Nothing new for an automation to learn.** A propose-shaped tool (`knowledge_propose_edit`,
+  `notes_propose_edit`, …) already stages a suggestion for the operator's asynchronous review on
+  its own — that queue (the *Suggestions* page, ADR-0033) is exactly what an automation without
+  `ask_approval` falls back to. Chat gains a same-conversation Approve/Reject; nothing about the
+  staged-and-queued behavior itself changes for a headless caller.
 
 ## Safety
 

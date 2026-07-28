@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import Attachment, WritesDocument, draft_review
+from epicurus_core import Attachment, EntityRef, WritesDocument, draft_review
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
     _EMPTY_ANSWER_FALLBACK,
@@ -27,6 +27,7 @@ from epicurus_core_app.agent.agent import (
 )
 from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.mcp_host import ToolCallError
+from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
@@ -794,6 +795,192 @@ async def test_compose_error_string_does_not_suspend() -> None:
     assert "awaiting_input" not in [e.type for e in events]
     assert events[-1].type == "done"
     assert any(m.role == "tool" and "reconnect Google" in (m.content or "") for m in gw.calls[1])
+
+
+# ── ask_approval pause / resume (#745, ADR-0117) ──────────────────────────────
+
+
+async def _approval_store() -> PendingApprovalStore:
+    store = PendingApprovalStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await store.init()
+    return store
+
+
+_APPROVAL_REF = {
+    "ref_id": "sugg-1",
+    "module": "knowledge",
+    "kind": "suggestion",
+    "title": "Update goals.md",
+}
+
+
+def _ask_approval_call(
+    summary: str, refs: list[dict[str, Any]] | None = None, call_id: str = "c1"
+) -> dict[str, Any]:
+    args = {"summary": summary, "refs": [] if refs is None else refs}
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "ask_approval", "arguments": json.dumps(args)},
+    }
+
+
+async def test_ask_approval_suspends_the_turn() -> None:
+    store = await _approval_store()
+    gw = _FakeStreamGateway(
+        [
+            (
+                [],
+                ChatResult(
+                    model="m",
+                    content="",
+                    tool_calls=[_ask_approval_call("Update goals.md", [_APPROVAL_REF])],
+                ),
+            )
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), pending_approvals=store)  # type: ignore[arg-type]
+    events = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="update my goals note")], session_id="s1", model="m"
+        )
+    ]
+    types = [e.type for e in events]
+    assert "awaiting_input" in types  # the turn paused…
+    assert "done" not in types  # …and did not complete
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.awaiting_kind == "approval"
+    assert awaiting.summary == "Update goals.md"
+    assert awaiting.refs == [EntityRef.model_validate(_APPROVAL_REF)]
+    assert awaiting.run_id
+    # The in-progress run was persisted with the assistant's tool-call message.
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    assert run.pending_call_id == "c1"
+    assert run.summary == "Update goals.md"
+    assert run.refs == [EntityRef.model_validate(_APPROVAL_REF).model_dump()]
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in run.conversation)
+    # The ask_approval call has no tool result yet — it is filled on Approve/Reject.
+    assert not any(
+        m.get("role") == "tool" and m.get("tool_call_id") == "c1" for m in run.conversation
+    )
+
+
+async def test_ask_approval_resume_continues_the_turn() -> None:
+    store = await _approval_store()
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_ask_approval_call("Update it")])),
+            (["done"], ChatResult(model="m", content="done")),
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), pending_approvals=store)  # type: ignore[arg-type]
+    first = [
+        e
+        async for e in agent.run_stream(
+            [ChatMessage(role="user", content="update it")], session_id="s1", model="m"
+        )
+    ]
+    awaiting = next(e for e in first if e.type == "awaiting_input")
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    convo = [ChatMessage.model_validate(m) for m in run.conversation]
+    # The route appends the operator's decision under the ask_approval call id.
+    convo.append(
+        ChatMessage(
+            role="tool",
+            tool_call_id=run.pending_call_id,
+            name="ask_approval",
+            content="The operator approved this change.",
+        )
+    )
+    resumed = [
+        e async for e in agent.run_stream([], session_id="s1", model="m", resume_convo=convo)
+    ]
+    assert resumed[-1].type == "done"
+    assert resumed[-1].turn is not None
+    assert resumed[-1].turn.content == "done"
+    # The model continued the same turn with the decision as the ask_approval tool result.
+    assert any(m.role == "tool" and "approved" in (m.content or "") for m in gw.calls[1])
+
+
+async def test_ask_approval_without_store_degrades_and_answers() -> None:
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_ask_approval_call("Update it")])),
+            (["proceeding"], ChatResult(model="m", content="proceeding")),
+        ]
+    )
+    agent = Agent(
+        gateway=gw, mcp=_FakeMcp()
+    )  # no pending-approval store wired  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    assert "awaiting_input" not in [e.type for e in events]
+    assert events[-1].type == "done"
+    assert events[-1].turn is not None and events[-1].turn.content == "proceeding"
+    # Without a store the loop feeds an instruction back as the ask_approval result and continues.
+    assert any(
+        m.role == "tool" and m.name == "ask_approval" and (m.content or "").startswith("error:")
+        for m in gw.calls[1]
+    )
+
+
+async def test_ask_approval_runs_sibling_tools_before_suspending() -> None:
+    store = await _approval_store()
+    gw = _FakeStreamGateway(
+        [
+            (
+                [],
+                ChatResult(
+                    model="m",
+                    content="",
+                    tool_calls=[_tool_call(), _ask_approval_call("Update it", call_id="c2")],
+                ),
+            )
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_FakeMcp(outputs={"echo": "pong"}), pending_approvals=store)  # type: ignore[arg-type]
+    events = [
+        e async for e in agent.run_stream([ChatMessage(role="user", content="go")], session_id="s1")
+    ]
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    run = await store.take(tenant="local", run_id=awaiting.run_id)
+    assert run is not None
+    # The sibling tool ran (its result is in the persisted convo) so the convo stays valid;
+    # ask_approval has no result yet — that arrives on resume.
+    assert any(m.get("role") == "tool" and m.get("content") == "pong" for m in run.conversation)
+    assert not any(m.get("tool_call_id") == "c2" for m in run.conversation)
+
+
+async def test_ask_approval_drops_malformed_refs_but_keeps_valid_ones() -> None:
+    # The model authors `refs` by hand — a malformed entry (missing a required field, or not
+    # even an object) must not fail the whole call, and must not poison the valid entries.
+    store = await _approval_store()
+    call = _ask_approval_call(
+        "Update it",
+        refs=[
+            _APPROVAL_REF,
+            {"ref_id": "missing-fields"},  # invalid: no module/kind/title
+            "not even an object",  # type: ignore[list-item]
+        ],
+    )
+    gw = _FakeStreamGateway([([], ChatResult(model="m", content="", tool_calls=[call]))])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), pending_approvals=store)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.refs == [EntityRef.model_validate(_APPROVAL_REF)]
+
+
+async def test_ask_approval_missing_refs_argument_defaults_to_empty_list() -> None:
+    store = await _approval_store()
+    args = json.dumps({"summary": "Update it"})  # `refs` omitted entirely
+    call = {"id": "c1", "type": "function", "function": {"name": "ask_approval", "arguments": args}}
+    gw = _FakeStreamGateway([([], ChatResult(model="m", content="", tool_calls=[call]))])
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), pending_approvals=store)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.refs == []
 
 
 # ── Loop hygiene: same rules as run(), applied to run_stream (#524) ───────────

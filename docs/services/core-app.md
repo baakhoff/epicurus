@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563 — an additive shape a stale client ignores) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. Each message carries its **`id`** — the stable anchor a client names to edit that turn (`/edit`, #552) — alongside `role`, `content`, `created_at`, `entity_refs`, `attachments`, and (assistant turns) `activity`. |
@@ -50,6 +50,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace a user message with `{content}` (and `{model?}`, `{message_id?}`) and re-answer it in place — revises the message, truncates everything after it, then streams. **`message_id`** names the turn to revise (#552); omitted, it defaults to the session's **last** user message, so pre-#552 callers are unchanged. Editing further back discards the real turns behind it (the web shell confirms with the count first). Edits in place, never branching (#302). Every check runs **before** any write, so a rejected edit leaves history untouched — an `error` event on empty content, no user turn, a `message_id` that isn't a **user** message of **this** session, or a turn already running for the session (a live run's history isn't ours to cut; the `/chat/stream` **409** remains the backstop for one starting mid-flight). |
 | `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
 | `POST /platform/v1/agent/runs/{run_id}/draft` | **Confirm/Decline a draft-first send** (ADR-0085, #563). Body `{decision: "send" \| "decline", reason?}`. Consumes the pending draft; on `send` the core transmits it via the owning module's `POST /send` and appends the outcome (`Sent.` + id, or a relayed error hint) as the compose call's tool result, on `decline` it appends a "not sent" result (carrying any `reason`) — then continues the same turn (same SSE protocol as `/chat/stream`). An `error` event if the draft is unknown / expired / already resolved. Confirm/Decline is connection-gated client-side (#530); the `run_id` is the DB pause token, distinct from a live-run id. |
+| `POST /platform/v1/agent/runs/{run_id}/approval` | **Approve/Reject an `ask_approval` pause** (#745, ADR-0117). Body `{decision: "approved" \| "rejected", comment?}`. Consumes the pending approval and appends the decision (+ any `comment`) as the `ask_approval` call's tool result, then continues the same turn (same SSE protocol as `/chat/stream`). Unlike `/draft`, this route never itself calls a module — by the time it's posted, the **web client** has already called the relevant module's own review-decision endpoint directly (the agent must never approve its own work; see the *Built-in agent tools* section below), so `comment` is purely informational, carried back to the model. An `error` event if the approval is unknown / expired / already resolved. |
 | `GET /platform/v1/agent/runs/{run_id}/stream?after_seq=N` | **Re-attach** to an in-flight turn (ADR-0055), replaying buffered events after `N` (or `Last-Event-ID`) then tailing live — same SSE protocol as `/chat/stream`, no readiness prelude. A `gone` event if the run is unknown / finished-and-reaped (the client then falls back to the durable transcript). Note: this `run_id` is a **live-run** id (in-memory, for re-attach), distinct from the suspended-run id used by `/resume`. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
@@ -361,11 +362,31 @@ streaming path can present a draft; the **non-streaming** loop (`POST /chat`, th
 has no review pane, so it degrades — the model is told the draft can't be sent from that channel
 rather than being fed the raw envelope (nothing is transmitted regardless).
 
-**Not on this list: `finish_quiet`.** It looks like another built-in but isn't registered as one —
-`register_builtin`'s tools are offered to *every* turn (filtered only by the autonomy dial, which an
-ordinary chat turn bypasses entirely), and `finish_quiet` must never reach a plain chat turn. It is
-spliced into `Agent._loop`'s tool surface directly, gated on `automation_id`/`quiet_capable` — see
-*Automations engine → Agent-gated delivery* below.
+**`ask_approval(summary, refs)`** pauses the turn for the operator to Approve/Reject a change the
+model just staged through a propose tool (#745, ADR-0117) — a third sibling of `ask_user` and
+draft-first-send, on the same suspend/resume discipline: the loop persists the run plus `summary`
+and `refs` (the entity reference(s) the propose tool's result gave the model for what it staged,
+copied verbatim — possibly empty) to `agent_pending_approvals` (a sibling of
+`agent_suspended_runs`/`agent_pending_drafts`, reaped after `ASK_APPROVAL_TTL_HOURS`) and emits
+`awaiting_input` with `awaiting_kind: "approval"`. It differs from both siblings in one deliberate
+way: resolving it never calls a module from the core. The chat UI renders an approval card from
+`summary`/`refs`; **Approve**/**Reject** first call the relevant module's own existing
+review-decision endpoint directly — the operator's own click drives it, never the agent, which is
+exactly the boundary knowledge's suggestion review already draws (`suggestions.py`: "the agent
+must never approve its own work") — and only then POST `{decision, comment?}` to
+`…/runs/{run_id}/approval`, which appends the outcome (plus any `comment`) as the tool result and
+resumes. A module call failure doesn't block the resume; it is folded into `comment` instead, so
+the model is told plainly rather than assuming the change took effect.
+
+**Not on this list: `finish_quiet` and `ask_approval`.** Neither is registered via
+`register_builtin` — those tools are offered to *every* turn (filtered only by the autonomy dial,
+which an ordinary chat turn bypasses entirely), and both must be withheld from turns where they
+don't apply. `finish_quiet` is spliced into `Agent._loop`'s tool surface directly, gated on
+`automation_id`/`quiet_capable` — see *Automations engine → Agent-gated delivery* below.
+`ask_approval` is spliced into `run_stream`'s tool surface directly, unconditionally: `run_stream`
+carries no `automation_id` concept at all, so the tool is inherently absent from every headless
+path (`_loop` — automations, scheduled turns, inbound-bridge replies) rather than needing a gate of
+its own — those callers keep today's async review-queue behavior unchanged.
 
 ### LLM gateway (ADR-0010)
 
@@ -1011,8 +1032,8 @@ registry-side (`ModuleRegistry.tool_side_effects`, over the TTL-cached snapshot)
 reason `document_tool` exists — and only when a turn actually passes `allow`, so ordinary
 chat pays nothing. The core built-ins are classified at registration: `now` and
 `memory_search` read; `propose_automation` propose; `remember`, `ask_user`, and
-`set_chat_model` write. (`finish_quiet` carries no such classification at all — it isn't a
-`register_builtin` tool, see *Built-in agent tools* above.)
+`set_chat_model` write. (`finish_quiet` and `ask_approval` carry no such classification at
+all — neither is a `register_builtin` tool, see *Built-in agent tools* above.)
 
 **Safety:** a **persisted** per-tenant kill switch (unlike `PowerController`, which resets
 on restart — a stop a restart undoes is not a stop), rate caps, digest windows, a
@@ -1104,6 +1125,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `MESSAGING_MODEL` | — | Optional dedicated model for bridge turns; blank = the default chat model. |
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
 | `DRAFT_REVIEW_TTL_HOURS` | `24` | How long a turn paused on a draft-first send waits for Confirm/Decline before its pending draft is reaped (ADR-0085, #563). |
+| `ASK_APPROVAL_TTL_HOURS` | `24` | How long a turn paused by `ask_approval` waits for Approve/Reject before its pending approval is reaped — expiry decays to the existing async review-queue behavior, nothing lost (#745, ADR-0117). |
 | `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
 | `EVENTS_RETENTION_DAYS` | `30` | How long a module event stays in the durable log (ADR-0103). `0` disables pruning — keep everything, and mind the disk. |
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
@@ -1283,6 +1305,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `agent_suspended_runs` (a separate table, so `create_all` builds it with no migration and the two
   consume-on-resume paths can't cross). Written on suspend, **consumed** on Confirm/Decline, reaped
   after `DRAFT_REVIEW_TTL_HOURS`.
+- **Postgres `agent_pending_approvals`** — a turn paused by `ask_approval` (#745, ADR-0117): `id`
+  (run_id), `tenant`, `session_id`, `model`, `pending_call_id`, `summary`, `refs` (JSON — the
+  entity reference(s), possibly empty), `conversation` (JSON), `created_at`. A **third sibling**
+  of `agent_suspended_runs`/`agent_pending_drafts`, same reasoning: a separate table so
+  `create_all` needs no migration and none of the three consume-on-resume paths can cross. No
+  `tool`/`module` column like the draft table — the pending call is always the one fixed
+  `ask_approval` tool, never a per-module compose tool. Written on suspend, **consumed** on
+  Approve/Reject, reaped after `ASK_APPROVAL_TTL_HOURS`.
 - **Postgres `session_models`** — a session's persisted model override (#707): `session_id`
   (primary key), `tenant`, `model`, `updated_at`. A row exists only once a session's model has
   been explicitly set — by the `set_chat_model` tool or an explicit picker change (the same

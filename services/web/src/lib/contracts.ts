@@ -493,6 +493,11 @@ export const AgentEvent = z.object({
   // service-worker-cached PWA ignores the new fields and keeps parsing the stream (ADR-0055).
   awaiting_kind: z.string().nullish(),
   draft: z.record(z.string(), z.unknown()).nullish(),
+  // Present on `awaiting_input` for an ask_approval pause (#745, ADR-0117): `"approval"` plus
+  // `summary` and the entity reference(s) (possibly empty) to render as an approval card.
+  // Additive, same rationale as the draft-review fields above.
+  summary: z.string().nullish(),
+  refs: z.array(EntityRef).default([]),
   // Present on a `tool` event whose module annotated the tool `writes_document` (#541,
   // ADR-0100/0101): what the call is writing, so the shell can open the document pane. Rides
   // both the `running` and terminal frames. Additive, like the draft fields above.

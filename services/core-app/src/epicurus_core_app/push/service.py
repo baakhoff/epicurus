@@ -1,11 +1,14 @@
 """The push send path — a core-internal contract, not an HTTP route (#670, ADR-0102).
 
-:meth:`PushService.notify` is what a future caller (the automations engine's push sink;
-a core-originated system notice) calls directly in-process — ``notify(tenant, category=...,
-title=..., body=...)``. Nothing in this PR calls it except the settings UI's "send test
-notification" button (``push/routes.py``), since no event source exists yet to trigger a
-real one; see docs/reference/notifications.md for the signature as the documented contract
-future callers code against.
+:meth:`PushService.notify` is what a caller with a *category* codes against — ``notify(
+tenant, category=..., title=..., body=...)`` — resolving push/center through `PushPrefs`
+(categories, then automation overrides). The settings UI's "send test notification" button
+(``push/routes.py``) is today's only category-based caller; the automations engine's push
+sink is still deferred (its own issue). :meth:`PushService.notify_effective` is the same
+send path for a caller whose prefs come from somewhere else entirely — the event-alerts
+listener (#732), whose per-``(module, event_type)`` subscription *is* the effective
+``ChannelPrefs``, with no category to resolve. See docs/reference/notifications.md for both
+signatures as the documented contract future callers code against.
 
 Every call first records a notification-center row (``epicurus_core_app.notifications``) if
 the category/automation's ``center`` toggle is on — regardless of what push delivery does
@@ -33,7 +36,7 @@ from pywebpush import WebPushException, webpush
 
 from epicurus_core import EventBus, SecretError, SecretStore, get_logger
 from epicurus_core_app.notifications import NotificationStore
-from epicurus_core_app.push.prefs import PushPrefsStore, is_quiet_now
+from epicurus_core_app.push.prefs import ChannelPrefs, PushPrefs, PushPrefsStore, is_quiet_now
 from epicurus_core_app.push.queue import PushQueueStore, QueuedPush
 from epicurus_core_app.push.subscriptions import PushSubscriptionStore
 from epicurus_core_app.push.vapid import generate_vapid_keypair, load_vapid_signer
@@ -116,6 +119,64 @@ class PushService:
         anything push-related below it (#671, ADR-0102 §4)."""
         prefs = await self.prefs.get(tenant)
         effective = prefs.effective(category, automation_id)
+        return await self._deliver(
+            tenant,
+            effective,
+            category=category,
+            title=title,
+            body=body,
+            deep_link=deep_link,
+            entity_ref=entity_ref,
+            automation_id=automation_id,
+            quiet_prefs=prefs,
+        )
+
+    async def notify_effective(
+        self,
+        tenant: str,
+        *,
+        effective: ChannelPrefs,
+        category: str,
+        title: str,
+        body: str,
+        deep_link: str | None = None,
+        entity_ref: dict[str, Any] | None = None,
+    ) -> NotifyResult:
+        """Like :meth:`notify`, but the caller has already resolved push/center — for a prefs
+        source outside `PushPrefs` (#732's event alerts: the effective channels come from a
+        per-``(module, event_type)`` subscription row, not a category or automation override,
+        so there is nothing here for `PushPrefs.effective` to resolve). Quiet hours are still
+        tenant-wide, so this still reads `PushPrefs` for that half of the decision.
+        """
+        quiet_prefs = await self.prefs.get(tenant)
+        return await self._deliver(
+            tenant,
+            effective,
+            category=category,
+            title=title,
+            body=body,
+            deep_link=deep_link,
+            entity_ref=entity_ref,
+            automation_id=None,
+            quiet_prefs=quiet_prefs,
+        )
+
+    async def _deliver(
+        self,
+        tenant: str,
+        effective: ChannelPrefs,
+        *,
+        category: str,
+        title: str,
+        body: str,
+        deep_link: str | None,
+        entity_ref: dict[str, Any] | None,
+        automation_id: str | None,
+        quiet_prefs: PushPrefs,
+    ) -> NotifyResult:
+        """The shared send path once push/center are resolved: center write, then push routes
+        to delivered now / queued for quiet hours / skipped — independent of the center write
+        (#671, ADR-0102 §4)."""
         if effective.center:
             await self._notifications.create(
                 tenant=tenant,
@@ -129,7 +190,7 @@ class PushService:
         if not effective.push:
             return NotifyResult(outcome="skipped_disabled")
         local_now = await self._local_now()
-        if is_quiet_now(prefs, local_now.time()):
+        if is_quiet_now(quiet_prefs, local_now.time()):
             await self._queue.enqueue(
                 tenant=tenant,
                 category=category,

@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
+from epicurus_core_app.push.event_subscriptions import EventSubscription, EventSubscriptionStore
 from epicurus_core_app.push.prefs import KNOWN_CATEGORIES, ChannelPrefs, PushPrefs, PushPrefsStore
 from epicurus_core_app.push.service import PushService
 from epicurus_core_app.push.subscriptions import PushSubscription, PushSubscriptionStore
@@ -67,6 +68,27 @@ class TestNotificationView(BaseModel):
     pruned_count: int
 
 
+class EventSubscriptionView(BaseModel):
+    module: str
+    event_type: str
+    push: bool
+    center: bool
+
+
+class SetEventSubscriptionRequest(BaseModel):
+    """Body for ``PUT /platform/v1/push/event-subscriptions`` — one full row, upserted.
+
+    Unlike ``SetPrefsRequest``, every field is required: an event subscription is keyed by
+    ``(module, event_type)`` rather than resolved from the tenant's existing prefs, so there
+    is no "send only what changed" — the caller always names the event it's toggling.
+    """
+
+    module: str
+    event_type: str
+    push: bool
+    center: bool
+
+
 def _subscription_view(sub: PushSubscription) -> SubscriptionView:
     return SubscriptionView(
         id=sub.id,
@@ -95,11 +117,18 @@ def _prefs_view(prefs: PushPrefs) -> PushPrefsView:
     )
 
 
+def _event_subscription_view(sub: EventSubscription) -> EventSubscriptionView:
+    return EventSubscriptionView(
+        module=sub.module, event_type=sub.event_type, push=sub.push, center=sub.center
+    )
+
+
 def create_push_router(
     service: PushService,
     *,
     subscriptions: PushSubscriptionStore,
     prefs: PushPrefsStore,
+    event_subscriptions: EventSubscriptionStore,
     default_tenant: str = "local",
 ) -> APIRouter:
     """Push subscribe/unsubscribe + shared push/center prefs (Settings surface, no module page)."""
@@ -193,6 +222,33 @@ def create_push_router(
         )
         return TestNotificationView(
             outcome=result.outcome, sent_count=result.sent_count, pruned_count=result.pruned_count
+        )
+
+    @router.get("/event-subscriptions", response_model=list[EventSubscriptionView])
+    async def list_event_subscriptions(
+        tenant_id: str | None = Query(None),
+    ) -> list[EventSubscriptionView]:
+        """The tenant's *non-default* event subscriptions only (#732) — everything else is
+        off. The settings UI unions this with each module's declared ``events_emitted``,
+        the same way it unions ``/prefs``' sparse ``categories`` with ``known_categories``."""
+        tenant = tenant_id or default_tenant
+        return [_event_subscription_view(s) for s in await event_subscriptions.list(tenant)]
+
+    @router.put("/event-subscriptions", response_model=EventSubscriptionView)
+    async def set_event_subscription(
+        body: SetEventSubscriptionRequest, tenant_id: str | None = Query(None)
+    ) -> EventSubscriptionView:
+        if not body.module.strip() or not body.event_type.strip():
+            raise HTTPException(status_code=400, detail="module and event_type are required")
+        tenant = tenant_id or default_tenant
+        await event_subscriptions.set(
+            tenant,
+            module=body.module,
+            event_type=body.event_type,
+            prefs=ChannelPrefs(push=body.push, center=body.center),
+        )
+        return EventSubscriptionView(
+            module=body.module, event_type=body.event_type, push=body.push, center=body.center
         )
 
     return router

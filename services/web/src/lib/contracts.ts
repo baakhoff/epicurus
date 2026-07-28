@@ -124,6 +124,21 @@ export const PushTestResult = z.object({
 export type PushTestResult = z.infer<typeof PushTestResult>;
 
 /**
+ * One "push me when X happens" subscription (#732) — `(module, event_type)` plus its own
+ * `ChannelPrefs`, independent of `PushPrefs.categories`. The server only ever returns rows
+ * the operator actually subscribed to (default is off, not `PushPrefs`' on-by-default); the
+ * settings UI unions this sparse list with every module's declared `events_emitted` to
+ * render the full toggleable catalog.
+ */
+export const EventSubscription = z.object({
+  module: z.string(),
+  event_type: z.string(),
+  push: z.boolean(),
+  center: z.boolean(),
+});
+export type EventSubscription = z.infer<typeof EventSubscription>;
+
+/**
  * The operator's correction to a saved hosted model's declared capabilities (#711).
  *
  * LiteLLM's static cost map omits ids entirely (`xai/grok-latest`) and mislabels others, which

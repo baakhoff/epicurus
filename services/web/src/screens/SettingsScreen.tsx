@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ChatBridgesCard } from "@/components/ChatBridgesCard";
+import { EventAlertsCard } from "@/components/EventAlertsCard";
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
 import { PushNotificationsCard } from "@/components/PushNotificationsCard";
@@ -804,6 +805,8 @@ export function SettingsScreen() {
 
 
         <PushNotificationsCard />
+
+        <EventAlertsCard />
 
         <MaintenanceCard />
 

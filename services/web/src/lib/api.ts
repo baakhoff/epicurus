@@ -27,6 +27,7 @@ import {
   EditorVersionContent,
   EditorVersionList,
   EmailMessage,
+  EventSubscription,
   FileText,
   HoverCard,
   LlmPrefs,
@@ -345,6 +346,17 @@ export const api = {
     request(PushTestResult, "/platform/v1/push/test", {
       method: "POST",
       body: JSON.stringify({ category }),
+    }),
+
+  // Per-event alerts (#732): "push me when X happens" for any module-declared event, no
+  // automation required. Sparse — only subscribed events come back; the settings UI unions
+  // this with every module's declared `events_emitted` (see `modules()` below).
+  eventSubscriptions: () =>
+    request(z.array(EventSubscription), "/platform/v1/push/event-subscriptions"),
+  setEventSubscription: (body: EventSubscription) =>
+    request(EventSubscription, "/platform/v1/push/event-subscriptions", {
+      method: "PUT",
+      body: JSON.stringify(body),
     }),
 
   // In-app notification center (#671) — the durable record every push-worthy event lands

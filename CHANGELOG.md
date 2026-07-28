@@ -14,6 +14,18 @@ images to GHCR.
 
 ### Added
 
+- **Per-event alerts** (#732) — "push me when X happens" for any module-declared event, no
+  automation required. A tenant-scoped `(module, event_type) -> ChannelPrefs` subscription
+  store, off by default, backs a new `EventAlertListener` wired beside the automations engine
+  at the same event-intake seam — a dumb fan-out (no agent turn, no ledger, no autonomy dial),
+  not an automation. `PushService.notify_effective` delivers through the existing
+  center/quiet-hours/rate-cap send path for a caller whose channel prefs don't come from a
+  category; a second, per-subscription rate cap keeps one chatty event type from spending a
+  tenant's whole push budget. An automation triggered by the same event still fires
+  independently — two notifications, by design. Settings gains an "Event alerts" block,
+  grouped by module with a Custom section for a free-typed `(module, event_type)` pair.
+  `core-app` 0.96.0→0.97.0 (MINOR) · `web` 0.122.0→0.123.0 (MINOR). ADR-0114.
+
 - **Knowledge and Notes remember where you left off** (#743) — opening the page always
   landed on the module's default project, with every folder collapsed back to its initial
   state and no document open, no matter where you'd actually been working: the active

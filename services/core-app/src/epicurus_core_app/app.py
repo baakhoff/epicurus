@@ -146,6 +146,8 @@ from epicurus_core_app.page_order_prefs import PageOrderStore
 from epicurus_core_app.page_order_routes import create_page_order_router
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.push import (
+    EventAlertListener,
+    EventSubscriptionStore,
     PushDigestScheduler,
     PushPrefsStore,
     PushQueueStore,
@@ -299,6 +301,14 @@ def create_app() -> FastAPI:
         push_service.send_digest,
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         poll_interval_s=settings.push_quiet_poll_interval_s,
+    )
+    # Per-event alerts (#732): a dumb fan-out beside the automations engine, not an
+    # automation itself — wired to the same `event_intake.on_event` seam below.
+    event_subscriptions = EventSubscriptionStore(engine)
+    event_alert_listener = EventAlertListener(
+        event_subscriptions,
+        push_service,
+        rate_cap_per_hour=settings.event_alerts_rate_cap_per_hour,
     )
     # The maintenance orchestrator's schedule (#621): one row per tenant, falling back to the env
     # defaults until an operator sets their own via PUT. Read by both the orchestrator's poll loop
@@ -628,6 +638,7 @@ def create_app() -> FastAPI:
         poll_interval_s=settings.automations_poll_interval_s,
     )
     event_intake.on_event(automation_matcher.on_event)
+    event_intake.on_event(event_alert_listener.on_event)
     oauth = OAuthService(
         secrets,
         redirect_base_url=settings.oauth_redirect_base_url,
@@ -736,6 +747,10 @@ def create_app() -> FastAPI:
             await notifications.init()
         except Exception as exc:
             log.error("notification center init failed; notifications disabled", error=str(exc))
+        try:
+            await event_subscriptions.init()
+        except Exception as exc:
+            log.error("event subscriptions init failed; event alerts disabled", error=str(exc))
         try:
             await maintenance_schedule_prefs.init()
         except Exception as exc:
@@ -987,6 +1002,7 @@ def create_app() -> FastAPI:
             push_service,
             subscriptions=push_subscriptions,
             prefs=push_prefs,
+            event_subscriptions=event_subscriptions,
             default_tenant=settings.default_tenant_id,
         )
     )

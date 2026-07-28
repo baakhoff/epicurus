@@ -299,9 +299,18 @@ unsubscribe, a list of every subscribed device (any row removable), one Switch p
 [known category](../reference/notifications.md#pushprefs), a quiet-hours editor (`<input
 type="time">` pair + explicit Save, the same "interdependent fields" reasoning as the
 maintenance schedule editor above — mirrors the settings-primitives shared with the
-notification center, #671), and a "send test notification" button — the only way to trigger a
-real end-to-end push before the automations engine gives the pipe a first real event-sourced
-caller.
+notification center, #671), and a "send test notification" button — the only trigger for a
+category-based push; the automations engine's own push sink is still deferred.
+
+**Settings → Event alerts** (#732, `EventAlertsCard.tsx`): every module's declared events
+(`api.modules()`'s `manifest.events_emitted`, the same client-side derivation the Automations
+trigger picker uses — reused, not duplicated), grouped by module, each with its own
+push/center `Switch` pair (default off, unlike the category toggles above); a "Custom"
+section renders any subscribed `(module, event_type)` outside the declared catalog and a
+free-text form to add another. Turning both switches off on a row is the removal action —
+there is no separate delete control. See
+[the reference page](../reference/notifications.md#event-alerts-732-adr-0114) for the API
+contract.
 
 ### Notification center (#671, ADR-0104)
 

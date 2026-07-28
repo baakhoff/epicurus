@@ -150,6 +150,86 @@ the oldest rows are pruned past the cap on every `create()` (ADR-0104 §3; contr
 module-event log's day-based `EVENTS_RETENTION_DAYS`, ADR-0103 §5 — a different retention
 question: "what haven't I looked at" bounds naturally by count, not by age).
 
+## Event alerts (#732, ADR-0114)
+
+`epicurus_core_app.push.event_subscriptions` + `epicurus_core_app.push.event_alerts` —
+"push me when X happens" for any module-declared event, with no automation involved. A
+tenant opts in to individual `(module, event_type)` pairs; an enabled subscription becomes a
+notification the moment a matching event is recorded, via
+[`PushService.notify_effective`](#pushservicenotify_effective-core-internal).
+
+**Not an automation.** No agent turn, no trigger queue, no ledger entry, no autonomy dial —
+a dumb fan-out wired beside the automations engine, at the same `EventIntake.on_event` seam
+`AutomationMatcher` uses (`docs/reference/automations.md`). Want reasoning or actions instead
+of a tap on the shoulder? That's what an automation's event trigger is for. An automation
+with its own trigger on the same event and an enabled alert both fire on the same occurrence
+— **two notifications, by design**; nothing here dedupes them (deduping would mean the alert
+has to know about every automation's trigger, which is exactly the coupling a dumb fan-out
+avoids).
+
+### HTTP — `/platform/v1/push` (browser-facing, same router as above)
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /event-subscriptions` | The tenant's *non-default* subscriptions only (`EventSubscriptionView[]`) — everything else is off. The settings UI unions this with every module's declared `events_emitted` (`GET /platform/v1/modules`), the same way it unions `/prefs`' sparse `categories` with `known_categories`. |
+| `PUT /event-subscriptions` | Upsert one `(module, event_type)` row. Body `{module, event_type, push, center}` — every field required (unlike `/prefs`, there is nothing to merge against). Setting both `push` and `center` false deletes the row rather than storing an all-off one. 400 if `module`/`event_type` is blank. |
+
+### `EventSubscription`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `module` | `str` | The emitting module (`mail`, `tasks`, …), or a custom value the operator typed in. |
+| `event_type` | `str` | The event's dotted type (`mail.received`) — exactly what `LoggedEvent.type` carries and what the automations trigger picker renders (manifest `events_emitted[].subject`, `events.` prefix stripped). |
+| `push` / `center` | `bool` | This subscription's own [`ChannelPrefs`](#pushprefs) — independent of `PushPrefs.categories`; there is no category resolution in this path. |
+
+Default is **no row**, unlike `PushPrefs.categories` (default on/on) — `EventSubscriptionStore.
+get` returns `None` for an unsubscribed event, and the listener below treats `None` as "do
+nothing." (`EventSubscriptionStore`, table `event_subscriptions`, unique on `(tenant, module,
+event_type)`.)
+
+### The listener (`EventAlertListener`, core-internal)
+
+Wired to `EventIntake.on_event` beside `AutomationMatcher`. For every newly-recorded event:
+look up a subscription for `(tenant, module, type)`; if none, or both channels are off, stop.
+Otherwise check a per-subscription rate cap (`EVENT_ALERTS_RATE_CAP_PER_HOUR`, default
+20/hour, 0 = unlimited) — independent of, and in addition to, `PushService`'s own tenant-wide
+`PUSH_RATE_CAP_PER_HOUR`; a single chatty event type must not be able to spend a tenant's
+entire hourly push budget. The cap gates the whole notification (push and center together),
+not push alone. Fires regardless of `causation_id` — unlike the automations matcher's loop
+guard, there is no agent turn here to spiral, so an event an automation's own run produced is
+exactly as alert-worthy as one a module emitted.
+
+The notification's title/body render generically — no per-module knowledge: the entity's own
+title leads when the event carries an `entity_ref` (rendered client-side as a hover-card
+chip, ADR-0019), with `"<module> · <type>"` as the body; with no entity, `"<module> · <type>"`
+is the title and the body is empty.
+
+### `PushService.notify_effective` (core-internal)
+
+```python
+async def notify_effective(
+    self, tenant: str, *, effective: ChannelPrefs, category: str, title: str, body: str,
+    deep_link: str | None = None, entity_ref: dict[str, Any] | None = None,
+) -> NotifyResult
+```
+
+The same send path as [`notify`](#pushservicenotify-core-internal) — center write, then push
+routes to delivered now / queued for quiet hours / skipped — for a caller that has already
+resolved `push`/`center` itself. `notify`'s `PushPrefs.effective(category, automation_id)`
+step is the *only* thing this skips; quiet hours are still tenant-wide, so this still reads
+`PushPrefs` for that half. `category` here is a label only (the notification center's filter
+key, and the `push.sent` usage event's `category`) — it plays no role in resolving whether to
+send, unlike in `notify`.
+
+### Settings UI (`EventAlertsCard`)
+
+Grouped by module, one row per declared event with a push/center toggle pair, mirroring
+`PushNotificationsCard`'s category list — plus a "Custom" section for any subscribed
+`(module, event_type)` that isn't in the declared catalog (a free-text add form, the same
+escape hatch the automations trigger picker offers). Turning both toggles off on a row
+removes it from the Custom section the same way `PUT .../event-subscriptions` removes its
+row — there is no separate delete endpoint.
+
 ## Service worker (`services/web/src/sw.ts`)
 
 `push` — parses the JSON payload (`{title, body, category, deep_link, entity_ref}`) and calls
@@ -160,5 +240,5 @@ PWA window and navigates it to `deep_link`, or opens a new one. Both are testabl
 [web](../services/web.md).
 
 See the running services that speak this contract: [core-app](../services/core-app.md#push-notifications-adr-0102)
-(the send path + the notification center) and [web](../services/web.md) (subscribe flow +
-settings UI + service worker + the Notifications page).
+(the send path + the notification center + event alerts) and [web](../services/web.md)
+(subscribe flow + settings UI + service worker + the Notifications page).

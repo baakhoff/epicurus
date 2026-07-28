@@ -8,11 +8,15 @@ exercised both as a fake (route behaviour) and for real over an in-process ASGI 
 from __future__ import annotations
 
 import base64
+import io
+import os
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
 from fastapi import FastAPI, Request
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -23,6 +27,38 @@ from epicurus_core_app.agent.attachments import AttachmentExpander, ImagePart
 from epicurus_core_app.agent.routes import _content_type_allowed, create_agent_router
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, MessageRecord
+
+
+def _text_pdf(text: str = "Hello PDF World") -> bytes:
+    """A real, minimal PDF whose one page actually contains *text* — see
+    test_document_extraction.py for the full extractor test suite; this is just enough to
+    prove the expander's PDF branch reaches a real extraction, not a mocked one."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    content = DecodedStreamObject()
+    content.set_data(f"BT /Helv 24 Tf 72 700 Td ({text}) Tj ET".encode("latin-1"))
+    page[NameObject("/Contents")] = writer._add_object(content)
+    font = DictionaryObject()
+    font[NameObject("/Type")] = NameObject("/Font")
+    font[NameObject("/Subtype")] = NameObject("/Type1")
+    font[NameObject("/BaseFont")] = NameObject("/Helvetica")
+    resources = DictionaryObject()
+    fonts = DictionaryObject()
+    fonts[NameObject("/Helv")] = writer._add_object(font)
+    resources[NameObject("/Font")] = fonts
+    page[NameObject("/Resources")] = resources
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _blank_pdf() -> bytes:
+    """A real, valid PDF with a page but no content stream — the scanned/image-only case."""
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
 async def _attachment_store() -> AttachmentStore:
@@ -155,6 +191,52 @@ async def test_expand_mixes_text_files_and_images_in_one_turn() -> None:
     assert "pic.jpg" not in out.text  # the image never pollutes the text preamble
     assert len(out.images) == 1
     assert out.images[0].mime == "image/jpeg"
+
+
+async def test_expand_pdf_attachment_extracts_real_text() -> None:
+    """The core #738 fix: a text-bearing PDF's content reaches the model, not mojibake."""
+    store = await _attachment_store()
+    att_id = await store.save(
+        tenant="t", kind="application/pdf", title="report.pdf", content=_text_pdf("Hello PDF World")
+    )
+    out = await _expander(store).expand(
+        [Attachment(att_id=att_id, source="file", title="report.pdf")], tenant="t"
+    )
+    assert "Hello PDF World" in out.text
+    assert "[page 1]" in out.text
+    assert "report.pdf" in out.text
+    assert "�" not in out.text  # the mojibake regression this issue exists to fix
+    assert out.images == []
+
+
+async def test_expand_scanned_pdf_renders_an_honest_block_not_noise() -> None:
+    store = await _attachment_store()
+    att_id = await store.save(
+        tenant="t", kind="application/pdf", title="scan.pdf", content=_blank_pdf()
+    )
+    out = await _expander(store).expand(
+        [Attachment(att_id=att_id, source="file", title="scan.pdf")], tenant="t"
+    )
+    assert "scan.pdf" in out.text
+    assert "no extractable text" in out.text
+    assert "�" not in out.text
+
+
+async def test_expand_unknown_binary_renders_metadata_not_mojibake() -> None:
+    """A non-PDF binary (a zip renamed .bin, here simulated) still never reaches the model
+    as replacement-character noise (#738's catch-all, independent of the PDF seam)."""
+    store = await _attachment_store()
+    binary_content = os.urandom(500)  # high-entropy bytes decode to mostly U+FFFD as UTF-8
+    att_id = await store.save(
+        tenant="t", kind="application/octet-stream", title="mystery.bin", content=binary_content
+    )
+    out = await _expander(store).expand(
+        [Attachment(att_id=att_id, source="file", title="mystery.bin")], tenant="t"
+    )
+    assert "mystery.bin" in out.text
+    assert "application/octet-stream" in out.text
+    assert "not extractable as text" in out.text
+    assert "�" not in out.text
 
 
 async def test_upload_route_stores_the_file_and_returns_a_handle() -> None:

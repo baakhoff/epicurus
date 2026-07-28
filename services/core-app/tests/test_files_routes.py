@@ -57,6 +57,11 @@ async def test_write_list_read_round_trip(client: AsyncClient) -> None:
 async def test_read_missing_is_404(client: AsyncClient) -> None:
     resp = await client.get(READ, params={"path": "nope.txt"})
     assert resp.status_code == 404
+    # #742: the message names the path and a recovery step — not a bare "not found" a caller
+    # (an agent, directly or via a module tool that forwards this text) can't act on.
+    detail = resp.json()["detail"]
+    assert "nope.txt" in detail
+    assert "list the folder" in detail
 
 
 @pytest.mark.parametrize("endpoint", [READ, LIST, STAT])
@@ -91,6 +96,20 @@ async def test_move_renames_and_moves(client: AsyncClient) -> None:
 async def test_move_missing_source_is_404(client: AsyncClient) -> None:
     resp = await client.post(MOVE, json={"src": "ghost.txt", "dst": "x.txt"})
     assert resp.status_code == 404
+    # #742: names the source path and a recovery step, prefixed "source" so it reads
+    # unambiguously for an operation with two paths.
+    detail = resp.json()["detail"]
+    assert detail.startswith("source ")
+    assert "ghost.txt" in detail
+    assert "list the folder" in detail
+
+
+async def test_stat_missing_is_404_with_an_actionable_detail(client: AsyncClient) -> None:
+    resp = await client.get(STAT, params={"path": "nope.txt"})
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "nope.txt" in detail
+    assert "list the folder" in detail
 
 
 async def test_move_onto_existing_is_409(client: AsyncClient) -> None:

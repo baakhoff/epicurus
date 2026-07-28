@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563 — an additive shape a stale client ignores) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. Each message carries its **`id`** — the stable anchor a client names to edit that turn (`/edit`, #552) — alongside `role`, `content`, `created_at`, `entity_refs`, `attachments`, and (assistant turns) `activity`. |
@@ -50,6 +50,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace a user message with `{content}` (and `{model?}`, `{message_id?}`) and re-answer it in place — revises the message, truncates everything after it, then streams. **`message_id`** names the turn to revise (#552); omitted, it defaults to the session's **last** user message, so pre-#552 callers are unchanged. Editing further back discards the real turns behind it (the web shell confirms with the count first). Edits in place, never branching (#302). Every check runs **before** any write, so a rejected edit leaves history untouched — an `error` event on empty content, no user turn, a `message_id` that isn't a **user** message of **this** session, or a turn already running for the session (a live run's history isn't ours to cut; the `/chat/stream` **409** remains the backstop for one starting mid-flight). |
 | `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
 | `POST /platform/v1/agent/runs/{run_id}/draft` | **Confirm/Decline a draft-first send** (ADR-0085, #563). Body `{decision: "send" \| "decline", reason?}`. Consumes the pending draft; on `send` the core transmits it via the owning module's `POST /send` and appends the outcome (`Sent.` + id, or a relayed error hint) as the compose call's tool result, on `decline` it appends a "not sent" result (carrying any `reason`) — then continues the same turn (same SSE protocol as `/chat/stream`). An `error` event if the draft is unknown / expired / already resolved. Confirm/Decline is connection-gated client-side (#530); the `run_id` is the DB pause token, distinct from a live-run id. |
+| `POST /platform/v1/agent/runs/{run_id}/approval` | **Approve/Reject an `ask_approval` pause** (#745, ADR-0117). Body `{decision: "approved" \| "rejected", comment?}`. Consumes the pending approval and appends the decision (+ any `comment`) as the `ask_approval` call's tool result, then continues the same turn (same SSE protocol as `/chat/stream`). Unlike `/draft`, this route never itself calls a module — by the time it's posted, the **web client** has already called the relevant module's own review-decision endpoint directly (the agent must never approve its own work; see the *Built-in agent tools* section below), so `comment` is purely informational, carried back to the model. An `error` event if the approval is unknown / expired / already resolved. |
 | `GET /platform/v1/agent/runs/{run_id}/stream?after_seq=N` | **Re-attach** to an in-flight turn (ADR-0055), replaying buffered events after `N` (or `Last-Event-ID`) then tailing live — same SSE protocol as `/chat/stream`, no readiness prelude. A `gone` event if the run is unknown / finished-and-reaped (the client then falls back to the durable transcript). Note: this `run_id` is a **live-run** id (in-memory, for re-attach), distinct from the suspended-run id used by `/resume`. |
 | `GET /platform/v1/agent/memory?q=&limit=` | The cross-chat memory corpus — the durable **facts** the model remembers about the user (ADR-0045). No `q`: the facts newest-first; with `q`: what recall surfaces for that query (the same ranking a turn gets). Returns `{items, total}` — each `MemoryItem` is `{id, text, source, created_at?, score?}` where `source` is `tool` (the `remember` tool) or `auto` (background extraction); `score` is set only for a search. `limit` is bounded 1–500 (default 200). Backs the **Settings → Memory** box. |
 | `DELETE /platform/v1/agent/memory/{id}` | Forget one remembered fact so it stops being recalled. Drops its vector; the conversation that surfaced it is untouched. Returns `{forgotten}`. |
@@ -82,6 +83,27 @@ never reaches the provider at all — it ends immediately with a canned explanat
 (`stopped="unsupported_media"`), the same shape as any other turn (persisted, streamed as a
 normal answer), just skipping the extraction hand-off (a canned rejection is nothing to learn
 facts from).
+
+**A PDF attachment gets a real reader, not a naive decode (#738).** Before this, every
+non-image file — including a PDF — was decoded as UTF-8 (`errors="replace"`), which for a
+PDF meant `[file: report.pdf]` followed by thousands of replacement characters: the same
+noise images used to produce, just as text instead of an obviously-binary blob.
+`agent/document_extraction.py`'s `extract_pdf` (pure-Python `pypdf`, no system deps) reads
+the real text layer instead, page by page (`[page N]` markers), bounded to 20k characters
+with a truncation note — larger than the plain-text excerpt cap (`_EXCERPT_CHARS`, 4k) since a
+document attachment is the point of the turn, not incidental context. An encrypted PDF (beyond
+an empty/owner-only password — the common "restricts editing, not reading" case) or a scanned
+(image-only, no text layer) one renders an honest metadata block instead —
+`[file: report.pdf — PDF, 12 pages, no extractable text]` — never mojibake, and the attachment
+is never silently dropped either. The same honest-block treatment catches any *other* file
+whose UTF-8 decode turns out mostly replacement characters (`is_mostly_binary`, a zip renamed
+`.bin`) — no format gets to pretend binary is text. Out of scope, deliberately: OCR (a scanned
+PDF reports "no extractable text", full stop), docx/pptx extractors (the seam is built to make
+adding one trivial, not built yet), and native PDF pass-through for a hosted model that
+accepts documents directly (extraction is the portable, local-first answer — Ollama can't take
+a PDF at all; a capability-gated pass-through can layer on top of this seam later without
+changing it). The platform read door (`GET /platform/v1/files/read`) is untouched — this seam
+applies only at the attachment expander, the one place the mojibake actually reached the model.
 
 **Tool results that carry entity refs also teach the model the ids** (ADR-0079). When a module
 tool returns an envelope (`tool_envelope(text, [EntityRef…])`), the loop lifts the refs onto the
@@ -340,11 +362,31 @@ streaming path can present a draft; the **non-streaming** loop (`POST /chat`, th
 has no review pane, so it degrades — the model is told the draft can't be sent from that channel
 rather than being fed the raw envelope (nothing is transmitted regardless).
 
-**Not on this list: `finish_quiet`.** It looks like another built-in but isn't registered as one —
-`register_builtin`'s tools are offered to *every* turn (filtered only by the autonomy dial, which an
-ordinary chat turn bypasses entirely), and `finish_quiet` must never reach a plain chat turn. It is
-spliced into `Agent._loop`'s tool surface directly, gated on `automation_id`/`quiet_capable` — see
-*Automations engine → Agent-gated delivery* below.
+**`ask_approval(summary, refs)`** pauses the turn for the operator to Approve/Reject a change the
+model just staged through a propose tool (#745, ADR-0117) — a third sibling of `ask_user` and
+draft-first-send, on the same suspend/resume discipline: the loop persists the run plus `summary`
+and `refs` (the entity reference(s) the propose tool's result gave the model for what it staged,
+copied verbatim — possibly empty) to `agent_pending_approvals` (a sibling of
+`agent_suspended_runs`/`agent_pending_drafts`, reaped after `ASK_APPROVAL_TTL_HOURS`) and emits
+`awaiting_input` with `awaiting_kind: "approval"`. It differs from both siblings in one deliberate
+way: resolving it never calls a module from the core. The chat UI renders an approval card from
+`summary`/`refs`; **Approve**/**Reject** first call the relevant module's own existing
+review-decision endpoint directly — the operator's own click drives it, never the agent, which is
+exactly the boundary knowledge's suggestion review already draws (`suggestions.py`: "the agent
+must never approve its own work") — and only then POST `{decision, comment?}` to
+`…/runs/{run_id}/approval`, which appends the outcome (plus any `comment`) as the tool result and
+resumes. A module call failure doesn't block the resume; it is folded into `comment` instead, so
+the model is told plainly rather than assuming the change took effect.
+
+**Not on this list: `finish_quiet` and `ask_approval`.** Neither is registered via
+`register_builtin` — those tools are offered to *every* turn (filtered only by the autonomy dial,
+which an ordinary chat turn bypasses entirely), and both must be withheld from turns where they
+don't apply. `finish_quiet` is spliced into `Agent._loop`'s tool surface directly, gated on
+`automation_id`/`quiet_capable` — see *Automations engine → Agent-gated delivery* below.
+`ask_approval` is spliced into `run_stream`'s tool surface directly, unconditionally: `run_stream`
+carries no `automation_id` concept at all, so the tool is inherently absent from every headless
+path (`_loop` — automations, scheduled turns, inbound-bridge replies) rather than needing a gate of
+its own — those callers keep today's async review-queue behavior unchanged.
 
 ### LLM gateway (ADR-0010)
 
@@ -769,15 +811,16 @@ module's reload control path so the bridge connects at runtime — no restart.
 
 One coordinated batch over the core's background jobs, behind a single trigger (#383). The jobs are
 a small **registry** — a `MaintenanceJob` is a labelled async unit of work — so a new job type
-registers by being added to the list; the run / route / schedule machinery is unchanged. Five
+registers by being added to the list; the run / route / schedule machinery is unchanged. Six
 ship: the **memory fact-extraction drain** (light, nightly-eligible — drains the
 deferred-extraction queue, ADR-0051), the **standing-profile synthesis** (light, nightly-eligible
 — `ProfileSynthesizer.run` distils each tenant's facts into its statically-injected profile,
 ADR-0094), the **playbook reflection** pass (light, nightly-eligible — `PlaybookReflector.run`
 proposes edits to the agent's own guidance for the operator to approve, ADR-0093; see *Governed
 playbooks* above), the **module re-index** fan-out (heavy, manual-only — the same `reembed`
-fan-out as above), and **memory facts re-embed** (heavy, manual-only — calls
-`UserFactStore.reembed_all` for the default tenant, #436). Jobs run **sequenced** (gentle on a
+fan-out as above), **memory facts re-embed** (heavy, manual-only — calls
+`UserFactStore.reembed_all` for the default tenant, #436), and the **run-history prune** (light,
+nightly-eligible — trims its own persisted history, below, #733). Jobs run **sequenced** (gentle on a
 single GPU) and each is contained:
 one job's failure becomes an `error` result, never aborting the rest. Nightly auto-runs follow a
 runtime-editable **schedule** (below, #621); the manual "run everything" trigger is always
@@ -793,16 +836,33 @@ the run already going. `MaintenanceOrchestrator.shutdown()` cancels an in-flight
 app shutdown (marking whatever hadn't finished `error`) rather than orphaning it against
 infra that's about to close.
 
+**Persisted run history (#733).** `maintenance_history.py`'s `MaintenanceRunStore` — a
+tenant-scoped `maintenance_runs` table — is the durable counterpart to the orchestrator's own
+in-memory `last_run`, which a restart erases. The orchestrator takes an `on_recorded` callback
+(mirrors `AutomationRunner.on_recorded` → the live runs feed) invoked with every completed run,
+success or per-job error alike; `app.py` wires `on_recorded=maintenance_history.record`, so the
+orchestrator itself never imports the store. A **shutdown-interrupted** batch is still recorded —
+just from `MaintenanceOrchestrator.shutdown()` rather than from `_drive`'s own
+`except CancelledError`, which cannot safely `await` again once caught (see its docstring) — a
+crashed batch leaves a row, not a mystery, even though (like today) it publishes no
+`maintenance.completed` event. Every run also carries a `source` (`"scheduled"` | `"manual"`,
+defaulting to `"manual"` — the only two real callers, `_tick` and `POST /run`, always pass it
+explicitly) that the old in-memory `last_run` never distinguished. Retention is both a row cap
+and an age cutoff (`MAINTENANCE_RUN_HISTORY_MAX_ROWS`/`_MAX_AGE_DAYS`, default 200/90) — pruned by
+the run-history-prune job above, the same "count or age" posture the module-event log and
+notification center each apply to their own retention question.
+
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_cadence, schedule_hour, schedule_weekday, next_run_at, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the *effective* schedule (the tenant's own override, else the env-configured default), an ISO `next_run_at` estimate (`null` when disabled — a display estimate only; the scheduler's own due-check additionally avoids re-firing within an already-run window), the last *completed* run (or `null`), and the in-flight run (or `null`) with its live per-job progress. |
+| `GET /platform/v1/maintenance` | `{schedule_enabled, schedule_cadence, schedule_hour, schedule_weekday, next_run_at, jobs:[{key,label,nightly}], last_run, current_run}` — the registered jobs, the *effective* schedule (the tenant's own override, else the env-configured default), an ISO `next_run_at` estimate (`null` when disabled — a display estimate only; the scheduler's own due-check additionally avoids re-firing within an already-run window), the newest persisted history row (`last_run` — reads the store, survives a restart; `null` before any run has completed), and the in-flight run (or `null`) with its live per-job progress. |
+| `GET /platform/v1/maintenance/runs` | Persisted history, newest-first — `{runs:[{id,started_at,finished_at,scope,source,jobs:[{key,label,status,detail}]}], next_cursor}`. Query params `cursor` (a prior page's `next_cursor`; omit for the newest page) and `limit` (1-200, default 50). `next_cursor` is `null` past the last page. |
 | `PUT /platform/v1/maintenance/schedule` | Set the tenant's schedule — body `{enabled, cadence: "hourly"\|"daily"\|"weekly", hour: 0-23, weekday: 0-6\|null}` (#621). Validated as a whole (**400** on an invalid shape — an unknown cadence, an out-of-range hour, a `weekly` with no/bad weekday, or a weekday given for a non-weekly cadence) before it persists; returns the full refreshed `GET` shape. |
-| `POST /platform/v1/maintenance/run` | **202** — starts every job now (`scope: "all"`) as a background task and returns its live progress immediately: `MaintenanceCurrentRun` `{started_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `pending`/`running`/`ok`/`skipped`/`error`). **409** if a batch is already running — the body is a plain `{detail}` message; re-`GET` for the in-flight run. |
+| `POST /platform/v1/maintenance/run` | **202** — starts every job now (`scope: "all"`, `source: "manual"`) as a background task and returns its live progress immediately: `MaintenanceCurrentRun` `{started_at, scope, jobs:[{key,label,status,detail}]}` (`status` ∈ `pending`/`running`/`ok`/`skipped`/`error`). **409** if a batch is already running — the body is a plain `{detail}` message; re-`GET` for the in-flight run. |
 
 The **manual** trigger (the web **Settings → Maintenance** card) is always available and runs all
 jobs regardless of the schedule; the card rehydrates onto `current_run` on mount and polls a few
 seconds apart while one is live, so a page refresh mid-batch lands back on the same run instead of
-losing it.
+losing it. A **Run history** list underneath pages back through the persisted history.
 
 **The nightly schedule is a real, per-tenant, runtime-editable trigger (#621, ADR-0098)** —
 enable/disable, an `hourly`/`daily`/`weekly` cadence, an hour, and (weekly only) a weekday,
@@ -820,8 +880,8 @@ since a schedule editable at runtime could change while that sleep was in progre
 and the current local time; the "last fired" bookkeeping that dedupes a window is in-memory only
 (a restart re-evaluates fresh against the wall clock, same as before). Consolidating the
 per-runner nightly schedules onto this orchestrator remains the named follow-up. Every *completed*
-run publishes a tenant-scoped `maintenance.completed`; a run interrupted by shutdown is discarded,
-not published.
+run publishes a tenant-scoped `maintenance.completed` **and** is persisted to history; a run
+interrupted by shutdown is recorded to history too (#733) but publishes no event, same as before.
 
 ### Scheduled turns (ADR-0092)
 
@@ -972,8 +1032,8 @@ registry-side (`ModuleRegistry.tool_side_effects`, over the TTL-cached snapshot)
 reason `document_tool` exists — and only when a turn actually passes `allow`, so ordinary
 chat pays nothing. The core built-ins are classified at registration: `now` and
 `memory_search` read; `propose_automation` propose; `remember`, `ask_user`, and
-`set_chat_model` write. (`finish_quiet` carries no such classification at all — it isn't a
-`register_builtin` tool, see *Built-in agent tools* above.)
+`set_chat_model` write. (`finish_quiet` and `ask_approval` carry no such classification at
+all — neither is a `register_builtin` tool, see *Built-in agent tools* above.)
 
 **Safety:** a **persisted** per-tenant kill switch (unlike `PowerController`, which resets
 on restart — a stop a restart undoes is not a stop), rate caps, digest windows, a
@@ -1006,12 +1066,22 @@ VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service 
 
 `/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
 service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
-/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, and `POST /test` (the settings UI's "send test
-notification" button — the only caller today; no event source triggers a real push yet).
+/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below), and
+`POST /test` (the settings UI's "send test notification" button — the only caller of
+category-based `notify` today; the automations engine's push sink is still deferred).
 `/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
 `GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
 [the reference page](../reference/notifications.md) for the full contract and the web-side
 subscribe flow.
+
+**Event alerts (#732, ADR-0114).** `push/event_subscriptions.py` + `push/event_alerts.py`:
+a tenant-scoped `(module, event_type) -> ChannelPrefs` store, off by default, and a listener
+wired to the same `EventIntake.on_event` seam the automations matcher uses — a dumb fan-out,
+not an automation (no agent turn, no ledger). `PushService.notify_effective` is the send path
+for a caller (this listener) whose channel prefs come from somewhere other than `PushPrefs`
+categories. An automation triggered by the same event still fires independently — two
+notifications, by design. See [the reference page](../reference/notifications.md#event-alerts-732-adr-0114)
+for the full contract.
 
 ### Core-emitted spine events (#665)
 
@@ -1055,6 +1125,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `MESSAGING_MODEL` | — | Optional dedicated model for bridge turns; blank = the default chat model. |
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
 | `DRAFT_REVIEW_TTL_HOURS` | `24` | How long a turn paused on a draft-first send waits for Confirm/Decline before its pending draft is reaped (ADR-0085, #563). |
+| `ASK_APPROVAL_TTL_HOURS` | `24` | How long a turn paused by `ask_approval` waits for Approve/Reject before its pending approval is reaped — expiry decays to the existing async review-queue behavior, nothing lost (#745, ADR-0117). |
 | `LIVE_RUN_GRACE_SECONDS` | `300` | How long a *finished* in-flight run stays re-attachable in memory before it is reaped (ADR-0055). Pure cache — the answer is already durable, so this only bounds how long a late re-attach can tail the buffer. |
 | `EVENTS_RETENTION_DAYS` | `30` | How long a module event stays in the durable log (ADR-0103). `0` disables pruning — keep everything, and mind the disk. |
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
@@ -1179,9 +1250,18 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   above.
 - **Postgres `agent_instructions`** — per-tenant editable base system prompt (#497, ADR-0083):
   `tenant`, `instructions` (nullable). A NULL/blank row falls back to the shipped
-  `DEFAULT_AGENT_INSTRUCTIONS` — which establishes voice, tool use, and the source-grounding
+  `DEFAULT_AGENT_INSTRUCTIONS` — which establishes voice; tool use, including the #742
+  verify-before-mutate rule (an entity known only from earlier turns, not a tool result just
+  now, gets re-checked — list/stat/read/search — before a mutating call relies on it) and its
+  recover-on-not-found counterpart (a tool reporting something missing means re-ground and
+  report reality, never blind-retry the same call); and the source-grounding
   ladder (module data first, then web search, never an unsourced guess, #703); resolved per turn
-  and injected first in `Agent._assemble`.
+  and injected first in `Agent._assemble`. **Porting note (#742):** these are prompt *text*,
+  not code — a tenant that has already replaced the default via `PUT /agent/instructions` does
+  not pick up new rules automatically. An operator running a heavily customized prompt should
+  port the verify-before-mutate/recover-on-not-found paragraph (or the gist of it) into their
+  own instructions if they want the same behavior; there is no mechanism that layers the shipped
+  default's rules onto a custom one.
 - **Postgres `agent_instructions_versions`** — snapshots of the base prompt (ADR-0046 via
   ADR-0093 §3): `id`, `vid`, `tenant`, `content`, `created_at`. Each `set_instructions` records the
   prompt it **replaced** (the first edit therefore captures the shipped default), deduplicated,
@@ -1225,6 +1305,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `agent_suspended_runs` (a separate table, so `create_all` builds it with no migration and the two
   consume-on-resume paths can't cross). Written on suspend, **consumed** on Confirm/Decline, reaped
   after `DRAFT_REVIEW_TTL_HOURS`.
+- **Postgres `agent_pending_approvals`** — a turn paused by `ask_approval` (#745, ADR-0117): `id`
+  (run_id), `tenant`, `session_id`, `model`, `pending_call_id`, `summary`, `refs` (JSON — the
+  entity reference(s), possibly empty), `conversation` (JSON), `created_at`. A **third sibling**
+  of `agent_suspended_runs`/`agent_pending_drafts`, same reasoning: a separate table so
+  `create_all` needs no migration and none of the three consume-on-resume paths can cross. No
+  `tool`/`module` column like the draft table — the pending call is always the one fixed
+  `ask_approval` tool, never a per-module compose tool. Written on suspend, **consumed** on
+  Approve/Reject, reaped after `ASK_APPROVAL_TTL_HOURS`.
 - **Postgres `session_models`** — a session's persisted model override (#707): `session_id`
   (primary key), `tenant`, `model`, `updated_at`. A row exists only once a session's model has
   been explicitly set — by the `set_chat_model` tool or an explicit picker change (the same

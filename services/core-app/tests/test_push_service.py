@@ -474,3 +474,112 @@ async def test_send_digest_respects_the_rate_cap(monkeypatch: pytest.MonkeyPatch
     await fx.service.notify(TENANT, category="mail", title="t", body="b")  # consumes the cap
     result = await fx.service.send_digest(TENANT, [_queued("mail", "t")])
     assert result.outcome == "skipped_rate_limited"
+
+
+# ── notify_effective (#732) ───────────────────────────────────────────────────────
+# The event-alerts send path: the caller has already resolved push/center (from a per-event
+# subscription, not a category), so there is no PushPrefs.categories/automation_overrides
+# lookup to exercise here — these tests confirm it shares notify()'s delivery mechanics
+# (center write, quiet hours, tenant-wide rate cap) exactly, via the same `_deliver` path.
+
+
+async def test_notify_effective_uses_the_passed_in_prefs_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Category prefs must play no role — an event-alert subscription is not a category."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=False, center=False)})
+    result = await fx.service.notify_effective(
+        TENANT,
+        effective=ChannelPrefs(push=True, center=True),
+        category="mail",
+        title="t",
+        body="b",
+    )
+    assert result.outcome == "sent"  # the category's push=False never applies
+
+
+async def test_notify_effective_skips_push_when_the_passed_in_prefs_say_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    result = await fx.service.notify_effective(
+        TENANT,
+        effective=ChannelPrefs(push=False, center=True),
+        category="mail",
+        title="t",
+        body="b",
+    )
+    assert result.outcome == "skipped_disabled"
+    rows = await fx.notifications.list(TENANT)
+    assert len(rows) == 1  # center is independent, and was on
+
+
+async def test_notify_effective_records_no_center_row_when_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.service.notify_effective(
+        TENANT,
+        effective=ChannelPrefs(push=False, center=False),
+        category="mail",
+        title="t",
+        body="b",
+    )
+    assert await fx.notifications.list(TENANT) == []
+
+
+async def test_notify_effective_queues_during_quiet_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.prefs.set_quiet_hours(TENANT, enabled=True, start="00:00", end="23:59")
+    result = await fx.service.notify_effective(
+        TENANT, effective=ChannelPrefs(push=True, center=True), category="mail", title="t", body="b"
+    )
+    assert result.outcome == "queued"
+    assert len(await fx.queue.list_for_tenant(TENANT)) == 1
+
+
+async def test_notify_effective_respects_the_tenant_wide_rate_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-subscription cap lives in EventAlertListener; PushService still enforces its
+    own tenant-wide cap underneath, same as any other caller of the send path."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture(rate_cap_per_hour=1)
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    effective = ChannelPrefs(push=True, center=True)
+    first = await fx.service.notify_effective(
+        TENANT, effective=effective, category="mail", title="t", body="b"
+    )
+    second = await fx.service.notify_effective(
+        TENANT, effective=effective, category="mail", title="t", body="b"
+    )
+    assert first.outcome == "sent"
+    assert second.outcome == "skipped_rate_limited"
+
+
+async def test_notify_effective_passes_through_entity_ref_and_deep_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    ref = {"ref_id": "m1", "module": "mail", "kind": "message", "title": "Q3 invoice"}
+    await fx.service.notify_effective(
+        TENANT,
+        effective=ChannelPrefs(push=False, center=True),
+        category="mail",
+        title="Q3 invoice",
+        body="mail.received",
+        deep_link="/m/mail/m1",
+        entity_ref=ref,
+    )
+    rows = await fx.notifications.list(TENANT)
+    assert rows[0].entity_ref == ref
+    assert rows[0].deep_link == "/m/mail/m1"

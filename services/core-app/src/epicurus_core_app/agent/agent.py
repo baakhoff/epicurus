@@ -41,6 +41,7 @@ from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
+from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.gateway import LlmGateway
@@ -122,6 +123,63 @@ FINISH_QUIET_SPEC: dict[str, Any] = {
                 }
             },
             "required": ["reason"],
+        },
+    },
+}
+
+# ask_approval (#745, ADR-0117). A sibling of ask_user (ADR-0053): the model stages a change
+# through an existing propose tool, then calls this to pause for the operator's Approve/Reject
+# instead of assuming. Deliberately NOT a McpHost built-in, for the same "bound at the tool
+# surface, not by prompt politeness" reason FINISH_QUIET_SPEC above is spliced rather than
+# registered — but the opposite gate: `run_stream` (the interactive chat path) splices this in
+# unconditionally, while `_loop` (`run()`, used by automations, scheduled turns, and inbound
+# bridge replies) never does, so the tool is simply absent from an unattended run's tool list —
+# it keeps today's async review-queue behavior with no special-case needed. Approve/Reject
+# themselves never reach the model as something it can call — see suggestions.py's "the agent
+# must never approve its own work" — the decision is made by the *web client* calling the
+# owning module's own review-decision endpoint directly; only the outcome comes back here as
+# this call's tool result.
+ASK_APPROVAL_TOOL = "ask_approval"
+
+ASK_APPROVAL_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": ASK_APPROVAL_TOOL,
+        "description": (
+            "Ask the operator to Approve or Reject a change you just staged with a propose "
+            "tool, and PAUSE until they decide. Call this right after staging — never before, "
+            "and never to approve or reject anything yourself — so the operator reviews the "
+            "actual staged change. Their decision (and any comment) comes back as this tool's "
+            "result; continue from there."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "A one-line description of the staged change to approve.",
+                },
+                "refs": {
+                    "type": "array",
+                    "description": (
+                        "The entity reference(s) the propose tool's result gave you for what "
+                        "you staged, so the operator can open it directly — copy them exactly, "
+                        "never invent one. An empty list if you don't have any; the summary "
+                        "alone still shows."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ref_id": {"type": "string"},
+                            "module": {"type": "string"},
+                            "kind": {"type": "string"},
+                            "title": {"type": "string"},
+                        },
+                        "required": ["ref_id", "module", "kind", "title"],
+                    },
+                },
+            },
+            "required": ["summary", "refs"],
         },
     },
 }
@@ -387,21 +445,46 @@ def _parse_draft(output: str) -> DraftReview | None:
         return None
 
 
+def _parse_approval_refs(raw: Any) -> list[EntityRef]:
+    """Best-effort parse of ``ask_approval``'s ``refs`` argument into :class:`EntityRef` objects.
+
+    The model authors this list by hand (copying what a propose tool's result gave it), so a
+    malformed or partly-malformed entry must not fail the whole call — anything that isn't a
+    well-formed ref is dropped rather than raised, the same discipline :func:`_parse_draft`
+    applies to a malformed draft envelope.
+    """
+    if not isinstance(raw, list):
+        return []
+    refs: list[EntityRef] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            refs.append(EntityRef.model_validate(item))
+        except ValidationError:
+            continue
+    return refs
+
+
 @dataclass
 class _Pending:
-    """A tool call that pauses the turn — an ``ask_user`` question or a compose-tool draft.
+    """A tool call that pauses the turn — an ``ask_user`` question, a compose-tool draft, or an
+    ``ask_approval`` request.
 
     At most one per step (the loop gates on ``pending is None``): the first suspend-requesting
     call in a step wins and the turn suspends after its siblings run, so the conversation stays
     valid (every tool call gets a result or is the single deferred one). ``draft`` is set for a
-    ``kind == "draft"`` pending; ``question`` for ``"ask_user"``.
+    ``kind == "draft"`` pending; ``question`` for ``"ask_user"``; ``summary``/``refs`` for
+    ``"approval"``.
     """
 
     call_id: str
-    kind: str  # "ask_user" | "draft"
+    kind: str  # "ask_user" | "draft" | "approval"
     tool: str
     question: str = ""
     draft: DraftReview | None = None
+    summary: str = ""
+    refs: list[EntityRef] | None = None
 
 
 class _RefCollector:
@@ -438,9 +521,12 @@ class AgentEvent(BaseModel):
     ``run_id`` the client posts the answer to, to resume the turn (ADR-0053). The same
     ``awaiting_input`` frame carries a draft-review pause (ADR-0085, #563) when ``awaiting_kind``
     is ``"draft_review"``: it then carries the composed ``draft`` to render in the split-pane, and
-    the ``run_id`` is confirmed/declined via ``POST /runs/{run_id}/draft``. Reusing the existing
-    event type (rather than a new one) keeps a stale, service-worker-cached PWA parsing the stream
-    — every new field is additive (ADR-0055).
+    the ``run_id`` is confirmed/declined via ``POST /runs/{run_id}/draft``. It carries an
+    ``ask_approval`` pause (#745, ADR-0117) when ``awaiting_kind`` is ``"approval"``: it then
+    carries ``summary`` and ``refs`` to render as an approval card, and the ``run_id`` is
+    approved/rejected via ``POST /runs/{run_id}/approval``. Reusing the existing event type
+    (rather than a new one) keeps a stale, service-worker-cached PWA parsing the stream — every
+    new field is additive (ADR-0055).
     """
 
     type: str  # "delta" | "tool" | "done" | "error" | "readiness" | "awaiting_input"
@@ -457,6 +543,11 @@ class AgentEvent(BaseModel):
     # shell renders in the split-pane for Confirm/Decline. Absent for an ``ask_user`` pause.
     awaiting_kind: str | None = None
     draft: dict[str, Any] | None = None
+    # awaiting_input, approval flavour (#745, ADR-0117): ``"approval"`` + what to render as an
+    # approval card — a one-line summary and the entity reference(s) (if any) the model gave for
+    # what it staged. Absent for an ``ask_user``/``draft_review`` pause.
+    summary: str | None = None
+    refs: list[EntityRef] | None = None
     # ``tool`` events only, and only for a tool the module annotated ``writes_document``
     # (#541, ADR-0100/0101): what the call is writing — ``{module, content, target, title}`` —
     # so the shell can open the document pane beside the chat. Rides both the ``running`` and
@@ -588,6 +679,7 @@ class Agent:
         prefs: LlmPrefsStore | None = None,
         suspended: SuspendedRunStore | None = None,
         pending_drafts: PendingDraftStore | None = None,
+        pending_approvals: PendingApprovalStore | None = None,
         instructions: AgentInstructionsStore | None = None,
         profile: StandingProfileStore | None = None,
         documents: DocumentToolLookup | None = None,
@@ -621,6 +713,9 @@ class Agent:
         # Pending-draft store for draft-first send Confirm/Decline (ADR-0085). None disables the
         # pause (the loop then degrades: a compose tool is told it cannot present a draft to send).
         self._pending_drafts = pending_drafts
+        # Pending-approval store for ask_approval Approve/Reject (#745, ADR-0117). None disables
+        # the pause (the loop then degrades: ask_approval gets an instruction to proceed).
+        self._pending_approvals = pending_approvals
         # Editable base system prompt (#497, ADR-0083). None disables it (the agent runs with no
         # base prompt, as it did before this store existed); resolved per turn in ``_assemble``.
         self._instructions = instructions
@@ -746,6 +841,10 @@ class Agent:
         need_final = False  # an early/exhausted stop wants one final tool-less answer streamed
         try:
             specs, route = await self._mcp.discover()
+            # ask_approval (#745) is offered on every streamed turn — this path is chat-only (no
+            # automation_id here at all, unlike _loop), so unlike FINISH_QUIET_SPEC's gated splice
+            # there is no condition to check; see the constant's comment for the full rationale.
+            specs = [*specs, ASK_APPROVAL_SPEC]
             # Offer tools only to a model that can use them; otherwise the runtime errors and
             # the turn fails. A tool-less model just answers in text (the UI flags it).
             can_use_tools = bool(specs) and await self._gateway.supports_tools(model, tenant_id)
@@ -832,6 +931,34 @@ class Agent:
                                 )
                             )
                         continue
+                    if name == ASK_APPROVAL_TOOL:
+                        # Don't execute — ask_approval suspends the turn (#745, ADR-0117), the
+                        # same deferred-pause discipline as ask_user above.
+                        if pending is None:
+                            summary = str(arguments.get("summary") or "").strip()
+                            approval_refs = _parse_approval_refs(arguments.get("refs"))
+                            pending = _Pending(
+                                call_id=call_id,
+                                kind="approval",
+                                tool=name,
+                                summary=summary,
+                                refs=approval_refs,
+                            )
+                            tools_used.append(name)
+                            append_tool(timeline, name, "ok", summary or None)
+                            yield AgentEvent(
+                                type="tool", tool=name, status="ok", detail=summary or None
+                            )
+                        else:  # a second pause in one step — stub it so the convo stays valid
+                            convo.append(
+                                ChatMessage(
+                                    role="tool",
+                                    tool_call_id=call_id,
+                                    name=name,
+                                    content="(answered together with the pause above)",
+                                )
+                            )
+                        continue
                     tools_used.append(name)
                     detail = _tool_detail(arguments)
                     document = await self._document_written_by(name, arguments)
@@ -884,7 +1011,8 @@ class Agent:
                     )
                     if run_id is not None:
                         # Pause the turn (no `done`): ask_user posts an answer to /resume; a draft
-                        # is confirmed/declined via /runs/{run_id}/draft (ADR-0053/ADR-0085).
+                        # is confirmed/declined via /runs/{run_id}/draft (ADR-0053/ADR-0085); an
+                        # approval is decided via /runs/{run_id}/approval (#745, ADR-0117).
                         if pending.kind == "draft" and pending.draft is not None:
                             yield AgentEvent(
                                 type="awaiting_input",
@@ -892,23 +1020,37 @@ class Agent:
                                 awaiting_kind="draft_review",
                                 draft=pending.draft.draft,
                             )
+                        elif pending.kind == "approval":
+                            yield AgentEvent(
+                                type="awaiting_input",
+                                run_id=run_id,
+                                awaiting_kind="approval",
+                                summary=pending.summary,
+                                refs=pending.refs,
+                            )
                         else:
                             yield AgentEvent(
                                 type="awaiting_input", run_id=run_id, question=pending.question
                             )
                         return
                     # No suspend store wired — degrade: give the model a result and keep going.
+                    if pending.kind == "draft":
+                        degraded = (
+                            "error: cannot present a draft to send right now; tell the user you"
+                            " could not send it and to try again."
+                        )
+                    elif pending.kind == "approval":
+                        degraded = (
+                            "error: cannot pause for approval right now; use your best judgment."
+                        )
+                    else:
+                        degraded = "error: cannot pause for input; use your best assumption"
                     convo.append(
                         ChatMessage(
                             role="tool",
                             tool_call_id=pending.call_id,
                             name=pending.tool,
-                            content=(
-                                "error: cannot present a draft to send right now; tell the user you"
-                                " could not send it and to try again."
-                                if pending.kind == "draft"
-                                else "error: cannot pause for input; use your best assumption"
-                            ),
+                            content=degraded,
                         )
                     )
                 if guard.note_results(errored):
@@ -1088,8 +1230,9 @@ class Agent:
     ) -> str | None:
         """Persist a turn-pausing call to the store for its kind; return the run id (or ``None``).
 
-        Dispatches an ``ask_user`` pause to the suspended-run store (ADR-0053) and a compose-tool
-        draft to the pending-draft store (ADR-0085); ``None`` (no store wired) degrades to a
+        Dispatches an ``ask_user`` pause to the suspended-run store (ADR-0053), a compose-tool
+        draft to the pending-draft store (ADR-0085), and an ``ask_approval`` pause to the
+        pending-approval store (#745, ADR-0117); ``None`` (no store wired) degrades to a
         proceed/notice tool result at the call site.
         """
         if pending.kind == "draft":
@@ -1102,6 +1245,16 @@ class Agent:
                 pending_call_id=pending.call_id,
                 tool=pending.tool,
                 draft=pending.draft,
+            )
+        if pending.kind == "approval":
+            return await self._suspend_approval(
+                convo=convo,
+                model=model,
+                tenant=tenant,
+                session_id=session_id,
+                pending_call_id=pending.call_id,
+                summary=pending.summary,
+                refs=pending.refs or [],
             )
         return await self._suspend(
             convo=convo,
@@ -1144,6 +1297,38 @@ class Agent:
             )
         except Exception as exc:  # a failed persist must not crash the turn
             log.warning("draft suspend persist failed; proceeding without pause", error=str(exc))
+            return None
+
+    async def _suspend_approval(
+        self,
+        *,
+        convo: list[ChatMessage],
+        model: str | None,
+        tenant: str,
+        session_id: str | None,
+        pending_call_id: str,
+        summary: str,
+        refs: list[EntityRef],
+    ) -> str | None:
+        """Persist the run + approval request so an Approve/Reject can resume it (#745, ADR-0117).
+
+        Returns the run id, or ``None`` when no pending-approval store is wired — the caller
+        then degrades (tells the model it could not pause for approval) instead of pausing.
+        """
+        if self._pending_approvals is None:
+            return None
+        try:
+            return await self._pending_approvals.save(
+                tenant=tenant,
+                session_id=session_id,
+                model=model,
+                pending_call_id=pending_call_id,
+                summary=summary,
+                refs=[ref.model_dump() for ref in refs],
+                conversation=[m.model_dump(exclude_none=True) for m in convo],
+            )
+        except Exception as exc:  # a failed persist must not crash the turn
+            log.warning("approval suspend persist failed; proceeding without pause", error=str(exc))
             return None
 
     async def _expand_attachments(

@@ -56,6 +56,89 @@ images to GHCR.
   `core-app` 0.100.0→0.101.0 (MINOR) · `web` 0.124.0→0.125.0 (MINOR). ADR-0117 (extends ADR-0053,
   ADR-0033, ADR-0085).
 
+- **Knowledge and Notes remember where you left off** (#743) — opening the page always
+  landed on the module's default project, with every folder collapsed back to its initial
+  state and no document open, no matter where you'd actually been working: the active
+  scope, fold state, and open document were all plain component state, hydrated from
+  nothing on every mount. All three now persist to `localStorage` — the scope choice keyed
+  by `(module, pageId)`, fold state and selection by `(module, pageId, scope)` since tree
+  paths are scope-relative (restoring one project's folds onto another would be worse than
+  restoring nothing). Reopening the page — navigating away and back, switching projects and
+  back within one visit, or a full reload — restores scope, then folds, then the open
+  document, in that order; the document lands in preview per #729, same as any other open.
+  An explicit `?doc=` deep-link or a host-provided document (#541) still always wins over
+  restored state — they set the selection during render, before the restore effect (which
+  only ever fills an untouched slot) gets a chance to run. Decay is graceful: a restored
+  scope that no longer exists falls back to the module's own default (which re-triggers the
+  same restore for whatever that default resolves to); a restored document that's gone is
+  simply never selected, so it never gets a doc-fetch to 404 on — no error flash, just the
+  ordinary empty-state prompt. A real bug surfaced while testing this against a genuine
+  remount (not just a scope switch within one mount): the write-back effect was gated only
+  on `scope` being known, not on the restore having actually run for it yet, so on a fresh
+  mount it fired one render early with the plain in-memory defaults and clobbered the very
+  state the restore was about to read — fixed by gating the write on the same "restored for
+  this scope" marker the restore effect itself sets. Scroll position and in-document
+  read-position are out of scope. `web` 0.124.0→0.125.0 (MINOR).
+
+
+- **Move Knowledge documents by drag-and-drop, and an honest actions menu** (#741) — there
+  was no way to move a document to another folder (or back to the root) at all, and the
+  row's "three dots" — the icon that universally means "more actions" — just deleted the
+  file; the real rename affordance was a bare `ChevronRight`, easy to mistake for
+  navigation. The move machinery already existed (`moveItem`, which rename already used) —
+  the gap was purely presentational. File rows are now **drag-and-drop movable**: drop one
+  on a folder row to move it in, or on the tree's own background to move it to the top
+  level; a collapsed folder auto-expands the moment a drag hovers over it, and Escape (or
+  dropping outside any target) cancels for free — the browser fires `dragend` regardless of
+  how the drag ended. The three old hover icons are replaced by one honest **⋯ actions
+  menu**: Rename, Move to… (a compact folder picker), New file in folder (folders only),
+  and Delete — still gated by the same themed confirm (#488), no longer the bare ⋯ icon's
+  own click action. Moving the currently open document keeps it open at its new path (no
+  dead pane, no 404 fetch) — the existing `moveItem.onSuccess` already handled this for
+  rename, unchanged. Both Move to… and drag-and-drop reuse the not-yet-saved guard #740
+  added for rename: moving an unsaved document swaps its path locally instead of a server
+  call that would 404. Drag-and-drop is desktop-only by design (native HTML5 DnD doesn't
+  fire from touch input), so the menu is what covers mobile and touch. Folder-to-folder
+  moves are out of scope for this pass — files only. Notes is untouched: `can_manage_files`
+  stays false there, so it shows no hover actions, same as always. `web` 0.123.1→0.124.0
+  (MINOR).
+
+
+
+- **Resizable tree panel for Knowledge and Notes** (#730) — the editor archetype's document
+  list fixed the tree column at 18rem, so long titles truncated on a narrow tree and a wide
+  screen couldn't give the tree more room. A drag handle now sits between the tree and the
+  editor: pointer-drag resizes live (clamped to 12rem–40rem), double-click resets to the
+  18rem default, and the handle is keyboard-accessible (`role="separator"`, arrow keys nudge
+  the width) rather than mouse-only. The width persists per `(module, pageId)` in
+  `localStorage` (`editor-tree-width:<module>/<pageId>`) — the same pattern CalendarView
+  already uses for its own view state — so Knowledge and Notes remember independent
+  preferences. Below the `sm` breakpoint the layout is unchanged (a single stacked pane, so
+  there's nothing to divide); the fixed-width grid column becomes a CSS custom property
+  (`--tree-w`) read only by the `sm:` grid-template, so the responsive stack is undisturbed
+  by the same inline style always being present. One archetype change covers both pages
+  (Notes and Knowledge share the `editor` archetype, ADR-0018) — a shared `ResizableSplit`
+  component is deliberately not extracted yet; that's for if/when a second consumer (e.g. the
+  Files browser) actually needs one. `web` 0.122.1→0.123.0 (MINOR).
+
+
+- **Knowledge/notes: suggestion lifecycle tools** (#744) — the agent could only *add* to its
+  review queue; "change that suggestion" had no better option than proposing a near-duplicate,
+  and the agent had no way to see what was already pending. Four new tools per module —
+  `{knowledge,notes}_list_suggestions` (the pending queue: id, kind, target, a content
+  preview), `_read_suggestion` (one suggestion's full proposed content), `_update_suggestion`
+  (revise content/note/target in place — stays pending, `proposed-at` refreshes, one queue
+  entry never two), `_withdraw_suggestion` (retract a pending suggestion, kept as history) —
+  let it check first and revise instead of duplicating. Update/withdraw stay strictly inside
+  the pending queue and never touch the vault/note, so they're safe to expose even though
+  approve/reject correctly stay off the MCP surface (letting the agent approve its own
+  proposals would defeat the review gate, ADR-0033). A refusal on an already-resolved or
+  unknown suggestion raises with a message naming *why* (already approved/rejected/withdrawn,
+  or unknown outright) rather than a bare 404 the model can't act on (#697 precedent). Notes'
+  `notes_read_suggestion` is a deliberate, narrow exception to "notes are private, no read
+  tool" — it echoes back only the agent's own draft, never a note's stored body. Every
+  existing propose-shaped tool in both modules now nudges the agent to check the pending
+  queue first. `knowledge` 0.26.0→0.27.0 (MINOR) · `notes` 0.11.0→0.12.0 (MINOR).
 - **Per-saved-model capability overrides** (#711) — a saved hosted model can now carry the
   operator's correction to what the core *believes* it can do. LiteLLM's static cost map is the
   only source for a hosted model's vision support and context length, and it is missing ids
@@ -96,6 +179,9 @@ images to GHCR.
   a bare `"not found"` — the platform file API's own contract, hardened independently of which
   specific tool a caller used. `core-app` 0.99.0→0.100.0 (MINOR — a behavior-visible
   instructions change, the #704 precedent).
+
+
+
 - **PDF attachments reach the model as real text, not mojibake** (#738) — the attachment
   expander decoded every non-image file as UTF-8, so a PDF arrived as `[file: report.pdf]`
   followed by thousands of replacement characters — the same noise images used to produce
@@ -110,6 +196,58 @@ images to GHCR.
   extractors (the seam is built to make adding one trivial, not built yet), and native PDF
   pass-through for a hosted model that accepts documents directly. `core-app` 0.98.0→0.99.0
   (MINOR — a new `pypdf` dependency; no web change).
+
+
+- **A flaky `AutomationsScreen` test under full-suite CPU contention** (#758) —
+  `"toggles an automation without a reload"` reached for a `getByRole("switch", …)` query
+  as its very first assertion after render, with no cheaper checkpoint first; a role query
+  computes accessible names over the whole tree and is measurably pricier than a text
+  match, so it timed out twice in full-suite (`npx vitest run`, no file filter) background
+  runs while every sibling test in the file either settles on plain text first or (in one
+  case) already follows that exact pattern. It always passed cleanly in isolation — a
+  timing symptom of many parallel worker processes contending for CPU, not a logic bug.
+  Fixed the test to check text first, matching its own sibling, and raised testing-library's
+  global `asyncUtilTimeout` from the 1000ms default to 3000ms in the shared test setup — the
+  more general fix for the same class of contention-induced timeout anywhere else in the
+  suite, while still failing a genuinely-hung query promptly. `web` 0.122.0→0.122.1 (PATCH).
+
+- **Editor: Knowledge's "New document" can now be named at creation** (#740) — it used to
+  materialize as `new-note.md` (then `new-note-2.md`, …) with no chance to name it: the
+  `can_create` flow (Notes) already prompted for a name and slugified it, but Knowledge's
+  `can_manage_files` doors — the root "New document" and the in-folder create — hardcoded the
+  slug instead, and rename couldn't rescue it because an unsaved doc isn't in the tree yet (a
+  `moveItem` call against it would 404 before the first save). Both Knowledge doors now open
+  the same naming step Notes has: the root door reuses its toolbar form, and the in-folder door
+  gets a new inline row right in the tree at the folder you clicked, rather than a form that
+  pops up disconnected from it in the toolbar. A single shared submit now backs all three doors
+  (`can_create`'s form and both `can_manage_files` doors), slugifying the name and seeding the
+  same `# <name>` heading (Knowledge's slugs keep the `.md` extension its file store has always
+  used; Notes' never have had one) — and lands in preview per #729, same as any other door.
+  Rename is now safe for an unsaved document too: the shell shows a just-created, not-yet-saved
+  doc in the tree (Knowledge only — Notes never exposes tree actions) precisely so its hover
+  rename/delete are reachable, and both are guarded to act **locally** — swap the slug, abandon
+  the draft — instead of firing a server call that would 404; once the first save lands, both
+  fall through to the existing server-backed behavior unchanged. Incidental fix while touching
+  the shared slug helper: `uniqueSlug`'s collision suffix now lands before a `.md` extension
+  (`name-2.md`) instead of after it (the pre-existing, never-before-exercised `name.md-2`).
+  `web` 0.123.0→0.123.1 (PATCH).
+
+
+
+- **Editor: create lands in preview — render-first now applies to creation, not just
+  opening** (#729) — creating a document (Knowledge or Notes) opened it in **edit** mode,
+  while opening an *existing* document landed in **preview** (render-first, ADR-0042); create
+  was the one door that showed a raw, unrendered buffer where every other door showed the
+  rendered result immediately. The archetype flipped to preview only on the doc-fetch seeding
+  path, and all three create doors explicitly set edit mode (and skip that fetch via `isNew`,
+  so the flip never ran): the plain "New document", the named "New note" (Notes' `can_create`
+  flow), and "New file in folder" — the command palette's `?new=1` deep-link funnels into the
+  same doors. All three now land in preview like every other open; Edit stays one click away
+  on the mode toggle. The two doors that seeded an empty buffer ("New document", "New file in
+  folder") now seed a `# Untitled` heading — matching the Notes service's own "no heading
+  found" fallback (`derive_title`) — so the first preview never renders a blank pane; the named
+  door already seeded `# <name>` and keeps doing so. One archetype change covers both pages
+  (Notes and Knowledge share the `editor` archetype, ADR-0018). `web` 0.122.0→0.122.1 (PATCH).
 - **KV-cache fallback message: a staged choice needs a restart, not an environment edit** (#709)
   — `apply_kv_cache_type` has two distinct degraded modes and the API collapsed both into
   `applied: false`, so the Models page always showed the scarier, mostly-wrong instruction

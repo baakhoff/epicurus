@@ -486,8 +486,57 @@ column is a no-op), with the action/form path as the pointer-free fallback.
 The `editor` archetype (knowledge, notes) opens a document **rendered and editable** — its
 markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —
 ProseMirror + remark — lazy-loaded so it never enters the main bundle, #377), and an Edit/Preview
-toggle drops to the **raw markdown source** when you prefer it (ADR-0042). Both views write back
-to the same markdown buffer, so the save/version flow below is unchanged. Because notes/knowledge **re-embed on every save**, the editor does not
+toggle drops to the **raw markdown source** when you prefer it (ADR-0042). **Creating** a
+document lands in preview too (#729), and every create door prompts for a name first (#740):
+Notes' "New note" toolbar form, Knowledge's root "New document" form, and Knowledge's in-folder
+create — an inline row in the tree, right at the folder you clicked, rather than a form up in
+the toolbar. All three slugify the typed name and seed a `# <name>` heading so the first preview
+renders a title instead of a blank pane; Escape/cancel creates nothing. Knowledge's slugs keep
+the `.md` extension its file store has always used; Notes' never have had one. The command
+palette's `?new=1` deep-link funnels into the same doors. A freshly-created document isn't in
+the server's list until the first save, so the shell injects it into the tree anyway — Knowledge
+only, since Notes doesn't expose tree actions at all — so its hover rename/delete are reachable
+immediately: renaming it before that first save swaps the slug locally (a server move would 404
+against a file that doesn't exist yet); deleting it abandons the draft the same way. Once saved,
+both actions go through the normal server-backed path, unchanged. Both views write back to the
+same markdown buffer, so the save/version flow below is unchanged.
+
+Knowledge's file rows carry a **⋯ actions menu** (#741) instead of the three separate hover
+icons this used to be — one of which was, confusingly, the bare ⋯ icon itself wired straight to
+Delete. The menu holds Rename, Move to… (a compact folder picker), New file in folder
+(folders only), and Delete (still gated by the same themed confirm, #488). Files are also
+**drag-and-drop movable**: drop one on a folder row to move it in, or on the tree's own
+background to move it to the top level; a collapsed folder auto-expands the moment a drag
+hovers over it, and Escape — or dropping outside any target — cancels cleanly for free, since
+the browser fires `dragend` regardless of how the drag ended. Moving the currently open document
+keeps it open at its new path (no dead pane, no 404 fetch). Both Move to… and drag-and-drop
+reuse the same not-yet-saved guard #740 added for rename: moving an unsaved document swaps its
+path locally instead of a server call that would 404. This is desktop-only by design — native
+HTML5 drag-and-drop doesn't fire from touch input at all, so the menu is what covers mobile.
+None of this touches Notes: `can_manage_files` stays false there, so its tree shows no hover
+actions, same as before.
+
+The list pane is **resizable** (#730): drag the divider between it and the editor to widen or
+narrow it (12rem–40rem), double-click the divider to reset to the 18rem default, or focus it
+(it's a keyboard-accessible `role="separator"`) and use the arrow keys. The width is remembered
+per `(module, pageId)` in `localStorage`, so Knowledge and Notes keep independent preferences —
+the same pattern CalendarView already uses for its own view-state persistence. Below the `sm`
+breakpoint the layout is still a single stacked pane, so there is nothing to divide there.
+
+The editor also **remembers where you left off** (#743): the active project/knowledge-base,
+which folders were expanded, and which document was open all persist to `localStorage` — the
+scope choice keyed by `(module, pageId)`, the fold-state and selection by `(module, pageId,
+scope)` (tree paths are scope-relative, so restoring one project's folds onto another would be
+worse than restoring nothing). Reopening the page — after navigating away and back, switching
+projects and back within one visit, or a full reload — restores all three, in that order: scope,
+then folds, then the open document (which lands in preview, per #729, same as any other open).
+An explicit `?doc=` deep-link (or a host-provided document, #541) always wins over restored
+state, exactly as before. Decay is graceful: a restored scope that's gone falls back to the
+module's own default; a restored document that's gone is simply never selected, so there's no
+404 or error flash — just the ordinary "select a document" empty state. Scroll position and
+read-position within a document are out of scope.
+
+Because notes/knowledge **re-embed on every save**, the editor does not
 save on each keystroke: a save fires only when you **leave** (switch document, go back, or
 the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
 or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →

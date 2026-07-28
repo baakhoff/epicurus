@@ -540,6 +540,112 @@ function TreeItem({
 }
 
 /**
+ * The open menu's body (#741). Its own component so each open mounts fresh `showMoveTo`
+ * state — the same reason CommandPalette's dialog body is separate, and why neither needs
+ * a reset effect (react-hooks/set-state-in-effect). Closing the menu unmounts this, so the
+ * next open always starts on the actions list rather than wherever it was left.
+ */
+function TreeItemMenuPanel({
+  isDir,
+  destinations,
+  onRename,
+  onMoveTo,
+  onNewFileInFolder,
+  onDelete,
+  onClose,
+}: {
+  isDir: boolean;
+  destinations: { path: string; title: string }[];
+  onRename: () => void;
+  onMoveTo: (destination: string) => void;
+  onNewFileInFolder: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [showMoveTo, setShowMoveTo] = useState(false);
+
+  return (
+    <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 text-left shadow-(--ep-shadow)">
+      {showMoveTo ? (
+        <>
+          <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">Move to…</div>
+          <div className="max-h-56 overflow-y-auto">
+            <button
+              aria-label="Move to the top level"
+              onClick={() => {
+                onMoveTo("");
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              (root)
+            </button>
+            {destinations.map((f) => (
+              <button
+                key={f.path}
+                aria-label={`Move to ${f.path}`}
+                onClick={() => {
+                  onMoveTo(f.path);
+                  onClose();
+                }}
+                className="block w-full truncate px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+              >
+                {f.path}
+              </button>
+            ))}
+            {destinations.length === 0 && (
+              <p className="px-3 py-2 text-xs text-ink-faint">No other folders.</p>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          {!isDir && (
+            <button
+              onClick={() => {
+                onRename();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Rename
+            </button>
+          )}
+          {!isDir && (
+            <button
+              onClick={() => setShowMoveTo(true)}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Move to…
+            </button>
+          )}
+          {isDir && (
+            <button
+              onClick={() => {
+                onNewFileInFolder();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              New file in folder
+            </button>
+          )}
+          <button
+            onClick={() => {
+              onDelete();
+              onClose();
+            }}
+            className="block w-full px-3 py-1.5 text-left text-sm text-danger hover:bg-danger/10"
+          >
+            Delete
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
  * The per-item "more actions" menu (#741) — replaces what used to be three separate hover
  * icons (one of which, confusingly, was the bare ⋯ icon wired to Delete). Rename and Move to…
  * are file-only (folders don't rename or move in this version); New file in folder is
@@ -565,11 +671,6 @@ function TreeItemMenu({
   onNewFileInFolder: () => void;
   onDelete: () => void;
 }) {
-  const [showMoveTo, setShowMoveTo] = useState(false);
-  useEffect(() => {
-    if (!isOpen) setShowMoveTo(false);
-  }, [isOpen]);
-
   const isDir = node.type === "dir";
   const currentParent = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : "";
   // A file's own current folder is a no-op move (nothing to offer it as); a folder never
@@ -598,83 +699,15 @@ function TreeItemMenu({
               className="fixed inset-0 z-10 cursor-default"
               onClick={() => onOpenChange(false)}
             />
-            <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 text-left shadow-(--ep-shadow)">
-              {showMoveTo ? (
-                <>
-                  <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">Move to…</div>
-                  <div className="max-h-56 overflow-y-auto">
-                    <button
-                      aria-label="Move to the top level"
-                      onClick={() => {
-                        onMoveTo("");
-                        onOpenChange(false);
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      (root)
-                    </button>
-                    {destinations.map((f) => (
-                      <button
-                        key={f.path}
-                        aria-label={`Move to ${f.path}`}
-                        onClick={() => {
-                          onMoveTo(f.path);
-                          onOpenChange(false);
-                        }}
-                        className="block w-full truncate px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                      >
-                        {f.path}
-                      </button>
-                    ))}
-                    {destinations.length === 0 && (
-                      <p className="px-3 py-2 text-xs text-ink-faint">No other folders.</p>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  {!isDir && (
-                    <button
-                      onClick={() => {
-                        onRename();
-                        onOpenChange(false);
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      Rename
-                    </button>
-                  )}
-                  {!isDir && (
-                    <button
-                      onClick={() => setShowMoveTo(true)}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      Move to…
-                    </button>
-                  )}
-                  {isDir && (
-                    <button
-                      onClick={() => {
-                        onNewFileInFolder();
-                        onOpenChange(false);
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
-                    >
-                      New file in folder
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      onDelete();
-                      onOpenChange(false);
-                    }}
-                    className="block w-full px-3 py-1.5 text-left text-sm text-danger hover:bg-danger/10"
-                  >
-                    Delete
-                  </button>
-                </>
-              )}
-            </div>
+            <TreeItemMenuPanel
+              isDir={isDir}
+              destinations={destinations}
+              onRename={onRename}
+              onMoveTo={onMoveTo}
+              onNewFileInFolder={onNewFileInFolder}
+              onDelete={onDelete}
+              onClose={() => onOpenChange(false)}
+            />
           </>
         )}
       </div>
@@ -897,8 +930,20 @@ export function EditorView({
   });
 
   const listData = list.data ? EditorData.parse(list.data) : null;
+  // A restored scope that no longer exists (the knowledge base was deleted since the last
+  // visit) decays to the module default (#743). Derived here rather than corrected by writing
+  // `activeScope` back: the restore effect below keys off the resolved scope, so healing it
+  // *through state* would make that effect re-trigger itself — the cascade
+  // react-hooks/set-state-in-effect exists to catch. `isPlaceholderData` guards the same
+  // window the effect does (#712): mid-switch, `listData` is still the previous scope's, and
+  // judging the new scope against that list would wrongly call it gone.
+  const restoredScopeIsGone =
+    !!activeScope &&
+    !!listData &&
+    !list.isPlaceholderData &&
+    !listData.scopes.some((s) => s.id === activeScope);
   // The resolved scope: the operator's pick, else the module's default (first project).
-  const scope = activeScope || listData?.scope || "";
+  const scope = (restoredScopeIsGone ? "" : activeScope) || listData?.scope || "";
   // Tree paths are scope-relative; the module's doc/folder/move endpoints want the
   // knowledge-root-relative `<scope>/<path>`.
   const toModulePath = (p: string): string => (scope ? `${scope}/${p}` : p);
@@ -959,10 +1004,9 @@ export function EditorView({
   // value, so it doesn't fight the operator's own live changes afterward. It naturally
   // re-fires (restoring THAT scope's own state) whenever `scope` resolves to something new,
   // whether from a fresh mount or the operator switching knowledge bases mid-session.
-  // Doubles as graceful decay: a restored scope that's gone falls back to the module
-  // default (which re-triggers this effect for the newly-resolved scope); a restored
-  // document that no longer exists is simply never selected, so it never gets a doc-fetch
-  // to 404 on — no error flash, just the ordinary "select a document" empty state.
+  // Graceful decay for a vanished *scope* is handled upstream, where `scope` is resolved; a
+  // restored *document* that no longer exists is simply never selected here, so it never gets
+  // a doc-fetch to 404 on — no error flash, just the ordinary "select a document" empty state.
   // `?doc=`/the `doc` prop always win: they set `selectedPath` during render, above, so by
   // the time this runs the `selectedPath === null` guard only ever restores an untouched slot.
   const restoredScopeRef = useRef<string | null>(null);
@@ -974,20 +1018,20 @@ export function EditorView({
     // chance once the real data for the new scope arrives.
     if (!listData || list.isPlaceholderData || restoredScopeRef.current === scope) return;
     restoredScopeRef.current = scope;
-    if (activeScope && !listData.scopes.some((s) => s.id === activeScope)) {
-      setActiveScope(""); // gone — fall back to the module default; scope resolves again
-      return;
-    }
     const restored = readTreeState(module, pageId, scope);
     setCollapsed(new Set(restored.collapsed));
-    if (
-      selectedPath === null &&
+    // Functional update so the "only fill an untouched slot" guard can read the current
+    // selection without taking `selectedPath` as a dependency — depending on it would make
+    // this effect re-run on the very write it just made (react-hooks/set-state-in-effect).
+    // Returning `current` unchanged is also a real bail-out: React skips the re-render.
+    setSelectedPath((current) =>
+      current === null &&
       restored.selectedPath &&
       listData.docs.some((d) => d.path === restored.selectedPath)
-    ) {
-      setSelectedPath(restored.selectedPath);
-    }
-  }, [listData, scope, activeScope, module, pageId, selectedPath]);
+        ? restored.selectedPath
+        : current,
+    );
+  }, [listData, scope, module, pageId]);
 
   // Persist the operator's scope choice (#743) — keyed by (module, pageId) only, separate
   // from the fold-state/selection below, which are keyed by scope too.

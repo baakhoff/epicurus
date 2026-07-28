@@ -696,3 +696,114 @@ describe("EditorView — knowledge bases (scopes)", () => {
     expect(ta.readOnly).toBe(true);
   });
 });
+
+// ── resizable tree panel (#730) ───────────────────────────────────────────────
+
+describe("EditorView — resizable tree panel (#730)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  function separator() {
+    return screen.getByRole("separator", { name: "Resize document tree" });
+  }
+
+  it("defaults to 18rem with no stored preference", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+    expect(separator()).toHaveAttribute("aria-valuenow", "18");
+    expect(separator()).toHaveAttribute("aria-valuemin", "12");
+    expect(separator()).toHaveAttribute("aria-valuemax", "40");
+  });
+
+  it("drags to resize live and persists the width for this (module, pageId)", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    // jsdom's default root font-size resolves to 16px, so a 160px drag is a 10rem delta.
+    fireEvent.pointerMove(handle, { clientX: 160, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 160, pointerId: 1 });
+
+    expect(handle).toHaveAttribute("aria-valuenow", "28");
+    expect(localStorage.getItem("editor-tree-width:knowledge/vault")).toBe("28");
+  });
+
+  it("clamps drag resize to [12rem, 40rem]", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 5000, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "40");
+
+    fireEvent.pointerMove(handle, { clientX: -5000, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "12");
+    fireEvent.pointerUp(handle, { clientX: -5000, pointerId: 1 });
+  });
+
+  it("double-click resets to the 18rem default", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 160, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 160, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "28");
+
+    fireEvent.doubleClick(handle);
+    expect(handle).toHaveAttribute("aria-valuenow", "18");
+    expect(localStorage.getItem("editor-tree-width:knowledge/vault")).toBe("18");
+  });
+
+  it("nudges the width with arrow keys", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(handle).toHaveAttribute("aria-valuenow", "19");
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(handle).toHaveAttribute("aria-valuenow", "17");
+  });
+
+  it("remembers Knowledge and Notes widths independently", async () => {
+    localStorage.setItem("editor-tree-width:knowledge/vault", "24");
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+    expect(separator()).toHaveAttribute("aria-valuenow", "24");
+    unmount();
+
+    mockModulePage.mockResolvedValue({ docs: [{ id: "b.md", title: "b", path: "b.md" }] });
+    render(<EditorView module="notes" pageId="notes" />, { wrapper });
+    await screen.findByText("b");
+    // Notes has no stored width of its own — the 24rem stashed for Knowledge doesn't leak in.
+    expect(separator()).toHaveAttribute("aria-valuenow", "18");
+  });
+
+  it("survives a reload — the persisted width comes back on the next mount", async () => {
+    mockModulePage.mockResolvedValue({ docs: [{ id: "a.md", title: "a", path: "a.md" }] });
+    const { unmount } = render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+
+    const handle = separator();
+    fireEvent.pointerDown(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: -32, pointerId: 1 }); // -2rem → 16rem
+    fireEvent.pointerUp(handle, { clientX: -32, pointerId: 1 });
+    unmount();
+
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+    await screen.findByText("a");
+    expect(separator()).toHaveAttribute("aria-valuenow", "16");
+  });
+});

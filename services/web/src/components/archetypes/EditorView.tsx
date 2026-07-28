@@ -38,7 +38,18 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -83,6 +94,38 @@ function uniqueSlug(base: string, taken: Set<string>): string {
   let n = 2;
   while (taken.has(`${base}-${n}`)) n++;
   return `${base}-${n}`;
+}
+
+// ── Resizable tree panel (#730) ─────────────────────────────────────────────────
+
+const DEFAULT_TREE_WIDTH_REM = 18;
+const MIN_TREE_WIDTH_REM = 12;
+const MAX_TREE_WIDTH_REM = 40;
+
+function clampTreeWidth(rem: number): number {
+  return Math.min(MAX_TREE_WIDTH_REM, Math.max(MIN_TREE_WIDTH_REM, rem));
+}
+
+const treeWidthStorageKey = (module: string, pageId: string): string =>
+  `editor-tree-width:${module}/${pageId}`;
+
+/** The operator's last-chosen tree width for this page, else the 18rem default. */
+function readTreeWidth(module: string, pageId: string): number {
+  try {
+    const raw = localStorage.getItem(treeWidthStorageKey(module, pageId));
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) ? clampTreeWidth(parsed) : DEFAULT_TREE_WIDTH_REM;
+  } catch {
+    return DEFAULT_TREE_WIDTH_REM;
+  }
+}
+
+function writeTreeWidth(module: string, pageId: string, rem: number): void {
+  try {
+    localStorage.setItem(treeWidthStorageKey(module, pageId), String(rem));
+  } catch {
+    /* storage full / unavailable — persistence is best-effort */
+  }
 }
 
 // ── Tree builder ───────────────────────────────────────────────────────────────
@@ -513,6 +556,11 @@ export function EditorView({
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
   // Client-side tree filter (#339): matches document titles/paths in the active scope.
   const [treeFilter, setTreeFilter] = useState("");
+  // Resizable tree panel (#730): width in rem, persisted per (module, pageId) — CalendarView's
+  // localStorage precedent. Drag state lives in a ref (not state) since pointermove fires far
+  // too often to route through a re-render on every event.
+  const [treeWidth, setTreeWidth] = useState(() => readTreeWidth(module, pageId));
+  const treeDrag = useRef<{ startX: number; startWidthRem: number } | null>(null);
 
   // The active scope (knowledge base / project, #KB-refactor). Empty = let the module
   // default to the first project; the switcher and create-project flow drive it. Paths in
@@ -995,6 +1043,37 @@ export function EditorView({
     });
   };
 
+  // Resizable tree panel (#730): drag the handle to resize, clamped to [12rem, 40rem].
+  const commitTreeWidth = (rem: number) => {
+    const clamped = clampTreeWidth(rem);
+    setTreeWidth(clamped);
+    writeTreeWidth(module, pageId, clamped);
+  };
+  const handleTreeResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    treeDrag.current = { startX: e.clientX, startWidthRem: treeWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const handleTreeResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = treeDrag.current;
+    if (!drag) return;
+    const rootPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    commitTreeWidth(drag.startWidthRem + (e.clientX - drag.startX) / rootPx);
+  };
+  const handleTreeResizeEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!treeDrag.current) return;
+    treeDrag.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  const handleTreeResizeKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      commitTreeWidth(treeWidth - 1);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      commitTreeWidth(treeWidth + 1);
+    }
+  };
+
   const commonTreeProps = {
     selectedPath,
     collapsed,
@@ -1020,11 +1099,14 @@ export function EditorView({
   };
 
   return (
-    <div className="grid h-full min-h-0 min-w-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
+    <div
+      className="grid h-full min-h-0 min-w-0 sm:grid-cols-[minmax(0,var(--tree-w))_8px_1fr]"
+      style={{ "--tree-w": `${treeWidth}rem` } as CSSProperties}
+    >
       {/* document list — hidden on phone once a document is open */}
       <div
         className={cn(
-          "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain border-edge sm:border-r",
+          "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain",
           selectedPath && "hidden sm:flex",
         )}
       >
@@ -1245,6 +1327,26 @@ export function EditorView({
             ))}
           </ul>
         )}
+      </div>
+
+      {/* resize handle (#730) — desktop-only; the phone's stacked layout never shows both
+          panes at once, so there is nothing to divide there. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize document tree"
+        aria-valuenow={Math.round(treeWidth)}
+        aria-valuemin={MIN_TREE_WIDTH_REM}
+        aria-valuemax={MAX_TREE_WIDTH_REM}
+        tabIndex={0}
+        onPointerDown={handleTreeResizeStart}
+        onPointerMove={handleTreeResizeMove}
+        onPointerUp={handleTreeResizeEnd}
+        onDoubleClick={() => commitTreeWidth(DEFAULT_TREE_WIDTH_REM)}
+        onKeyDown={handleTreeResizeKeyDown}
+        className="hidden shrink-0 cursor-col-resize touch-none outline-none hover:bg-accent-dim focus-visible:bg-accent-dim sm:block"
+      >
+        <div className="mx-auto h-full w-px bg-edge" />
       </div>
 
       {/* editor — hidden on phone until a document is open */}

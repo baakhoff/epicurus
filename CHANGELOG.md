@@ -39,6 +39,8 @@ images to GHCR.
   time, source, duration, per-job status chips, expandable detail, "Load more" pagination.
   `core-app` 0.97.0→0.98.0 (MINOR) · `web` 0.123.0→0.124.0 (MINOR). ADR-0116 (amends ADR-0060).
 
+
+
 - **Knowledge and Notes remember where you left off** (#743) — opening the page always
   landed on the module's default project, with every folder collapsed back to its initial
   state and no document open, no matter where you'd actually been working: the active
@@ -145,6 +147,21 @@ images to GHCR.
   `web` 0.119.0→0.120.0 (MINOR).
 
 ### Fixed
+
+- **PDF attachments reach the model as real text, not mojibake** (#738) — the attachment
+  expander decoded every non-image file as UTF-8, so a PDF arrived as `[file: report.pdf]`
+  followed by thousands of replacement characters — the same noise images used to produce
+  (#633), just mistaken for text instead of flagged as binary. A new `document_extraction.py`
+  seam (`pypdf`, pure-Python, no system deps) reads a PDF's real text layer instead, page by
+  page (`[page N]` markers), bounded to 20k characters with a truncation note. An encrypted
+  (beyond an empty/owner-only password) or scanned (image-only) PDF renders an honest metadata
+  block — `[file: report.pdf — PDF, 12 pages, no extractable text]` — never mojibake, and the
+  attachment is never silently dropped either. The same honest-block treatment now catches any
+  *other* file whose UTF-8 decode turns out mostly replacement characters (a zip renamed
+  `.bin`) — no format gets to pretend binary is text. Out of scope, deliberately: OCR, docx/pptx
+  extractors (the seam is built to make adding one trivial, not built yet), and native PDF
+  pass-through for a hosted model that accepts documents directly. `core-app` 0.98.0→0.99.0
+  (MINOR — a new `pypdf` dependency; no web change).
 
 - **A flaky `AutomationsScreen` test under full-suite CPU contention** (#758) —
   `"toggles an automation without a reload"` reached for a `getByRole("switch", …)` query

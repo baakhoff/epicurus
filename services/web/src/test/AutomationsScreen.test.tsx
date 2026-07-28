@@ -179,9 +179,12 @@ describe("AutomationsScreen", () => {
     automationRows = [automation()];
     renderScreen();
 
-    await userEvent.click(
-      await screen.findByRole("switch", { name: "Tell me about invoices enabled" }),
-    );
+    // Settle on cheap text first (matching "shows and flips the kill switch" below) before
+    // the switch's role query, which computes accessible names over the whole tree and is
+    // measurably pricier than a text match — this test flaked twice under full-suite CPU
+    // contention (#758) reaching for the role query as its very first assertion.
+    await screen.findByText("Tell me about invoices");
+    await userEvent.click(screen.getByRole("switch", { name: "Tell me about invoices enabled" }));
     await waitFor(() => expect(api.setAutomationEnabled).toHaveBeenCalledWith("a1", false));
   });
 

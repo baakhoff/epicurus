@@ -38,7 +38,18 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
@@ -77,12 +88,115 @@ function slugify(name: string): string {
   return base || "note";
 }
 
-/** Disambiguate a slug against the ones already in the list (append -2, -3, …). */
+/** Disambiguate a slug against the ones already in the list (append -2, -3, …) — inserted
+ *  before a trailing `.md`, so a repeat lands on "name-2.md" rather than "name.md-2". */
 function uniqueSlug(base: string, taken: Set<string>): string {
   if (!taken.has(base)) return base;
+  const match = /^(.*)(\.md)$/.exec(base);
+  const stem = match ? match[1] : base;
+  const ext = match ? match[2] : "";
   let n = 2;
-  while (taken.has(`${base}-${n}`)) n++;
-  return `${base}-${n}`;
+  while (taken.has(`${stem}-${n}${ext}`)) n++;
+  return `${stem}-${n}${ext}`;
+}
+
+/** Display title for a not-yet-saved document, before the server has a chance to derive
+ *  one — the filename without its extension, matching Knowledge's own `doc_title`. */
+function basenameTitle(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.md$/, "");
+}
+
+// ── Resizable tree panel (#730) ─────────────────────────────────────────────────
+
+const DEFAULT_TREE_WIDTH_REM = 18;
+const MIN_TREE_WIDTH_REM = 12;
+const MAX_TREE_WIDTH_REM = 40;
+
+function clampTreeWidth(rem: number): number {
+  return Math.min(MAX_TREE_WIDTH_REM, Math.max(MIN_TREE_WIDTH_REM, rem));
+}
+
+const treeWidthStorageKey = (module: string, pageId: string): string =>
+  `editor-tree-width:${module}/${pageId}`;
+
+/** The operator's last-chosen tree width for this page, else the 18rem default. */
+function readTreeWidth(module: string, pageId: string): number {
+  try {
+    const raw = localStorage.getItem(treeWidthStorageKey(module, pageId));
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) ? clampTreeWidth(parsed) : DEFAULT_TREE_WIDTH_REM;
+  } catch {
+    return DEFAULT_TREE_WIDTH_REM;
+  }
+}
+
+function writeTreeWidth(module: string, pageId: string, rem: number): void {
+  try {
+    localStorage.setItem(treeWidthStorageKey(module, pageId), String(rem));
+  } catch {
+    /* storage full / unavailable — persistence is best-effort */
+  }
+}
+
+// ── Restore last state (#743) ───────────────────────────────────────────────────
+
+const scopeStorageKey = (module: string, pageId: string): string => `editor-scope:${module}/${pageId}`;
+
+/** The operator's last-chosen scope (knowledge base / project) for this page, else "" —
+ *  meaning let the module default to its first project, same as an empty starting value
+ *  always has. */
+function readScope(module: string, pageId: string): string {
+  try {
+    return localStorage.getItem(scopeStorageKey(module, pageId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeScope(module: string, pageId: string, scope: string): void {
+  try {
+    if (scope) {
+      localStorage.setItem(scopeStorageKey(module, pageId), scope);
+    } else {
+      localStorage.removeItem(scopeStorageKey(module, pageId));
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+interface PersistedTreeState {
+  collapsed: string[];
+  selectedPath: string | null;
+}
+
+const treeStateStorageKey = (module: string, pageId: string, scope: string): string =>
+  `editor-state:${module}/${pageId}/${scope}`;
+
+/** Fold state and open document are scope-relative (tree paths are), so they're keyed by
+ *  (module, pageId, scope) — restoring the wrong project's open folders onto this one would
+ *  be worse than restoring nothing. */
+function readTreeState(module: string, pageId: string, scope: string): PersistedTreeState {
+  try {
+    const raw = localStorage.getItem(treeStateStorageKey(module, pageId, scope));
+    if (!raw) return { collapsed: [], selectedPath: null };
+    const parsed = JSON.parse(raw) as Partial<PersistedTreeState>;
+    return {
+      collapsed: Array.isArray(parsed.collapsed) ? parsed.collapsed : [],
+      selectedPath: typeof parsed.selectedPath === "string" ? parsed.selectedPath : null,
+    };
+  } catch {
+    return { collapsed: [], selectedPath: null };
+  }
+}
+
+function writeTreeState(module: string, pageId: string, scope: string, state: PersistedTreeState): void {
+  try {
+    localStorage.setItem(treeStateStorageKey(module, pageId, scope), JSON.stringify(state));
+  } catch {
+    /* best-effort */
+  }
 }
 
 // ── Tree builder ───────────────────────────────────────────────────────────────
@@ -137,6 +251,21 @@ function buildTree(docs: EditorDoc[]): TreeNode[] {
 
 // ── TreeItem component ─────────────────────────────────────────────────────────
 
+/** Drag-and-drop move state and handlers (#741), grouped — `TreeItem` is already deep in
+ *  flat props, and this bundle is one cohesive concern threaded unchanged through every
+ *  recursion level. */
+interface TreeDnd {
+  /** The path currently being dragged, or null. Only files are drag sources. */
+  dragPath: string | null;
+  /** The folder path currently a valid, hovered drop target, or null. */
+  dropTarget: string | null;
+  onDragStart: (path: string) => void;
+  onDragEnd: () => void;
+  onDragOverFolder: (folderPath: string) => void;
+  onDragLeaveFolder: (folderPath: string) => void;
+  onDropOnFolder: (folderPath: string) => void;
+}
+
 interface TreeItemProps {
   node: TreeNode;
   selectedPath: string | null;
@@ -157,6 +286,19 @@ interface TreeItemProps {
   onRenameChange: (value: string) => void;
   onRenameSubmit: (oldPath: string) => void;
   onRenameDismiss: () => void;
+  /** The folder currently showing its inline "new file" row (#740), else null. */
+  creatingInFolder: string | null;
+  newFileName: string;
+  onNewFileNameChange: (value: string) => void;
+  onSubmitNewFile: (event: FormEvent) => void;
+  onCancelNewFile: () => void;
+  dnd: TreeDnd;
+  /** The path whose actions menu (#741) is open, else null — only one at a time. */
+  menuOpenPath: string | null;
+  onMenuOpenChange: (path: string | null) => void;
+  /** Every folder in the active scope, for the "Move to…" picker. */
+  folderChoices: { path: string; title: string }[];
+  onMoveTo: (fromPath: string, toFolder: string) => void;
 }
 
 function TreeItem({
@@ -179,6 +321,16 @@ function TreeItem({
   onRenameChange,
   onRenameSubmit,
   onRenameDismiss,
+  creatingInFolder,
+  newFileName,
+  onNewFileNameChange,
+  onSubmitNewFile,
+  onCancelNewFile,
+  dnd,
+  menuOpenPath,
+  onMenuOpenChange,
+  folderChoices,
+  onMoveTo,
 }: TreeItemProps) {
   const isDir = node.type === "dir";
   const isCollapsed = collapsed.has(node.path);
@@ -186,6 +338,8 @@ function TreeItem({
   const isHovered = hoveredPath === node.path;
   const isRenaming = renamingPath === node.path;
   const indent = node.depth * 12;
+  const isDropTarget = isDir && dnd.dropTarget === node.path;
+  const canAcceptDrop = isDir && dnd.dragPath !== null && dnd.dragPath !== node.path;
 
   return (
     <>
@@ -196,10 +350,38 @@ function TreeItem({
             isSelected && !isDir
               ? "bg-accent-dim text-accent-strong"
               : "text-ink hover:bg-surface-2",
+            dnd.dragPath === node.path && "opacity-40",
+            isDropTarget && "bg-accent-dim ring-1 ring-accent/40",
           )}
           style={{ paddingLeft: `${8 + indent}px` }}
           onMouseEnter={() => onSetHovered(node.path)}
           onMouseLeave={() => onSetHovered(null)}
+          draggable={canManageFiles && !isDir && !isRenaming}
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", node.path);
+            dnd.onDragStart(node.path);
+          }}
+          onDragEnd={dnd.onDragEnd}
+          onDragOver={(e) => {
+            e.stopPropagation();
+            if (!canAcceptDrop) return;
+            e.preventDefault(); // allow the drop
+            if (!isDropTarget) dnd.onDragOverFolder(node.path);
+          }}
+          onDragLeave={(e) => {
+            e.stopPropagation();
+            // Only clear when the pointer truly leaves the row, not when it crosses a child.
+            if (isDir && !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              dnd.onDragLeaveFolder(node.path);
+            }
+          }}
+          onDrop={(e) => {
+            e.stopPropagation();
+            if (!canAcceptDrop) return;
+            e.preventDefault();
+            dnd.onDropOnFolder(node.path);
+          }}
         >
           {/* collapse toggle for dirs */}
           {isDir && (
@@ -261,41 +443,24 @@ function TreeItem({
             </button>
           )}
 
-          {/* per-item actions (shown on hover when can_manage_files) */}
-          {canManageFiles && isHovered && !isRenaming && (
-            <div className="ml-auto flex shrink-0 items-center gap-0.5">
-              {isDir && (
-                <button
-                  title="New file in folder"
-                  onClick={() => onStartNewFileInFolder(node.path)}
-                  className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
-                >
-                  <Plus size={12} />
-                </button>
-              )}
-              <button
-                title={isDir ? "Delete folder" : "Delete file"}
-                onClick={() => {
-                  if (isDir) {
-                    onDeleteFolder(node.path);
-                  } else {
-                    onDeleteFile(node.path);
-                  }
-                }}
-                className="rounded p-0.5 text-ink-faint hover:text-danger hover:bg-surface-3"
-              >
-                <MoreHorizontal size={12} />
-              </button>
-              {!isDir && (
-                <button
-                  title="Rename file"
-                  onClick={() => onStartRename(node.path, node.title)}
-                  className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
-                >
-                  <ChevronRight size={12} />
-                </button>
-              )}
-            </div>
+          {/* per-item actions menu (shown on hover when can_manage_files, #741) */}
+          {canManageFiles && (isHovered || menuOpenPath === node.path) && !isRenaming && (
+            <TreeItemMenu
+              node={node}
+              isOpen={menuOpenPath === node.path}
+              onOpenChange={(open) => onMenuOpenChange(open ? node.path : null)}
+              folderChoices={folderChoices}
+              onRename={() => onStartRename(node.path, node.title)}
+              onMoveTo={(destination) => onMoveTo(node.path, destination)}
+              onNewFileInFolder={() => onStartNewFileInFolder(node.path)}
+              onDelete={() => {
+                if (isDir) {
+                  onDeleteFolder(node.path);
+                } else {
+                  onDeleteFile(node.path);
+                }
+              }}
+            />
           )}
 
           {/* mobile chevron for files */}
@@ -305,9 +470,35 @@ function TreeItem({
         </div>
       </li>
 
-      {/* children (rendered when not collapsed) */}
-      {isDir && !isCollapsed && node.children.length > 0 && (
+      {/* children (rendered when not collapsed) — plus this folder's own inline "new file"
+          row (#740), even when it has no children yet. */}
+      {isDir && !isCollapsed && (node.children.length > 0 || creatingInFolder === node.path) && (
         <>
+          {creatingInFolder === node.path && (
+            <li>
+              <form
+                onSubmit={onSubmitNewFile}
+                className="flex items-center gap-1.5 py-1"
+                style={{ paddingLeft: `${8 + (node.depth + 1) * 12}px` }}
+              >
+                <FileText size={14} className="shrink-0 text-ink-faint" />
+                <TextInput
+                  autoFocus
+                  value={newFileName}
+                  onChange={(e) => onNewFileNameChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") onCancelNewFile();
+                  }}
+                  placeholder="File title…"
+                  aria-label="New file title"
+                  className="h-6 flex-1 py-0 text-xs"
+                />
+                <Button type="submit" variant="primary" className="h-6 px-2 py-0 text-xs">
+                  OK
+                </Button>
+              </form>
+            </li>
+          )}
           {node.children.map((child) => (
             <TreeItem
               key={child.path}
@@ -330,11 +521,197 @@ function TreeItem({
               onRenameChange={onRenameChange}
               onRenameSubmit={onRenameSubmit}
               onRenameDismiss={onRenameDismiss}
+              creatingInFolder={creatingInFolder}
+              newFileName={newFileName}
+              onNewFileNameChange={onNewFileNameChange}
+              onSubmitNewFile={onSubmitNewFile}
+              onCancelNewFile={onCancelNewFile}
+              dnd={dnd}
+              menuOpenPath={menuOpenPath}
+              onMenuOpenChange={onMenuOpenChange}
+              folderChoices={folderChoices}
+              onMoveTo={onMoveTo}
             />
           ))}
         </>
       )}
     </>
+  );
+}
+
+/**
+ * The open menu's body (#741). Its own component so each open mounts fresh `showMoveTo`
+ * state — the same reason CommandPalette's dialog body is separate, and why neither needs
+ * a reset effect (react-hooks/set-state-in-effect). Closing the menu unmounts this, so the
+ * next open always starts on the actions list rather than wherever it was left.
+ */
+function TreeItemMenuPanel({
+  isDir,
+  destinations,
+  onRename,
+  onMoveTo,
+  onNewFileInFolder,
+  onDelete,
+  onClose,
+}: {
+  isDir: boolean;
+  destinations: { path: string; title: string }[];
+  onRename: () => void;
+  onMoveTo: (destination: string) => void;
+  onNewFileInFolder: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [showMoveTo, setShowMoveTo] = useState(false);
+
+  return (
+    <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 text-left shadow-(--ep-shadow)">
+      {showMoveTo ? (
+        <>
+          <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">Move to…</div>
+          <div className="max-h-56 overflow-y-auto">
+            <button
+              aria-label="Move to the top level"
+              onClick={() => {
+                onMoveTo("");
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              (root)
+            </button>
+            {destinations.map((f) => (
+              <button
+                key={f.path}
+                aria-label={`Move to ${f.path}`}
+                onClick={() => {
+                  onMoveTo(f.path);
+                  onClose();
+                }}
+                className="block w-full truncate px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+              >
+                {f.path}
+              </button>
+            ))}
+            {destinations.length === 0 && (
+              <p className="px-3 py-2 text-xs text-ink-faint">No other folders.</p>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          {!isDir && (
+            <button
+              onClick={() => {
+                onRename();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Rename
+            </button>
+          )}
+          {!isDir && (
+            <button
+              onClick={() => setShowMoveTo(true)}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Move to…
+            </button>
+          )}
+          {isDir && (
+            <button
+              onClick={() => {
+                onNewFileInFolder();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              New file in folder
+            </button>
+          )}
+          <button
+            onClick={() => {
+              onDelete();
+              onClose();
+            }}
+            className="block w-full px-3 py-1.5 text-left text-sm text-danger hover:bg-danger/10"
+          >
+            Delete
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The per-item "more actions" menu (#741) — replaces what used to be three separate hover
+ * icons (one of which, confusingly, was the bare ⋯ icon wired to Delete). Rename and Move to…
+ * are file-only (folders don't rename or move in this version); New file in folder is
+ * dir-only; Delete applies to both and still routes through the caller's themed confirm
+ * (#488) — this component only decides *that* delete was requested, never performs it.
+ */
+function TreeItemMenu({
+  node,
+  isOpen,
+  onOpenChange,
+  folderChoices,
+  onRename,
+  onMoveTo,
+  onNewFileInFolder,
+  onDelete,
+}: {
+  node: TreeNode;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  folderChoices: { path: string; title: string }[];
+  onRename: () => void;
+  onMoveTo: (destination: string) => void;
+  onNewFileInFolder: () => void;
+  onDelete: () => void;
+}) {
+  const isDir = node.type === "dir";
+  const currentParent = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : "";
+  // A file's own current folder is a no-op move (nothing to offer it as); a folder never
+  // moves in this version, so its choices don't matter, but keep the list well-formed.
+  const destinations = folderChoices.filter((f) => f.path !== currentParent && f.path !== node.path);
+
+  return (
+    <div className="ml-auto shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="relative">
+        <button
+          title="More actions"
+          aria-label="More actions"
+          aria-haspopup="menu"
+          aria-expanded={isOpen}
+          onClick={() => onOpenChange(!isOpen)}
+          className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
+        >
+          <MoreHorizontal size={12} />
+        </button>
+        {isOpen && (
+          <>
+            <button
+              type="button"
+              aria-hidden
+              tabIndex={-1}
+              className="fixed inset-0 z-10 cursor-default"
+              onClick={() => onOpenChange(false)}
+            />
+            <TreeItemMenuPanel
+              isDir={isDir}
+              destinations={destinations}
+              onRename={onRename}
+              onMoveTo={onMoveTo}
+              onNewFileInFolder={onNewFileInFolder}
+              onDelete={onDelete}
+              onClose={() => onOpenChange(false)}
+            />
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -507,17 +884,30 @@ export function EditorView({
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  // The path whose "more actions" menu is open (#741) — only one at a time.
+  const [menuOpenPath, setMenuOpenPath] = useState<string | null>(null);
+  // Drag-and-drop move (#741): the file path being dragged, and the folder currently a valid,
+  // hovered drop target ("" for the tree's own root-level whitespace).
+  const [dragPath, setDragPath] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [newFolderCreating, setNewFolderCreating] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   // The folder inside which a new file is being created (null = root)
   const [newFileInFolder, setNewFileInFolder] = useState<string | null>(null);
   // Client-side tree filter (#339): matches document titles/paths in the active scope.
   const [treeFilter, setTreeFilter] = useState("");
+  // Resizable tree panel (#730): width in rem, persisted per (module, pageId) — CalendarView's
+  // localStorage precedent. Drag state lives in a ref (not state) since pointermove fires far
+  // too often to route through a re-render on every event.
+  const [treeWidth, setTreeWidth] = useState(() => readTreeWidth(module, pageId));
+  const treeDrag = useRef<{ startX: number; startWidthRem: number } | null>(null);
 
   // The active scope (knowledge base / project, #KB-refactor). Empty = let the module
   // default to the first project; the switcher and create-project flow drive it. Paths in
   // the tree are scope-relative; `toModulePath` prepends the scope at the API boundary.
-  const [activeScope, setActiveScope] = useState("");
+  // Restored per (module, pageId) on mount (#743) — empty still means "module default",
+  // now doubling as "no scope was ever explicitly chosen (or restored) for this page".
+  const [activeScope, setActiveScope] = useState(() => readScope(module, pageId));
   const [creatingProject, setCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   // The knowledge base awaiting a delete confirm (#340); null = no dialog open.
@@ -540,8 +930,20 @@ export function EditorView({
   });
 
   const listData = list.data ? EditorData.parse(list.data) : null;
+  // A restored scope that no longer exists (the knowledge base was deleted since the last
+  // visit) decays to the module default (#743). Derived here rather than corrected by writing
+  // `activeScope` back: the restore effect below keys off the resolved scope, so healing it
+  // *through state* would make that effect re-trigger itself — the cascade
+  // react-hooks/set-state-in-effect exists to catch. `isPlaceholderData` guards the same
+  // window the effect does (#712): mid-switch, `listData` is still the previous scope's, and
+  // judging the new scope against that list would wrongly call it gone.
+  const restoredScopeIsGone =
+    !!activeScope &&
+    !!listData &&
+    !list.isPlaceholderData &&
+    !listData.scopes.some((s) => s.id === activeScope);
   // The resolved scope: the operator's pick, else the module's default (first project).
-  const scope = activeScope || listData?.scope || "";
+  const scope = (restoredScopeIsGone ? "" : activeScope) || listData?.scope || "";
   // Tree paths are scope-relative; the module's doc/folder/move endpoints want the
   // knowledge-root-relative `<scope>/<path>`.
   const toModulePath = (p: string): string => (scope ? `${scope}/${p}` : p);
@@ -596,6 +998,60 @@ export function EditorView({
       { replace: true },
     );
   }, [newParam, setSearchParams]);
+
+  // Restore last state (#743): once the module page's data resolves, restore this scope's
+  // fold state and previously-open document — only the first time we see this exact scope
+  // value, so it doesn't fight the operator's own live changes afterward. It naturally
+  // re-fires (restoring THAT scope's own state) whenever `scope` resolves to something new,
+  // whether from a fresh mount or the operator switching knowledge bases mid-session.
+  // Graceful decay for a vanished *scope* is handled upstream, where `scope` is resolved; a
+  // restored *document* that no longer exists is simply never selected here, so it never gets
+  // a doc-fetch to 404 on — no error flash, just the ordinary "select a document" empty state.
+  // `?doc=`/the `doc` prop always win: they set `selectedPath` during render, above, so by
+  // the time this runs the `selectedPath === null` guard only ever restores an untouched slot.
+  const restoredScopeRef = useRef<string | null>(null);
+  useEffect(() => {
+    // `list.isPlaceholderData` matters here the same way it does for the doc query (#712):
+    // right after switching scopes, `listData` still holds the *previous* scope's data for
+    // a moment. Restoring (and marking this scope "handled") against that stale snapshot
+    // would validate against the wrong scope's docs/scopes and then never get a second
+    // chance once the real data for the new scope arrives.
+    if (!listData || list.isPlaceholderData || restoredScopeRef.current === scope) return;
+    restoredScopeRef.current = scope;
+    const restored = readTreeState(module, pageId, scope);
+    setCollapsed(new Set(restored.collapsed));
+    // Functional update so the "only fill an untouched slot" guard can read the current
+    // selection without taking `selectedPath` as a dependency — depending on it would make
+    // this effect re-run on the very write it just made (react-hooks/set-state-in-effect).
+    // Returning `current` unchanged is also a real bail-out: React skips the re-render.
+    setSelectedPath((current) =>
+      current === null &&
+      restored.selectedPath &&
+      listData.docs.some((d) => d.path === restored.selectedPath)
+        ? restored.selectedPath
+        : current,
+    );
+  }, [listData, scope, module, pageId]);
+
+  // Persist the operator's scope choice (#743) — keyed by (module, pageId) only, separate
+  // from the fold-state/selection below, which are keyed by scope too.
+  useEffect(() => {
+    writeScope(module, pageId, activeScope);
+  }, [module, pageId, activeScope]);
+
+  // Persist fold state and the open document per (module, pageId, scope) (#743) — including
+  // for Notes, where `scope` is permanently "" (it has no project concept, so this is just
+  // one more valid key, not a special case). Fires on every change, including the restore
+  // effect's own — a harmless write-back of what was just read. Gated on that restore
+  // having already run *for this scope* (not on `scope` being non-empty, which "" legitimately
+  // is for Notes): on a fresh mount `collapsed`/`selectedPath` still hold their plain
+  // defaults for a render or two while Knowledge's `scope` resolves ahead of any data
+  // loading — writing during that window would clobber the very state the restore effect
+  // above is about to read.
+  useEffect(() => {
+    if (restoredScopeRef.current !== scope) return;
+    writeTreeState(module, pageId, scope, { collapsed: [...collapsed], selectedPath });
+  }, [module, pageId, scope, collapsed, selectedPath]);
 
   const doc = useQuery({
     queryKey: ["module-doc", module, pageId, scope, selectedPath],
@@ -833,13 +1289,33 @@ export function EditorView({
   }
 
   const data = listData ?? EditorData.parse({});
-  const tree = buildTree(data.docs);
+
+  // A just-created, not-yet-saved document (#740) isn't in the server's list yet — inject it
+  // into the tree so it's visible right where it belongs, and so its hover rename/delete reach
+  // the isNew-safe paths above instead of being unreachable like before this fix. can_create
+  // (Notes) never shows tree actions at all (canManageFiles gates them), so this only changes
+  // anything for can_manage_files (Knowledge) — Notes' tree is built from `data.docs` same as
+  // always via `fileDocs`/`filterMatches` below, which deliberately don't see this entry.
+  const treeDocs =
+    data.can_manage_files && isNew && selectedPath && !data.docs.some((d) => d.path === selectedPath)
+      ? [
+          ...data.docs,
+          { id: selectedPath, title: basenameTitle(selectedPath), path: selectedPath, type: "file" as const },
+        ]
+      : data.docs;
+  const tree = buildTree(treeDocs);
 
   // Tree search (#339): a client-side filter over the active scope's documents. When a query
   // is present the tree is replaced by a flat list of matching files (title or path match);
   // the box only appears when there are files to search.
   const fileDocs = data.docs.filter((d) => d.type === "file");
-  const hasAnyDocs = data.docs.length > 0;
+  // Based on `treeDocs`, not `data.docs` — otherwise creating the first document in an empty
+  // scope would leave the empty-state message showing instead of the document it just created.
+  const hasAnyDocs = treeDocs.length > 0;
+  // Every folder in the active scope, for the actions menu's "Move to…" picker (#741).
+  const folderChoices = data.docs
+    .filter((d) => d.type === "dir")
+    .map((d) => ({ path: d.path, title: d.title }));
   const filterQuery = treeFilter.trim().toLowerCase();
   const filterMatches = filterQuery
     ? fileDocs.filter(
@@ -880,17 +1356,22 @@ export function EditorView({
     setSelectedPath(path);
   };
 
-  // can_manage_files: start a new document at the scope root ("New document").
+  // can_manage_files: open the naming form for a new document at the scope root (#740) — the
+  // same naming step the can_create flow already has, rather than the hardcoded "new-note.md"
+  // this door used to materialize with no chance to name it.
   const handleStartNewDocument = () => {
-    const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug("new-note.md", taken);
     setViewingVersion(null);
     setHistoryOpen(false);
-    setIsNew(true);
-    setSelectedPath(slug);
-    setDraft("");
-    setBaseline("");
-    setMode("edit");
+    setNewFileInFolder(null);
+    setCreating(true);
+  };
+
+  // Cancel any in-progress naming (root toolbar form or an in-folder inline row) — creates
+  // nothing (#740's "Escape/cancel creates nothing").
+  const cancelCreating = () => {
+    setCreating(false);
+    setNewName("");
+    setNewFileInFolder(null);
   };
 
   // Restore a viewed past version (ADR-0046): make its content the live buffer and save it
@@ -914,14 +1395,19 @@ export function EditorView({
     applyRestore();
   };
 
-  // can_create: the existing "New note" flow (used by Notes module)
-  const startNewNote = (event: FormEvent) => {
+  // Shared "create a new document" submit (#740) — used by Notes' can_create toolbar and,
+  // now, Knowledge's can_manage_files doors (root + in-folder). Knowledge's documents are
+  // real files and always end in `.md` (its pre-existing hardcoded doors already did this);
+  // Notes' slugs never have had an extension — unchanged. Lands in preview (#729).
+  const submitNewDoc = (event: FormEvent) => {
     event.preventDefault();
     const name = newName.trim();
     if (!name) return;
     const folderPrefix = newFileInFolder ? `${newFileInFolder}/` : "";
+    const slugBase = slugify(name);
+    const fileName = data.can_manage_files ? `${slugBase}.md` : slugBase;
     const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug(folderPrefix + slugify(name), taken);
+    const slug = uniqueSlug(folderPrefix + fileName, taken);
     setViewingVersion(null);
     setHistoryOpen(false);
     setIsNew(true);
@@ -929,25 +1415,25 @@ export function EditorView({
     setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
     setDraft(`# ${name}\n\n`);
     setBaseline("");
-    setMode("edit");
+    setMode("preview"); // render-first applies to create too (#729)
     setCreating(false);
     setNewName("");
     setNewFileInFolder(null);
   };
 
-  // can_manage_files: start a new file inside a folder
+  // can_manage_files: open the naming form for a new file inside a folder (#740), expanding
+  // the folder if it's collapsed so the inline input is actually visible.
   const handleStartNewFileInFolder = (folderPath: string) => {
-    setNewFileInFolder(folderPath);
-    const taken = new Set(data.docs.map((d) => d.path));
-    const slug = uniqueSlug(`${folderPath}/new-note.md`, taken);
     setViewingVersion(null);
     setHistoryOpen(false);
-    setIsNew(true);
-    setSelectedPath(slug);
-    setSeededPath(slug); // the buffer is authoritative; don't reseed when the save refetches
-    setDraft("");
-    setBaseline("");
-    setMode("edit");
+    setCollapsed((prev) => {
+      if (!prev.has(folderPath)) return prev;
+      const next = new Set(prev);
+      next.delete(folderPath);
+      return next;
+    });
+    setNewFileInFolder(folderPath);
+    setCreating(true);
   };
 
   const handleDeleteFile = (path: string) => setPathToDelete(path);
@@ -969,7 +1455,64 @@ export function EditorView({
       setRenamingPath(null);
       return;
     }
+    // The doc hasn't been created server-side yet (#740) — a move would 404 before the
+    // first save lands. Swap the local slug directly; the next save (idle/leave/explicit)
+    // creates it at the new path. Once saved, isNew is false and this falls through to the
+    // normal server-side move below, unchanged.
+    if (isNew && oldPath === selectedPath) {
+      setSelectedPath(newPath);
+      setSeededPath(newPath); // same buffer, just a new home — don't treat it as unseeded
+      setRenamingPath(null);
+      setRenameValue("");
+      return;
+    }
     moveItem.mutate({ from: oldPath, to: newPath });
+  };
+
+  // Move a document to a new folder (#741) — via the actions menu's "Move to…" or
+  // drag-and-drop. Safe for a not-yet-saved document (#740), same guard as rename above:
+  // swap the path locally rather than a server call that would 404.
+  const moveDocument = (fromPath: string, toFolder: string) => {
+    const basename = fromPath.slice(fromPath.lastIndexOf("/") + 1);
+    const toPath = toFolder ? `${toFolder}/${basename}` : basename;
+    if (toPath === fromPath) return;
+    if (isNew && fromPath === selectedPath) {
+      setSelectedPath(toPath);
+      setSeededPath(toPath);
+      return;
+    }
+    moveItem.mutate({ from: fromPath, to: toPath });
+  };
+
+  const handleDragStart = (path: string) => setDragPath(path);
+  const handleDragEnd = () => {
+    setDragPath(null);
+    setDropTarget(null);
+  };
+  const handleDragOverFolder = (folderPath: string) => {
+    setDropTarget(folderPath);
+    // Auto-expand a collapsed folder under the drag so its contents (and the fact that the
+    // drop landed there) are visible without the operator needing a separate click (#741).
+    setCollapsed((prev) => {
+      if (!prev.has(folderPath)) return prev;
+      const next = new Set(prev);
+      next.delete(folderPath);
+      return next;
+    });
+  };
+  // Only clear if nothing newer has already claimed the spot — a sibling folder's dragover
+  // can fire before this leave does, and clearing unconditionally would wipe that instead.
+  const handleDragLeaveFolder = (folderPath: string) =>
+    setDropTarget((t) => (t === folderPath ? null : t));
+  const handleDropOnFolder = (folderPath: string) => {
+    if (dragPath) moveDocument(dragPath, folderPath);
+    setDragPath(null);
+    setDropTarget(null);
+  };
+  const handleDropOnRoot = () => {
+    if (dragPath) moveDocument(dragPath, "");
+    setDragPath(null);
+    setDropTarget(null);
   };
 
   const handleCreateFolder = (event: FormEvent) => {
@@ -991,6 +1534,37 @@ export function EditorView({
     });
   };
 
+  // Resizable tree panel (#730): drag the handle to resize, clamped to [12rem, 40rem].
+  const commitTreeWidth = (rem: number) => {
+    const clamped = clampTreeWidth(rem);
+    setTreeWidth(clamped);
+    writeTreeWidth(module, pageId, clamped);
+  };
+  const handleTreeResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    treeDrag.current = { startX: e.clientX, startWidthRem: treeWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const handleTreeResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = treeDrag.current;
+    if (!drag) return;
+    const rootPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    commitTreeWidth(drag.startWidthRem + (e.clientX - drag.startX) / rootPx);
+  };
+  const handleTreeResizeEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!treeDrag.current) return;
+    treeDrag.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  const handleTreeResizeKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      commitTreeWidth(treeWidth - 1);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      commitTreeWidth(treeWidth + 1);
+    }
+  };
+
   const commonTreeProps = {
     selectedPath,
     collapsed,
@@ -1009,6 +1583,24 @@ export function EditorView({
     onStartRename: handleStartRename,
     onRenameChange: setRenameValue,
     onRenameSubmit: handleRenameSubmit,
+    creatingInFolder: creating ? newFileInFolder : null,
+    newFileName: newName,
+    onNewFileNameChange: setNewName,
+    onSubmitNewFile: submitNewDoc,
+    onCancelNewFile: cancelCreating,
+    dnd: {
+      dragPath,
+      dropTarget,
+      onDragStart: handleDragStart,
+      onDragEnd: handleDragEnd,
+      onDragOverFolder: handleDragOverFolder,
+      onDragLeaveFolder: handleDragLeaveFolder,
+      onDropOnFolder: handleDropOnFolder,
+    },
+    menuOpenPath,
+    onMenuOpenChange: setMenuOpenPath,
+    folderChoices,
+    onMoveTo: moveDocument,
     onRenameDismiss: () => {
       setRenamingPath(null);
       setRenameValue("");
@@ -1016,11 +1608,14 @@ export function EditorView({
   };
 
   return (
-    <div className="grid h-full min-h-0 min-w-0 sm:grid-cols-[minmax(0,18rem)_1fr]">
+    <div
+      className="grid h-full min-h-0 min-w-0 sm:grid-cols-[minmax(0,var(--tree-w))_8px_1fr]"
+      style={{ "--tree-w": `${treeWidth}rem` } as CSSProperties}
+    >
       {/* document list — hidden on phone once a document is open */}
       <div
         className={cn(
-          "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain border-edge sm:border-r",
+          "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain",
           selectedPath && "hidden sm:flex",
         )}
       >
@@ -1088,16 +1683,13 @@ export function EditorView({
         {data.can_create && (
           <div className="border-b border-edge p-2">
             {creating ? (
-              <form onSubmit={startNewNote} className="flex items-center gap-2">
+              <form onSubmit={submitNewDoc} className="flex items-center gap-2">
                 <TextInput
                   autoFocus
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      setCreating(false);
-                      setNewName("");
-                    }
+                    if (e.key === "Escape") cancelCreating();
                   }}
                   placeholder="Note title…"
                   aria-label="New note title"
@@ -1142,6 +1734,22 @@ export function EditorView({
                   disabled={!newFolderName.trim()}
                   busy={createFolder.isPending}
                 >
+                  Create
+                </Button>
+              </form>
+            ) : creating && newFileInFolder === null ? (
+              <form onSubmit={submitNewDoc} className="flex items-center gap-2">
+                <TextInput
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") cancelCreating();
+                  }}
+                  placeholder="Document title…"
+                  aria-label="New document title"
+                />
+                <Button type="submit" variant="primary" disabled={!newName.trim()}>
                   Create
                 </Button>
               </form>
@@ -1235,12 +1843,51 @@ export function EditorView({
             <EmptyState quote="No matching documents." />
           )
         ) : (
-          <ul className="flex flex-col p-2">
+          <ul
+            className={cn(
+              "flex min-h-full flex-col rounded-(--radius-card) p-2 transition-colors",
+              dropTarget === "" && "bg-accent-dim ring-1 ring-accent/40",
+            )}
+            onDragOver={(e) => {
+              if (!dragPath) return;
+              e.preventDefault(); // allow the drop
+              if (dropTarget !== "") setDropTarget("");
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setDropTarget((t) => (t === "" ? null : t));
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              handleDropOnRoot();
+            }}
+          >
             {tree.map((node) => (
               <TreeItem key={node.path} node={node} {...commonTreeProps} />
             ))}
           </ul>
         )}
+      </div>
+
+      {/* resize handle (#730) — desktop-only; the phone's stacked layout never shows both
+          panes at once, so there is nothing to divide there. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize document tree"
+        aria-valuenow={Math.round(treeWidth)}
+        aria-valuemin={MIN_TREE_WIDTH_REM}
+        aria-valuemax={MAX_TREE_WIDTH_REM}
+        tabIndex={0}
+        onPointerDown={handleTreeResizeStart}
+        onPointerMove={handleTreeResizeMove}
+        onPointerUp={handleTreeResizeEnd}
+        onDoubleClick={() => commitTreeWidth(DEFAULT_TREE_WIDTH_REM)}
+        onKeyDown={handleTreeResizeKeyDown}
+        className="hidden shrink-0 cursor-col-resize touch-none outline-none hover:bg-accent-dim focus-visible:bg-accent-dim sm:block"
+      >
+        <div className="mx-auto h-full w-px bg-edge" />
       </div>
 
       {/* editor — hidden on phone until a document is open */}
@@ -1499,7 +2146,19 @@ export function EditorView({
         confirmLabel="Delete"
         onCancel={() => setPathToDelete(null)}
         onConfirm={() => {
-          if (pathToDelete) deleteDoc.mutate(pathToDelete);
+          if (pathToDelete) {
+            // Same reachability the rename guard above exists for (#740): the synthetic
+            // tree entry makes an unsaved doc's own delete action reachable too — abandon
+            // locally rather than calling a server delete that would 404.
+            if (isNew && pathToDelete === selectedPath) {
+              setSelectedPath(null);
+              setIsNew(false);
+              setDraft("");
+              setBaseline("");
+            } else {
+              deleteDoc.mutate(pathToDelete);
+            }
+          }
           setPathToDelete(null);
         }}
       />

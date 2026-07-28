@@ -121,6 +121,19 @@ images to GHCR.
 
 ### Fixed
 
+- **A flaky `AutomationsScreen` test under full-suite CPU contention** (#758) —
+  `"toggles an automation without a reload"` reached for a `getByRole("switch", …)` query
+  as its very first assertion after render, with no cheaper checkpoint first; a role query
+  computes accessible names over the whole tree and is measurably pricier than a text
+  match, so it timed out twice in full-suite (`npx vitest run`, no file filter) background
+  runs while every sibling test in the file either settles on plain text first or (in one
+  case) already follows that exact pattern. It always passed cleanly in isolation — a
+  timing symptom of many parallel worker processes contending for CPU, not a logic bug.
+  Fixed the test to check text first, matching its own sibling, and raised testing-library's
+  global `asyncUtilTimeout` from the 1000ms default to 3000ms in the shared test setup — the
+  more general fix for the same class of contention-induced timeout anywhere else in the
+  suite, while still failing a genuinely-hung query promptly. `web` 0.122.0→0.122.1 (PATCH).
+
 - **Editor: Knowledge's "New document" can now be named at creation** (#740) — it used to
   materialize as `new-note.md` (then `new-note-2.md`, …) with no chance to name it: the
   `can_create` flow (Notes) already prompted for a name and slugified it, but Knowledge's

@@ -14,6 +14,29 @@ images to GHCR.
 
 ### Added
 
+- **Move Knowledge documents by drag-and-drop, and an honest actions menu** (#741) — there
+  was no way to move a document to another folder (or back to the root) at all, and the
+  row's "three dots" — the icon that universally means "more actions" — just deleted the
+  file; the real rename affordance was a bare `ChevronRight`, easy to mistake for
+  navigation. The move machinery already existed (`moveItem`, which rename already used) —
+  the gap was purely presentational. File rows are now **drag-and-drop movable**: drop one
+  on a folder row to move it in, or on the tree's own background to move it to the top
+  level; a collapsed folder auto-expands the moment a drag hovers over it, and Escape (or
+  dropping outside any target) cancels for free — the browser fires `dragend` regardless of
+  how the drag ended. The three old hover icons are replaced by one honest **⋯ actions
+  menu**: Rename, Move to… (a compact folder picker), New file in folder (folders only),
+  and Delete — still gated by the same themed confirm (#488), no longer the bare ⋯ icon's
+  own click action. Moving the currently open document keeps it open at its new path (no
+  dead pane, no 404 fetch) — the existing `moveItem.onSuccess` already handled this for
+  rename, unchanged. Both Move to… and drag-and-drop reuse the not-yet-saved guard #740
+  added for rename: moving an unsaved document swaps its path locally instead of a server
+  call that would 404. Drag-and-drop is desktop-only by design (native HTML5 DnD doesn't
+  fire from touch input), so the menu is what covers mobile and touch. Folder-to-folder
+  moves are out of scope for this pass — files only. Notes is untouched: `can_manage_files`
+  stays false there, so it shows no hover actions, same as always. `web` 0.123.1→0.124.0
+  (MINOR).
+
+
 - **Resizable tree panel for Knowledge and Notes** (#730) — the editor archetype's document
   list fixed the tree column at 18rem, so long titles truncated on a narrow tree and a wide
   screen couldn't give the tree more room. A drag handle now sits between the tree and the
@@ -92,6 +115,7 @@ images to GHCR.
   the shared slug helper: `uniqueSlug`'s collision suffix now lands before a `.md` extension
   (`name-2.md`) instead of after it (the pre-existing, never-before-exercised `name.md-2`).
   `web` 0.123.0→0.123.1 (PATCH).
+
 
 
 - **Editor: create lands in preview — render-first now applies to creation, not just

@@ -191,6 +191,21 @@ function buildTree(docs: EditorDoc[]): TreeNode[] {
 
 // ── TreeItem component ─────────────────────────────────────────────────────────
 
+/** Drag-and-drop move state and handlers (#741), grouped — `TreeItem` is already deep in
+ *  flat props, and this bundle is one cohesive concern threaded unchanged through every
+ *  recursion level. */
+interface TreeDnd {
+  /** The path currently being dragged, or null. Only files are drag sources. */
+  dragPath: string | null;
+  /** The folder path currently a valid, hovered drop target, or null. */
+  dropTarget: string | null;
+  onDragStart: (path: string) => void;
+  onDragEnd: () => void;
+  onDragOverFolder: (folderPath: string) => void;
+  onDragLeaveFolder: (folderPath: string) => void;
+  onDropOnFolder: (folderPath: string) => void;
+}
+
 interface TreeItemProps {
   node: TreeNode;
   selectedPath: string | null;
@@ -217,6 +232,13 @@ interface TreeItemProps {
   onNewFileNameChange: (value: string) => void;
   onSubmitNewFile: (event: FormEvent) => void;
   onCancelNewFile: () => void;
+  dnd: TreeDnd;
+  /** The path whose actions menu (#741) is open, else null — only one at a time. */
+  menuOpenPath: string | null;
+  onMenuOpenChange: (path: string | null) => void;
+  /** Every folder in the active scope, for the "Move to…" picker. */
+  folderChoices: { path: string; title: string }[];
+  onMoveTo: (fromPath: string, toFolder: string) => void;
 }
 
 function TreeItem({
@@ -244,6 +266,11 @@ function TreeItem({
   onNewFileNameChange,
   onSubmitNewFile,
   onCancelNewFile,
+  dnd,
+  menuOpenPath,
+  onMenuOpenChange,
+  folderChoices,
+  onMoveTo,
 }: TreeItemProps) {
   const isDir = node.type === "dir";
   const isCollapsed = collapsed.has(node.path);
@@ -251,6 +278,8 @@ function TreeItem({
   const isHovered = hoveredPath === node.path;
   const isRenaming = renamingPath === node.path;
   const indent = node.depth * 12;
+  const isDropTarget = isDir && dnd.dropTarget === node.path;
+  const canAcceptDrop = isDir && dnd.dragPath !== null && dnd.dragPath !== node.path;
 
   return (
     <>
@@ -261,10 +290,38 @@ function TreeItem({
             isSelected && !isDir
               ? "bg-accent-dim text-accent-strong"
               : "text-ink hover:bg-surface-2",
+            dnd.dragPath === node.path && "opacity-40",
+            isDropTarget && "bg-accent-dim ring-1 ring-accent/40",
           )}
           style={{ paddingLeft: `${8 + indent}px` }}
           onMouseEnter={() => onSetHovered(node.path)}
           onMouseLeave={() => onSetHovered(null)}
+          draggable={canManageFiles && !isDir && !isRenaming}
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", node.path);
+            dnd.onDragStart(node.path);
+          }}
+          onDragEnd={dnd.onDragEnd}
+          onDragOver={(e) => {
+            e.stopPropagation();
+            if (!canAcceptDrop) return;
+            e.preventDefault(); // allow the drop
+            if (!isDropTarget) dnd.onDragOverFolder(node.path);
+          }}
+          onDragLeave={(e) => {
+            e.stopPropagation();
+            // Only clear when the pointer truly leaves the row, not when it crosses a child.
+            if (isDir && !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              dnd.onDragLeaveFolder(node.path);
+            }
+          }}
+          onDrop={(e) => {
+            e.stopPropagation();
+            if (!canAcceptDrop) return;
+            e.preventDefault();
+            dnd.onDropOnFolder(node.path);
+          }}
         >
           {/* collapse toggle for dirs */}
           {isDir && (
@@ -326,41 +383,24 @@ function TreeItem({
             </button>
           )}
 
-          {/* per-item actions (shown on hover when can_manage_files) */}
-          {canManageFiles && isHovered && !isRenaming && (
-            <div className="ml-auto flex shrink-0 items-center gap-0.5">
-              {isDir && (
-                <button
-                  title="New file in folder"
-                  onClick={() => onStartNewFileInFolder(node.path)}
-                  className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
-                >
-                  <Plus size={12} />
-                </button>
-              )}
-              <button
-                title={isDir ? "Delete folder" : "Delete file"}
-                onClick={() => {
-                  if (isDir) {
-                    onDeleteFolder(node.path);
-                  } else {
-                    onDeleteFile(node.path);
-                  }
-                }}
-                className="rounded p-0.5 text-ink-faint hover:text-danger hover:bg-surface-3"
-              >
-                <MoreHorizontal size={12} />
-              </button>
-              {!isDir && (
-                <button
-                  title="Rename file"
-                  onClick={() => onStartRename(node.path, node.title)}
-                  className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
-                >
-                  <ChevronRight size={12} />
-                </button>
-              )}
-            </div>
+          {/* per-item actions menu (shown on hover when can_manage_files, #741) */}
+          {canManageFiles && (isHovered || menuOpenPath === node.path) && !isRenaming && (
+            <TreeItemMenu
+              node={node}
+              isOpen={menuOpenPath === node.path}
+              onOpenChange={(open) => onMenuOpenChange(open ? node.path : null)}
+              folderChoices={folderChoices}
+              onRename={() => onStartRename(node.path, node.title)}
+              onMoveTo={(destination) => onMoveTo(node.path, destination)}
+              onNewFileInFolder={() => onStartNewFileInFolder(node.path)}
+              onDelete={() => {
+                if (isDir) {
+                  onDeleteFolder(node.path);
+                } else {
+                  onDeleteFile(node.path);
+                }
+              }}
+            />
           )}
 
           {/* mobile chevron for files */}
@@ -426,11 +466,192 @@ function TreeItem({
               onNewFileNameChange={onNewFileNameChange}
               onSubmitNewFile={onSubmitNewFile}
               onCancelNewFile={onCancelNewFile}
+              dnd={dnd}
+              menuOpenPath={menuOpenPath}
+              onMenuOpenChange={onMenuOpenChange}
+              folderChoices={folderChoices}
+              onMoveTo={onMoveTo}
             />
           ))}
         </>
       )}
     </>
+  );
+}
+
+/**
+ * The open menu's body (#741). Its own component so each open mounts fresh `showMoveTo`
+ * state — the same reason CommandPalette's dialog body is separate, and why neither needs
+ * a reset effect (react-hooks/set-state-in-effect). Closing the menu unmounts this, so the
+ * next open always starts on the actions list rather than wherever it was left.
+ */
+function TreeItemMenuPanel({
+  isDir,
+  destinations,
+  onRename,
+  onMoveTo,
+  onNewFileInFolder,
+  onDelete,
+  onClose,
+}: {
+  isDir: boolean;
+  destinations: { path: string; title: string }[];
+  onRename: () => void;
+  onMoveTo: (destination: string) => void;
+  onNewFileInFolder: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [showMoveTo, setShowMoveTo] = useState(false);
+
+  return (
+    <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-(--radius-card) border border-edge bg-surface py-1 text-left shadow-(--ep-shadow)">
+      {showMoveTo ? (
+        <>
+          <div className="px-3 py-1.5 text-xs font-medium text-ink-dim">Move to…</div>
+          <div className="max-h-56 overflow-y-auto">
+            <button
+              aria-label="Move to the top level"
+              onClick={() => {
+                onMoveTo("");
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              (root)
+            </button>
+            {destinations.map((f) => (
+              <button
+                key={f.path}
+                aria-label={`Move to ${f.path}`}
+                onClick={() => {
+                  onMoveTo(f.path);
+                  onClose();
+                }}
+                className="block w-full truncate px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+              >
+                {f.path}
+              </button>
+            ))}
+            {destinations.length === 0 && (
+              <p className="px-3 py-2 text-xs text-ink-faint">No other folders.</p>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          {!isDir && (
+            <button
+              onClick={() => {
+                onRename();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Rename
+            </button>
+          )}
+          {!isDir && (
+            <button
+              onClick={() => setShowMoveTo(true)}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              Move to…
+            </button>
+          )}
+          {isDir && (
+            <button
+              onClick={() => {
+                onNewFileInFolder();
+                onClose();
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-ink hover:bg-surface-2"
+            >
+              New file in folder
+            </button>
+          )}
+          <button
+            onClick={() => {
+              onDelete();
+              onClose();
+            }}
+            className="block w-full px-3 py-1.5 text-left text-sm text-danger hover:bg-danger/10"
+          >
+            Delete
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The per-item "more actions" menu (#741) — replaces what used to be three separate hover
+ * icons (one of which, confusingly, was the bare ⋯ icon wired to Delete). Rename and Move to…
+ * are file-only (folders don't rename or move in this version); New file in folder is
+ * dir-only; Delete applies to both and still routes through the caller's themed confirm
+ * (#488) — this component only decides *that* delete was requested, never performs it.
+ */
+function TreeItemMenu({
+  node,
+  isOpen,
+  onOpenChange,
+  folderChoices,
+  onRename,
+  onMoveTo,
+  onNewFileInFolder,
+  onDelete,
+}: {
+  node: TreeNode;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+  folderChoices: { path: string; title: string }[];
+  onRename: () => void;
+  onMoveTo: (destination: string) => void;
+  onNewFileInFolder: () => void;
+  onDelete: () => void;
+}) {
+  const isDir = node.type === "dir";
+  const currentParent = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : "";
+  // A file's own current folder is a no-op move (nothing to offer it as); a folder never
+  // moves in this version, so its choices don't matter, but keep the list well-formed.
+  const destinations = folderChoices.filter((f) => f.path !== currentParent && f.path !== node.path);
+
+  return (
+    <div className="ml-auto shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="relative">
+        <button
+          title="More actions"
+          aria-label="More actions"
+          aria-haspopup="menu"
+          aria-expanded={isOpen}
+          onClick={() => onOpenChange(!isOpen)}
+          className="rounded p-0.5 text-ink-faint hover:text-ink hover:bg-surface-3"
+        >
+          <MoreHorizontal size={12} />
+        </button>
+        {isOpen && (
+          <>
+            <button
+              type="button"
+              aria-hidden
+              tabIndex={-1}
+              className="fixed inset-0 z-10 cursor-default"
+              onClick={() => onOpenChange(false)}
+            />
+            <TreeItemMenuPanel
+              isDir={isDir}
+              destinations={destinations}
+              onRename={onRename}
+              onMoveTo={onMoveTo}
+              onNewFileInFolder={onNewFileInFolder}
+              onDelete={onDelete}
+              onClose={() => onOpenChange(false)}
+            />
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -603,6 +824,12 @@ export function EditorView({
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  // The path whose "more actions" menu is open (#741) — only one at a time.
+  const [menuOpenPath, setMenuOpenPath] = useState<string | null>(null);
+  // Drag-and-drop move (#741): the file path being dragged, and the folder currently a valid,
+  // hovered drop target ("" for the tree's own root-level whitespace).
+  const [dragPath, setDragPath] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [newFolderCreating, setNewFolderCreating] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   // The folder inside which a new file is being created (null = root)
@@ -957,6 +1184,10 @@ export function EditorView({
   // Based on `treeDocs`, not `data.docs` — otherwise creating the first document in an empty
   // scope would leave the empty-state message showing instead of the document it just created.
   const hasAnyDocs = treeDocs.length > 0;
+  // Every folder in the active scope, for the actions menu's "Move to…" picker (#741).
+  const folderChoices = data.docs
+    .filter((d) => d.type === "dir")
+    .map((d) => ({ path: d.path, title: d.title }));
   const filterQuery = treeFilter.trim().toLowerCase();
   const filterMatches = filterQuery
     ? fileDocs.filter(
@@ -1110,6 +1341,52 @@ export function EditorView({
     moveItem.mutate({ from: oldPath, to: newPath });
   };
 
+  // Move a document to a new folder (#741) — via the actions menu's "Move to…" or
+  // drag-and-drop. Safe for a not-yet-saved document (#740), same guard as rename above:
+  // swap the path locally rather than a server call that would 404.
+  const moveDocument = (fromPath: string, toFolder: string) => {
+    const basename = fromPath.slice(fromPath.lastIndexOf("/") + 1);
+    const toPath = toFolder ? `${toFolder}/${basename}` : basename;
+    if (toPath === fromPath) return;
+    if (isNew && fromPath === selectedPath) {
+      setSelectedPath(toPath);
+      setSeededPath(toPath);
+      return;
+    }
+    moveItem.mutate({ from: fromPath, to: toPath });
+  };
+
+  const handleDragStart = (path: string) => setDragPath(path);
+  const handleDragEnd = () => {
+    setDragPath(null);
+    setDropTarget(null);
+  };
+  const handleDragOverFolder = (folderPath: string) => {
+    setDropTarget(folderPath);
+    // Auto-expand a collapsed folder under the drag so its contents (and the fact that the
+    // drop landed there) are visible without the operator needing a separate click (#741).
+    setCollapsed((prev) => {
+      if (!prev.has(folderPath)) return prev;
+      const next = new Set(prev);
+      next.delete(folderPath);
+      return next;
+    });
+  };
+  // Only clear if nothing newer has already claimed the spot — a sibling folder's dragover
+  // can fire before this leave does, and clearing unconditionally would wipe that instead.
+  const handleDragLeaveFolder = (folderPath: string) =>
+    setDropTarget((t) => (t === folderPath ? null : t));
+  const handleDropOnFolder = (folderPath: string) => {
+    if (dragPath) moveDocument(dragPath, folderPath);
+    setDragPath(null);
+    setDropTarget(null);
+  };
+  const handleDropOnRoot = () => {
+    if (dragPath) moveDocument(dragPath, "");
+    setDragPath(null);
+    setDropTarget(null);
+  };
+
   const handleCreateFolder = (event: FormEvent) => {
     event.preventDefault();
     const name = newFolderName.trim();
@@ -1183,6 +1460,19 @@ export function EditorView({
     onNewFileNameChange: setNewName,
     onSubmitNewFile: submitNewDoc,
     onCancelNewFile: cancelCreating,
+    dnd: {
+      dragPath,
+      dropTarget,
+      onDragStart: handleDragStart,
+      onDragEnd: handleDragEnd,
+      onDragOverFolder: handleDragOverFolder,
+      onDragLeaveFolder: handleDragLeaveFolder,
+      onDropOnFolder: handleDropOnFolder,
+    },
+    menuOpenPath,
+    onMenuOpenChange: setMenuOpenPath,
+    folderChoices,
+    onMoveTo: moveDocument,
     onRenameDismiss: () => {
       setRenamingPath(null);
       setRenameValue("");
@@ -1425,7 +1715,26 @@ export function EditorView({
             <EmptyState quote="No matching documents." />
           )
         ) : (
-          <ul className="flex flex-col p-2">
+          <ul
+            className={cn(
+              "flex min-h-full flex-col rounded-(--radius-card) p-2 transition-colors",
+              dropTarget === "" && "bg-accent-dim ring-1 ring-accent/40",
+            )}
+            onDragOver={(e) => {
+              if (!dragPath) return;
+              e.preventDefault(); // allow the drop
+              if (dropTarget !== "") setDropTarget("");
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setDropTarget((t) => (t === "" ? null : t));
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              handleDropOnRoot();
+            }}
+          >
             {tree.map((node) => (
               <TreeItem key={node.path} node={node} {...commonTreeProps} />
             ))}

@@ -56,6 +56,20 @@ images to GHCR.
 
 ### Fixed
 
+- **Editor: create lands in preview — render-first now applies to creation, not just
+  opening** (#729) — creating a document (Knowledge or Notes) opened it in **edit** mode,
+  while opening an *existing* document landed in **preview** (render-first, ADR-0042); create
+  was the one door that showed a raw, unrendered buffer where every other door showed the
+  rendered result immediately. The archetype flipped to preview only on the doc-fetch seeding
+  path, and all three create doors explicitly set edit mode (and skip that fetch via `isNew`,
+  so the flip never ran): the plain "New document", the named "New note" (Notes' `can_create`
+  flow), and "New file in folder" — the command palette's `?new=1` deep-link funnels into the
+  same doors. All three now land in preview like every other open; Edit stays one click away
+  on the mode toggle. The two doors that seeded an empty buffer ("New document", "New file in
+  folder") now seed a `# Untitled` heading — matching the Notes service's own "no heading
+  found" fallback (`derive_title`) — so the first preview never renders a blank pane; the named
+  door already seeded `# <name>` and keeps doing so. One archetype change covers both pages
+  (Notes and Knowledge share the `editor` archetype, ADR-0018). `web` 0.122.0→0.122.1 (PATCH).
 - **KV-cache fallback message: a staged choice needs a restart, not an environment edit** (#709)
   — `apply_kv_cache_type` has two distinct degraded modes and the API collapsed both into
   `applied: false`, so the Models page always showed the scarier, mostly-wrong instruction

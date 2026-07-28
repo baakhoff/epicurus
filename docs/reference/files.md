@@ -92,6 +92,15 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 > so a unified Files read / move / download / delete spans both stores. `page`/`search` merge the
 > two for listing.
 
+**A 404's `detail` names the path and a recovery step (#742)** — `read`/`stat`/`move`'s missing-
+entry cases read `"<path>" does not exist — it may have been deleted or moved; list the folder
+for current contents` (`move`'s prefixes it `source ...`, since the operation has two paths).
+A bare `"not found"` gives a caller — an agent directly, or a module tool that forwards this
+text verbatim — nothing to act on; naming the path and suggesting a re-list closes that gap.
+`delete`'s two doors stay idempotent on a miss (`{deleted: false}`, never a 404) — a deliberate,
+pre-existing design, not something this issue changed: "delete something that's already gone"
+is success, not an error, so there is no not-found *message* on that path to improve.
+
 ### `PlatformClient` methods
 
 `files_list(path="")`, `files_read(path)`, `files_search(q, limit=50)`, `files_write(path, content)`,

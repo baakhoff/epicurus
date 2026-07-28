@@ -153,6 +153,16 @@ def _disposition(name: str) -> str:
     return f'attachment; filename="{safe}"'
 
 
+def _not_found_detail(path: str) -> str:
+    """A 404 ``detail`` that names the path and suggests a recovery step (#742) — for an agent
+    caller (directly, or via a module tool that forwards this text), a bare ``"not found"``
+    gives nothing to act on, while this names exactly what to re-check and how."""
+    return (
+        f'"{path}" does not exist — it may have been deleted or moved; '
+        "list the folder for current contents"
+    )
+
+
 def create_files_router(
     store: FileStore,
     *,
@@ -240,7 +250,7 @@ def create_files_router(
                 obj = await objects.read(tenant=tenant, path=rel)
                 if obj is not None:
                     return FileReadResponse(path=obj.path, name=obj.name, content=obj.content)
-            raise HTTPException(status_code=404, detail="not found") from None
+            raise HTTPException(status_code=404, detail=_not_found_detail(rel)) from None
         except ValueError as exc:  # the 256 KB text cap (traversal already handled by _safe)
             raise HTTPException(
                 status_code=413, detail="file is too large to read as text"
@@ -255,10 +265,10 @@ def create_files_router(
         tenant_id: str | None = Query(default=None),
     ) -> FileEntry:
         tenant = _tenant(tenant_id)
-        _safe(path)
+        rel = _safe(path)
         entry = await store.stat(tenant=tenant, path=path)
         if entry is None:
-            raise HTTPException(status_code=404, detail="not found")
+            raise HTTPException(status_code=404, detail=_not_found_detail(rel))
         return entry
 
     @router.put("/write", response_model=FileEntry)
@@ -336,7 +346,9 @@ def create_files_router(
                 if events is not None:
                     await events.file_moved(tenant, src, entry.path)
                 return FileEntry(path=entry.path, name=entry.name, kind=entry.kind, size=entry.size)
-            raise HTTPException(status_code=404, detail="source not found") from None
+            raise HTTPException(
+                status_code=404, detail=f"source {_not_found_detail(src)}"
+            ) from None
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail="destination already exists") from exc
         except ValueError as exc:  # tenant root, or a move into the path itself

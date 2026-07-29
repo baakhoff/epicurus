@@ -85,8 +85,10 @@ A received message (frozen dataclass):
 ```python
 from epicurus_core import Event, EventBus
 
+
 async def on_msg(event: Event) -> None:
     print(event.subject, event.json())
+
 
 async with EventBus(settings.nats_url) as bus:
     await bus.subscribe("inbox.message", on_msg, tenant_id="local")
@@ -144,7 +146,7 @@ await emit_event(
     tenant_id=tenant,
     module="mail",
     event_type="mail.received",
-    dedup_key=f"gmail:{msg.id}",              # deterministic per change — never a uuid
+    dedup_key=f"gmail:{msg.id}",  # deterministic per change — never a uuid
     payload={"message_id": msg.id, "subject": msg.subject, "unread": 1},
     entity_ref=EntityRef(ref_id=msg.id, module="mail", kind="message", title=msg.subject),
 )

@@ -74,9 +74,11 @@ The vocabulary the dial gates on, declared on a module's tools:
 @module.tool(side_effect="read")
 def mail_search(query: str) -> str: ...
 
+
 @module.tool(side_effect="propose")
 def mail_send(to: str, subject: str, body: str) -> str:
     """Composes a draft for review — it cannot transmit (ADR-0085)."""
+
 
 @module.tool(side_effect="write")
 def mail_mark_read(message_id: str) -> str: ...

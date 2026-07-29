@@ -19,6 +19,7 @@ module = EpicurusModule(
     description="Greets people",
 )
 
+
 @module.tool()
 def greet(name: str) -> str:
     """Greet someone by name."""
@@ -35,7 +36,10 @@ when the agent makes the call — then hands the user the normal editor once the
 ```python
 from epicurus_core import WritesDocument
 
-@module.tool(writes_document=WritesDocument(content_arg="content", title_arg="title", target_arg="path"))
+
+@module.tool(
+    writes_document=WritesDocument(content_arg="content", title_arg="title", target_arg="path")
+)
 def create_doc(path: str, title: str, content: str) -> str:
     """Create a document."""
     ...
@@ -73,7 +77,7 @@ A module serves its tools over the internal Docker network using the
 streamable-HTTP transport:
 
 ```python
-app = module.http_app()   # a Starlette ASGI app
+app = module.http_app()  # a Starlette ASGI app
 
 # run it, e.g. with uvicorn:
 #   uvicorn yourmodule:app --host 0.0.0.0 --port 8080
@@ -131,7 +135,7 @@ from epicurus_core import CoreSettings, PlatformClient, PlatformMessage
 
 settings = CoreSettings()
 platform = PlatformClient(
-    base_url=settings.platform_url,      # http://core:8080 on the Docker network
+    base_url=settings.platform_url,  # http://core:8080 on the Docker network
     tenant_id=settings.default_tenant_id,
 )
 
@@ -165,7 +169,7 @@ flow and the per-tenant token vault; the module asks for a ready-to-use, auto-re
 access token with one `PlatformClient` call:
 
 ```python
-token = await platform.get_oauth_token("google")   # -> str, raises if not connected
+token = await platform.get_oauth_token("google")  # -> str, raises if not connected
 headers = {"Authorization": f"Bearer {token}"}
 ```
 

@@ -326,7 +326,7 @@ def create_llm_router(
         return {"status": "ok", "model": request.model}
 
     @router.put("/prefs/context-window")
-    async def set_context_window(request: SetContextWindowRequest) -> dict[str, int | None | str]:
+    async def set_context_window(request: SetContextWindowRequest) -> dict[str, int | str | None]:
         """Set or clear the Ollama context window (num_ctx) for this tenant."""
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
@@ -364,7 +364,7 @@ def create_llm_router(
         }
 
     @router.put("/prefs/agent-max-steps")
-    async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | None | str]:
+    async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | str | None]:
         """Set or clear the agent loop bound (tool rounds per turn) for this tenant.
 
         Clamped to 1-12: at least one round to be useful, and a ceiling so a misconfigured

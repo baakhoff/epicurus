@@ -27,13 +27,12 @@ from epicurus_core.db import ensure_columns
 # Columns introduced after the table's first release — the store owns this list.
 _ADDED_COLUMNS = ("status", "priority", "tags")
 
+
 class TaskStore:
     async def init(self) -> None:
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(
-                lambda c: ensure_columns(c, _StoredTask.__table__, _ADDED_COLUMNS)
-            )
+            await conn.run_sync(lambda c: ensure_columns(c, _StoredTask.__table__, _ADDED_COLUMNS))
 ```
 
 - `table` is a mapped class's `__table__` (typed `FromClause` by SQLAlchemy, always a `Table`

@@ -52,10 +52,12 @@ invalid value raises `pydantic.ValidationError` when settings load.
 ```python
 from epicurus_core import CoreSettings
 
-class GreeterSettings(CoreSettings):
-    greeting: str = "Hello"          # add your own fields
 
-settings = GreeterSettings()         # reads env / .env
+class GreeterSettings(CoreSettings):
+    greeting: str = "Hello"  # add your own fields
+
+
+settings = GreeterSettings()  # reads env / .env
 settings.greeting, settings.is_production, settings.use_json_logs
 ```
 

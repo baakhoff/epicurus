@@ -42,8 +42,8 @@ genuine hang. Two escape hatches keep legitimately slow tests green:
 - **Override per test** when one is genuinely slow:
 
   ```python
-  @pytest.mark.timeout(120)   # raise it for this test
-  @pytest.mark.timeout(0)     # or disable the deadline entirely
+  @pytest.mark.timeout(120)  # raise it for this test
+  @pytest.mark.timeout(0)  # or disable the deadline entirely
   def test_something_slow(): ...
   ```
 

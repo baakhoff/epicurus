@@ -12,7 +12,7 @@ usage accounting. This is how "all AI goes through the core" is enforced in prac
 from epicurus_core import PlatformClient
 
 client = PlatformClient(
-    base_url=settings.platform_url,   # internal URL of the core, e.g. http://core-app:8080
+    base_url=settings.platform_url,  # internal URL of the core, e.g. http://core-app:8080
     tenant_id=settings.default_tenant_id,
 )
 ```
@@ -74,8 +74,8 @@ its default". Backed by `GET /platform/v1/modules/{module}/models/{slot}`.
 
 ```python
 client = PlatformClient(base_url=..., tenant_id=..., module="knowledge")
-model = await client.get_module_model("embedding")   # chosen id, or None
-vectors = await client.embed(texts, model=model)      # None -> core default
+model = await client.get_module_model("embedding")  # chosen id, or None
+vectors = await client.embed(texts, model=model)  # None -> core default
 ```
 
 ### `await client.get_collections() -> CollectionPrefs`
@@ -91,7 +91,7 @@ collections, write to the active one).
 ```python
 client = PlatformClient(base_url=..., tenant_id=..., module="calendar")
 prefs = await client.get_collections()
-targets = prefs.enabled or [CollectionRef(account="local")]   # overlay, or local default
+targets = prefs.enabled or [CollectionRef(account="local")]  # overlay, or local default
 ```
 
 ### `await client.get_timezone() -> str`
@@ -107,8 +107,8 @@ lookup must not fail the write it decorates.
 try:
     zone = ZoneInfo(await client.get_timezone())
 except Exception:
-    zone = UTC                              # degrade, never fail the write
-start = naive_start.replace(tzinfo=zone)    # naive input -> operator wall time
+    zone = UTC  # degrade, never fail the write
+start = naive_start.replace(tzinfo=zone)  # naive input -> operator wall time
 ```
 
 ### `await client.get_suggestions_enabled() -> bool`
@@ -123,9 +123,9 @@ approves its own staged suggestion through the normal apply path.
 ```python
 client = PlatformClient(base_url=..., tenant_id=..., module="notes")
 if await client.get_suggestions_enabled():
-    stage_for_review(change)            # default: operator approves
+    stage_for_review(change)  # default: operator approves
 else:
-    apply_directly(change)              # review turned off
+    apply_directly(change)  # review turned off
 ```
 
 ## Errors

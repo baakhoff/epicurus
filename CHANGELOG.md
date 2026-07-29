@@ -12,6 +12,20 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A knowledge indexer test no longer fails one run in 256** (#769) — `test_indexer`'s
+  `test_mtime_ns_reconciles_from_a_raw_seeded_value` opened by asserting that a raw
+  `st_mtime_ns` and the indexer's derived `round(mtime * 1_000_000_000)` must differ, i.e. that
+  the `int → float → int` round-trip is always lossy. It is not: a float64's ULP near `1.8e18`
+  (the epoch in nanoseconds, as of 2026) is exactly 256, so any mtime landing on a multiple of
+  256 round-trips unchanged and the two agree — about 1 run in 256, and only where stamps carry
+  nanosecond granularity (ext4/CI; NTFS's 100ns ticks hide it entirely). Because `quality` is a
+  required check, an unlucky run blocked unrelated PRs — it was hit twice during the 2026-07-29
+  train, once on an npm-only change, which is what identified it as ambient rather than caused.
+  The scenario needs a ledger row whose `mtime_ns` *disagrees* with the derived value; how the
+  disagreement arose is immaterial, so the fixture now supplies one directly instead of relying
+  on float imprecision. Every real assertion in the test is untouched. `knowledge` 0.27.0→0.27.1
+  (PATCH).
+
 ### Added
 
 - **External file mounts** (#731) — add a directory to Files the way you'd add a drive: an

@@ -28,8 +28,8 @@ images to GHCR.
   auto-indexes by default. `LocalFileStore` gained a `tenant_subdir` flag so a mount can
   address its own root directly rather than nesting a `<tenant>/` segment inside the
   operator's drive. A move never crosses between the tenant space and a mount, or between two
-  mounts — mounts are isolated compartments. `epicurus-core` 0.31.0→0.32.0 (MINOR) ·
-  `core-app` 0.96.0→0.97.0 (MINOR) · `web` 0.122.0→0.123.0 (MINOR).
+  mounts — mounts are isolated compartments. `epicurus-core` 0.32.0→0.33.0 (MINOR) ·
+  `core-app` 0.102.0→0.103.0 (MINOR) · `web` 0.128.0→0.129.0 (MINOR).
 
 - **Per-event alerts** (#732) — "push me when X happens" for any module-declared event, no
   automation required. A tenant-scoped `(module, event_type) -> ChannelPrefs` subscription
@@ -41,7 +41,7 @@ images to GHCR.
   tenant's whole push budget. An automation triggered by the same event still fires
   independently — two notifications, by design. Settings gains an "Event alerts" block,
   grouped by module with a Custom section for a free-typed `(module, event_type)` pair.
-  `core-app` 0.96.0→0.97.0 (MINOR) · `web` 0.122.0→0.123.0 (MINOR). ADR-0114.
+  `core-app` 0.96.0→0.97.0 (MINOR) · `web` 0.125.1→0.126.0 (MINOR). ADR-0114.
 
 - **Persisted maintenance-run history** (#733) — the Maintenance orchestrator's `last_run` was
   a single in-memory slot, gone on restart, with no record of whether a run was scheduled or
@@ -54,7 +54,7 @@ images to GHCR.
   pages back through it, newest-first; retention prunes past a row cap or age cutoff as its own
   nightly-eligible maintenance job. Settings' Maintenance card gains a "Run history" list —
   time, source, duration, per-job status chips, expandable detail, "Load more" pagination.
-  `core-app` 0.97.0→0.98.0 (MINOR) · `web` 0.123.0→0.124.0 (MINOR). ADR-0116 (amends ADR-0060).
+  `core-app` 0.97.0→0.98.0 (MINOR) · `web` 0.126.0→0.127.0 (MINOR). ADR-0116 (amends ADR-0060).
 
 - **`ask_approval` — pause a turn for an inline Approve/Reject of a staged change** (#745) — a
   third sibling of `ask_user` (ADR-0053) and draft-first send (ADR-0085): after the model stages
@@ -70,7 +70,7 @@ images to GHCR.
   needed. A new `agent_pending_approvals` table (a third sibling of
   `agent_suspended_runs`/`agent_pending_drafts`) holds the pause; it decays to the same async
   queue on expiry (`ASK_APPROVAL_TTL_HOURS`, default 24h) — nothing lost either way.
-  `core-app` 0.100.0→0.101.0 (MINOR) · `web` 0.124.0→0.125.0 (MINOR). ADR-0117 (extends ADR-0053,
+  `core-app` 0.100.0→0.101.0 (MINOR) · `web` 0.127.0→0.128.0 (MINOR). ADR-0117 (extends ADR-0053,
   ADR-0033, ADR-0085).
 
 - **Knowledge and Notes remember where you left off** (#743) — opening the page always
@@ -205,7 +205,7 @@ images to GHCR.
   and the symptom now has a runbook entry in `startup-and-recovery.md`. Also repairs a drift the
   release process missed: `epicurus_core.__version__` still read `0.30.0` while the package
   published `0.31.0` — a test now pins the two together. `epicurus-core` 0.31.0→0.32.0 (MINOR) ·
-  `core-app` 0.96.0→0.97.0 (MINOR).
+  `core-app` 0.101.0→0.102.0 (MINOR).
 
 - **The agent now verifies a stale-memory entity before mutating it, and recovers instead of
   blind-retrying a not-found** (#742) — reported from a real trace: create a file via chat,
@@ -253,7 +253,7 @@ images to GHCR.
   Fixed the test to check text first, matching its own sibling, and raised testing-library's
   global `asyncUtilTimeout` from the 1000ms default to 3000ms in the shared test setup — the
   more general fix for the same class of contention-induced timeout anywhere else in the
-  suite, while still failing a genuinely-hung query promptly. `web` 0.122.0→0.122.1 (PATCH).
+  suite, while still failing a genuinely-hung query promptly. `web` 0.125.0→0.125.1 (PATCH).
 
 - **Editor: Knowledge's "New document" can now be named at creation** (#740) — it used to
   materialize as `new-note.md` (then `new-note-2.md`, …) with no chance to name it: the

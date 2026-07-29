@@ -13,7 +13,7 @@ own MCP tool server (ADR-0004 / ADR-0009).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -32,6 +32,7 @@ from epicurus_core import (
     get_logger,
     setup_tracing,
 )
+from epicurus_core.files import PathEscapeError
 from epicurus_core.manifest import UiSection
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
@@ -140,6 +141,7 @@ from epicurus_core_app.modules import (
     create_modules_router,
     create_suggestions_router,
 )
+from epicurus_core_app.mounts import MOUNT_PREFIX, Mount, build_mounts, parse_mount_specs
 from epicurus_core_app.notifications import NotificationStore
 from epicurus_core_app.notifications_routes import create_notifications_router
 from epicurus_core_app.oauth.routes import create_oauth_router
@@ -698,6 +700,46 @@ def create_app() -> FastAPI:
         max_rows=settings.maintenance_run_history_max_rows,
         max_age_days=settings.maintenance_run_history_max_age_days,
     )
+
+    # External file mounts (#731): operator-declared roots beside the tenant space, each its
+    # own local-FS store (see epicurus_core_app.mounts). A malformed FILES_EXTERNAL_MOUNTS*
+    # setting raises here and fails startup loudly — mirrors build_file_store above; better
+    # than silently granting the agent no mount, or the wrong one.
+    mounts = build_mounts(
+        parse_mount_specs(
+            mounts=settings.files_external_mounts,
+            indexed=settings.files_external_mounts_indexed,
+            exclude=settings.files_external_mounts_exclude,
+        )
+    )
+
+    def _make_mount_rescan(mount: Mount) -> Callable[[], Awaitable[int]]:
+        """A rescan closure for one indexed mount — its own lock, own tree, own index prefix."""
+        lock = asyncio.Lock()
+
+        async def _rescan() -> int:
+            async with lock:
+                return await scan_file_space(
+                    mount.store,
+                    file_index,
+                    tenant=settings.default_tenant_id,
+                    path_prefix=f"{MOUNT_PREFIX}{mount.name}/",
+                    exclude=mount.exclude,
+                )
+
+        return _rescan
+
+    # Watch is independent per mount (different trees on disk); only mounts that opted into
+    # indexing get one (`FILES_EXTERNAL_MOUNTS_INDEXED`) — a whole-drive mount never auto-scans.
+    mount_watchers = [
+        FileWatcher(
+            mount.spec.path,
+            _make_mount_rescan(mount),
+            debounce_ms=settings.files_watch_debounce_ms,
+        )
+        for mount in mounts.values()
+        if mount.indexed
+    ]
     # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
     # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out
     # (heavy, manual-only). The manual "run everything" trigger is always available; the nightly
@@ -879,6 +921,26 @@ def create_app() -> FastAPI:
                 await _rescan_files()
             except Exception as exc:  # never block startup on a provisioning/scan hiccup
                 log.warning("file-space provisioning/scan failed", error=str(exc))
+        # External mounts (#731): purge any stale rows under a mount's index namespace, then
+        # rescan the ones that opted into indexing. Purging unconditionally (not just the
+        # indexed ones) cleans up after a mount whose indexing was just turned off; a mount
+        # removed from the config entirely is the one case left un-purged here — its rows are
+        # simply never reachable again through the API (404s the unknown name), so they are
+        # harmless, not a leak (see epicurus_core_app.mounts).
+        for _mount in mounts.values():
+            _prefix = f"{MOUNT_PREFIX}{_mount.name}/"
+            try:
+                await file_index.remove_prefix(tenant=settings.default_tenant_id, prefix=_prefix)
+                if _mount.indexed:
+                    await scan_file_space(
+                        _mount.store,
+                        file_index,
+                        tenant=settings.default_tenant_id,
+                        path_prefix=_prefix,
+                        exclude=_mount.exclude,
+                    )
+            except Exception as exc:  # never block startup on one mount's provisioning/scan
+                log.warning("mount index scan failed", mount=_mount.name, error=str(exc))
         # Parse the model catalog from upstream on a loop (#269). Fire-and-forget so
         # startup never blocks on the network; the task self-heals on transient failures.
         catalog_task = asyncio.create_task(catalog.run_periodic())
@@ -900,6 +962,10 @@ def create_app() -> FastAPI:
         file_watch_task = (
             asyncio.create_task(file_watcher.run()) if file_watcher is not None else None
         )
+        # Same for each indexed external mount (#731) — independent trees, independent watchers.
+        mount_watch_tasks = [
+            (watcher, asyncio.create_task(watcher.run())) for watcher in mount_watchers
+        ]
         # Start consuming inbound bridge messages (ADR-0058). Best-effort: a NATS hiccup here
         # must not block startup — the rest of the core (web chat) stays up regardless.
         if settings.messaging_inbound_enabled:
@@ -972,6 +1038,11 @@ def create_app() -> FastAPI:
                 file_watch_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await file_watch_task
+            for _watcher, _task in mount_watch_tasks:
+                _watcher.stop()
+                _task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await _task
             # Let in-flight turns finish (and persist) before the engine closes under them (#376).
             await live_runs.drain()
             await bus.close()
@@ -1003,6 +1074,7 @@ def create_app() -> FastAPI:
             allowed_upload_types=settings.attachment_allowed_type_list,
             locked_prefixes=frozenset(settings.module_hostnames),
             events=core_events,
+            mounts=mounts,
         )
     )
     app.include_router(
@@ -1127,6 +1199,26 @@ def create_app() -> FastAPI:
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    # A safety net for the file routes that have no local ValueError handling to catch it
+    # first (#731) — list/stat/dir/upload/page/download all let a PathEscapeError propagate
+    # unhandled; this turns a symlink-escape attempt into a clean 400 instead of a 500,
+    # uniformly, rather than threading a try/except through every one of them.
+    @app.exception_handler(PathEscapeError)
+    async def _on_path_escape(_request: Request, exc: PathEscapeError) -> JSONResponse:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # An external mount (#731) is host-filesystem content the core does not control — unlike
+    # the tenant space (core-managed, chowned at startup), a mount can genuinely fail an I/O
+    # call for reasons outside the request itself: the operator declared it `rw` but the host
+    # directory isn't actually writable by the container's uid (ADR-0069), a full disk, and so
+    # on. Left uncaught this was an opaque 500 with no detail; this surfaces the OS's own
+    # message (e.g. "[Errno 13] Permission denied: …") so the failure is diagnosable instead
+    # of a bare crash. Still a 500 — it is a server/environment condition, not a client error.
+    @app.exception_handler(OSError)
+    async def _on_os_error(_request: Request, exc: OSError) -> JSONResponse:
+        log.warning("unhandled OSError from a route handler", error=str(exc))
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     return app
 

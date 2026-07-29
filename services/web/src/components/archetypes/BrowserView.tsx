@@ -12,6 +12,9 @@
  *    folder/breadcrumb to move it (#391), through the shared `/pages/{id}/move` contract.
  *  - `deletable` on an item + a `remove` source → a delete affordance (row + detail pane),
  *    behind the shell Confirm with a recursive-contents warning for folders (#564).
+ *  - `read_only` on the page data → hides Upload / external file-drop for the *current*
+ *    directory (e.g. a read-only external mount, #731) — a courtesy; the server is the
+ *    actual enforcement.
  *
  * Responsive: two panes side-by-side on wide screens; on phones the list fills the
  * view and selecting an item slides to its detail (with a back affordance).
@@ -374,9 +377,16 @@ export function BrowserView({ source }: { source: BrowserSource }) {
     else setSourceMenuOpen(true);
   }
 
+  // The current directory itself may be read-only (e.g. a read-only external mount, #731) —
+  // Upload and file drops are a page-level affordance with no per-item equivalent (unlike
+  // rename/move/delete, already covered by each item's own movable/deletable), so this is
+  // the one place that needs the page-level flag. A courtesy only: the server refuses the
+  // mutation regardless, mount or not — this just spares a doomed click/drop.
+  const canUpload = !!source.upload && !data.read_only;
+
   // External file drops upload into the current directory (#479). Internal move-drags
   // (dragId set) keep their own row/breadcrumb targets — those don't carry "Files".
-  const externalDropProps = source.upload
+  const externalDropProps = canUpload
     ? {
         onDragOver: (e: React.DragEvent) => {
           if (dragId || !e.dataTransfer.types.includes("Files")) return;
@@ -411,7 +421,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
         setDragOverPath(dir);
         return;
       }
-      if (source.upload && e.dataTransfer.types.includes("Files")) {
+      if (canUpload && e.dataTransfer.types.includes("Files")) {
         e.preventDefault();
         e.stopPropagation(); // claim it: the pane highlights the *current* dir, this target wins
         e.dataTransfer.dropEffect = "copy" as const;
@@ -430,7 +440,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
         dropInto(dir);
         return;
       }
-      if (source.upload && e.dataTransfer.types.includes("Files")) {
+      if (canUpload && e.dataTransfer.types.includes("Files")) {
         e.preventDefault();
         e.stopPropagation(); // took it — don't let the pane also upload into the current dir
         setDragOverPath(null);
@@ -443,7 +453,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* toolbar: breadcrumbs + optional search + optional upload */}
-      {(breadcrumbs.length > 0 || data.search_enabled || source.upload) && (
+      {(breadcrumbs.length > 0 || data.search_enabled || canUpload) && (
         <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-1.5">
           {/* breadcrumbs */}
           {breadcrumbs.length > 0 && (
@@ -521,8 +531,9 @@ export function BrowserView({ source }: { source: BrowserSource }) {
             </form>
           )}
 
-          {/* upload into the current directory (#479); icon-only on phone (#620) */}
-          {source.upload && (
+          {/* upload into the current directory (#479); icon-only on phone (#620); hidden when
+              the directory itself is read-only, e.g. a read-only mount (#731) */}
+          {canUpload && (
             <>
               <Tooltip label="Upload" side="bottom">
                 <Button
@@ -805,7 +816,7 @@ export function BrowserView({ source }: { source: BrowserSource }) {
 
       {/* The phone source menu (#479): pick what kind of thing first, Telegram-style —
           each option opens the matching native surface via its hidden input. */}
-      {source.upload && (
+      {canUpload && (
         <Sheet open={sourceMenuOpen} onClose={() => setSourceMenuOpen(false)} title="Upload">
           <div className="flex flex-col gap-1">
             <Button

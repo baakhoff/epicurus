@@ -12,6 +12,7 @@ import pytest
 
 from epicurus_core.files import (
     LocalFileStore,
+    PathEscapeError,
     S3FileStore,
     build_file_store,
     normalize_rel,
@@ -130,6 +131,81 @@ async def test_tenant_isolation(store: LocalFileStore) -> None:
 async def test_invalid_tenant_rejected(store: LocalFileStore) -> None:
     with pytest.raises(TenantError):
         await store.write_text(tenant="Bad Tenant!", path="x.txt", content="x")
+
+
+def _symlink(link: Path, target: Path) -> None:
+    """Create a symlink, or skip the test — creating one needs a privilege the CI
+
+    runner always has (Linux) but a local Windows checkout may not (Developer Mode /
+    admin), and that platform gap has nothing to do with the containment logic under test.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except OSError as exc:
+        pytest.skip(f"cannot create symlinks in this environment: {exc}")
+
+
+async def test_store_rejects_symlink_escape(store: LocalFileStore, tmp_path: Path) -> None:
+    """A symlink *inside* the store root pointing outside it is still contained (#731).
+
+    ``normalize_rel`` only catches a literal ``..`` in the request path; a link planted on
+    disk needs the runtime ``resolve()`` + containment check in ``_abs``, which is exactly
+    what an operator-declared external mount (real filesystem content, not core-managed)
+    makes newly reachable and worth locking down explicitly.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("nope", encoding="utf-8")
+    tenant_root = tmp_path / TENANT
+    tenant_root.mkdir()
+    _symlink(tenant_root / "escape", outside)
+    with pytest.raises(PathEscapeError):
+        await store.read_bytes(tenant=TENANT, path="escape/secret.txt")
+
+
+# ── tenant_subdir=False (external mounts, #731) ────────────────────────────────
+
+
+@pytest.fixture
+def mount_store(tmp_path: Path) -> LocalFileStore:
+    return LocalFileStore(tmp_path, tenant_subdir=False)
+
+
+async def test_mount_store_addresses_root_directly(
+    mount_store: LocalFileStore, tmp_path: Path
+) -> None:
+    """``tenant_subdir=False`` writes/reads *root* itself — no ``<root>/<tenant>`` nesting."""
+    await mount_store.write_text(tenant=TENANT, path="report.md", content="hi")
+    assert (tmp_path / "report.md").read_text(encoding="utf-8") == "hi"
+    assert not (tmp_path / TENANT).exists()
+    assert await mount_store.read_text(tenant=TENANT, path="report.md") == "hi"
+
+
+async def test_mount_store_still_validates_tenant(mount_store: LocalFileStore) -> None:
+    """Constraint #1's gate stays in force even though the tenant no longer shapes the path."""
+    with pytest.raises(TenantError):
+        await mount_store.list_dir(tenant="Bad Tenant!", path="")
+
+
+async def test_mount_store_rejects_symlink_escape(
+    mount_store: LocalFileStore, tmp_path: Path
+) -> None:
+    outside = tmp_path.parent / "mount-outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.txt").write_text("nope", encoding="utf-8")
+    _symlink(tmp_path / "escape", outside)
+    with pytest.raises(PathEscapeError):
+        await mount_store.read_bytes(tenant=TENANT, path="escape/secret.txt")
+
+
+async def test_mount_store_two_mounts_do_not_collide(tmp_path: Path) -> None:
+    """Two mount instances over sibling roots never see each other's content."""
+    a = LocalFileStore(tmp_path / "mount-a", tenant_subdir=False)
+    b = LocalFileStore(tmp_path / "mount-b", tenant_subdir=False)
+    (tmp_path / "mount-a").mkdir()
+    (tmp_path / "mount-b").mkdir()
+    await a.write_text(tenant=TENANT, path="x.txt", content="a")
+    assert await b.stat(tenant=TENANT, path="x.txt") is None
 
 
 async def test_read_text_size_cap(store: LocalFileStore) -> None:

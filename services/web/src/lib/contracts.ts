@@ -735,6 +735,14 @@ export const BrowserData = z.object({
   path: z.string().nullish(),
   /** When true the shell renders a search input above the list. */
   search_enabled: z.boolean().optional(),
+  /**
+   * When true, the current directory itself is read-only — e.g. a read-only external mount
+   * (#731) — and the shell hides Upload / external file-drop for it. Narrower than per-item
+   * `movable`/`deletable` (which already cover rename/move/delete): this is the one
+   * page-level mutating affordance not scoped to a single item. A courtesy only — every
+   * mutation is refused server-side regardless, mount or not.
+   */
+  read_only: z.boolean().optional(),
 });
 export type BrowserData = z.infer<typeof BrowserData>;
 

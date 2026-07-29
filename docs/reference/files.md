@@ -58,13 +58,27 @@ any `..` segment, so a key can never escape its tenant root.
 
 ### Backends + `build_file_store`
 
-- **`LocalFileStore(root)`** — the tenant tree under `<root>/<tenant>` (the self-host default).
-  Blocking disk I/O runs in a worker thread so the event loop stays free.
+- **`LocalFileStore(root, *, tenant_subdir=True)`** — the tenant tree under `<root>/<tenant>`
+  (the self-host default). Blocking disk I/O runs in a worker thread so the event loop stays
+  free. `tenant_subdir=False` (#731) addresses *root* itself rather than `root/<tenant>` — the
+  seam an [external mount](#external-mounts-731) uses, since a mount root already names one
+  directory; `tenant` is still validated on every call even though it no longer shapes the
+  path.
 - **`S3FileStore(url, access_key, secret_key)`** — keys in a `{tenant}-files` bucket
   (`scope_bucket`); directories are virtual, listed via the `/` delimiter. Needs `aioboto3`
   (install the `epicurus-core[s3]` extra).
 - **`build_file_store(backend, root, s3_url, s3_access_key, s3_secret_key)`** — the single swap
   point for constraint #3: `local` (default) or `s3`.
+
+### `PathEscapeError`
+
+A `ValueError` subclass `LocalFileStore` raises when a *resolved* path escapes the store's
+root — a symlink inside the tree pointing outward (`normalize_rel` already rejects a literal
+`..` in the request path; this is the runtime backstop for what only a real filesystem entry
+can produce). `files_routes.py` maps it to a clean **400** via an app-level exception handler
+(`app.py`, alongside `GatewayPausedError`) rather than a 500, so a handler with no local
+`ValueError` catch (`list`, `stat`, `dir`, `upload`, `page`, `download`) still fails cleanly.
+Existing `except ValueError` handlers are unaffected — it *is* a `ValueError`.
 
 ## The wire contract (`/platform/v1/files/*`)
 
@@ -125,6 +139,71 @@ The **upload route shares the chat-attachment caps** (#175 → #479): `ATTACHMEN
 application/json` → 415) — one policy for every byte an operator puts into epicurus. The web
 container's nginx fronts both routes with `client_max_body_size 12m` (keep it ≥ the byte cap).
 
+## External mounts (#731)
+
+**What.** An operator-declared, drive-style root beside the tenant file space — bind a host
+directory (or an entire drive) into the container and it shows up in Files as an additional
+top-level root, addressable by the operator (Files page) and the agent (`storage_list` /
+`storage_search` / `storage_read`) exactly like the tenant tree, subject to a per-mount
+read-only/read-write gate. See [Infrastructure → External file
+mounts](../infrastructure/index.md#external-file-mounts-731) for the compose overlay that
+declares one; this section covers the resulting API/agent-facing behavior.
+
+**Declaration** (`CoreAppSettings`, all string env vars — an operator-level deployment concern,
+not a per-request one):
+
+| Setting | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `files_external_mounts` | `FILES_EXTERNAL_MOUNTS` | `""` | Comma-separated `name:container-path[:ro\|rw]` entries. `name` is 1-63 chars, lowercase alphanumeric plus `-`/`_` (it appears in URLs and index rows); mode defaults to `ro`. A malformed entry, a duplicate name, or an invalid mode fails startup (`epicurus_core_app.mounts.parse_mount_specs`) — loud, not a silently-wrong grant. |
+| `files_external_mounts_indexed` | `FILES_EXTERNAL_MOUNTS_INDEXED` | `""` | Comma-separated mount *names* opted into indexing/watching. A mount not listed here is browsable and read/writable but never scanned or searched — the safe default for "mount a whole drive" (size, privacy). |
+| `files_external_mounts_exclude` | `FILES_EXTERNAL_MOUNTS_EXCLUDE` | `""` | Exclude globs per mount: `name=pat1\|pat2;name2=pat3`. Matched against both the mount-relative path and the bare filename during a scan/watch walk; a matching directory is not descended into. Ignored for a mount not in `files_external_mounts_indexed`. |
+
+**Addressing.** A mount-relative path is `mount:<name>/<sub-path>` (or `mount:<name>` alone for
+its own root) — the one scheme used everywhere: the platform API's `path` query param,
+`PlatformClient.files_*`, and the agent's `storage_*` tools all pass this string straight
+through unchanged; `files_routes.py`'s `_target()` helper resolves the prefix to the right
+`FileStore` before any tenant-store call. The tenant space itself is addressed exactly as
+before (no prefix) — declaring a mount changes nothing about existing paths.
+
+**Store.** Each mount is its own `LocalFileStore(path, tenant_subdir=False)` — a completely
+separate root from the tenant tree and from every other mount (constraint #3 needs no new
+backend: an external mount is host-filesystem content by definition, so there's no S3
+equivalent of "bind a host directory"). `tenant` is still validated on every call (constraint
+#1), even though a mount today applies to the one v1 tenant regardless — a per-tenant mount ACL
+is SaaS-tier follow-up work, not built here.
+
+**Read-only enforcement.** A `ro` mount (the default) is enforced **server-side** on every
+mutating route (`write`, `delete`, `dir`, `move`, `upload`, `entry` delete) — **403** — not just
+hidden in the UI; the Files page also sets a page-level `read_only` flag (`files_page`'s
+response) so the shell hides Upload/external-drop for it (`BrowserView.tsx`), a courtesy on top
+of the real enforcement. Per-item `movable`/`deletable` follow the same rule: `false` for
+everything under a `ro` mount, matching the tenant space's rules for an `rw` one (files
+movable, both files and directories deletable).
+
+**Containment.** `normalize_rel` rejects a literal `..` in the request path as always; a
+symlink *inside* a mount root pointing outward is caught by `LocalFileStore`'s own resolve +
+containment check (`PathEscapeError` → 400, see above) — the same protection the tenant space
+has always had, now exercised against content the core doesn't manage and an operator's real
+filesystem can plausibly contain (a symlinked subtree in a media library, say).
+
+**Moves stay within one store.** `POST /move` refuses a `src`/`dst` pair that crosses between
+the tenant space and a mount, or between two mounts (400) — copying bytes across independent
+filesystem roots is a materially different operation from a rename, and out of scope for v1;
+mounts are isolated compartments, the same way a module's own top-level subtree already is via
+`locked_prefixes`.
+
+**Unknown mount name** → **404** before any filesystem call, on every route.
+
+**Indexing** is opt-in per mount (`files_external_mounts_indexed`) and namespaced with the
+`mount:<name>/` prefix in the same `core_files` table the tenant tree uses — an indexed row is
+directly addressable with the same string a search hit returns. `purge_stale` and the new
+`remove_prefix` (`file_index.py`) are prefix-scoped, so re-scanning one mount (or the tenant
+tree) can never delete another's rows. At startup every declared mount's `mount:<name>/`
+namespace is purged, then re-scanned if indexed — this also cleans up a mount whose indexing
+was just turned off; a mount removed from the config **entirely** is the one case left
+un-purged (its rows are simply unreachable — the name 404s — not a leak; see
+`epicurus_core_app/mounts.py`).
+
 ## Data model
 
 Per-tenant scoping (constraint #1): the local backend writes `<root>/<tenant>/…`; the S3 backend
@@ -139,7 +218,8 @@ time, not stored in this index).
 Local backend: the filesystem (the core mounts the shared `/data` volume). S3 backend: `aioboto3`
 against a MinIO/S3 endpoint. The Files page / read / move / download **merge with or fall back to**
 the **storage module** for object entries (chat uploads, agent-written files), proxied over the
-internal network. Uses **no AI**.
+internal network. External mounts (#731): the filesystem the operator bound via the compose
+overlay — no other service dependency. Uses **no AI**.
 
 ## Phase plan (ADR-0052 → ADR-0065)
 
@@ -177,3 +257,10 @@ method together so the contract stays symmetric (operator-UI-facing routes — `
 `upload`, `entry` delete — deliberately have no client method; modules never call them). The two
 operator mutation doors (`upload`, `entry` delete) carry the #479 ownership guard their module
 twins (`write`, `DELETE …/files`) must not — modules write and delete inside their own subtrees.
+
+External mounts (#731) are parsed and constructed in `epicurus_core_app/mounts.py`
+(`parse_mount_specs` → `build_mounts`) from the `FILES_EXTERNAL_MOUNTS*` settings, then passed
+into `create_files_router(..., mounts=...)`; `files_routes.py`'s `_target()` is the one place
+that resolves a `mount:<name>/…` path, so every handler stays mount-aware by resolving through
+it rather than each reimplementing the prefix check. Adding a route that touches the file space
+means calling `_target()` first, same as the existing ones.

@@ -152,18 +152,44 @@ class FileIndex:
             )
             return None if row is None else _row_to_entry(row)
 
-    async def purge_stale(self, *, tenant: str, seen_paths: set[str]) -> int:
-        """Delete rows not visited in the most recent scan (files removed on disk)."""
+    async def purge_stale(self, *, tenant: str, seen_paths: set[str], path_prefix: str = "") -> int:
+        """Delete rows not visited in the most recent scan (files removed on disk).
+
+        *path_prefix* (#731) scopes the purge to one namespace — e.g. a single external
+        mount's own rows (``mount:<name>/``) — so re-scanning it can never delete the tenant
+        tree's rows, or another mount's, just because they weren't in *this* walk's
+        ``seen_paths``. Empty (the default) scopes to the whole tenant, as before.
+        """
+        conditions = [_CoreFile.tenant == tenant, _CoreFile.path.not_in(seen_paths)]
+        if path_prefix:
+            conditions.append(_CoreFile.path.like(_like_prefix(path_prefix) + "%", escape="\\"))
+        async with self._session() as session:
+            result = await session.execute(delete(_CoreFile).where(*conditions))
+            await session.commit()
+            deleted: int = cast("CursorResult[Any]", result).rowcount or 0
+            return deleted
+
+    async def remove_prefix(self, *, tenant: str, prefix: str) -> int:
+        """Delete every row whose path starts with *prefix* (#731).
+
+        Used to clear an external mount's whole namespace (``mount:<name>/``) up front before
+        a fresh scan, and to drop it entirely when the mount stops being indexed. Unlike
+        :meth:`remove_subtree`, *prefix* need not itself be an indexed row (a mount's synthetic
+        top-level address, ``mount:<name>``, never is) — this matches on the string prefix
+        alone. A blank *prefix* is refused (it would purge the whole tenant); returns the
+        number of rows removed.
+        """
+        if not prefix:
+            return 0
         async with self._session() as session:
             result = await session.execute(
                 delete(_CoreFile).where(
                     _CoreFile.tenant == tenant,
-                    _CoreFile.path.not_in(seen_paths),
+                    _CoreFile.path.like(_like_prefix(prefix) + "%", escape="\\"),
                 )
             )
             await session.commit()
-            deleted: int = cast("CursorResult[Any]", result).rowcount or 0
-            return deleted
+            return cast("CursorResult[Any]", result).rowcount or 0
 
     async def remove_subtree(self, *, tenant: str, path: str) -> int:
         """Delete the row at *path* and every descendant under ``<path>/`` (#564).

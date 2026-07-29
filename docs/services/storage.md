@@ -58,10 +58,15 @@ the surface that *renders* Files (and the scanner/watcher that fed it) moved to 
 > `storage_list` / `storage_search` filter them out and `storage_read` refuses them with
 > `Error: not available` (#KB-refactor). The operator-facing core Files surface is unaffected.
 
+> A `path` may also address an operator-declared **external mount** (#731) via
+> `mount:<name>/<sub-path>` (`mount:<name>` alone for its own root) — these tools pass
+> whatever string they're given straight through to the core, which resolves the prefix. See
+> [file space → External mounts](../reference/files.md#external-mounts-731).
+
 | Tool | Purpose |
 | --- | --- |
-| `storage_list(path="")` | List the direct children of `path` in the file space (dirs before files), via `PlatformClient.files_list`. A hidden subtree (e.g. `notes/`) yields nothing. |
-| `storage_search(query, limit=50)` | Case-insensitive name/path search (max 200) over the core file index, via `PlatformClient.files_search`. Hits under a hidden subtree are filtered out. |
+| `storage_list(path="")` | List the direct children of `path` in the file space (dirs before files), via `PlatformClient.files_list`. A hidden subtree (e.g. `notes/`) yields nothing; the root listing also includes any declared external mount as a folder. |
+| `storage_search(query, limit=50)` | Case-insensitive name/path search (max 200) over the core file index, via `PlatformClient.files_search`. Hits under a hidden subtree are filtered out; covers every external mount that opted into indexing. |
 | `storage_read(path)` | Return a text file's contents — a file-space file (via `PlatformClient.files_read`) **or** an agent-written object. Rejects files > **256 KB** and non-UTF-8 (binary) with an explanatory message; a path under a hidden subtree returns `Error: not available`. |
 | `storage_status()` | Object-store counts (catalogued objects), tenant-scoped. No filesystem root. |
 | `storage_object_put(key, content)` | Store a text object under `key` (tenant bucket) **and catalogue it** so it appears in the core Files page and is searchable / readable / downloadable; a nested key (`reports/q2.md`) creates the folder tree. Returns the normalised key used. |

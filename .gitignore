@@ -89,6 +89,9 @@ dist/
 # ─── Docker / runtime ────────────────────────────────────────────────────────
 docker-compose.override.yml
 *.local.yml
+# infra/ci/smoke.sh's bind-mounted external-mounts round trip (#731) — created/removed by
+# the script itself, kept on disk only when it's run with KEEP_UP=1.
+/.smoke-mount/
 
 # ─── Logs ────────────────────────────────────────────────────────────────────
 /logs/

@@ -1,0 +1,56 @@
+# Opt-in external file mounts for core-app (#731, ADR-0115). Bind a host directory — or an
+# entire drive — under a conventional prefix so it shows up in Files as an additional root
+# ("drive"), browsable/searchable (if opted into indexing) by the operator and the agent,
+# alongside the tenant space.
+#
+# core-app runs in a container: an arbitrary host path cannot be attached at runtime, so this
+# is a compose-file change plus a container recreate — the same shape as the docker-socket
+# overlay (services/core-app/compose.docker-socket.yaml). NOT auto-loaded — Compose only
+# auto-merges a `compose.override.yaml` sitting beside the file it overrides, and this one
+# lives here specifically so a plain `docker compose up` / `task up` never picks it up by
+# accident. Layer it on top of the default stack explicitly:
+#
+#   docker compose -f compose.yaml -f services/core-app/compose.external-mounts.yaml up -d
+#   # or: task external-mounts-up
+#
+# Security note (read before enabling): a mount exposes that host subtree to the operator's
+# Files page *and* the agent's file tools (list/read always; write/delete only if declared
+# `rw`) — mount deliberately, and prefer read-only (`ro`, the default if the mode segment is
+# omitted) unless the operator specifically wants the agent writing there. Never bind the host
+# home directory (`~`/`$HOME`) or a path containing credentials/SSH keys — this is the same
+# standing pitfall as any other bind mount, just pointed at content this app didn't create.
+#
+# Below is ONE example mount named "media", read-only, bound at /mnt/spaces/media — duplicate
+# the `volumes` line (and extend FILES_EXTERNAL_MOUNTS, comma-separated) for more than one.
+# FILES_EXTERNAL_MOUNTS entries are `name:container-path[:ro|rw]` — the container-path here
+# MUST match what's actually bound below, or the declared mount has nothing to serve.
+#
+#   volumes:
+#     - ${EXTERNAL_MOUNT_MEDIA_HOST_PATH}:/mnt/spaces/media:ro
+#     - ${EXTERNAL_MOUNT_DOCS_HOST_PATH}:/mnt/spaces/docs:rw       # a second mount, RW
+#   environment:
+#     FILES_EXTERNAL_MOUNTS: "media:/mnt/spaces/media:ro,docs:/mnt/spaces/docs:rw"
+#     # Opt a mount into indexing/watching (comma-separated names) — omit entirely to keep
+#     # every declared mount browsable-but-unsearchable, the safe default for a whole drive.
+#     FILES_EXTERNAL_MOUNTS_INDEXED: "docs"
+#     # Exclude globs, scoped per mount name: name=pat1|pat2;name2=pat3 — only meaningful for
+#     # an indexed mount.
+#     FILES_EXTERNAL_MOUNTS_EXCLUDE: "docs=*.tmp|node_modules/*"
+#
+# `EXTERNAL_MOUNT_MEDIA_HOST_PATH` (arbitrary name — pick your own per mount) is a host path
+# set in the root `.env`, e.g.:
+#
+#   EXTERNAL_MOUNT_MEDIA_HOST_PATH=D:\media
+#
+# Bind-mount the container path read-only (`:ro` on the volume line) whenever the declared
+# mount itself is `ro` — belt-and-suspenders: even if `FILES_EXTERNAL_MOUNTS` were misdeclared
+# `rw`, the container-level mount still physically can't write. An `rw` mount needs the volume
+# line WITHOUT `:ro`.
+services:
+  core-app:
+    volumes:
+      - ${EXTERNAL_MOUNT_MEDIA_HOST_PATH:?set EXTERNAL_MOUNT_MEDIA_HOST_PATH to a host directory — see the comments in this file}:/mnt/spaces/media:ro
+    environment:
+      FILES_EXTERNAL_MOUNTS: ${FILES_EXTERNAL_MOUNTS:-media:/mnt/spaces/media:ro}
+      FILES_EXTERNAL_MOUNTS_INDEXED: ${FILES_EXTERNAL_MOUNTS_INDEXED:-}
+      FILES_EXTERNAL_MOUNTS_EXCLUDE: ${FILES_EXTERNAL_MOUNTS_EXCLUDE:-}

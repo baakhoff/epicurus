@@ -1095,6 +1095,9 @@ everyone else's:
   object-store fallbacks — passes through those handlers. There is deliberately **no
   `file_updated`** (an overwrite emits nothing — content owners announce their own
   `*_updated`), and out-of-band disk changes seen only by the file watcher are not emitted.
+  A mutation inside an external mount (#731) emits the same way, with a `mount:<name>/`-
+  prefixed path — unconditionally, independent of that mount's indexing opt-in (the two are
+  orthogonal: an event says something changed, indexing says it's searchable).
 - **`core.suggestion_approved` / `core.suggestion_rejected`** — at
   `ModuleRegistry.review_action`, the one funnel every review surface passes through:
   module review pages proxied over HTTP *and* the in-process core pseudo-module
@@ -1235,7 +1238,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   and its subtree (`FileIndex.remove_subtree`) — so a change shows in search/listing at once, with
   the watcher as the backstop. Storage-module objects are merged in at request time, not stored
   here — a node reported by both sources collapses to one row, the file-space entry winning so its
-  movability stays authoritative (#560; see [file space](../reference/files.md)).
+  movability stays authoritative (#560; see [file space](../reference/files.md)). An indexed
+  **external mount** (#731) shares this same table, namespaced under `mount:<name>/` — opt-in
+  per mount (`FILES_EXTERNAL_MOUNTS_INDEXED`), prefix-scoped on purge so re-scanning one mount
+  never touches the tenant tree's rows or another mount's.
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Postgres `page_order_prefs`** — per-tenant left-nav page order (#543): `tenant`,

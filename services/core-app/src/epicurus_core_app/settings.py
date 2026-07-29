@@ -236,6 +236,23 @@ class CoreAppSettings(CoreSettings):
     # Coalescing window (ms) for a burst of changes before a rescan fires — a module dropping
     # many files at once is grouped into one incremental pass. Passed to the watcher's debounce.
     files_watch_debounce_ms: int = 1500
+    # ── External file mounts (#731) ─────────────────────────────────────────────
+    # Operator-declared drive-style mounts: additional roots beside the tenant file space,
+    # each backed by a host directory bound into the container (never a default — the operator
+    # opts in via a compose overlay, see services/core-app/compose.external-mounts.yaml).
+    # Comma-separated `name:container-path[:ro|rw]` entries; mode defaults to `ro`. `name` is
+    # the address an operator/agent uses (`mount:<name>/<path>`) — lowercase alphanumeric plus
+    # `-`/`_`, since it appears in URLs and index rows. Empty = no mounts declared.
+    files_external_mounts: str = ""
+    # Comma-separated mount *names* (from `files_external_mounts`) that opt into indexing/
+    # watching. A mount not listed here is browsable and read/writable but never scanned or
+    # searched — the safe default for "mount a whole drive" (size, privacy). Empty = none.
+    files_external_mounts_indexed: str = ""
+    # Exclude globs for indexed mounts, scoped per mount name: `name=pat1|pat2;name2=pat3`.
+    # Matched against both the entry's mount-relative path and its bare filename during the
+    # scan/watch walk — a matching directory is not descended into. Ignored for a mount not
+    # listed in `files_external_mounts_indexed`.
+    files_external_mounts_exclude: str = ""
 
     # ── Push notifications (ADR-0102) ───────────────────────────────────────────
     # The contact identity presented in the VAPID JWT (RFC 8292) — a mailto: or https: URL

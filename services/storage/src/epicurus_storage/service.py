@@ -3,7 +3,10 @@
 After the file-space migration (ADR-0063) the **core** owns the unified file space and serves
 the Files browser UI; this module is a *consumer* of it plus the owner of the object store:
 
-Agent file tools (read the core-owned file space via the platform API, no ``/data`` mount):
+Agent file tools (read the core-owned file space via the platform API, no ``/data`` mount).
+A path may address an operator-declared external mount (#731) via ``mount:<name>/<sub-path>``
+(``mount:<name>`` alone addresses its root) — the core resolves the prefix; these tools pass
+whatever path string they're given straight through, so no mount-specific code lives here:
   storage_list    — list directory children (file space + objects)
   storage_search  — search by name/path fragment (file space + objects)
   storage_read    — read a text file (object store first, then the file space)
@@ -365,8 +368,10 @@ def build_module(
     async def storage_list(path: str = "") -> list[FileNode]:
         """List the direct children of *path* in the file space (file-space + objects).
 
-        Pass an empty string (the default) to list the root. Returns directories before files,
-        both sorted by name.
+        Pass an empty string (the default) to list the root — this also lists any declared
+        external mount (#731) as a folder. Address inside one with ``mount:<name>/<sub-path>``
+        (or ``mount:<name>`` for its own root). Returns directories before files, both sorted
+        by name.
         """
         if _is_hidden(path):
             return []
@@ -383,7 +388,10 @@ def build_module(
     async def storage_search(query: str, limit: int = 50) -> list[FileNode]:
         """Search the file space (file-space + objects) by name or path fragment.
 
-        Case-insensitive; returns up to *limit* results (max 200).
+        Case-insensitive; returns up to *limit* results (max 200). Covers every external mount
+        (#731) that opted into indexing — a hit there already carries its ``mount:<name>/``
+        address, directly usable with ``storage_read``. A mount not opted into indexing is
+        browsable via ``storage_list`` but never appears here.
         """
         if not query.strip():
             return []
@@ -410,7 +418,9 @@ def build_module(
         """Read a text file and return its contents (object store first, then file space).
 
         Files larger than 256 KB are rejected — use the Files download instead. Binary
-        (non-UTF-8) files are also rejected with an explanatory message.
+        (non-UTF-8) files are also rejected with an explanatory message. A path inside a
+        declared external mount (#731) — ``mount:<name>/<sub-path>`` — reads from that mount;
+        an unknown mount name is reported as not found.
         """
         # Private subtrees (e.g. notes) are never readable by the agent (#KB-refactor).
         if _is_hidden(path):

@@ -50,7 +50,7 @@ is set.
 from epicurus_core import scope_subject, set_current_tenant
 
 set_current_tenant("acme")
-scope_subject("inbox.message")           # -> "acme.inbox.message"
+scope_subject("inbox.message")  # -> "acme.inbox.message"
 scope_subject("inbox.message", "other")  # -> "other.inbox.message"
 ```
 

@@ -52,10 +52,12 @@ from epicurus_core import EpicurusModule
 
 module = EpicurusModule("greeter", version="1.0.0")
 
+
 @module.tool()
 def greet(name: str) -> str:
     """Greet someone."""
     return f"Hello, {name}!"
+
 
 module.emits("greeting.sent")
 manifest = await module.manifest(secrets=["GREETER_API_KEY"])

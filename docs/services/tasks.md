@@ -242,14 +242,14 @@ class Task(BaseModel):
     id: str
     title: str
     notes: str | None = None
-    due: str | None = None                                      # ISO date, e.g. "2025-01-15"
+    due: str | None = None  # ISO date, e.g. "2025-01-15"
     status: Literal["open", "in_progress", "done"] = "open"
     completed_at: str | None = None
-    priority: Literal["low", "medium", "high"] | None = None    # local-only
-    tags: list[str] = []                                        # local-only
-    repeat: str | None = None                                   # RRULE if recurring (#471, ADR-0082)
-    list_id: str | None = None                                  # the list (category) — router-stamped
-    list_title: str | None = None                               # its human label — router-stamped
+    priority: Literal["low", "medium", "high"] | None = None  # local-only
+    tags: list[str] = []  # local-only
+    repeat: str | None = None  # RRULE if recurring (#471, ADR-0082)
+    list_id: str | None = None  # the list (category) — router-stamped
+    list_title: str | None = None  # its human label — router-stamped
     # `completed` is a computed alias: True when status == "done".
 ```
 

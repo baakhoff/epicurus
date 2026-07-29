@@ -53,7 +53,7 @@ All NATS traffic goes through `epicurus_core.events.EventBus`, which now forward
 `user`/`password` to `nats.connect`. Services build the bus from settings:
 
 ```python
-bus = EventBus.from_settings(settings)   # reads NATS_USER / NATS_PASSWORD from the env
+bus = EventBus.from_settings(settings)  # reads NATS_USER / NATS_PASSWORD from the env
 ```
 
 `CoreSettings.nats_user` / `nats_password` default to `None`, so the EventBus still

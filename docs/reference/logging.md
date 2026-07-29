@@ -44,5 +44,6 @@ and they appear on every line within that context:
 
 ```python
 import structlog
+
 structlog.contextvars.bind_contextvars(tenant="acme", request_id="abc123")
 ```

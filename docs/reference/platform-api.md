@@ -696,8 +696,8 @@ Instantiate one per module service, scoped to the tenant.
 from epicurus_core import PlatformClient, PlatformMessage
 
 client = PlatformClient(
-    base_url="http://core:8080",   # PLATFORM_URL env var in the service template
-    tenant_id="local",             # settings.default_tenant_id
+    base_url="http://core:8080",  # PLATFORM_URL env var in the service template
+    tenant_id="local",  # settings.default_tenant_id
 )
 ```
 
@@ -740,7 +740,7 @@ there is a single definition of each shape.
 
 ```python
 class PlatformMessage(BaseModel):
-    role: str                           # "system" | "user" | "assistant" | "tool"
+    role: str  # "system" | "user" | "assistant" | "tool"
     content: str | None = None
     tool_calls: list[dict] | None = None
     tool_call_id: str | None = None

@@ -1003,7 +1003,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-knowledge"
-version = "0.27.0"
+version = "0.27.1"
 source = { editable = "services/knowledge" }
 dependencies = [
     { name = "asyncpg" },

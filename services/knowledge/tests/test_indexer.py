@@ -154,11 +154,22 @@ async def test_mtime_ns_reconciles_from_a_raw_seeded_value(
     # than what the indexer's byte-preserving read actually sees.
     raw_bytes = (vault / note_path).read_bytes()
     content_hash = hashlib.sha256(raw_bytes).hexdigest()
-    # The raw filesystem nanosecond mtime — generically different from the indexer's derived
+    # The raw filesystem nanosecond mtime — *usually* different from the indexer's derived
     # `round(mtime * 1_000_000_000)` after the float round-trip (mirrors a pre-ADR-0070 row).
     raw_mtime_ns = os.stat(vault / note_path).st_mtime_ns
     derived_mtime_ns = round(os.stat(vault / note_path).st_mtime * 1_000_000_000)
-    assert raw_mtime_ns != derived_mtime_ns, "fixture assumption: raw and derived ns must differ"
+    if raw_mtime_ns == derived_mtime_ns:
+        # "Usually", not always. A float64's ULP near 1.8e18 — the epoch in nanoseconds, as of
+        # 2026 — is 256, so a raw mtime that happens to land on a multiple of 256 survives the
+        # round-trip exactly and the two agree. That is roughly 1 run in 256 on a filesystem
+        # with nanosecond stamps (ext4, i.e. CI; NTFS keeps 100ns ticks, so it effectively
+        # never collides and this is invisible on Windows). This used to be a bare `assert`,
+        # so the whole suite failed at that rate for a reason having nothing to do with the
+        # behaviour under test. What the scenario needs is a ledger row whose `mtime_ns`
+        # *disagrees* with the derived value; how the disagreement arose is immaterial, so
+        # supply one directly rather than relying on float imprecision to provide it.
+        raw_mtime_ns += 1
+    assert raw_mtime_ns != derived_mtime_ns
 
     await note_index.upsert(
         tenant=TENANT,

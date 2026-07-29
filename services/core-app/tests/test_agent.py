@@ -20,6 +20,7 @@ from epicurus_core_app.agent.agent import (
     _STOPPED_TOOL_ERRORS,
     _STOPPED_UNSUPPORTED_MEDIA,
     _VISION_UNSUPPORTED_MESSAGE,
+    ASK_APPROVAL_TOOL,
     FINISH_QUIET_TOOL,
     Agent,
     _canonical_calls,
@@ -195,6 +196,30 @@ async def test_finish_quiet_is_offered_once_the_automation_opts_in() -> None:
     offered = gw.tools_seen[0]
     assert offered is not None
     assert FINISH_QUIET_TOOL in [spec["function"]["name"] for spec in offered]
+
+
+async def test_ask_approval_is_never_offered_by_run(_ignored: None = None) -> None:
+    # ask_approval (#745) is chat-runs-only: run()/_loop is the path automations, scheduled
+    # turns, and inbound-bridge replies all share, and it never splices the spec in — with or
+    # without an automation_id — so an unattended turn simply cannot see the tool, the same
+    # "bound at the tool surface" discipline FINISH_QUIET_SPEC's gate uses above.
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "http://echo:8080/mcp"})
+    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    offered = gw.tools_seen[0]
+    assert offered is not None
+    assert ASK_APPROVAL_TOOL not in [spec["function"]["name"] for spec in offered]
+
+
+async def test_ask_approval_is_never_offered_to_an_automation_either() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi")])
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "http://echo:8080/mcp"})
+    await Agent(gateway=gw, mcp=mcp).run(
+        [ChatMessage(role="user", content="hi")], automation_id="auto-1", quiet_capable=True
+    )
+    offered = gw.tools_seen[0]
+    assert offered is not None
+    assert ASK_APPROVAL_TOOL not in [spec["function"]["name"] for spec in offered]
 
 
 async def test_calling_finish_quiet_marks_the_turn_quiet() -> None:

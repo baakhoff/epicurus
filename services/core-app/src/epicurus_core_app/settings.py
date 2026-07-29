@@ -99,6 +99,10 @@ class CoreAppSettings(CoreSettings):
     # How long a draft paused for review (ADR-0085, #563) waits for the operator's Confirm/Decline
     # before its pending-draft run is reaped (hours). If it expires the model can compose again.
     draft_review_ttl_hours: int = 24
+    # How long a turn paused by `ask_approval` (#745, ADR-0117) waits for the operator's
+    # Approve/Reject before its pending-approval run is reaped (hours); expiry decays to the
+    # existing async review-queue behavior (the staged change simply waits there instead).
+    ask_approval_ttl_hours: int = 24
     # How long a *finished* in-flight run (#376) stays re-attachable in memory before it is
     # reaped (seconds). A reconnecting client within this window replays the buffered turn;
     # after it, the client falls back to the durable transcript. Pure cache — the answer is
@@ -182,6 +186,12 @@ class CoreAppSettings(CoreSettings):
     # since the schedule is now runtime-editable and a fixed sleep-until-hour can't react to a
     # change made while it's sleeping. 60s keeps the worst-case delivery lag under a minute.
     maintenance_poll_interval_s: int = 60
+    # Persisted run history retention (#733) — a row cap and an age cutoff, whichever catches a
+    # given row first (the same "count or age" posture EVENTS_RETENTION_DAYS/the notification
+    # center's max_per_tenant each take on their own retention question). 200 runs covers months
+    # of even an hourly cadence; 90 days is a comfortable "what happened last quarter" window.
+    maintenance_run_history_max_rows: int = 200
+    maintenance_run_history_max_age_days: int = 90
 
     # ── Scheduled turns (ADR-0092) ────────────────────────────────────────────────
     # How often the scheduler checks for a due row (a plain poll, not one sleep-until-hour task
@@ -257,6 +267,14 @@ class CoreAppSettings(CoreSettings):
     # How often the quiet-hours digest scheduler checks whether a tenant's quiet window has
     # just ended (a plain poll, mirroring maintenance/scheduled-turns — see their settings).
     push_quiet_poll_interval_s: int = 60
+
+    # ── Per-event alerts (#732) ─────────────────────────────────────────────────
+    # Max notifications per (tenant, module, event_type) per hour — independent of, and in
+    # addition to, PUSH_RATE_CAP_PER_HOUR above. A sanity valve on one chatty subscription,
+    # not a per-tenant budget: without it, a single noisy event type could spend the whole
+    # tenant-wide push cap and starve every other alert/category. In-memory, single-instance
+    # v1, the same trade as the cap above. 0 disables it.
+    event_alerts_rate_cap_per_hour: int = 20
 
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.

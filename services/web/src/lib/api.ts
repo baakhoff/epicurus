@@ -27,11 +27,13 @@ import {
   EditorVersionContent,
   EditorVersionList,
   EmailMessage,
+  EventSubscription,
   FileText,
   HoverCard,
   LlmPrefs,
   LogEntry,
   MaintenanceCurrentRun,
+  MaintenanceRunPage,
   type MaintenanceScheduleUpdate,
   MaintenanceStatus,
   MemoryListing,
@@ -158,6 +160,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(update),
     }),
+  // Persisted run history (#733), newest-first — pass a prior page's `next_cursor` to page
+  // further back.
+  maintenanceRunHistory: (opts?: { cursor?: number; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.cursor != null) params.set("cursor", String(opts.cursor));
+    if (opts?.limit != null) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return request(MaintenanceRunPage, `/platform/v1/maintenance/runs${qs ? `?${qs}` : ""}`);
+  },
   setContextWindow: (value: number | null) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/prefs/context-window", {
       method: "PUT",
@@ -345,6 +356,17 @@ export const api = {
     request(PushTestResult, "/platform/v1/push/test", {
       method: "POST",
       body: JSON.stringify({ category }),
+    }),
+
+  // Per-event alerts (#732): "push me when X happens" for any module-declared event, no
+  // automation required. Sparse — only subscribed events come back; the settings UI unions
+  // this with every module's declared `events_emitted` (see `modules()` below).
+  eventSubscriptions: () =>
+    request(z.array(EventSubscription), "/platform/v1/push/event-subscriptions"),
+  setEventSubscription: (body: EventSubscription) =>
+    request(EventSubscription, "/platform/v1/push/event-subscriptions", {
+      method: "PUT",
+      body: JSON.stringify(body),
     }),
 
   // In-app notification center (#671) — the durable record every push-worthy event lands

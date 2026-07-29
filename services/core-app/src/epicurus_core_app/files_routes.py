@@ -160,6 +160,16 @@ def _disposition(name: str) -> str:
     return f'attachment; filename="{safe}"'
 
 
+def _not_found_detail(path: str) -> str:
+    """A 404 ``detail`` that names the path and suggests a recovery step (#742) — for an agent
+    caller (directly, or via a module tool that forwards this text), a bare ``"not found"``
+    gives nothing to act on, while this names exactly what to re-check and how."""
+    return (
+        f'"{path}" does not exist — it may have been deleted or moved; '
+        "list the folder for current contents"
+    )
+
+
 def create_files_router(
     store: FileStore,
     *,
@@ -322,7 +332,7 @@ def create_files_router(
                 obj = await objects.read(tenant=tenant, path=rel)
                 if obj is not None:
                     return FileReadResponse(path=obj.path, name=obj.name, content=obj.content)
-            raise HTTPException(status_code=404, detail="not found") from None
+            raise HTTPException(status_code=404, detail=_not_found_detail(path)) from None
         except PathEscapeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:  # the 256 KB text cap (traversal already handled by _safe)
@@ -345,7 +355,7 @@ def create_files_router(
         _safe(sub)
         entry = await target.stat(tenant=tenant, path=sub)
         if entry is None:
-            raise HTTPException(status_code=404, detail="not found")
+            raise HTTPException(status_code=404, detail=_not_found_detail(path))
         return _reprefix(mount, entry)
 
     @router.put("/write", response_model=FileEntry)
@@ -453,7 +463,9 @@ def create_files_router(
                 if events is not None:
                     await events.file_moved(tenant, src, entry.path)
                 return FileEntry(path=entry.path, name=entry.name, kind=entry.kind, size=entry.size)
-            raise HTTPException(status_code=404, detail="source not found") from None
+            raise HTTPException(
+                status_code=404, detail=f"source {_not_found_detail(src)}"
+            ) from None
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail="destination already exists") from exc
         except PathEscapeError as exc:

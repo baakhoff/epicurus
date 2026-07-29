@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from epicurus_core import get_logger
-from epicurus_core_app.agent.agent import Agent, AgentEvent, AgentTurn
+from epicurus_core_app.agent.agent import ASK_APPROVAL_TOOL, Agent, AgentEvent, AgentTurn
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
 from epicurus_core_app.agent.live_runs import (
@@ -21,6 +21,7 @@ from epicurus_core_app.agent.live_runs import (
     RunAlreadyActiveError,
     RunStreamFactory,
 )
+from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftStore
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
@@ -113,6 +114,21 @@ class DraftDecision(BaseModel):
 
     decision: Literal["send", "decline"]
     reason: str | None = None
+
+
+class ApprovalDecision(BaseModel):
+    """Body for POST /runs/{run_id}/approval — the operator's Approve/Reject of an
+    ``ask_approval`` pause (#745, ADR-0117).
+
+    Unlike :class:`DraftDecision`, resolving this never itself calls a module: by the time this
+    posts, the web client has already called the relevant module's own review-decision endpoint
+    directly (the agent must never approve its own work — see ``suggestions.py``) — this only
+    resumes the paused turn with the outcome. ``comment`` is an optional short note carried back
+    to the model either way, e.g. the operator's reason for a Reject.
+    """
+
+    decision: Literal["approved", "rejected"]
+    comment: str | None = None
 
 
 # Transmit a confirmed draft via a module's ``POST /send`` → the provider message id, or raise
@@ -212,6 +228,7 @@ def create_agent_router(
     *,
     suspended: SuspendedRunStore | None = None,
     pending_drafts: PendingDraftStore | None = None,
+    pending_approvals: PendingApprovalStore | None = None,
     send_draft: SendDraft | None = None,
     live_runs: LiveRunRegistry | None = None,
     profile: StandingProfileStore | None = None,
@@ -592,6 +609,52 @@ def create_agent_router(
         convo.append(
             ChatMessage(
                 role="tool", tool_call_id=run.pending_call_id, name=run.tool, content=content
+            )
+        )
+        return await _start_turn_response(
+            lambda: agent.run_stream(
+                [], model=run.model, session_id=run.session_id, resume_convo=convo
+            ),
+            session_id=run.session_id,
+            readiness_model=run.model,
+            lead_readiness=False,
+        )
+
+    @router.post("/runs/{run_id}/approval")
+    async def resolve_approval(run_id: str, request: ApprovalDecision) -> StreamingResponse:
+        """Resume a turn paused by ``ask_approval``, supplying the operator's decision (#745,
+        ADR-0117).
+
+        Takes the pending approval (consuming it, so a double-submit can't resume twice) and
+        appends the outcome (plus any comment) as the ``ask_approval`` call's tool result. Unlike
+        ``resolve_draft``, this never calls a module itself — approve/reject already happened
+        against the module's own review-decision endpoint before this posts (the web client calls
+        it directly; see ``ApprovalDecision``). Either way the turn continues as a fresh durable
+        run (#376) on the same SSE protocol as ``/chat/stream``. Emits an ``error`` event if the
+        approval is unknown / expired / already resolved.
+        """
+        run = (
+            None
+            if pending_approvals is None
+            else await pending_approvals.take(tenant=tenant, run_id=run_id)
+        )
+        if run is None:
+            detail = "this approval has expired or was already resolved"
+            return _one_off(AgentEvent(type="error", detail=detail))
+        comment = (request.comment or "").strip()
+        if request.decision == "approved":
+            content = "The operator approved this change."
+        else:
+            content = "The operator rejected this change."
+        if comment:
+            content += f" Their comment: {comment}"
+        convo = [ChatMessage.model_validate(m) for m in run.conversation]
+        convo.append(
+            ChatMessage(
+                role="tool",
+                tool_call_id=run.pending_call_id,
+                name=ASK_APPROVAL_TOOL,
+                content=content,
             )
         )
         return await _start_turn_response(

@@ -124,6 +124,21 @@ export const PushTestResult = z.object({
 export type PushTestResult = z.infer<typeof PushTestResult>;
 
 /**
+ * One "push me when X happens" subscription (#732) — `(module, event_type)` plus its own
+ * `ChannelPrefs`, independent of `PushPrefs.categories`. The server only ever returns rows
+ * the operator actually subscribed to (default is off, not `PushPrefs`' on-by-default); the
+ * settings UI unions this sparse list with every module's declared `events_emitted` to
+ * render the full toggleable catalog.
+ */
+export const EventSubscription = z.object({
+  module: z.string(),
+  event_type: z.string(),
+  push: z.boolean(),
+  center: z.boolean(),
+});
+export type EventSubscription = z.infer<typeof EventSubscription>;
+
+/**
  * The operator's correction to a saved hosted model's declared capabilities (#711).
  *
  * LiteLLM's static cost map omits ids entirely (`xai/grok-latest`) and mislabels others, which
@@ -478,6 +493,11 @@ export const AgentEvent = z.object({
   // service-worker-cached PWA ignores the new fields and keeps parsing the stream (ADR-0055).
   awaiting_kind: z.string().nullish(),
   draft: z.record(z.string(), z.unknown()).nullish(),
+  // Present on `awaiting_input` for an ask_approval pause (#745, ADR-0117): `"approval"` plus
+  // `summary` and the entity reference(s) (possibly empty) to render as an approval card.
+  // Additive, same rationale as the draft-review fields above.
+  summary: z.string().nullish(),
+  refs: z.array(EntityRef).default([]),
   // Present on a `tool` event whose module annotated the tool `writes_document` (#541,
   // ADR-0100/0101): what the call is writing, so the shell can open the document pane. Rides
   // both the `running` and terminal frames. Additive, like the draft fields above.
@@ -1487,13 +1507,27 @@ export const MaintenanceJobResult = z.object({
 });
 export type MaintenanceJobResult = z.infer<typeof MaintenanceJobResult>;
 
-/** The aggregate result of one maintenance batch (#383). */
+/**
+ * One persisted maintenance-run history row (#733) — a completed, or shutdown-interrupted,
+ * batch. Backs both `MaintenanceStatus.last_run` (the newest row — survives a restart, unlike
+ * the pre-#733 in-memory-only `last_run`) and `GET /maintenance/runs`' paginated list.
+ */
 export const MaintenanceRun = z.object({
-  ran_at: z.string(),
+  id: z.number(),
+  started_at: z.string(),
+  finished_at: z.string(),
   scope: z.string(),
+  source: z.string(), // "scheduled" | "manual"
   jobs: z.array(MaintenanceJobResult).default([]),
 });
 export type MaintenanceRun = z.infer<typeof MaintenanceRun>;
+
+/** One page of `GET /maintenance/runs`, newest-first (#733). */
+export const MaintenanceRunPage = z.object({
+  runs: z.array(MaintenanceRun).default([]),
+  next_cursor: z.number().nullish(),
+});
+export type MaintenanceRunPage = z.infer<typeof MaintenanceRunPage>;
 
 /** One job's live status within an in-flight maintenance run (#561). */
 export const MaintenanceJobProgress = z.object({

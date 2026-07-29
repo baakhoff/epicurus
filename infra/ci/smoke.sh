@@ -158,6 +158,18 @@ grep -E '^OPENBAO_(UNSEAL_KEY|TOKEN)=' "$SECRETS_FILE" >> "$ENV_FILE"
 wait_state openbao
 ok "OpenBao bootstrapped, unsealed, healthy"
 
+# The app token must be *periodic* (#728). A plain service token also works here — and then
+# 403s on every secret read 32 days later, long after any test has finished. That expiry is
+# untestable by construction, so assert the property that prevents it: a non-zero period.
+app_token="$(grep -E '^OPENBAO_TOKEN=' "$SECRETS_FILE" | tail -1 | cut -d= -f2-)"
+token_period="$($DC exec -T -e BAO_TOKEN="$app_token" openbao \
+    bao token lookup -format=json 2>/dev/null | tr -d ' \t\r\n' \
+    | grep -o '"period":[0-9]*' | cut -d: -f2)"
+case "$token_period" in
+  ''|*[!0-9]*|0) die "app token is not periodic (period='${token_period:-unset}') — it expires, see #728" ;;
+esac
+ok "app token is periodic (${token_period}s), so renewal can keep it alive indefinitely"
+
 log "Starting the auto-unseal sidecar, core, and modules"
 $DC up -d openbao-unseal
 # shellcheck disable=SC2086 # $APP: same deliberate word list as above

@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from epicurus_core import SecretError
 from epicurus_core_app.notifications import NotificationStore
+from epicurus_core_app.push.event_subscriptions import EventSubscriptionStore
 from epicurus_core_app.push.prefs import PushPrefsStore
 from epicurus_core_app.push.queue import PushQueueStore
 from epicurus_core_app.push.routes import create_push_router
@@ -59,6 +60,8 @@ async def _app() -> FastAPI:
     await queue.init()
     notifications = NotificationStore(_engine())
     await notifications.init()
+    event_subscriptions = EventSubscriptionStore(_engine())
+    await event_subscriptions.init()
     service = PushService(
         subscriptions=subscriptions,
         prefs=prefs,
@@ -73,7 +76,13 @@ async def _app() -> FastAPI:
     )
     app = FastAPI()
     app.include_router(
-        create_push_router(service, subscriptions=subscriptions, prefs=prefs, default_tenant=TENANT)
+        create_push_router(
+            service,
+            subscriptions=subscriptions,
+            prefs=prefs,
+            event_subscriptions=event_subscriptions,
+            default_tenant=TENANT,
+        )
     )
     return app
 
@@ -238,3 +247,71 @@ async def test_test_notification_endpoint_sends_when_subscribed(
         )
         resp = await c.post("/platform/v1/push/test", json={"category": "system"})
     assert resp.json() == {"outcome": "sent", "sent_count": 1, "pruned_count": 0}
+
+
+# ── event subscriptions (#732) ────────────────────────────────────────────────────
+
+
+async def test_list_event_subscriptions_starts_empty() -> None:
+    app = await _app()
+    async with _client(app) as c:
+        resp = await c.get("/platform/v1/push/event-subscriptions")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_put_then_list_event_subscription_round_trips() -> None:
+    app = await _app()
+    async with _client(app) as c:
+        put = await c.put(
+            "/platform/v1/push/event-subscriptions",
+            json={"module": "mail", "event_type": "mail.received", "push": True, "center": False},
+        )
+        listed = await c.get("/platform/v1/push/event-subscriptions")
+    assert put.status_code == 200
+    assert put.json() == {
+        "module": "mail",
+        "event_type": "mail.received",
+        "push": True,
+        "center": False,
+    }
+    assert listed.json() == [put.json()]
+
+
+async def test_put_event_subscription_rejects_blank_fields() -> None:
+    app = await _app()
+    async with _client(app) as c:
+        resp = await c.put(
+            "/platform/v1/push/event-subscriptions",
+            json={"module": "", "event_type": "mail.received", "push": True, "center": True},
+        )
+    assert resp.status_code == 400
+
+
+async def test_put_event_subscription_with_both_off_removes_it_from_the_list() -> None:
+    app = await _app()
+    async with _client(app) as c:
+        await c.put(
+            "/platform/v1/push/event-subscriptions",
+            json={"module": "mail", "event_type": "mail.received", "push": True, "center": True},
+        )
+        await c.put(
+            "/platform/v1/push/event-subscriptions",
+            json={"module": "mail", "event_type": "mail.received", "push": False, "center": False},
+        )
+        listed = await c.get("/platform/v1/push/event-subscriptions")
+    assert listed.json() == []
+
+
+async def test_event_subscriptions_are_tenant_scoped() -> None:
+    app = await _app()
+    async with _client(app) as c:
+        await c.put(
+            "/platform/v1/push/event-subscriptions",
+            params={"tenant_id": "b"},
+            json={"module": "mail", "event_type": "mail.received", "push": True, "center": True},
+        )
+        default_list = await c.get("/platform/v1/push/event-subscriptions")
+        b_list = await c.get("/platform/v1/push/event-subscriptions", params={"tenant_id": "b"})
+    assert default_list.json() == []
+    assert len(b_list.json()) == 1

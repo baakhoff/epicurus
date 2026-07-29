@@ -56,6 +56,7 @@ from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.instructions_routes import create_instructions_router
 from epicurus_core_app.agent.live_runs import LiveRunRegistry
 from epicurus_core_app.agent.mcp_host import McpHost
+from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.playbook_review import (
     CORE_MODULE_NAME,
@@ -116,7 +117,9 @@ from epicurus_core_app.maintenance import (
     module_reindex_job,
     playbook_reflection_job,
     profile_synthesis_job,
+    prune_run_history_job,
 )
+from epicurus_core_app.maintenance_history import MaintenanceRunStore
 from epicurus_core_app.maintenance_routes import create_maintenance_router
 from epicurus_core_app.maintenance_schedule_prefs import MaintenanceScheduleStore
 from epicurus_core_app.memory.extraction import ExtractionRunner, FactExtractor
@@ -148,6 +151,8 @@ from epicurus_core_app.page_order_prefs import PageOrderStore
 from epicurus_core_app.page_order_routes import create_page_order_router
 from epicurus_core_app.platform_api import create_platform_router
 from epicurus_core_app.push import (
+    EventAlertListener,
+    EventSubscriptionStore,
     PushDigestScheduler,
     PushPrefsStore,
     PushQueueStore,
@@ -302,6 +307,14 @@ def create_app() -> FastAPI:
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         poll_interval_s=settings.push_quiet_poll_interval_s,
     )
+    # Per-event alerts (#732): a dumb fan-out beside the automations engine, not an
+    # automation itself — wired to the same `event_intake.on_event` seam below.
+    event_subscriptions = EventSubscriptionStore(engine)
+    event_alert_listener = EventAlertListener(
+        event_subscriptions,
+        push_service,
+        rate_cap_per_hour=settings.event_alerts_rate_cap_per_hour,
+    )
     # The maintenance orchestrator's schedule (#621): one row per tenant, falling back to the env
     # defaults until an operator sets their own via PUT. Read by both the orchestrator's poll loop
     # (below) and the maintenance routes; written only by the routes.
@@ -404,6 +417,9 @@ def create_app() -> FastAPI:
     # Durable state behind draft-first send Confirm/Decline (ADR-0085, #563): a turn paused on a
     # composed outbound draft lives here until the operator confirms/declines (or it expires).
     pending_drafts = PendingDraftStore(engine, ttl_hours=settings.draft_review_ttl_hours)
+    # Durable state behind ask_approval Approve/Reject (#745, ADR-0117): a turn paused on a staged
+    # change lives here until the operator decides (or it expires, decaying to the async queue).
+    pending_approvals = PendingApprovalStore(engine, ttl_hours=settings.ask_approval_ttl_hours)
     # In-flight turns, decoupled from the request that started them (#376): a turn runs in a
     # detached task that buffers its events, so a client disconnect (PWA backgrounded, refresh)
     # no longer aborts it — the answer still persists and a reconnecting client re-attaches.
@@ -545,6 +561,7 @@ def create_app() -> FastAPI:
         prefs=prefs,
         suspended=suspended_runs,
         pending_drafts=pending_drafts,
+        pending_approvals=pending_approvals,
         # The editable base system prompt (#497), resolved per turn and injected first — so both
         # chat and the headless bridge consumer below run with the same instructions.
         instructions=agent_instructions,
@@ -630,6 +647,7 @@ def create_app() -> FastAPI:
         poll_interval_s=settings.automations_poll_interval_s,
     )
     event_intake.on_event(automation_matcher.on_event)
+    event_intake.on_event(event_alert_listener.on_event)
     oauth = OAuthService(
         secrets,
         redirect_base_url=settings.oauth_redirect_base_url,
@@ -673,6 +691,16 @@ def create_app() -> FastAPI:
         if settings.files_backend == "local" and settings.files_watch
         else None
     )
+    # Persisted maintenance-run history (#733): the durable counterpart to the orchestrator's
+    # in-memory `last_run` — survives a restart, and distinguishes a scheduled fire from a
+    # manual "run now". Built before the orchestrator below since its own prune job (registered
+    # into the same jobs list) closes over it.
+    maintenance_history = MaintenanceRunStore(
+        engine,
+        max_rows=settings.maintenance_run_history_max_rows,
+        max_age_days=settings.maintenance_run_history_max_age_days,
+    )
+
     # External file mounts (#731): operator-declared roots beside the tenant space, each its
     # own local-FS store (see epicurus_core_app.mounts). A malformed FILES_EXTERNAL_MOUNTS*
     # setting raises here and fails startup loudly — mirrors build_file_store above; better
@@ -724,12 +752,14 @@ def create_app() -> FastAPI:
             playbook_reflection_job(playbook_reflector.run),
             module_reindex_job(registry.reembed),
             facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
+            prune_run_history_job(lambda: maintenance_history.prune(settings.default_tenant_id)),
         ],
         bus=bus,
         default_tenant=settings.default_tenant_id,
         timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
         schedule=lambda: maintenance_schedule_prefs.get(settings.default_tenant_id),
         poll_interval_s=settings.maintenance_poll_interval_s,
+        on_recorded=maintenance_history.record,
     )
 
     @asynccontextmanager
@@ -778,10 +808,21 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log.error("notification center init failed; notifications disabled", error=str(exc))
         try:
+            await event_subscriptions.init()
+        except Exception as exc:
+            log.error("event subscriptions init failed; event alerts disabled", error=str(exc))
+        try:
             await maintenance_schedule_prefs.init()
         except Exception as exc:
             log.error(
                 "maintenance schedule prefs init failed; schedule falls back to env config",
+                error=str(exc),
+            )
+        try:
+            await maintenance_history.init()
+        except Exception as exc:
+            log.error(
+                "maintenance run history init failed; last_run/run history unavailable",
                 error=str(exc),
             )
         try:
@@ -821,6 +862,13 @@ def create_app() -> FastAPI:
             await pending_drafts.init()
         except Exception as exc:
             log.error("pending-draft store init failed; draft-first send off", error=str(exc))
+        try:
+            await pending_approvals.init()
+        except Exception as exc:
+            log.error(
+                "pending-approval store init failed; ask_approval pause/resume off",
+                error=str(exc),
+            )
         try:
             await registry.reconcile_tombstones()
         except Exception as exc:  # best-effort — a Docker hiccup must never block startup
@@ -939,6 +987,11 @@ def create_app() -> FastAPI:
         # Coordinated maintenance batch on an opt-in nightly schedule (ADR-0060) — a no-op task when
         # the schedule is disabled; the manual trigger stays available either way.
         maintenance_task = asyncio.create_task(maintenance.run_periodic())
+        # Keep the OpenBao app token's lease alive (#728). The bootstrap token is periodic:
+        # unlimited lifetime, but each lease expires after 768h, so an unrenewed deployment
+        # 403s on every secret read a month after bootstrap. The core is the only renewer —
+        # the modules that hold a token hold the *same* one, so one loop covers the fleet.
+        token_renewal_task = asyncio.create_task(secrets.run_token_renewal())
         log.info("core runtime ready", tenant=settings.default_tenant_id)
         try:
             yield
@@ -955,6 +1008,7 @@ def create_app() -> FastAPI:
             push_digest_task.cancel()
             live_run_reaper.cancel()
             maintenance_task.cancel()
+            token_renewal_task.cancel()
             with suppress(asyncio.CancelledError):
                 await catalog_task
             with suppress(asyncio.CancelledError):
@@ -973,6 +1027,8 @@ def create_app() -> FastAPI:
                 await event_retention_task
             with suppress(asyncio.CancelledError):
                 await automation_task
+            with suppress(asyncio.CancelledError):
+                await token_renewal_task
             # The nightly-schedule loop above is separate from an in-flight batch it (or a manual
             # trigger) may have started — cancel that too so it isn't orphaned against infra about
             # to close (#561).
@@ -1025,6 +1081,7 @@ def create_app() -> FastAPI:
         create_maintenance_router(
             maintenance,
             schedule_store=maintenance_schedule_prefs,
+            history=maintenance_history,
             timezone=lambda: timezone_prefs.get_timezone(settings.default_tenant_id),
             default_tenant=settings.default_tenant_id,
         )
@@ -1058,6 +1115,7 @@ def create_app() -> FastAPI:
             push_service,
             subscriptions=push_subscriptions,
             prefs=push_prefs,
+            event_subscriptions=event_subscriptions,
             default_tenant=settings.default_tenant_id,
         )
     )
@@ -1075,6 +1133,7 @@ def create_app() -> FastAPI:
             probe=readiness,
             suspended=suspended_runs,
             pending_drafts=pending_drafts,
+            pending_approvals=pending_approvals,
             # Draft-first send (ADR-0085, #563): on Confirm the route transmits the reviewed draft
             # via the owning module's ``POST /send`` — the one place the core sends outbound mail.
             send_draft=registry.send_draft,

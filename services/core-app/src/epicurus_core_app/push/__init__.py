@@ -7,6 +7,8 @@ send path (:mod:`vapid`, :mod:`subscriptions`, :mod:`prefs`, :mod:`queue`, :mod:
 
 from __future__ import annotations
 
+from epicurus_core_app.push.event_alerts import EventAlertListener
+from epicurus_core_app.push.event_subscriptions import EventSubscription, EventSubscriptionStore
 from epicurus_core_app.push.prefs import ChannelPrefs, PushPrefs, PushPrefsStore
 from epicurus_core_app.push.queue import PushDigestScheduler, PushQueueStore, QueuedPush
 from epicurus_core_app.push.routes import create_push_router
@@ -15,6 +17,9 @@ from epicurus_core_app.push.subscriptions import PushSubscription, PushSubscript
 
 __all__ = [
     "ChannelPrefs",
+    "EventAlertListener",
+    "EventSubscription",
+    "EventSubscriptionStore",
     "NotifyResult",
     "PushDigestScheduler",
     "PushPrefs",

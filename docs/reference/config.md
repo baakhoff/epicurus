@@ -85,6 +85,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_temperature` | `LLM_TEMPERATURE` | `float \| None` | `None` | Sampling temperature passed to each chat completion (local + hosted). A blank env value means unset. |
 | `llm_top_p` | `LLM_TOP_P` | `float \| None` | `None` | Nucleus-sampling `top_p` passed to each chat completion (local + hosted). |
 | `llm_num_ctx` | `LLM_NUM_CTX` | `int \| None` | `None` | Ollama context-window size (`num_ctx`); applied to local models only. |
+| `llm_bootstrap_models` | `LLM_BOOTSTRAP_MODELS` | `str` | `auto` | First-boot model bootstrap (#773, ADR-0118): models the core ensures exist in the local runtime at startup, pulled in the background (never blocking readiness). `auto` = the effective chat + embedding defaults; blank = disabled (air-gapped / hosted-only builds; the CI smoke gate sets this); or an explicit comma-separated list. Hosted-prefixed ids are skipped. |
 | `llm_catalog_url` | `LLM_CATALOG_URL` | `str` | `https://ollama.com/library` | Source the core parses the browsable model catalog from (#269). Point at a mirror for an air-gapped deployment. |
 | `llm_catalog_refresh_seconds` | `LLM_CATALOG_REFRESH_SECONDS` | `int` | `21600` (6h) | How often the background loop re-parses the catalog source. Floored to 60s. |
 | `llm_catalog_max_models` | `LLM_CATALOG_MAX_MODELS` | `int` | `0` | Cap on model families kept (the most-popular survive); `0` = unlimited. |

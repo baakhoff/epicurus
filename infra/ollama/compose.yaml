@@ -2,7 +2,9 @@
 #
 # Runs as a container so the platform works on any hardware and OS. CPU by default
 # (runs everywhere); GPU is opt-in via infra/ollama/gpu.yaml. Models are NOT baked
-# into the image — the core pulls and manages them at runtime through Ollama's API.
+# into the image — the core pulls and manages them at runtime through Ollama's API,
+# and on a fresh install bootstraps the deployment's default models at startup
+# (LLM_BOOTSTRAP_MODELS, #773) so first boot doesn't 404 until someone pulls by hand.
 #
 # Internal-only: the core reaches it at http://ollama:11434 on the epicurus network;
 # it is not published to the host (private-by-default — the core is the front door).

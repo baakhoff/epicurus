@@ -50,6 +50,16 @@ class CoreAppSettings(CoreSettings):
     llm_top_p: float | None = None
     # Ollama context-window size (num_ctx); applied to local models only.
     llm_num_ctx: int | None = None
+    # ── First-boot model bootstrap (#773, ADR-0118) ─────────────────────────────
+    # A fresh install boots with an empty Ollama volume (models are never baked into the
+    # image), so the first chat/embedding call 404s until someone pulls models. On startup
+    # the core ensures these exist, pulling the missing ones in the background — never
+    # blocking readiness (see llm/bootstrap.py).
+    #   "auto" — (default) the effective chat + embedding defaults for the default tenant
+    #            (stored prefs, else LLM_DEFAULT_MODEL / MEMORY_EMBED_MODEL);
+    #   ""     — disabled (hosted-only or air-gapped builds; the CI smoke gate sets this);
+    #   "a,b"  — pull exactly these (hosted-prefixed ids are skipped with a log line).
+    llm_bootstrap_models: str = "auto"
     # ── Model catalog (#269) ────────────────────────────────────────────────────
     # The core parses the browsable model list from this source on a schedule, so the
     # Models screen never ships a hand-maintained list. Defaults to the public Ollama

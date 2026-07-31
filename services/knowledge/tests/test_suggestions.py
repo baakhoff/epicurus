@@ -38,6 +38,7 @@ from epicurus_knowledge.suggestions import (
     SuggestionAuditStore,
     SuggestionReview,
     SuggestionStore,
+    SuggestionTargetGone,
     create_review_router,
     validate_operation,
 )
@@ -328,15 +329,31 @@ async def test_approve_delete_unlinks_and_deindexes(tmp_path: Path) -> None:
     assert await store.list(tenant=TENANT) == []
 
 
-async def test_approve_delete_tolerates_already_gone_file(tmp_path: Path) -> None:
-    # The file is already absent (no pre-write): the core delete 404s, which approve swallows,
-    # still de-indexes, and drops the suggestion — an apply must never wedge on a missing file.
+async def test_approve_delete_already_gone_resolves_but_reports_not_found(
+    tmp_path: Path,
+) -> None:
+    # The file is already absent (no pre-write): the core delete 404s. approve() must not
+    # report success for this no-op (#761) — but it also must not leave the suggestion
+    # un-resolvable just because there was nothing left to delete: de-index cleanup still
+    # runs and the suggestion still drops from the queue, exactly as a real delete would.
     review, store, indexer = await _review(tmp_path)
     sid = await _add(store, path="ghost.md", operation="delete")
-    result = await review.approve(sid)
-    assert result.status == "approved"
+    with pytest.raises(SuggestionTargetGone) as err:
+        await review.approve(sid)
+    assert err.value.status_code == 404
+    detail = str(err.value.detail)
+    assert "ghost.md" in detail
+    assert "does not exist" in detail
+    # Resolved, not left pending or un-resolvable — a stale suggestion must not wedge.
     assert "ghost.md" in indexer.removed
     assert await store.list(tenant=TENANT) == []
+    # The audit trail still records the operator's approval (ADR-0090) — the decision
+    # itself ("approved") stands; it is the *outcome* that was a no-op.
+    audit = (await review.list_audit()).decisions
+    assert len(audit) == 1
+    assert audit[0].id == sid
+    assert audit[0].decision == "approved"
+    assert audit[0].applied_content == ""
 
 
 async def test_reject_discards_without_touching_vault(tmp_path: Path) -> None:
@@ -468,6 +485,26 @@ async def test_reject_endpoint_discards(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert resp.json()["status"] == "rejected"
     assert not (vault_dir(tmp_path) / "note.md").exists()
+
+
+async def test_approve_endpoint_delete_already_gone_404s_but_clears_the_queue(
+    tmp_path: Path,
+) -> None:
+    # The operator clicks Approve in the Suggestions UI on a delete whose target vanished
+    # in the meantime (#761): the request must not come back as a plain 200 "approved" —
+    # that would be a false success — but the suggestion must still be gone afterward so
+    # it doesn't wedge in the queue forever with nothing left to delete.
+    review, store, indexer = await _review(tmp_path)
+    sid = await _add(store, path="ghost.md", operation="delete")
+    pages = _pages(tmp_path, indexer)
+    client = _app(review, pages)
+    resp = client.post(f"/pages/review/suggestions/{sid}/approve")
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "ghost.md" in detail
+    assert "does not exist" in detail
+    # Resolved server-side even though the request reported an error.
+    assert await store.list(tenant=TENANT) == []
 
 
 # ── the knowledge_propose_edit tool ───────────────────────────────────────────
@@ -820,6 +857,28 @@ async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None
     env = _envelope(content)
     assert "applied directly" in env.text.lower()
     assert (vault_dir(tmp_path) / "kb" / "new.md").read_text(encoding="utf-8") == "# Auto\n"
+    assert await store.list(tenant=TENANT) == []
+
+
+async def test_propose_edit_delete_already_gone_reports_not_found_when_review_off(
+    tmp_path: Path,
+) -> None:
+    # Auto-apply (review off) of a delete whose target is already gone (#761): the tool
+    # call must fail structurally (not the "applied directly" success text — nothing was
+    # actually deleted), but the suggestion must still be resolved, not left dangling.
+    store = await _store()
+    module = await _module_with_store(store, tmp_path, review_on=False)
+    with pytest.raises(ToolError, match=r"does not exist") as err:
+        await module.mcp.call_tool(
+            "knowledge_propose_edit",
+            {"path": "kb/ghost.md", "operation": "delete"},
+        )
+    message = str(err.value)
+    assert "kb/ghost.md" in message
+    assert "applied directly" not in message.lower()
+    # Confirms SuggestionTargetGone's dedicated branch fired, not the generic
+    # "still pending" wrapper (_finalize's other except clause, #761).
+    assert "review is off but applying failed" not in message
     assert await store.list(tenant=TENANT) == []
 
 

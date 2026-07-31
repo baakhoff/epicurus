@@ -443,6 +443,19 @@ def _unified_diff(path: str, before: str, after: str) -> str:
     )
 
 
+class SuggestionTargetGone(HTTPException):
+    """Raised by :meth:`SuggestionReview.approve` when a delete's target no longer exists.
+
+    A 404 surfaced from the underlying file delete (#761) — unlike every other error
+    :meth:`SuggestionReview.approve` can raise, the suggestion has **already been
+    resolved** (index cleanup ran, the audit row is recorded, the pending row is dropped)
+    by the time this is raised: a stale suggestion must not be left un-resolvable just
+    because there was nothing left to delete. Callers must not treat this like the
+    still-pending failures above it (e.g. the read-only 409) — the queue has already
+    moved on, so a message implying "nothing happened yet, try again" would be wrong.
+    """
+
+
 class SuggestionReview:
     """Renders the review queue and applies/discards suggestions on the operator's word."""
 
@@ -520,6 +533,13 @@ class SuggestionReview:
 
         409 when the vault is externally owned (watch mode, #232): applying would write a
         vault Obsidian owns, so the apply is refused. Reject still works to clear the queue.
+
+        A ``delete`` whose target is already gone (the file API 404s) is **not** a silent
+        success (#761): the suggestion is still resolved exactly as a real delete would be
+        — index cleanup runs, the audit row is recorded, the pending row drops — but
+        :class:`SuggestionTargetGone` (404) is raised afterward so the caller is told the
+        truth instead of a false "approved". Every other failure in this method raises
+        *before* any of that resolution happens; this is the one deliberate exception.
         """
         if self._read_only:
             raise HTTPException(
@@ -534,17 +554,28 @@ class SuggestionReview:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
         indexed = False
         applied_content = ""
+        # Set only when a delete's target is already gone (#761) — the resolution below
+        # still runs, but SuggestionTargetGone is raised afterward instead of a false
+        # "approved" outcome. ``None`` for every other path (including a real delete).
+        target_gone_detail: str | None = None
         if s.operation in ("create", "update"):
             applied_content = s.proposed_content if content is None else content
             result = await self._pages.write_doc(s.path, applied_content)
             indexed = result.indexed
         elif s.operation == "delete":
-            # Delete through the core file API (ADR-0064); an already-gone file (404) is fine.
+            # Delete through the core file API (ADR-0064). An already-gone file (404) does
+            # not abort the resolution below — there is simply nothing left to remove, which
+            # is reported honestly (below) rather than swallowed (#761).
             try:
                 await self._pages.delete_doc(s.path)
             except HTTPException as exc:
                 if exc.status_code != 404:
                     raise
+                target_gone_detail = (
+                    f'"{s.path}" does not exist — it may have been deleted or moved;'
+                    " list the folder for current contents. Nothing was deleted; this"
+                    " suggestion has been cleared from the queue."
+                )
             await self._indexer.remove_path(s.path)
         elif s.operation == "move":
             # move_item re-indexes internally now (#470) — mirror the create/update branch
@@ -571,6 +602,14 @@ class SuggestionReview:
             to_path=s.to_path,
         )
         await self._store.delete(tenant=self._tenant, sid=sid)
+        if target_gone_detail is not None:
+            log.warning(
+                "suggestion approved but delete target already gone",
+                sid=sid,
+                operation=s.operation,
+                path=s.path,
+            )
+            raise SuggestionTargetGone(status_code=404, detail=target_gone_detail)
         log.info("suggestion approved", sid=sid, operation=s.operation, path=s.path)
         return ApplyResult(
             id=sid,
@@ -735,6 +774,7 @@ __all__ = [
     "SuggestionAuditStore",
     "SuggestionReview",
     "SuggestionStore",
+    "SuggestionTargetGone",
     "create_review_router",
     "validate_operation",
 ]

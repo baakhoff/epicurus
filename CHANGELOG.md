@@ -12,6 +12,20 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Approving a delete suggestion no longer reports success when the file is already gone**
+  (#761) — `SuggestionReview.approve`'s `delete` branch caught the file API's 404 (the vault
+  document had already been removed some other way) and swallowed it outright, so both
+  callers landed on ordinary success: the operator's approval in the Suggestions UI closed
+  silently, and review-off auto-apply printed "Delete of '<path>' applied directly — review
+  is off" even though nothing was deleted. The suggestion is still fully resolved either way
+  — index cleanup runs, the audit row is recorded, the row drops from the queue, exactly as a
+  real delete — a stale suggestion must not be left un-resolvable just because there's nothing
+  left to remove. But `approve` now raises afterward instead of returning a false "approved":
+  a 404 naming the path and suggesting a next step (the #742 not-found bar: `"<path>" does not
+  exist — it may have been deleted or moved; list the folder for current contents`), so the
+  Suggestions UI shows an error instead of a silent close, and the review-off tool call fails
+  structurally instead of claiming the delete happened. `knowledge` 0.27.1→0.27.2 (PATCH).
+
 - **A knowledge indexer test no longer fails one run in 256** (#769) — `test_indexer`'s
   `test_mtime_ns_reconciles_from_a_raw_seeded_value` opened by asserting that a raw
   `st_mtime_ns` and the indexer's derived `round(mtime * 1_000_000_000)` must differ, i.e. that

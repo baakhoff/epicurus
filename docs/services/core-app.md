@@ -453,6 +453,32 @@ A miss against the map logs **once per model id per process**, then at debug: a 
 outside a curated list is expected, not anomalous, but the first sighting still explains a model
 that shows no badges.
 
+#### First-boot model bootstrap (#773, ADR-0118)
+
+A fresh install boots an **empty Ollama volume** (models are never baked into the image), so
+the first chat or embedding call would 404 until someone found the Models page — and
+background work (the knowledge indexer, memory recall) failed noisily meanwhile. On startup
+the core now ensures the deployment's default local models exist: a fire-and-forget lifespan
+task (`llm/bootstrap.py`) waits for the runtime, resolves the **effective** chat + embedding
+defaults (stored prefs, else `LLM_DEFAULT_MODEL` / `MEMORY_EMBED_MODEL`), and pulls the
+missing ones through the same `gateway.pull()` path the Models page uses — then applies the
+same post-pull context suggestion (#386), so a bootstrapped model opens correctly sized too.
+
+Behaviour is bounded and defensive, in keeping with what startup may cost:
+
+- **Never blocks** startup, readiness (ADR-0027), or a live turn — the pull happens in the
+  background while the rest of the core serves.
+- **Retries with exponential backoff** per model (the pull resumes partial downloads), then
+  gives up with a warning naming the Models page as the manual fallback.
+- **Hosted ids are skipped** (`claude/…` cannot be pulled into the local runtime), and an
+  unreachable runtime (a hosted-only deployment running no Ollama) costs one warning after a
+  bounded wait, never a crash loop.
+- An already-provisioned deployment no-ops after one `/api/tags` round trip.
+
+`LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default) resolves the effective defaults; blank
+disables the bootstrap (air-gapped builds — and the CI smoke gate, which must not download
+multi-GB weights); an explicit comma-separated list pulls exactly those.
+
 #### Model catalog (#269)
 
 The model browser's "Browse models" list is parsed by the core, not hand-maintained in

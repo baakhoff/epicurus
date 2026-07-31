@@ -32,6 +32,10 @@ services:
       - ${SMOKE_MOUNT_DIR}:/mnt/spaces/smoketest
     environment:
       FILES_EXTERNAL_MOUNTS: smoketest:/mnt/spaces/smoketest:rw
+      # First-boot model bootstrap (#773) off in the gate: it would pull multi-GB models
+      # from the public registry on every run — slow, flaky, and irrelevant to what the
+      # smoke asserts (the wiring, not the weights).
+      LLM_BOOTSTRAP_MODELS: ""
   echo:
     ports: !reset []
   storage:

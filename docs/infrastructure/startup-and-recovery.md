@@ -67,6 +67,31 @@ If the restart loop continues, the container may be crashing on startup. Common
 causes: misconfigured environment variable, port conflict, or dependency not yet
 healthy. Check the logs for the specific error.
 
+### Chat or embedding fails with "model not found" (404) {#model-not-found}
+
+A fresh install boots an empty Ollama volume — no models. The core bootstraps the
+deployment's default chat + embedding models itself at startup (#773, ADR-0118): a
+background pull that never blocks readiness, retried with backoff, logged by `core-app`
+as `model bootstrap: …`. On a slow network the first pull takes a while (the defaults
+total ~2.3 GB), and calls that need the model keep 404ing until it lands — that's the
+bootstrap still downloading, not a fault.
+
+If the 404s persist:
+
+```powershell
+# Did the bootstrap give up? Look for "model bootstrap" lines.
+docker compose logs core-app | Select-String "model bootstrap"
+
+# What is actually installed?
+docker compose exec ollama ollama list
+```
+
+A `giving up on model` warning means the pull exhausted its retries (registry
+unreachable) — pull manually from the web UI's **Models** page, or re-run the bootstrap
+by restarting the core (`docker compose restart core-app`). `LLM_BOOTSTRAP_MODELS=`
+(blank) disables the bootstrap entirely — intended for hosted-only or air-gapped
+deployments, where a local 404 instead means the model was simply never pulled.
+
 ### OpenBao is sealed {#openbao-sealed}
 
 OpenBao is sealed after the first start until the unseal sidecar runs. It will

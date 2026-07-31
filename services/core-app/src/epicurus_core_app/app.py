@@ -99,6 +99,7 @@ from epicurus_core_app.file_index import FileIndex
 from epicurus_core_app.file_scan import scan as scan_file_space
 from epicurus_core_app.file_watch import FileWatcher
 from epicurus_core_app.files_routes import create_files_router
+from epicurus_core_app.llm.bootstrap import ModelBootstrap
 from epicurus_core_app.llm.catalog import ModelCatalog
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
@@ -164,7 +165,7 @@ from epicurus_core_app.readiness import ReadinessProbe, create_readiness_router
 from epicurus_core_app.scheduled_turns import ScheduledTurnScheduler, ScheduledTurnStore
 from epicurus_core_app.scheduled_turns_routes import create_scheduled_turns_router
 from epicurus_core_app.settings import CoreAppSettings
-from epicurus_core_app.system_info import create_system_router
+from epicurus_core_app.system_info import create_system_router, suggest_context_for_model
 from epicurus_core_app.timezone_prefs import TimezonePrefsStore
 from epicurus_core_app.timezone_routes import create_timezone_router
 
@@ -224,6 +225,18 @@ def create_app() -> FastAPI:
         # Read-only here: the gateway consults each saved model's capability override ahead of
         # LiteLLM's static cost map when resolving vision / context length (#711).
         saved_models=saved_models,
+    )
+
+    # First-boot model bootstrap (#773, ADR-0118): a fresh install boots an empty Ollama
+    # volume, so the deployment's effective default chat + embedding models are ensured at
+    # startup — pulled in the background through the same gateway path the Models page uses,
+    # with the same post-pull context sizing (#386). LLM_BOOTSTRAP_MODELS tunes/disables it.
+    model_bootstrap = ModelBootstrap(
+        gateway,
+        models_spec=settings.llm_bootstrap_models,
+        suggest_context=lambda model: suggest_context_for_model(
+            gateway, model, tenant_id=settings.default_tenant_id
+        ),
     )
 
     # On-demand quant-variant lookup from each model's public library tags page (#330).
@@ -947,6 +960,11 @@ def create_app() -> FastAPI:
         # Backfill GB sizes from each family's tags page, rate-limited (#571). Returns
         # immediately when the catalog is disabled, so air-gapped builds never fetch.
         catalog_size_task = asyncio.create_task(catalog.run_size_fill())
+        # Ensure the deployment's default local models exist on a fresh install (#773,
+        # ADR-0118). Fire-and-forget like the loops around it: an already-provisioned
+        # deployment no-ops after one /api/tags round trip; a fresh one pulls in the
+        # background while the rest of the core serves.
+        model_bootstrap_task = asyncio.create_task(model_bootstrap.run())
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
@@ -1003,6 +1021,7 @@ def create_app() -> FastAPI:
             automation_task.cancel()
             catalog_task.cancel()
             catalog_size_task.cancel()
+            model_bootstrap_task.cancel()
             extraction_task.cancel()
             scheduled_turns_task.cancel()
             push_digest_task.cancel()
@@ -1013,6 +1032,8 @@ def create_app() -> FastAPI:
                 await catalog_task
             with suppress(asyncio.CancelledError):
                 await catalog_size_task
+            with suppress(asyncio.CancelledError):
+                await model_bootstrap_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
             with suppress(asyncio.CancelledError):

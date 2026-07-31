@@ -121,7 +121,9 @@ sidesteps that by reading the socket regardless of its owning group; `cap_drop: 
 `read_only: true`, and `no-new-privileges` remove everything else, so the allowlist — not the
 uid — is the actual boundary. This all works **out of the box**: a fresh `task up` applies a
 KV-cache change immediately (`applied: true`) and tears down a removed module's container at
-once, with no operator configuration.
+once, with no operator configuration. `tests/test_docker_proxy_allowlist.py` (#726) locks all
+three allowlists against drift — widening one now means deleting an assertion, not just adding
+a flag.
 
 **Escape hatch: the raw socket, opt-in.** Prefer `core-app` to hold `/var/run/docker.sock`
 directly instead of going through a third-party proxy image? Layer

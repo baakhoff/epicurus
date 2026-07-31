@@ -39,6 +39,10 @@ dev = [
     "testcontainers[minio]>=4.14.2",
     "cookiecutter>=2.5",
     "pre-commit>=4.6.1",
+    # tests/test_docker_proxy_allowlist.py (#726) parses `docker compose config` output —
+    # already resolved transitively (uvicorn[standard]), made an explicit direct
+    # dependency since the test takes a real, load-bearing dependency on it.
+    "pyyaml>=6.0",
     "types-python-dateutil>=2.9.0.20260518",
 ]
 

@@ -210,3 +210,57 @@ def test_ignores_docs_tree_itself(
     _point_at(check_docs_links, monkeypatch, tmp_path)
 
     assert check_docs_links.check_source_doc_references() == []
+
+
+def test_detects_a_broken_anchor_in_source_reference(
+    check_docs_links: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anchored source references (e.g., docs/foo.md#section in a comment) are validated
+    against the target file's headings, same as tier 1 internal links."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "index.md").write_text("## Real Section\n", encoding="utf-8")
+
+    app = tmp_path / "services" / "app" / "src"
+    app.mkdir(parents=True)
+    # A valid anchored reference
+    (app / "main.py").write_text("# See docs/index.md#real-section for details\n", encoding="utf-8")
+    # An invalid anchored reference
+    (app / "config.py").write_text(
+        "# See docs/index.md#missing-section for details\n", encoding="utf-8"
+    )
+
+    _init_repo(tmp_path)
+    _point_at(check_docs_links, monkeypatch, tmp_path)
+
+    errors = check_docs_links.check_source_doc_references()
+
+    assert len(errors) == 1
+    assert "docs/index.md#missing-section" in errors[0]
+    assert "config.py" in errors[0]
+    assert "missing-section" in errors[0]
+
+
+def test_allows_valid_anchors_in_source_references(
+    check_docs_links: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid anchored source references should not produce errors."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "deployment.md").write_text(
+        "## Docker-socket access (#708, ADR-0109)\n\nDetails here.\n", encoding="utf-8"
+    )
+
+    service = tmp_path / "services" / "core-app"
+    service.mkdir(parents=True)
+    (service / "compose.yaml").write_text(
+        "# See docs/deployment.md#docker-socket-access-708-adr-0109 for setup\n",
+        encoding="utf-8",
+    )
+
+    _init_repo(tmp_path)
+    _point_at(check_docs_links, monkeypatch, tmp_path)
+
+    errors = check_docs_links.check_source_doc_references()
+
+    assert errors == []

@@ -52,7 +52,7 @@ SOURCE_GLOBS = ("*.md", "*.tsx", "*.ts", "*.yaml", "*.yml", ".env.example", "*.p
 SOURCE_EXCLUDE_FILES = {"CHANGELOG.md", "check_docs_links.py"}
 
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-DOCS_PATH_RE = re.compile(r"docs/[A-Za-z0-9_/.-]+\.md")
+DOCS_PATH_RE = re.compile(r"docs/[A-Za-z0-9_/.-]+\.md(?:#[A-Za-z0-9_-]+)?")
 HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 _SLUG_STRIP_RE = re.compile(r"[^\w\s-]")
 _SLUG_SPACE_RE = re.compile(r"\s")
@@ -84,8 +84,17 @@ def slugify(heading: str) -> str:
 
 
 def _anchors_in(md_file: Path) -> set[str]:
+    """All valid anchors in an md file: auto-generated slugs and explicit {#anchor} tags."""
     text = md_file.read_text(encoding="utf-8")
-    return {slugify(heading) for _hashes, heading in HEADING_RE.findall(text)}
+    anchors = set()
+    for _hashes, heading in HEADING_RE.findall(text):
+        # Check for explicit anchor in the heading text (e.g., "## Title {#custom-anchor}")
+        explicit_match = re.search(r"{#([^}]+)}", heading)
+        if explicit_match:
+            anchors.add(explicit_match.group(1))
+        # Always add the auto-generated slug as a fallback
+        anchors.add(slugify(heading))
+    return anchors
 
 
 def check_docs_internal_links() -> list[str]:
@@ -120,7 +129,11 @@ def check_docs_internal_links() -> list[str]:
 
 
 def check_source_doc_references() -> list[str]:
-    """Tier 2: repo-relative docs/....md strings quoted in shipped source resolve."""
+    """Tier 2: repo-relative docs/....md strings quoted in shipped source resolve.
+
+    Anchors in the reference (e.g., docs/foo.md#section) are validated against the
+    target file's headings, same as tier 1.
+    """
     errors = []
     for f in _git_ls_files(*SOURCE_GLOBS):
         rel = f.relative_to(REPO_ROOT)
@@ -132,8 +145,24 @@ def check_source_doc_references() -> list[str]:
             continue
         for match in DOCS_PATH_RE.finditer(text):
             referenced = match.group(0)
-            if not (REPO_ROOT / referenced).is_file():
+            # Split file path and optional anchor
+            file_part, _, anchor = referenced.partition("#")
+            target_file = REPO_ROOT / file_part
+
+            if not target_file.is_file():
                 errors.append(f"{rel}: references '{referenced}', which does not exist")
+                continue
+
+            # If an anchor is present, validate it against the target file's headings
+            if (
+                anchor
+                and target_file.suffix == ".md"
+                and slugify(anchor) not in _anchors_in(target_file)
+            ):
+                errors.append(
+                    f"{rel}: references '{referenced}' — no heading in {file_part} "
+                    f"slugs to '#{slugify(anchor)}'"
+                )
     return errors
 
 

@@ -251,9 +251,10 @@ def _derive_tags(name: str, description: str, caps: set[str], params: str) -> li
     if "cloud" in caps and not params:
         tags.add("cloud")
     haystack = f"{name} {description}".lower()
-    if re.search(r"cod(?:e|er|ing)", haystack):
+    if re.search(r"\bcod(?:e|er|ing)\b", haystack):
         tags.add("code")
-    if re.search(r"multiling|languages", haystack):
+    # "multiling" is a deliberate prefix (multilingual, multilinguality) — leading boundary only.
+    if re.search(r"\bmultiling|\blanguages\b", haystack):
         tags.add("multilingual")
     billions = _params_to_billions(params)
     if billions is not None and billions < _SMALL_PARAMS_B:

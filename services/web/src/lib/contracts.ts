@@ -1222,12 +1222,38 @@ export const MailThreadSummary = z.object({
 });
 export type MailThreadSummary = z.infer<typeof MailThreadSummary>;
 
+/** A category tab's dim one-line preview of its newest message (#765). */
+export const MailTabPreview = z.object({
+  from: z.string().default(""),
+  subject: z.string().default(""),
+});
+export type MailTabPreview = z.infer<typeof MailTabPreview>;
+
+/** One inbox category tab (#765) — Gmail-style Primary / Promotions / Social / Updates
+ *  (+ Forums when it has mail). The module supplies the data; the shell draws the strip.
+ *  `unread` is absent when the provider can't count cheaply (no badge, not a zero), and
+ *  `preview` is absent for a category with no mail. Selecting a tab sends its `id` back as
+ *  `?tab=` — no provider query syntax ever reaches the shell, so a future provider that
+ *  classifies mail some other way needs no change here. */
+export const MailboxTab = z.object({
+  id: z.string(),
+  title: z.string(),
+  unread: z.number().nullish(),
+  preview: MailTabPreview.nullish(),
+});
+export type MailboxTab = z.infer<typeof MailboxTab>;
+
 /** The `mailbox` list read: the rail + one cursor page of threads (ADR-0087). */
 export const MailboxListData = z.object({
   title: z.string().default("Mail"),
   labels: z.array(MailLabel).default([]),
   active_label: z.string().default("INBOX"),
   query: z.string().default(""),
+  /** Inbox category tabs (#765) — empty for every non-Inbox folder, for a search, and for a
+   *  provider that doesn't classify mail, in which case the page renders exactly as before. */
+  tabs: z.array(MailboxTab).default([]),
+  /** The tab the returned threads are scoped to; "" when the whole Inbox is listed. */
+  active_tab: z.string().default(""),
   threads: z.array(MailThreadSummary).default([]),
   /** Opaque next-page token; absent at the end of the mailbox. */
   next_cursor: z.string().nullish(),

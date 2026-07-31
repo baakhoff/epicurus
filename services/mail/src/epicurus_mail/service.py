@@ -18,6 +18,9 @@ deriving the recipient and subject from the original message rather than taking 
 arguments.
 ``mail_mark_read`` / ``mail_mark_unread`` flip a message's read state; the
 ``email-reader`` panel also surfaces them as a tool-backed toggle (ADR-0024).
+``mail_search`` additionally takes a ``category`` (#765) — the same Primary / Promotions /
+Social / Updates / Forums buckets the mail page renders as tabs over the Inbox — so a chat
+turn can ask about one of them without knowing any provider query syntax.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from epicurus_core import (
 )
 from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.gmail import GMAIL_API_SCOPES
-from epicurus_mail.provider import ComposedMessage, MailMessage, MailProvider
+from epicurus_mail.provider import ComposedMessage, MailCategory, MailMessage, MailProvider
 
 MODULE_NAME = "mail"
 MAILBOX_PAGE_ID = "mailbox"
@@ -193,7 +196,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.16.0",
+        version="0.17.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -291,7 +294,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     )
 
     @module.tool(side_effect="read")
-    async def mail_search(query: str, max_results: int = 10) -> str:
+    async def mail_search(query: str, max_results: int = 10, category: str | None = None) -> str:
         """Search for mail matching *query*.
 
         Supports the same query syntax as Gmail (e.g. ``from:alice``,
@@ -300,11 +303,32 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         to open the full message in the panel.  Each chip carries the message
         id; call ``mail_read`` explicitly only when you need the body as text.
 
+        Pass *category* to restrict the search to one of the inbox categories the mail page
+        shows as tabs — so "summarize today's Promotions" is
+        ``mail_search(query="newer_than:1d", category="promotions")``. Combine it freely with
+        the rest of the query (``is:unread``, ``from:``, a date filter…); the two are ANDed.
+
         Args:
-            query: Mail search expression (Gmail query syntax).
+            query: Mail search expression (Gmail query syntax). May be empty when *category*
+                alone is the filter.
             max_results: Maximum number of messages to return (1-50, default 10).
+            category: Optional inbox category — ``primary`` (mail not in any other category),
+                ``promotions``, ``social``, ``updates``, or ``forums``. Omit to search
+                everything.
         """
         capped = max(1, min(max_results, 50))
+        # A category is a provider capability, so the id -> query translation lives behind the
+        # seam (never a Gmail operator hardcoded here); an unsupported one is reported rather
+        # than silently dropped, which would hand back "all mail" for a narrowed request.
+        if category:
+            scoped = provider.category_query(category.strip().lower())
+            if scoped is None:
+                return (
+                    f"Can't filter by category {category!r}: this mail account doesn't support"
+                    " categories, or that isn't one of primary, promotions, social, updates,"
+                    " forums."
+                )
+            query = f"{scoped} {query}".strip()
         try:
             messages = await provider.search(query, capped)
         except httpx.HTTPStatusError as exc:
@@ -590,17 +614,53 @@ def message_payload(message: MailMessage) -> dict[str, Any]:
     }
 
 
+def tab_payload(category: MailCategory) -> dict[str, Any]:
+    """One category tab as the page's `tabs` entry (#765).
+
+    Hand-built rather than ``model_dump()``d so the wire key is ``from`` (a Python keyword,
+    hence ``sender`` on the model) — the same mapping :func:`message_payload` already makes
+    for a message's sender, so the shell sees one spelling everywhere.
+    """
+    preview = category.preview
+    return {
+        "id": category.id,
+        "title": category.title,
+        "unread": category.unread,
+        "preview": (
+            {"from": preview.sender, "subject": preview.subject} if preview is not None else None
+        ),
+    }
+
+
+def _resolve_tab(
+    provider: MailProvider, tabs: list[MailCategory], requested: str | None
+) -> tuple[str, str | None]:
+    """Resolve a ``?tab=`` selection to ``(echoed id, provider query)`` (#765).
+
+    Yields ``("", None)`` — i.e. "no tab selected, list the whole Inbox" — for an absent
+    selection, one that isn't among the tabs actually offered, or one the provider can't
+    express as a query. So a hand-crafted ``?tab=nonsense`` degrades to the plain Inbox
+    rather than scoping the list by something the provider would misread, and the echoed
+    ``active_tab`` never claims a tab the shell isn't showing.
+    """
+    if not requested or all(tab.id != requested for tab in tabs):
+        return "", None
+    scoped = provider.category_query(requested)
+    return (requested, scoped) if scoped else ("", None)
+
+
 async def build_mailbox_list(
     provider: MailProvider,
     *,
     mailbox: CachedMailbox | None = None,
     label: str | None = None,
     query: str | None = None,
+    tab: str | None = None,
     cursor: str | None = None,
     reconcile: bool = False,
     limit: int = MAILBOX_PAGE_SIZE,
 ) -> dict[str, Any]:
-    """The `mailbox` list read (ADR-0087): the rail + one cursor page of threads.
+    """The `mailbox` list read (ADR-0087): the rail, the Inbox tabs, and one page of threads.
 
     Browsing is folder-scoped (the active *label*); a *query* searches the whole mailbox
     (Gmail syntax, like ``mail_search``) while the rail keeps highlighting the current
@@ -609,16 +669,26 @@ async def build_mailbox_list(
     fetch can't scan an unbounded mailbox (#539); the shell pages on with ``next_cursor``.
 
     Cache-first landing (ADR-0096, #623): when a *mailbox* orchestrator is supplied and this
-    is the plain landing view (no *query*, first page), it serves from the local cache
-    instantly — ``reconcile=True`` first pulls the provider delta into the cache. Search and
-    deeper (*cursor*) pages bypass the cache and read the provider live, since the cache only
-    materializes the default landing page.
+    is the plain landing view (no *query*, no *tab*, first page), it serves from the local
+    cache instantly — ``reconcile=True`` first pulls the provider delta into the cache. Search,
+    a tab-scoped list, and deeper (*cursor*) pages bypass the cache and read the provider live,
+    since the cache only materializes the default landing page.
+
+    **Category tabs (#765).** When the rail selection is the Inbox and nothing is being
+    searched, the payload gains ``tabs`` — Gmail-style Primary / Promotions / Social / Updates
+    (+ Forums when it has mail), each with its unread count and a one-line preview of its
+    newest message — plus ``active_tab``. A *tab* selection scopes the thread list through the
+    provider's own query mechanism, the same one the rail and search already use, so Primary
+    correctly means inbox-minus-categorized. Every other rail selection, and any search, omits
+    the block entirely; so does a provider that doesn't classify mail — and a payload without
+    ``tabs`` renders exactly the pre-tabs page.
 
     Args:
         provider: The active mail backend.
         mailbox: The cache orchestrator for the landing fast path (``None`` → always live).
         label: The rail selection; defaults to the Inbox.
         query: Optional provider-native search; searches all mail when present.
+        tab: Optional category tab id scoping the list within the Inbox (#765).
         cursor: Opaque next-page token from a previous read (``None`` for the first page).
         reconcile: On the cached landing path, pull the provider delta before serving.
         limit: Requested page size, clamped to :data:`MAILBOX_PAGE_SIZE`.
@@ -626,28 +696,46 @@ async def build_mailbox_list(
     active = label or DEFAULT_LABEL
     capped = max(1, min(limit, MAILBOX_PAGE_SIZE))
     q = (query or "").strip() or None
-    if mailbox is not None and q is None and not cursor:
+    # Tabs sit over the Inbox only, and never over a search (a search spans every folder, so
+    # scoping it to an Inbox category would be a lie). Assembled before the threads because
+    # the selection decides which thread read runs.
+    show_tabs = active == DEFAULT_LABEL and q is None
+    tabs = await _mailbox_tabs(provider, mailbox, active) if show_tabs else []
+    active_tab, tab_query = _resolve_tab(provider, tabs, tab)
+
+    if mailbox is not None and q is None and tab_query is None and not cursor:
         bundle = await (mailbox.reconcile(active) if reconcile else mailbox.landing(active))
-        return {
-            "title": "Mail",
-            "labels": [lbl.model_dump() for lbl in bundle.labels],
-            "active_label": active,
-            "query": "",
-            "threads": [thread.model_dump() for thread in bundle.threads],
-            "next_cursor": bundle.next_cursor,
-        }
-    labels = await provider.list_labels(count_ids=(DEFAULT_LABEL, active))
-    page = await provider.list_threads(
-        label=None if q else active, query=q, cursor=cursor, limit=capped
-    )
+        labels, threads, next_cursor = bundle.labels, bundle.threads, bundle.next_cursor
+    else:
+        labels = await provider.list_labels(count_ids=(DEFAULT_LABEL, active))
+        page = await provider.list_threads(
+            label=None if q else active, query=q or tab_query, cursor=cursor, limit=capped
+        )
+        threads, next_cursor = page.threads, page.next_cursor
     return {
         "title": "Mail",
         "labels": [lbl.model_dump() for lbl in labels],
         "active_label": active,
         "query": q or "",
-        "threads": [thread.model_dump() for thread in page.threads],
-        "next_cursor": page.next_cursor,
+        "tabs": [tab_payload(category) for category in tabs],
+        "active_tab": active_tab,
+        "threads": [thread.model_dump() for thread in threads],
+        "next_cursor": next_cursor,
     }
+
+
+async def _mailbox_tabs(
+    provider: MailProvider, mailbox: CachedMailbox | None, label: str
+) -> list[MailCategory]:
+    """The Inbox's category tabs, through the cache when there is one (#765).
+
+    Without a *mailbox* orchestrator (a stateless build, or a unit test) this reads the
+    provider directly — correct, just uncached; the whole point of the cached path is that
+    assembling the tabs is a provider fan-out that must not run per render.
+    """
+    if mailbox is not None:
+        return await mailbox.categories(label)
+    return await provider.list_categories(label=label)
 
 
 async def build_mailbox_thread(provider: MailProvider, thread_id: str) -> dict[str, Any]:

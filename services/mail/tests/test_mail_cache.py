@@ -24,6 +24,8 @@ from epicurus_mail.cache import CachedMailbox, _primary_folder
 from epicurus_mail.db import MailCache
 from epicurus_mail.provider import (
     MailAttachment,
+    MailCategory,
+    MailCategoryPreview,
     MailCursor,
     MailLabel,
     MailMessage,
@@ -514,3 +516,103 @@ async def test_mark_thread_read_flips_cache_optimistically() -> None:
     await mailbox.mark_thread_read("t1")
     rows = await cache.get_landing(tenant_id=TENANT, label="INBOX", limit=25)
     assert rows[0].unread is False  # reflected before any provider round-trip
+
+
+# ── category tabs (#765) ─────────────────────────────────────────────────────
+
+
+def _category(cid: str, title: str, *, unread: int = 1) -> MailCategory:
+    return MailCategory(
+        id=cid,
+        title=title,
+        unread=unread,
+        preview=MailCategoryPreview(sender=f"{cid}@x.com", subject=f"newest-{cid}"),
+    )
+
+
+async def test_categories_are_assembled_once_then_served_from_cache() -> None:
+    """The whole point: the provider fan-out must not run per render."""
+    provider = _provider()
+    provider.list_categories = AsyncMock(return_value=[_category("primary", "Primary")])
+    mailbox, _ = await _mailbox(provider)
+
+    first = await mailbox.categories("INBOX")
+    second = await mailbox.categories("INBOX")
+
+    assert [t.id for t in first] == [t.id for t in second] == ["primary"]
+    provider.list_categories.assert_awaited_once_with(label="INBOX")
+
+
+async def test_an_uncategorized_mailbox_is_probed_once_not_every_render() -> None:
+    """An empty answer is cached too, else the negative case is the *most* expensive one."""
+    provider = _provider()
+    provider.list_categories = AsyncMock(return_value=[])
+    mailbox, _ = await _mailbox(provider)
+
+    assert await mailbox.categories("INBOX") == []
+    assert await mailbox.categories("INBOX") == []
+    provider.list_categories.assert_awaited_once()
+
+
+async def test_an_expired_tab_set_is_reassembled() -> None:
+    provider = _provider()
+    provider.list_categories = AsyncMock(return_value=[_category("primary", "Primary")])
+    cache = MailCache(_engine())
+    await cache.init()
+    mailbox = CachedMailbox(provider, cache, tenant_id=TENANT, category_ttl_s=-1)  # type: ignore[arg-type]
+
+    await mailbox.categories("INBOX")
+    await mailbox.categories("INBOX")
+
+    assert provider.list_categories.await_count == 2
+
+
+async def test_mark_thread_read_drops_the_tabs_so_the_badge_converges() -> None:
+    """The acceptance path: the shell's existing invalidation re-reads and the count is right."""
+    provider = _provider()
+    provider.list_categories = AsyncMock(
+        side_effect=[
+            [_category("primary", "Primary", unread=3)],
+            [_category("primary", "Primary", unread=2)],
+        ]
+    )
+    mailbox, _ = await _mailbox(provider)
+
+    assert (await mailbox.categories("INBOX"))[0].unread == 3
+    await mailbox.mark_thread_read("t1")
+    assert (await mailbox.categories("INBOX"))[0].unread == 2
+    assert provider.list_categories.await_count == 2
+
+
+async def test_mark_thread_read_still_flips_the_cached_row() -> None:
+    """Invalidating the tabs must not cost the existing read/unread write-through (#625)."""
+    provider = _provider(threads=[_summary("t1", unread=True, sort_ts=100)])
+    provider.list_categories = AsyncMock(return_value=[])
+    mailbox, cache = await _mailbox(provider)
+
+    await mailbox.landing("INBOX")
+    await mailbox.mark_thread_read("t1")
+
+    rows = await cache.get_landing(tenant_id=TENANT, label="INBOX", limit=25)
+    assert rows[0].unread is False
+
+
+async def test_a_provider_failure_costs_the_tabs_not_the_page() -> None:
+    """Tabs are an enhancement over the list — a page with mail beats a page with nothing."""
+    provider = _provider()
+    provider.list_categories = AsyncMock(side_effect=httpx.ConnectError("gmail down"))
+    mailbox, _ = await _mailbox(provider)
+
+    assert await mailbox.categories("INBOX") == []
+
+
+async def test_a_failed_assembly_is_not_cached_as_no_categories() -> None:
+    """A transient failure must not poison the negative cache for a whole TTL."""
+    provider = _provider()
+    provider.list_categories = AsyncMock(
+        side_effect=[httpx.ConnectError("down"), [_category("primary", "Primary")]]
+    )
+    mailbox, _ = await _mailbox(provider)
+
+    assert await mailbox.categories("INBOX") == []
+    assert [t.id for t in await mailbox.categories("INBOX")] == ["primary"]

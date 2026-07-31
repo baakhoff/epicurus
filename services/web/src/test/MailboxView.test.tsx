@@ -316,6 +316,170 @@ it("invokes a message action (archive) through the tool proxy", async () => {
   );
 });
 
+/* ── inbox category tabs (#765) ─────────────────────────────────────────── */
+
+const TABS = [
+  { id: "primary", title: "Primary", unread: 2, preview: { from: "alice@example.com", subject: "Lunch?" } },
+  {
+    id: "promotions",
+    title: "Promotions",
+    unread: 41,
+    preview: { from: "deals@shop.example", subject: "50% off everything" },
+  },
+  { id: "forums", title: "Forums", unread: null, preview: null },
+];
+const TABBED = { ...LIST, tabs: TABS, active_tab: "" };
+
+/** A page impl that serves the tabbed list, scoping the rows when `?tab=` is set. */
+function tabbedPageImpl(_m: string, _p: string, params?: Record<string, string>) {
+  if (params?.thread_id) return Promise.resolve(THREAD);
+  if (params?.tab)
+    return Promise.resolve({
+      ...TABBED,
+      active_tab: params.tab,
+      threads: [{ ...LIST.threads[0], id: "p1", subject: `Only in ${params.tab}` }],
+    });
+  return Promise.resolve(TABBED);
+}
+
+it("renders the tab strip with unread badges and newest-message previews", async () => {
+  mockModulePage.mockImplementation(tabbedPageImpl);
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+
+  const strip = await screen.findByRole("tablist", { name: "Inbox categories" });
+  expect(within(strip).getAllByRole("tab").map((t) => t.textContent)).toHaveLength(3);
+  expect(within(strip).getByText("Promotions")).toBeInTheDocument();
+  expect(within(strip).getByText("41")).toBeInTheDocument(); // unread badge
+  expect(within(strip).getByText("deals@shop.example — 50% off everything")).toBeInTheDocument();
+  // A category with no count renders no badge at all (capability gate, not a zero).
+  expect(within(strip).queryByText("0")).not.toBeInTheDocument();
+});
+
+it("renders exactly today's page when the payload carries no tabs", async () => {
+  // LIST has no `tabs` key at all — the pre-#765 shape, which must still render unchanged.
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+});
+
+it("filters the thread list through the module when a tab is selected", async () => {
+  mockModulePage.mockImplementation(tabbedPageImpl);
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  fireEvent.click(await screen.findByRole("tab", { name: /Promotions/ }));
+
+  expect(await screen.findByText("Only in promotions")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { tab: "promotions" }),
+  );
+  expect(screen.getByRole("tab", { name: /Promotions/ })).toHaveAttribute("aria-selected", "true");
+});
+
+it("does not fire the cache reconcile read for a tab-scoped list (#623)", async () => {
+  // The module's local cache only materializes the *unscoped* landing page, so a tab read is
+  // already live — a reconcile alongside it would be a second, pointless provider round-trip.
+  mockModulePage.mockImplementation(tabbedPageImpl);
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  // The unscoped landing does reconcile — so the absence below is the tab, not a dead gate.
+  await waitFor(() =>
+    expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { reconcile: "1" }),
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: /Promotions/ }));
+  await screen.findByText("Only in promotions");
+
+  const reconciles = mockModulePage.mock.calls.filter((c) => c[2]?.reconcile === "1");
+  expect(reconciles.length).toBeGreaterThan(0);
+  expect(reconciles.every((c) => !c[2]?.tab)).toBe(true);
+});
+
+it("clicking the active tab clears the filter and returns to the whole Inbox", async () => {
+  mockModulePage.mockImplementation(tabbedPageImpl);
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  const promotions = await screen.findByRole("tab", { name: /Promotions/ });
+
+  fireEvent.click(promotions);
+  expect(await screen.findByText("Only in promotions")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: /Promotions/ }));
+
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: /Promotions/ })).toHaveAttribute(
+    "aria-selected",
+    "false",
+  );
+});
+
+it("drops the tab selection when the folder changes", async () => {
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.label === "SENT") return Promise.resolve({ ...LIST, active_label: "SENT" });
+    return tabbedPageImpl(_m, _p, params);
+  });
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  fireEvent.click(await screen.findByRole("tab", { name: /Promotions/ }));
+  await screen.findByText("Only in promotions");
+
+  fireEvent.click(screen.getByRole("button", { name: "Sent" }));
+
+  // Sent is fetched with no tab param, and the strip is gone (Sent carries no tabs).
+  await waitFor(() =>
+    expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { label: "SENT" }),
+  );
+  await waitFor(() => expect(screen.queryByRole("tablist")).not.toBeInTheDocument());
+});
+
+it("drops the tab selection when a search is run (a search spans every folder)", async () => {
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.q) return Promise.resolve({ ...LIST, query: params.q });
+    return tabbedPageImpl(_m, _p, params);
+  });
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  fireEvent.click(await screen.findByRole("tab", { name: /Promotions/ }));
+  await screen.findByText("Only in promotions");
+
+  const box = screen.getByPlaceholderText("Search mail…");
+  fireEvent.change(box, { target: { value: "invoice" } });
+  fireEvent.keyDown(box, { key: "Enter" });
+
+  await waitFor(() =>
+    expect(mockModulePage).toHaveBeenCalledWith("mail", "mailbox", { q: "invoice" }),
+  );
+});
+
+it("updates the active tab's unread count after mark-read, with no full reload", async () => {
+  // Opening a thread marks it read; the existing post-mark invalidation re-reads the page and
+  // the module (whose category cache the mark dropped) returns the decremented count.
+  let marked = false;
+  const UNREAD_THREAD = {
+    thread: {
+      id: "t1",
+      subject: "Project kickoff",
+      messages: [{ ...THREAD.thread.messages[0], message_id: "m1", unread: true }],
+      reply: null,
+    },
+  };
+  mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {
+    if (params?.thread_id) return Promise.resolve(UNREAD_THREAD);
+    return Promise.resolve({
+      ...TABBED,
+      tabs: TABS.map((t) => (t.id === "primary" ? { ...t, unread: marked ? 1 : 2 } : t)),
+    });
+  });
+  mockMarkRead.mockImplementation(() => {
+    marked = true;
+    return Promise.resolve({ thread_id: "t1", marked: 1 });
+  });
+
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  const strip = await screen.findByRole("tablist", { name: "Inbox categories" });
+  expect(within(strip).getByText("2")).toBeInTheDocument();
+
+  fireEvent.click(await screen.findByText("Project kickoff")); // opens + marks read
+  await waitFor(() => expect(mockMarkRead).toHaveBeenCalled());
+  fireEvent.click(await screen.findByRole("button", { name: "Back to list" }));
+
+  const refreshed = await screen.findByRole("tablist", { name: "Inbox categories" });
+  await waitFor(() => expect(within(refreshed).getByText("1")).toBeInTheDocument());
+});
+
 it("surfaces a thread-open error (not the silent list) with a Back control", async () => {
   // The list loads, but the thread fetch fails with a relayed Gmail hint (#538/#557).
   mockModulePage.mockImplementation((_m: string, _p: string, params?: Record<string, string>) => {

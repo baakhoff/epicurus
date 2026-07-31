@@ -123,6 +123,7 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         bus=bus,
         provider_name="gmail",
         sync_failed_cooldown_s=settings.mail_sync_failed_cooldown_s,
+        category_ttl_s=settings.mail_category_ttl_s,
     )
 
     @asynccontextmanager
@@ -273,6 +274,7 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         page_id: str,
         label: str | None = None,
         q: str | None = None,
+        tab: str | None = None,
         cursor: str | None = None,
         thread_id: str | None = None,
         reconcile: bool = False,
@@ -280,12 +282,14 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         """The `mailbox` archetype data (ADR-0087): the thread list, or one thread.
 
         ``?thread_id=`` returns the full conversation ``{thread: …}``; otherwise the rail +
-        a cursor page of threads for ``?label=``/``?q=``/``?cursor=``. The plain landing view
-        serves from the local cache instantly (ADR-0096, #623); ``?reconcile=1`` first pulls
-        the provider delta into the cache (the web fires it as a background second read, so the
-        list updates in place without a manual refresh). Search / deeper pages read live. A
-        Gmail 403 (missing scope or a ``usageLimits`` rate limit) / 429 is relayed as that
-        status with the module's reconnect / wait hint, not a raw 500 (#538/#557).
+        a cursor page of threads for ``?label=``/``?q=``/``?cursor=``. On the Inbox the payload
+        also carries the category ``tabs`` (#765), and ``?tab=<id>`` scopes the list to one of
+        them. The plain landing view serves from the local cache instantly (ADR-0096, #623);
+        ``?reconcile=1`` first pulls the provider delta into the cache (the web fires it as a
+        background second read, so the list updates in place without a manual refresh). Search,
+        a tab-scoped list, and deeper pages read live. A Gmail 403 (missing scope or a
+        ``usageLimits`` rate limit) / 429 is relayed as that status with the module's reconnect
+        / wait hint, not a raw 500 (#538/#557).
         """
         if page_id != MAILBOX_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no such page {page_id!r}")
@@ -293,7 +297,13 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
             if thread_id:
                 return await build_mailbox_thread(provider, thread_id)
             return await build_mailbox_list(
-                provider, mailbox=mailbox, label=label, query=q, cursor=cursor, reconcile=reconcile
+                provider,
+                mailbox=mailbox,
+                label=label,
+                query=q,
+                tab=tab,
+                cursor=cursor,
+                reconcile=reconcile,
             )
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)

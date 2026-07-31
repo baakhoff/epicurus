@@ -9,6 +9,10 @@ tenant-scoped :class:`~epicurus_mail.db.MailCache`. It gives the landing view tw
 - :meth:`reconcile` — the **background** path. Asks the provider (via the neutral change
   cursor) what changed since the last sync and patches only those rows, so new/changed
   messages and flag flips appear without a manual refresh and without a full refetch.
+- :meth:`categories` — the Inbox's **category tabs** (#765), on their own short TTL. Assembling
+  them is a provider fan-out (per category: is it populated, its newest message, its unread
+  count), so they are cached rather than rebuilt per render, and dropped whenever our own
+  mark-read invalidates a count.
 
 Search and deeper (``cursor``) pages stay live — the cache only accelerates the default
 landing view, which is the dogfood pain ("Mail takes far too long to open"). The
@@ -33,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import EntityRef, EventBus, emit_event, get_logger
 from epicurus_mail.db import MailCache
-from epicurus_mail.provider import MailLabel, MailProvider, MailThreadSummary
+from epicurus_mail.provider import MailCategory, MailLabel, MailProvider, MailThreadSummary
 
 log = get_logger("epicurus_mail.cache")
 
@@ -63,6 +67,9 @@ class CachedMailbox:
         sync_failed_cooldown_s: Minimum gap between ``mail.sync_failed`` emissions for this
             instance — every mailbox page open can trigger a reconcile, so an account stuck
             failing must not storm the bus once per open.
+        category_ttl_s: How long an assembled category-tab set stays fresh (#765). Assembling
+            it is a provider fan-out, so it must not run per render; short enough that newly
+            arrived mail moves the badges without anyone asking.
     """
 
     def __init__(
@@ -77,6 +84,7 @@ class CachedMailbox:
         bus: EventBus | None = None,
         provider_name: str = "gmail",
         sync_failed_cooldown_s: float = 900.0,
+        category_ttl_s: float = 60.0,
     ) -> None:
         self._provider = provider
         self._cache = cache
@@ -88,6 +96,7 @@ class CachedMailbox:
         self._provider_name = provider_name
         self._sync_failed_cooldown_s = sync_failed_cooldown_s
         self._last_sync_failed_at: float | None = None
+        self._category_ttl_s = category_ttl_s
 
     # ── read paths ───────────────────────────────────────────────────────────
 
@@ -132,6 +141,33 @@ class CachedMailbox:
             log.warning("mail reconcile failed", tenant=self._tenant, error=str(exc))
             await self._emit_sync_failed(reason="provider_error")
             raise
+
+    async def categories(self, label: str) -> list[MailCategory]:
+        """The Inbox's category tabs, briefly cached (#765).
+
+        A cache hit costs one small local query; a miss (cold, expired, or invalidated by our
+        own mark-read) asks the provider and stores the result — including an **empty**
+        result, so an uncategorized mailbox doesn't re-probe the provider on every render.
+
+        A provider failure is swallowed to an empty strip rather than raised: the tabs are an
+        enhancement over the thread list, and a page that renders its mail without tabs is
+        strictly better than a page that renders nothing. The failure is logged, and the
+        underlying breakage still surfaces through the list read itself, which does raise.
+        """
+        cached = await self._cache.get_categories(
+            tenant_id=self._tenant, label=label, max_age_s=self._category_ttl_s
+        )
+        if cached is not None:
+            return cached
+        try:
+            categories = await self._provider.list_categories(label=label)
+        except httpx.HTTPError as exc:
+            log.warning("mail category tabs unavailable", tenant=self._tenant, error=str(exc))
+            return []
+        await self._cache.replace_categories(
+            tenant_id=self._tenant, label=label, categories=categories
+        )
+        return categories
 
     # ── event spine (#663) ──────────────────────────────────────────────────
 
@@ -222,10 +258,16 @@ class CachedMailbox:
         The cache half of an optimistic mark-read: the list reflects the new state before the
         provider round-trips. The provider write and its later history delta keep the two
         converged (a mark elsewhere flows back in through :meth:`reconcile`).
+
+        Also drops the cached category tabs (#765): the thread just left (or joined) some
+        tab's unread count, and which tab that is isn't knowable here without a fetch. The
+        shell's existing post-mark invalidation therefore re-reads the page and the badge is
+        already right — no full reload, and no stale count sitting there for a TTL.
         """
         await self._cache.set_thread_unread(
             tenant_id=self._tenant, thread_id=thread_id, unread=unread
         )
+        await self._cache.invalidate_categories(tenant_id=self._tenant)
 
     # ── internals ────────────────────────────────────────────────────────────
 

@@ -141,6 +141,23 @@ The `MailProvider` seam gains `list_labels` / `list_threads` / `get_thread` / `a
 `get_attachment` (typed in mail-domain terms; a future IMAP/Microsoft provider capability-gates
 rather than forcing symmetry). Deferred: thread-level bulk triage and the unread-count nav badge.
 
+**v0.17.0** (#765): **Gmail-style inbox category tabs.** The Inbox now renders a tab strip —
+Primary / Promotions / Social / Updates (+ Forums when it has mail, exactly as Gmail hides an
+empty one) — each carrying its unread count and a dim one-line preview of its newest message;
+selecting a tab filters the thread list, and Primary correctly means *inbox-minus-categorized*.
+Gmail's `CATEGORY_*` labels stay out of the **rail** (they are not folders, ADR-0087) — a tab over
+one folder is a different UI element, and this is that element. The `MailProvider` seam gains two
+**concrete, capability-gated** members: `list_categories(label)` (the tabs, as presentation-ready
+`MailCategory`s) and `category_query(id)` (the *only* place a neutral tab id becomes provider query
+syntax). A provider that doesn't classify mail inherits the no-op defaults and the page renders
+exactly as before. The tabs are cached in `mail_category` on a short TTL because assembling them is
+a provider fan-out, and a mark-read drops that cache so the badge converges through the shell's
+existing invalidation with no full reload. `mail_search` gains a matching `category` argument, so
+"summarize today's Promotions" works in chat without the model knowing Gmail syntax. The strip is
+shell-rendered from module *data* (ADR-0018) — no markup leaves the module — which is also the
+local-first seam: a future local provider can back the same tab ids by classifying through the
+core's LLM gateway (constraint #8) with zero shell change.
+
 ---
 
 ## Contract
@@ -151,7 +168,7 @@ All tools operate on the active `MailProvider` for the tenant.
 
 | Tool | Inputs | Output | Notes |
 | --- | --- | --- | --- |
-| `mail_search` | `query: str`, `max_results: int = 10` | `ToolEnvelope` (text + entity refs) | Returns entity-ref chips; no body. Gmail query syntax. Max 50. |
+| `mail_search` | `query: str`, `max_results: int = 10`, `category: str \| None = None` | `ToolEnvelope` (text + entity refs) | Returns entity-ref chips; no body. Gmail query syntax. Max 50. `category` restricts to one inbox category — `primary` / `promotions` / `social` / `updates` / `forums` (#765), ANDed with `query`. |
 | `mail_read` | `message_id: str` | `str` (formatted text) | Subject, sender, date, and decoded plain-text body for the agent to reason on. |
 | `mail_send` | `to: str`, `subject: str`, `body: str` | `DraftReview` | **Compose-only (draft-first, ADR-0085)** — does **not** send. Composes the message and returns a `DraftReview` envelope; the core pauses the turn for the operator's Confirm/Decline. Rejects a blank recipient. |
 | `mail_reply` | `message_id: str`, `body: str` | `DraftReview` | **Compose-only (draft-first)** — does **not** send. Composes a reply in *message_id*'s thread (RFC-2822 `In-Reply-To`/`References` + provider thread association; recipient/subject derived from the original) and returns a `DraftReview`. The compose-time metadata read needs `gmail.modify`. |
@@ -202,7 +219,7 @@ proxies them to the web shell (the shell never calls the module directly).
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body, `module`/`message_id`, the `unread` state, and a one-element `actions` toggle (mark read/unread, ADR-0024). |
 | `POST` | `/send` | body: `ComposedMessage` → `{"id": str}` | **The module's only send path (ADR-0085, #563).** Transmits an operator-confirmed draft verbatim and publishes `mail.sent`. Not an MCP tool, so the agent cannot reach it — the core calls it after the operator Confirms a draft in the split-pane. A 403 maps to the same reconnect / rate-limit hint the tools use (#513/#538), as an HTTP 403. |
 | `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
-| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?cursor=`). The plain landing view (no `q`/`cursor`) serves from the **local cache** instantly (ADR-0096, #623); `?reconcile=1` first pulls the provider delta into the cache. Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. |
+| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?tab=`, `?cursor=`). On the Inbox the payload also carries the category `tabs` (#765), and `?tab=<id>` scopes the list to one of them. The plain landing view (no `q`/`tab`/`cursor`) serves from the **local cache** instantly (ADR-0096, #623); `?reconcile=1` first pulls the provider delta into the cache. Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. |
 | `POST` | `/pages/mailbox/send` | body: `MailboxSend` → `{"id": str}` | **Human-initiated compose/reply from the page (ADR-0087).** With `reply_to_message_id` re-derives threading via `compose_reply`, else composes from `to`/`subject`/`body`/`cc`; then transmits and publishes `mail.sent`. Operator-only via the gated core proxy — never an MCP tool, so the agent still cannot send (ADR-0085). |
 | `POST` | `/pages/mailbox/mark-read` | body: `{thread_id, message_ids}` → `{"thread_id": str, "marked": int}` | **Mark a thread's messages read on open (#625).** Clears the unread flag on each `message_ids` at the provider (`set_unread`, #277) then writes the thread's read state through to the local cache (ADR-0096) so the list row converges at once. Operator-only via the gated proxy; a Gmail scope/rate-limit error relays its hint; empty `message_ids` is a no-op. |
 | `GET` | `/pages/mailbox/attachment` | `?message_id=&attachment_id=` → bytes | Streams one attachment's bytes (with content-type + download disposition) for the core proxy to relay; nothing is stored (ADR-0087). |
@@ -213,7 +230,7 @@ The core exposes these via:
 GET  /platform/v1/modules/mail/resolve/message/{ref_id}        → HoverCard
 GET  /platform/v1/modules/mail/messages/{ref_id}               → EmailMessage
 GET  /platform/v1/modules/mail/status                          → status JSON
-GET  /platform/v1/modules/mail/pages/mailbox[?thread_id|label|q|cursor|reconcile]  → MailboxList | {thread}
+GET  /platform/v1/modules/mail/pages/mailbox[?thread_id|label|q|tab|cursor|reconcile]  → MailboxList | {thread}
 POST /platform/v1/modules/mail/pages/mailbox/send              → {"id": str}   (mailbox-gated)
 POST /platform/v1/modules/mail/pages/mailbox/mark-read         → {"thread_id","marked"} (mailbox-gated)
 GET  /platform/v1/modules/mail/pages/mailbox/attachment        → streamed bytes (mailbox-gated)
@@ -238,6 +255,13 @@ the provider didn't supply one.
   "labels": [{ "id": "INBOX", "title": "Inbox", "kind": "system", "unread": 2 }],
   "active_label": "INBOX",
   "query": "",
+  "tabs": [
+    { "id": "primary", "title": "Primary", "unread": 2,
+      "preview": { "from": "alice@example.com", "subject": "Lunch?" } },
+    { "id": "promotions", "title": "Promotions", "unread": 41,
+      "preview": { "from": "deals@shop.example", "subject": "50% off everything" } }
+  ],
+  "active_tab": "",
   "threads": [
     { "id": "t1", "subject": "Project kickoff", "sender": "alice@example.com",
       "snippet": "Let's get started", "date": "Mon, 1 Jan 2024 10:00:00 +0000",
@@ -246,6 +270,39 @@ the provider didn't supply one.
   "next_cursor": "PAGE2"
 }
 ```
+
+##### Inbox category tabs (#765)
+
+`tabs` is the Gmail-style category strip the shell renders **over the Inbox** — Primary,
+Promotions, Social, Updates, and Forums, each with its unread count and a dim one-line preview
+of its newest message. It is present only when the rail selection is the Inbox and nothing is
+being searched (a search spans every folder, so an Inbox category filter would be a lie), and
+only when the provider actually classifies mail. Every other case sends `"tabs": []`, and a
+payload without tabs renders exactly the page did before tabs existed.
+
+- **Per tab:** `{id, title, unread, preview: {from, subject}}`. `unread` is `null` when the
+  provider can't count that category cheaply (no badge — a capability gate, ADR-0030, not a
+  forced zero) and `preview` is `null` for a category with no mail.
+- **`id` is neutral** — `primary` / `promotions` / `social` / `updates` / `forums`. No provider
+  query syntax ever reaches the shell: selecting a tab sends its id back as `?tab=<id>`, and the
+  module translates it through `MailProvider.category_query`. That is the local-first seam — a
+  future local provider can back the same ids with its own classification (through the core's
+  LLM gateway, constraint #8) and neither this contract nor the shell changes.
+- **`?tab=` scopes the thread list** through the same label/query mechanism the rail and search
+  already use: the folder stays the Inbox and the provider query narrows it, so **Primary
+  correctly means inbox-minus-categorized** (Gmail's `category:primary`, which no label id alone
+  expresses). `active_tab` echoes the resolved selection, or `""` for the whole Inbox — a `?tab=`
+  naming a tab that wasn't offered degrades to the whole Inbox rather than being pasted into a
+  provider query.
+- **Which tabs appear.** Every category with Inbox mail, plus Primary even when empty — so Forums
+  (and any other empty category) is hidden exactly as Gmail hides it. If *nothing* outside Primary
+  has mail then the mailbox isn't categorized (Gmail's tabs are off, or it's a fresh account) and
+  the block is empty: one lone "Primary" tab would be noise, not information.
+- **The unscoped Inbox stays the landing view.** Unlike Gmail there is no implicit "always on
+  Primary": the unscoped list is the one the module serves from its local cache instantly
+  (ADR-0096, #623), and defaulting to a tab would trade that instant open for a live provider read
+  on every visit. A tab-scoped list therefore reads live and skips the reconcile pass; clicking the
+  active tab again clears the filter.
 
 The thread read (`?thread_id=t1`): every message uses the `EmailMessage` shape (now extended with
 `attachments`) so the page and panel share one renderer; `reply` is the server-derived prefill (the
@@ -377,6 +434,15 @@ already carries the specific message id — `new_message_ids` is derived from th
 not inferred from a thread-level diff. A future IMAP provider has no equivalent single call: it
 would derive `new_message_ids` from the UIDs above the last-seen `UIDNEXT` on a `UID FETCH`.
 
+**Category unread counts (#765).** A tab's count comes from `labels.get` on the matching
+`CATEGORY_*` label, which reports `messagesUnread` across the **whole mailbox** carrying that
+category — Gmail's own tab badge counts the Inbox only, so an archived-but-unread promotion inflates
+ours. In practice categorized mail is read or archived together, so the two agree closely; narrowing
+it would cost a per-category counting query on every refresh. Recorded as a follow-up rather than
+paid for now. Gmail also exposes no API for *whether the operator turned tabs on* — the module
+infers it: nothing outside Primary carrying Inbox mail reads as "not categorized", and no strip is
+sent.
+
 ---
 
 ## Local cache & incremental sync (ADR-0096, #623)
@@ -406,6 +472,14 @@ mailbox incrementally.
 - **The delta is also where `mail.received`/`mail.sync_failed` are emitted (#663).** A reconcile
   is the one place a genuinely-new message (vs. a flag flip) or a broken sync is already known —
   see [Module events](#module-events-adr-0103-663) above.
+- **The Inbox's category tabs are cached separately (#765).** Assembling them is a provider
+  fan-out (per category: is it populated, its newest message, its unread count), so they get their
+  own short TTL (`MAIL_CATEGORY_TTL_S`, default 60s) in `mail_category` rather than being rebuilt
+  per render — including a negative-cache row for "this mailbox has no categories", so the
+  uncategorized case doesn't become the most expensive one. A mark-read write-through drops the
+  cached tabs so the shell's existing post-mark invalidation re-reads the page with the badge
+  already corrected; anything else (new mail, a mark made in Gmail itself) is picked up when the
+  TTL lapses.
 
 The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `epicurus_mail.db`.
 
@@ -418,6 +492,7 @@ The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `ep
 | `PLATFORM_URL` | `http://localhost:8080` | Internal core base URL. On the Docker network: `http://core-app:8080`. |
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Postgres DSN for the tenant-scoped local cache (ADR-0096, #623). The module owns its own `mail_*` tables in the shared Postgres — no shared database, just a shared server. |
 | `MAIL_SYNC_FAILED_COOLDOWN_S` | `900` | Minimum seconds between `mail.sync_failed` emissions (#663) — a reconcile fires on every mailbox page open, so an account stuck failing must not storm the event spine once per open. |
+| `MAIL_CATEGORY_TTL_S` | `60` | How long the Inbox's category tabs stay fresh in the local cache (#765). Assembling them is a provider fan-out, so they must not be rebuilt per render; a minute is short enough that newly arrived mail moves the badges on its own, and a mark-read drops the cache outright so a count never sits stale after the operator changed it. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant this module acts on behalf of. |
 | `NATS_URL` | `nats://localhost:4222` | NATS event backbone. |
 | `LOG_LEVEL` | `info` | Logging verbosity. |
@@ -449,6 +524,7 @@ materialization of the landing view, not a mail store. Every table is scoped by 
 | `mail_label` | `(tenant_id, label_id)` | The rail's folders + unread counts, in rail order. |
 | `mail_sync` | `(tenant_id)` | The change cursor: Gmail `history_id`; IMAP `uid_validity`/`uid_next` reserved (all `BigInteger`). |
 | `mail_landing` | `(tenant_id, label)` | Per-folder landing metadata: the page-1 `next_cursor` (so a cached view keeps its "Older") and when it was last full-synced. |
+| `mail_category` | `(tenant_id, label, category_id)` | The Inbox's category tabs (#765): title, unread count, and the newest-message preview, in strip order, with the `cached_at` that drives the TTL. An empty `category_id` is the negative-cache row — "the provider was asked and has no categories here". |
 
 ---
 
@@ -531,3 +607,16 @@ IMAP specifically: a `UIDVALIDITY` rotation is exactly the "cursor too old to re
 `changed_threads_since` already returns `None` for (see the *Local cache* section below), which
 `CachedMailbox.reconcile` maps to `mail.sync_failed(reason="cursor_expired")` for free — no new
 failure-detection code needed on the reconcile side, only in the provider's own history walk.
+
+**Updated for the inbox category tabs (#765).** Two members were added **concrete**, not
+abstract, precisely so a provider doesn't have to care: `list_categories(label)` returns `[]` and
+`category_query(id)` returns `None` unless you override them, and the page then renders exactly as
+it always did. If your backend *does* classify inbox mail, implement both together — the tabs and
+the filter must agree on the same neutral ids (`primary` / `promotions` / `social` / `updates` /
+`forums`), because the shell round-trips the id it was given. Keep the classification behind
+`list_categories`: the shell never sees provider query syntax, which is what lets a **local** mail
+provider back the same tabs by classifying through the core's LLM gateway (constraint #8 — modules
+never call an LLM directly) without touching the page contract or the shell. Assembling the tabs is
+expected to be a fan-out, so return whatever is cheap and correct; the orchestrator
+(`CachedMailbox.categories`) owns the caching and swallows a failure to an empty strip so a broken
+classifier never costs the operator their mail.

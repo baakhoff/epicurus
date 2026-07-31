@@ -12,6 +12,7 @@ Required Google OAuth scopes (requested when the operator connects via
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import re
@@ -26,6 +27,8 @@ from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
     MailAttachment,
+    MailCategory,
+    MailCategoryPreview,
     MailCursor,
     MailLabel,
     MailMessage,
@@ -51,6 +54,30 @@ _SYSTEM_LABEL_TITLES = {
     "SPAM": "Spam",
     "TRASH": "Trash",
 }
+
+# Gmail's inbox categories, in the order the page's tab strip renders them (#765). These are
+# the ``CATEGORY_*`` system labels the rail above deliberately excludes: a category is not a
+# folder, it is a tab *over* the Inbox, so it belongs to a different UI element entirely.
+# Each entry maps a neutral tab id -> (title, the Gmail system label carrying its unread
+# count). The query operator is derived from the id itself (``category:<id>``) — Gmail's own
+# search vocabulary happens to use exactly these words, which is why the neutral ids were
+# chosen to match; :meth:`GmailProvider.category_query` is still the single translation point,
+# so a provider whose syntax differs changes only that method.
+#
+# ``primary`` maps to ``CATEGORY_PERSONAL``: Gmail labels "everything not in another category"
+# that way, and its ``category:primary`` search operator selects the same set — the
+# inbox-minus-categorized case.
+_GMAIL_CATEGORIES: tuple[tuple[str, str, str], ...] = (
+    ("primary", "Primary", "CATEGORY_PERSONAL"),
+    ("promotions", "Promotions", "CATEGORY_PROMOTIONS"),
+    ("social", "Social", "CATEGORY_SOCIAL"),
+    ("updates", "Updates", "CATEGORY_UPDATES"),
+    ("forums", "Forums", "CATEGORY_FORUMS"),
+)
+# The tab id Gmail treats as the fallback bucket. It is the one tab that renders even when
+# empty (an inbox with no Primary mail still has a Primary tab), and — on its own — is not
+# evidence that a mailbox is categorized at all.
+_DEFAULT_CATEGORY_ID = "primary"
 
 # The Gmail API scopes this module needs (beyond the default identity scopes the core
 # always requests). Declared in the manifest (``oauth_scopes``) so the shell requests them
@@ -257,6 +284,118 @@ class GmailProvider(MailProvider):
         )
         detail.raise_for_status()
         return _thread_summary(detail.json())
+
+    # ── inbox category tabs (#765) ───────────────────────────────────────────
+
+    def category_query(self, category_id: str) -> str | None:
+        """``category:<id>`` for a known tab id, else ``None`` (#765).
+
+        The single translation point between the neutral tab id the page contract speaks and
+        Gmail's search vocabulary. An unknown id yields ``None`` so a hand-crafted
+        ``?tab=whatever`` (or a bad ``mail_search(category=…)``) can never be pasted into a
+        Gmail query — the caller drops the scoping instead.
+        """
+        if category_id not in {cid for cid, _title, _label in _GMAIL_CATEGORIES}:
+            return None
+        return f"category:{category_id}"
+
+    async def list_categories(self, *, label: str) -> list[MailCategory]:
+        """The Inbox's category tabs: unread count + newest-message preview each (#765).
+
+        Three waves, each fanned out concurrently so the whole assembly costs ~3 round-trip
+        generations rather than ~13 serial ones:
+
+        1. **Probe** every category for its newest thread in *label* (one 1-result
+           ``threads.list`` each). A category with no thread is empty.
+        2. **Decide.** If nothing outside Primary has mail, this mailbox isn't categorized
+           (Gmail tabs off, or a fresh account) → return ``[]``, and the page renders with no
+           tab strip at all. Otherwise every populated category gets a tab, plus Primary even
+           when empty — so Forums (and any other empty category) is hidden exactly as Gmail
+           hides it.
+        3. **Enrich** each surviving tab: a metadata ``threads.get`` for the preview
+           (reusing :meth:`_fetch_thread_summary`, so a tab preview and a list row can never
+           disagree about who a thread is from) and a ``labels.get`` for the unread count.
+
+        Both enrichment reads are best-effort (:func:`_label_unread` already swallows errors;
+        the preview is wrapped the same way) — a thread that vanished between the probe and
+        the fetch costs that tab its preview, never the whole strip.
+
+        **Count semantics.** ``messagesUnread`` on a ``CATEGORY_*`` label counts unread mail
+        carrying that category anywhere in the mailbox, including archived mail — Gmail's own
+        tab badge counts the Inbox only. In practice categorized mail is read or archived
+        together so the two agree closely; narrowing it would cost a per-category counting
+        query, which is recorded as a follow-up rather than paid on every refresh.
+        """
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            newest = dict(
+                zip(
+                    (cid for cid, _t, _l in _GMAIL_CATEGORIES),
+                    await asyncio.gather(
+                        *(
+                            self._newest_category_thread(client, label, cid)
+                            for cid, _title, _label_id in _GMAIL_CATEGORIES
+                        )
+                    ),
+                    strict=True,
+                )
+            )
+            if not any(
+                thread_id for cid, thread_id in newest.items() if cid != _DEFAULT_CATEGORY_ID
+            ):
+                return []  # not a categorized mailbox — no tab strip (a lone Primary is noise)
+            wanted = [
+                (cid, title, label_id)
+                for cid, title, label_id in _GMAIL_CATEGORIES
+                if newest[cid] is not None or cid == _DEFAULT_CATEGORY_ID
+            ]
+            previews = await asyncio.gather(
+                *(self._category_preview(client, newest[cid]) for cid, _t, _l in wanted)
+            )
+            counts = await asyncio.gather(
+                *(_label_unread(client, label_id) for _c, _t, label_id in wanted)
+            )
+            return [
+                MailCategory(id=cid, title=title, unread=count, preview=preview)
+                for (cid, title, _label_id), preview, count in zip(
+                    wanted, previews, counts, strict=True
+                )
+            ]
+
+    @staticmethod
+    async def _newest_category_thread(
+        client: httpx.AsyncClient, label: str, category_id: str
+    ) -> str | None:
+        """The newest thread id in *label* ∩ *category_id*, or ``None`` when that tab is empty.
+
+        One 1-result ``threads.list``: ``labelIds`` and ``q`` are ANDed by Gmail, so this is
+        "the Inbox, restricted to this category" — including the ``category:primary`` =
+        inbox-minus-categorized case, which no label id alone expresses.
+        """
+        resp = await client.get(
+            "/users/me/threads",
+            params={"labelIds": label, "q": f"category:{category_id}", "maxResults": 1},
+        )
+        resp.raise_for_status()
+        threads = resp.json().get("threads", [])
+        return str(threads[0]["id"]) if threads else None
+
+    @classmethod
+    async def _category_preview(
+        cls, client: httpx.AsyncClient, thread_id: str | None
+    ) -> MailCategoryPreview | None:
+        """The tab's one-line preview from its newest thread — ``None`` if there isn't one.
+
+        Best-effort like :func:`_label_unread`: a thread that was deleted between the probe
+        and this fetch drops the preview, never the tab (or the strip).
+        """
+        if thread_id is None:
+            return None
+        try:
+            summary = await cls._fetch_thread_summary(client, thread_id)
+        except httpx.HTTPError:
+            return None
+        return MailCategoryPreview(sender=summary.sender, subject=summary.subject)
 
     async def get_thread(self, thread_id: str) -> MailThread:
         """The full conversation — every message with body + attachment metadata (ADR-0087)."""

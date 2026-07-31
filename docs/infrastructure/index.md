@@ -103,14 +103,27 @@ application-side, unchanged from before. The edge gateway gets its own sibling,
 write verb allowed at all) — a compromised gateway (routing every inbound request, the bigger
 attack surface of the two) never inherits the restart/remove grant.
 
-Both proxy containers run as root (`user: "0:0"`) — the portable choice, since the host's
+The (opt-in) observability stack gets a third sibling, **`docker-proxy-observability`** (#724),
+fronting Prometheus's container-label service discovery and Alloy's container discovery + log
+tailing — also read-only, and itself gated behind the `observability` compose profile, so it
+only exists when that stack is up. Its allowlist is GET/HEAD-only like `docker-proxy-traefik`,
+but not identical to it: both consumers use Prometheus's `discovery/moby` SD library, which
+(confirmed against a live boot, not assumed by analogy) issues a HEAD `/_ping` probe Traefik
+never sends and calls `GET /networks` to resolve each container's network labels — without
+either, Prometheus's own discovery refresh fails outright ("Forbidden"), not just a missing
+label — and Alloy separately calls `GET /containers/{id}/logs` to actually tail a container's
+output. Details: [`infra/observability/README.md`](../../infra/observability/README.md#docker-access-724-adr-0109).
+
+All three proxy containers run as root (`user: "0:0"`) — the portable choice, since the host's
 docker-socket group id varies by distro/install method and Docker Desktop's VM socket doesn't
 expose one the same way at all, so matching a GID can't be a zero-config default. Root
 sidesteps that by reading the socket regardless of its owning group; `cap_drop: [ALL]`,
 `read_only: true`, and `no-new-privileges` remove everything else, so the allowlist — not the
 uid — is the actual boundary. This all works **out of the box**: a fresh `task up` applies a
 KV-cache change immediately (`applied: true`) and tears down a removed module's container at
-once, with no operator configuration.
+once, with no operator configuration. `tests/test_docker_proxy_allowlist.py` (#726) locks all
+three allowlists against drift — widening one now means deleting an assertion, not just adding
+a flag.
 
 **Escape hatch: the raw socket, opt-in.** Prefer `core-app` to hold `/var/run/docker.sock`
 directly instead of going through a third-party proxy image? Layer

@@ -69,9 +69,10 @@ loopback-bound and individually overridable.
 | `4318` | OTel collector — HTTP | `OTLP_HTTP_PORT` |
 | `3000` | Grafana | `GRAFANA_PORT` |
 
-> Ollama (`11434`), SearXNG, `blackbox-exporter`, `node-exporter`, and the two Docker-socket
-> proxies `docker-proxy-core` / `docker-proxy-traefik` (`2375` each, #708/ADR-0109) are
-> internal-only — not published to the host. They take no host port.
+> Ollama (`11434`), SearXNG, `blackbox-exporter`, `node-exporter`, and the three Docker-socket
+> proxies `docker-proxy-core` / `docker-proxy-traefik` / `docker-proxy-observability` (`2375`
+> each, #708/#724, ADR-0109) are internal-only — not published to the host. They take no host
+> port.
 >
 > The observability ports — Prometheus (`9090`), Alertmanager (`9093`), Loki (`3100`),
 > Tempo (`4317`/`4318`), Grafana (`3000`) — only bind when the stack is started with

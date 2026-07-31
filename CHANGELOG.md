@@ -40,6 +40,65 @@ images to GHCR.
   on float imprecision. Every real assertion in the test is untouched. `knowledge` 0.27.0→0.27.1
   (PATCH).
 
+- **The docs link checker now validates anchors in source references, not just the file** (#725)
+  — tier 2 of `scripts/check_docs_links.py` scans shipped source for repo-relative `docs/….md`
+  strings and asserted only that the file exists, so a comment pointing at
+  `docs/foo.md#some-section` kept passing after the heading it named was renamed or removed —
+  exactly the rot the checker exists to catch, and it fails silently: the reader follows the link
+  and lands at the top of the page with nothing reported anywhere. Anchored references now
+  resolve against the target file's headings, the same way tier 1 already validates internal doc
+  links. `_anchors_in()` additionally recognizes explicit `{#custom-anchor}` markdown syntax
+  alongside the auto-generated slug, so a heading that pins its own anchor is accepted rather
+  than reported broken. Tooling only — no package version bump (ADR-0017 scopes SemVer to
+  `services/*` and `libs/epicurus-core`).
+
+- **Vision models are no longer mistagged as code models in the model catalog** (#727) —
+  `_derive_tags` matched the bare substring `cod(?:e|er|ing)` against each catalog entry's name
+  and description, and "encoder" contains "code": llava, whose blurb describes a *vision
+  encoder*, came back tagged `code`, so the Models page filed it under coding models and the
+  `code` filter offered a model that cannot write code. The pattern is now word-bounded. Its
+  sibling `multiling` keeps a **leading** boundary only, deliberately — it is a prefix that must
+  still match "multilingual"/"multilinguality", and bounding both ends silently dropped
+  gemma3:1b's tag, which `test_parse_derives_tags` caught on the first push. Ships inside
+  `core-app` 0.104.0.
+
+- **First boot pulls the default models instead of 404ing until someone finds the Models page**
+  (#773, ADR-0118) — models are never baked into the Ollama image (the core owns the model
+  lifecycle, constraint #8, ADR-0010), so a fresh install booted an empty volume and the first
+  chat or embedding call failed with `model not found`, while the knowledge indexer failed
+  noisily in the background — verified on a from-scratch deployment. The core now closes that gap
+  itself: a fire-and-forget lifespan task waits for the runtime, resolves the deployment's
+  *effective* chat + embedding defaults (stored prefs, else `LLM_DEFAULT_MODEL` /
+  `MEMORY_EMBED_MODEL`), skips hosted-prefixed ids, and pulls whichever are missing through the
+  same `gateway.pull()` the Models page uses — then applies the same post-pull context sizing
+  (#386), so a first-boot model opens correctly sized too. It never blocks startup, readiness, or
+  a live turn; per-model retries back off exponentially (Ollama resumes partial downloads) and
+  exhaustion is a warning naming the Models page, never a crash. An unreachable runtime — a
+  hosted-only deployment running no Ollama at all — costs one warning after a bounded wait.
+  `LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default), blank to disable, or an explicit
+  comma-separated list; the CI smoke override pins it blank, since the gate asserts the wiring,
+  not the weights. `core-app` 0.103.0→0.104.0 (MINOR).
+
+- **Observability no longer mounts the raw Docker socket** (#724, #726, ADR-0109) — Prometheus
+  and Alloy each bind-mounted `/var/run/docker.sock` for container service discovery and log
+  tailing, and Prometheus additionally ran as `user: root` purely to read it — full Docker API
+  access, write included, for two components that only ever read. Both now reach Docker through
+  `docker-proxy-observability`, a third read-only `wollomatic/socket-proxy` sibling of
+  `docker-proxy-core` and `docker-proxy-traefik`, gated behind the same `observability` compose
+  profile so it exists only when that stack is up; Prometheus's `user: root` override is gone
+  along with the mount. The allowlist is GET/HEAD-only and was derived from a live boot rather
+  than copied from `docker-proxy-traefik` — both consumers use Prometheus's `discovery/moby`
+  library, which issues a `HEAD /_ping` probe Traefik never sends and calls `GET /networks` to
+  resolve each container's network labels, and omitting either makes discovery error outright
+  rather than merely degrade a label; Alloy's `loki.source.docker` separately needs
+  `GET /containers/{id}/logs` to tail at all, whose absence fails silently. New
+  `tests/test_docker_proxy_allowlist.py` renders the real `docker compose config` and pins all
+  three proxies' allowlists by equality, so widening one fails as loudly as breaking one — it
+  also asserts the socket reaches nothing but the proxies (scanned across every rendered service,
+  not a named few) and that the hardening flags (`cap_drop: [ALL]`, `read_only`,
+  `no-new-privileges`) stay put. Infra, docs, and a repo-root test only — no service or library
+  version bump.
+
 ### Added
 
 - **Inbox category tabs on the mail page** (#765) — Gmail's Primary / Promotions / Social /

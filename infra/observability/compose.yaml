@@ -26,25 +26,70 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  # Prometheus reaches Docker for service discovery (containers labelled
+  # epicurus.metrics.port, see prometheus.yml's docker_sd_configs) through
+  # docker-proxy-observability below — a third read-only sibling of docker-proxy-core /
+  # docker-proxy-traefik (#724, ADR-0109). No socket mount here, so the stock image's
+  # non-root `nobody` user is sufficient — no `user: root` override needed.
   prometheus:
     image: prom/prometheus:v3.1.0
     restart: unless-stopped
     # Opt-in: this whole stack only starts with `--profile observability` (see the header).
     profiles: [observability]
-    # Root so Docker service discovery can read the (read-only) docker socket —
-    # the stock image's `nobody` user cannot. Acceptable for a local,
-    # loopback-bound stack; swap in a docker-socket proxy if this ever hardens.
-    user: root
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
-      # Docker service discovery: modules are scraped by container label
-      # (epicurus.metrics.port) instead of a hand-maintained target list.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      docker-proxy-observability:
+        condition: service_started
+    logging: *default-logging
+    networks: [epicurus]
+
+  # Least-privilege Docker control for the observability stack (#724, ADR-0109) — a third
+  # read-only sibling of docker-proxy-core (services/core-app/compose.yaml) and
+  # docker-proxy-traefik (infra/edge/compose.yaml). Fronts Prometheus's container-label
+  # service discovery and Alloy's container discovery + log tailing below; neither consumer
+  # ever writes to Docker, so the allowlist is GET/HEAD-only. Verified against a live boot,
+  # not just guessed by analogy to docker-proxy-traefik — three calls neither core-app nor
+  # Traefik ever make, each confirmed by an actual "blocked request" log line before it was
+  # added: both consumers use Prometheus's `discovery/moby` SD library, which (unlike
+  # Traefik's provider) issues a HEAD `/_ping` liveness probe before GET, and separately
+  # calls `GET /networks` to resolve each container's network name/labels — omitting either
+  # doesn't just degrade a label, it makes Prometheus's own refresh error outright ("Unable
+  # to refresh target groups ... Forbidden"). Alloy's `loki.source.docker` separately calls
+  # `GET /containers/{id}/logs` to actually tail a container's output — discovery can
+  # succeed while this is still missing, so it needs its own check (confirmed with
+  # `reason="path not allowed"`, not just "forbidden IP", i.e. the client was recognized and
+  # only the path was refused).
+  docker-proxy-observability:
+    image: ghcr.io/wollomatic/socket-proxy:1.12.3
+    restart: unless-stopped
+    # Opt-in: this whole stack only starts with `--profile observability` (see the header).
+    profiles: [observability]
+    # Root is the portable choice here — see docker-proxy-core's comment in
+    # services/core-app/compose.yaml for why a host-matched GID can't be a zero-config default.
+    user: "0:0"
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=prometheus,alloy
+      - '-allowHEAD=/(v[0-9]+\.[0-9]+/)?_ping'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?_ping'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?version'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/json'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/[^/]+/json'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?containers/[^/]+/logs'
+      - '-allowGET=/(v[0-9]+\.[0-9]+/)?networks'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     logging: *default-logging
     networks: [epicurus]
 
@@ -130,6 +175,8 @@ services:
     logging: *default-logging
     networks: [epicurus]
 
+  # Alloy discovers epicurus's containers and tails their logs through
+  # docker-proxy-observability above (#724, ADR-0109) instead of a raw socket mount.
   alloy:
     image: grafana/alloy:v1.5.1
     restart: unless-stopped
@@ -141,8 +188,11 @@ services:
       - /etc/alloy/config.alloy
     volumes:
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on: [loki]
+    depends_on:
+      docker-proxy-observability:
+        condition: service_started
+      loki:
+        condition: service_started
     logging: *default-logging
     networks: [epicurus]
 

@@ -1,10 +1,11 @@
 // Grafana Alloy — discover epicurus's Docker containers and ship their logs to Loki.
 //
-// Alloy reads the Docker socket directly. This works on Docker Engine 29 / Moby v2
-// (min API 1.40): Alloy's client negotiates the API version, unlike Traefik v3.3.
+// Alloy reaches Docker through docker-proxy-observability (#724, ADR-0109) — a read-only
+// allowlist proxy, not a raw socket mount. Alloy's client negotiates the Docker API version
+// itself, unlike Traefik v3.3, so the proxy needs no version pinning on this side either.
 
 discovery.docker "containers" {
-  host = "unix:///var/run/docker.sock"
+  host = "tcp://docker-proxy-observability:2375"
 }
 
 // Keep only this compose project's containers, and turn Docker metadata into useful
@@ -36,7 +37,7 @@ discovery.relabel "epicurus" {
 }
 
 loki.source.docker "containers" {
-  host       = "unix:///var/run/docker.sock"
+  host       = "tcp://docker-proxy-observability:2375"
   targets    = discovery.relabel.epicurus.output
   forward_to = [loki.write.default.receiver]
 }

@@ -45,6 +45,19 @@ datasources are pre-wired:
 - **Alerts** are evaluated by Prometheus from `infra/observability/prometheus/rules/`
   and visible in Grafana under **Alerting → Alert rules** (External — Prometheus).
 
+## Docker access (#724, ADR-0109)
+
+Prometheus's container-label service discovery and Alloy's container discovery + log
+tailing reach Docker through **`docker-proxy-observability`** — a read-only
+[`wollomatic/socket-proxy`](https://github.com/wollomatic/socket-proxy) sibling of
+`docker-proxy-core` / `docker-proxy-traefik` (#708, ADR-0109), gated behind this same
+`observability` profile so it only runs when this stack does. Neither Prometheus nor
+Alloy ever holds the raw socket mount — `docker_sd_configs`/`discovery.docker`/
+`loki.source.docker` all point at `tcp://docker-proxy-observability:2375` instead. Full
+allowlist rationale (and how it differs from `docker-proxy-traefik`'s, despite both
+being GET/HEAD-only): [Docker-socket
+access](../../docs/infrastructure/index.md#docker-socket-access-708-adr-0109).
+
 Send OTLP traces to Tempo at `tempo:4317` (gRPC) / `tempo:4318` (HTTP) on the
 internal network (also published on the host, loopback-bound by default).
 

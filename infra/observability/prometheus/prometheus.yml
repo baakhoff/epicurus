@@ -19,10 +19,11 @@ scrape_configs:
   # epicurus services expose Prometheus metrics at /metrics via epicurus-core.
   # They are discovered from Docker by the `epicurus.metrics.port` container
   # label (every module's compose fragment sets it), so adding a module needs
-  # no Prometheus edit.
+  # no Prometheus edit. Reached through docker-proxy-observability (#724, ADR-0109) —
+  # a read-only allowlist proxy, not the raw socket.
   - job_name: epicurus-services
     docker_sd_configs:
-      - host: unix:///var/run/docker.sock
+      - host: tcp://docker-proxy-observability:2375
     relabel_configs:
       # Only containers that opt in via the label are scraped.
       - source_labels: [__meta_docker_container_label_epicurus_metrics_port]

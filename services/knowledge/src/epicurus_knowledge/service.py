@@ -79,6 +79,7 @@ from epicurus_knowledge.suggestions import (
     REVIEW_PAGE_ID,
     SuggestionReview,
     SuggestionStore,
+    SuggestionTargetGone,
     validate_operation,
 )
 
@@ -431,6 +432,12 @@ def build_module(
         the same apply path the operator would. A failed auto-apply (e.g. a read-only watched
         vault) leaves the change staged rather than losing it.
 
+        The one exception is a delete auto-apply whose target is already gone (#761):
+        ``review.approve`` still resolves the suggestion (it does not stay staged), so
+        reusing ``pending_msg``'s "it is pending your review" framing would be false —
+        :class:`~epicurus_knowledge.suggestions.SuggestionTargetGone` is caught separately
+        below and reported as what actually happened instead.
+
         Every caller is annotated ``side_effect="propose"`` (#721, ADR-0112): accurate when
         review is on for this module; with it off, a propose-autonomy automation inherits the
         same direct-apply behavior chat already has here — an accepted interaction, not a bug
@@ -445,6 +452,11 @@ def build_module(
             return tool_envelope(pending_msg, [])
         try:
             await review.approve(sid)
+        except SuggestionTargetGone as exc:
+            # Unlike the generic failure below, approve() already resolved this suggestion
+            # (audit + dequeue) before raising — it is not "pending review" anymore, so
+            # report the honest not-found outcome plainly instead of pending_msg's framing.
+            raise RuntimeError(str(exc.detail)) from exc
         except Exception as exc:
             detail = getattr(exc, "detail", str(exc))
             # Raise rather than return a success envelope (#690): the suggestion stays staged

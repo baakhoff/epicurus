@@ -14,7 +14,7 @@ from epicurus_core.contracts import ToolEnvelope
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.refs import SOURCE_DOC, SOURCE_NOTE, decode_ref
 from epicurus_knowledge.service import build_module
-from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore
+from epicurus_knowledge.suggestions import SuggestionReview, SuggestionStore, SuggestionTargetGone
 
 
 def _hit(note_path: str, text: str, score: float, heading: str | None = None) -> SearchHit:
@@ -282,3 +282,49 @@ async def test_finalize_apply_failure_raises_not_a_success_envelope(tmp_path: Pa
         await module.mcp.call_tool(
             "knowledge_create_document", {"path": "kb/new.md", "content": "hello"}
         )
+
+
+async def test_finalize_target_gone_reports_honest_outcome_not_generic_failure(
+    tmp_path: Path,
+) -> None:
+    """A delete auto-apply whose target is already gone (#761) is resolved by approve()
+    before it raises `SuggestionTargetGone` — unlike this test's sibling above (a genuine
+    failure that leaves the suggestion staged), `_finalize` must not wrap it in the generic
+    "review is off but applying failed" / pending_msg framing, since that would falsely
+    claim the suggestion is still pending review when it has already been dequeued."""
+    from epicurus_knowledge.module_docs import ModuleDocsIndexer
+    from epicurus_knowledge.reader import DiskVaultReader
+
+    vault = AsyncMock(spec=KnowledgeIndexer)
+    docs = AsyncMock(spec=KnowledgeIndexer)
+    module_docs = AsyncMock(spec=ModuleDocsIndexer)
+    suggestions = SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
+    await suggestions.init()
+    reader = DiskVaultReader(tmp_path)
+    platform = AsyncMock(spec=PlatformClient)
+    platform.get_suggestions_enabled = AsyncMock(return_value=False)  # review is off
+    review = AsyncMock(spec=SuggestionReview)
+    review.approve = AsyncMock(
+        side_effect=SuggestionTargetGone(
+            status_code=404,
+            detail='"kb/ghost.md" does not exist — it may have been deleted or moved.',
+        )
+    )
+    module = build_module(
+        vault,
+        docs,
+        module_docs,
+        suggestions,
+        review,
+        platform,
+        tenant="test",
+        vault_path=tmp_path,
+        reader=reader,
+    )
+    with pytest.raises(ToolError, match=r"does not exist") as err:
+        await module.mcp.call_tool(
+            "knowledge_propose_edit", {"path": "kb/ghost.md", "operation": "delete"}
+        )
+    message = str(err.value)
+    assert "applying failed" not in message
+    assert "pending your review" not in message.lower()

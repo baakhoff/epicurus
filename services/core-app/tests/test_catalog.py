@@ -411,6 +411,17 @@ def test_live_index_reads_descriptions_pulls_and_capabilities() -> None:
     assert _entry_by_id(entries, "laguna-s-2.1").pulls == "8,171"
 
 
+def test_live_index_vision_models_not_mistagged_as_code() -> None:
+    # llava's description contains "vision encoder", which contains "encoder".
+    # Without word boundaries, the code pattern cod(?:e|er|ing) would match "encoder"
+    # and incorrectly tag the vision model as "code". Regression test for issue #727.
+    entries = parse_library(_live_index())
+    llava = _entry_by_id(entries, "llava:7b")
+    assert "vision" in llava.tags
+    assert "code" not in llava.tags
+    assert llava.description.strip()  # description exists and contains "encoder"
+
+
 def test_live_index_distinguishes_cloud_only_from_hybrid() -> None:
     entries = parse_library(_live_index())
     # A cloud-only family: one bare entry, tagged cloud.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -14,6 +14,8 @@ from epicurus_core import EventEnvelope
 from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
+    MailCategory,
+    MailCategoryPreview,
     MailCursor,
     MailLabel,
     MailMessage,
@@ -33,6 +35,19 @@ def _test_engine() -> AsyncEngine:
     )
 
 
+def _categories_off(provider: MailProvider) -> None:
+    """Default a provider stub to "no inbox categories" unless the test says otherwise (#765).
+
+    ``list_categories`` / ``category_query`` are concrete no-ops on the seam — a provider that
+    doesn't classify mail inherits them — but ``AsyncMock(spec=MailProvider)`` still auto-stubs
+    them into truthy mocks. Stating the capability-gated default here keeps every pre-tabs test
+    asserting exactly the page it was written for.
+    """
+    if not hasattr(provider.list_categories, "assert_awaited"):
+        provider.list_categories = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        provider.category_query = MagicMock(return_value=None)  # type: ignore[method-assign]
+
+
 def _client_with_provider(provider: MailProvider) -> TestClient:
     """A TestClient over *provider* with a mocked event bus + in-memory cache (ADR-0087 tests).
 
@@ -42,6 +57,7 @@ def _client_with_provider(provider: MailProvider) -> TestClient:
     """
     if not hasattr(provider.health_check, "assert_awaited"):  # ensure health_check is mocked
         provider.health_check = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    _categories_off(provider)
     with (
         patch("epicurus_mail.app.GmailProvider", return_value=provider),
         patch("epicurus_mail.app.EventBus.from_settings", return_value=AsyncMock()),
@@ -390,6 +406,56 @@ class TestMailboxListRoute:
         provider.list_threads.assert_awaited_once_with(
             label="SENT", query=None, cursor="C1", limit=25
         )
+
+    def test_tabs_are_absent_when_the_provider_has_no_categories(self) -> None:
+        """The capability gate end-to-end: today's payload, with an empty tabs block (#765)."""
+        provider = AsyncMock(spec=MailProvider)
+        provider.current_cursor = AsyncMock(return_value=MailCursor(history_id=1))
+        provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
+        provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+        with _client_with_provider(provider) as client:
+            body = client.get("/pages/mailbox").json()
+        assert body["tabs"] == []
+        assert body["active_tab"] == ""
+
+    def test_inbox_returns_the_tab_strip(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.current_cursor = AsyncMock(return_value=MailCursor(history_id=1))
+        provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
+        provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+        provider.list_categories = AsyncMock(
+            return_value=[
+                MailCategory(id="primary", title="Primary", unread=2),
+                MailCategory(
+                    id="promotions",
+                    title="Promotions",
+                    unread=41,
+                    preview=MailCategoryPreview(sender="deals@x.com", subject="50% off"),
+                ),
+            ]
+        )
+        provider.category_query = MagicMock(side_effect=lambda cid: f"category:{cid}")
+        with _client_with_provider(provider) as client:
+            body = client.get("/pages/mailbox").json()
+        assert [t["id"] for t in body["tabs"]] == ["primary", "promotions"]
+        assert body["tabs"][1]["unread"] == 41
+        # The wire key is ``from``, not the model's ``sender``.
+        assert body["tabs"][1]["preview"] == {"from": "deals@x.com", "subject": "50% off"}
+
+    def test_tab_param_scopes_the_thread_list(self) -> None:
+        provider = AsyncMock(spec=MailProvider)
+        provider.list_labels = AsyncMock(return_value=[])
+        provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+        provider.list_categories = AsyncMock(
+            return_value=[MailCategory(id="promotions", title="Promotions")]
+        )
+        provider.category_query = MagicMock(side_effect=lambda cid: f"category:{cid}")
+        with _client_with_provider(provider) as client:
+            body = client.get("/pages/mailbox?tab=promotions").json()
+        provider.list_threads.assert_awaited_once_with(
+            label="INBOX", query="category:promotions", cursor=None, limit=25
+        )
+        assert body["active_tab"] == "promotions"
 
     def test_thread_id_returns_conversation(self) -> None:
         provider = AsyncMock(spec=MailProvider)

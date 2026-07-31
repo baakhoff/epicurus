@@ -1,8 +1,10 @@
 /**
  * MailboxView — the `mailbox` archetype (ADR-0087): a mail client rendered entirely by the
  * shell (the mail module ships zero markup). A labels rail selects a folder; the main pane
- * shows a paginated thread list, one open conversation, or a compose/reply form. Reads flow
- * through the generic module-page proxy (`?label=`/`?q=`/`?cursor=`/`?thread_id=`); messages
+ * shows a paginated thread list, one open conversation, or a compose/reply form. Over the
+ * Inbox it also shows Gmail-style category tabs when the module supplies them (#765) — the
+ * module sends `{id, title, unread, preview}` per tab and this draws the strip. Reads flow
+ * through the generic module-page proxy (`?label=`/`?q=`/`?tab=`/`?cursor=`/`?thread_id=`); messages
  * render through the shared `MailMessageView` (the same component the panel `email-reader`
  * uses); sends go through the gated, operator-only send proxy (never the agent — ADR-0085).
  */
@@ -17,6 +19,7 @@ import {
   MailboxListData,
   MailboxThreadData,
   type MailboxReply,
+  type MailboxTab,
   type MailThreadData,
   type MailThreadSummary,
 } from "@/lib/contracts";
@@ -96,6 +99,104 @@ function LabelRail({
         </button>
       ))}
     </nav>
+  );
+}
+
+/* ── inbox category tabs (#765) ──────────────────────────────────────────── */
+
+/** The id the tab strip controls, so `aria-controls` has something to point at. */
+const THREAD_LIST_ID = "mailbox-thread-list";
+
+/** `From — Subject` for a tab's dim one-line preview; either half may be missing. */
+function previewLine(preview: MailboxTab["preview"]): string {
+  if (!preview) return "";
+  return [preview.from, preview.subject].filter(Boolean).join(" — ");
+}
+
+/**
+ * Gmail-style category tabs over the Inbox (#765). Rendered **only** when the module supplies
+ * them: a non-Inbox folder, a search, or a provider that doesn't classify mail sends no tabs
+ * and this never mounts, so the page is byte-for-byte the pre-tabs one.
+ *
+ * Selecting a tab scopes the thread list; selecting the *active* tab again clears the filter
+ * and returns to the whole Inbox. Unlike Gmail there is no implicit "always on Primary": the
+ * unscoped Inbox is the landing view because that is the one the module serves from its local
+ * cache instantly (ADR-0096, #623) — defaulting to a tab would trade that instant open for a
+ * live provider read on every single visit.
+ *
+ * Roving tabindex + arrow keys, matching the shared `Tabs` control; the strip itself scrolls
+ * horizontally so five tabs stay reachable on a phone without squeezing the titles.
+ */
+function CategoryTabs({
+  tabs,
+  active,
+  onSelect,
+}: {
+  tabs: MailboxTab[];
+  active: string;
+  onSelect: (id: string) => void;
+}) {
+  // With nothing selected the roving focus starts on the first tab, so the strip is always
+  // reachable by keyboard even before a choice has been made.
+  const focused = tabs.some((t) => t.id === active) ? active : tabs[0]?.id;
+  const move = (delta: number) => {
+    const index = tabs.findIndex((t) => t.id === focused);
+    if (index < 0) return;
+    onSelect(tabs[(index + delta + tabs.length) % tabs.length].id);
+  };
+
+  return (
+    <div
+      role="tablist"
+      aria-label="Inbox categories"
+      className="flex shrink-0 gap-1 overflow-x-auto border-b border-edge px-2"
+      onKeyDown={(e) => {
+        if (e.key === "ArrowRight") {
+          e.preventDefault();
+          move(1);
+        } else if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          move(-1);
+        }
+      }}
+    >
+      {tabs.map((tab) => {
+        const selected = tab.id === active;
+        const preview = previewLine(tab.preview);
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            aria-controls={THREAD_LIST_ID}
+            tabIndex={tab.id === focused ? 0 : -1}
+            title={selected ? "Show all Inbox mail" : undefined}
+            onClick={() => onSelect(selected ? "" : tab.id)}
+            className={cn(
+              "flex w-40 shrink-0 flex-col gap-0.5 border-b-2 px-2.5 py-1.5 text-left transition-colors",
+              selected
+                ? "border-accent text-ink"
+                : "border-transparent text-ink-dim hover:bg-surface-2 hover:text-ink",
+            )}
+          >
+            <span className="flex items-center gap-1.5">
+              <span className={cn("min-w-0 flex-1 truncate text-sm", selected && "font-semibold")}>
+                {tab.title}
+              </span>
+              {typeof tab.unread === "number" && tab.unread > 0 && (
+                <span className="shrink-0 rounded-full bg-surface-3 px-1.5 text-[11px] text-ink-dim tabular-nums">
+                  {tab.unread}
+                </span>
+              )}
+            </span>
+            {/* The dim one-line preview of the tab's newest message; a category with no mail
+                says so rather than leaving a ragged blank row in the strip. */}
+            <span className="truncate text-[11px] text-ink-faint">{preview || "Nothing here"}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -289,6 +390,9 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
   const [label, setLabel] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [submitted, setSubmitted] = useState("");
+  // The selected Inbox category tab (#765); "" is the unscoped Inbox — the cache-first
+  // landing view. Cleared alongside paging whenever the folder or the search changes.
+  const [tab, setTab] = useState("");
   // Cursor pagination (never offset): a stack of the tokens used per page — [null] is page 1,
   // Next pushes the server's next_cursor, Back pops. Reset whenever the label/query changes.
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
@@ -299,11 +403,12 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
   const resetPaging = useCallback(() => setCursors([null]), []);
 
   const listQuery = useQuery({
-    queryKey: ["module-page", module, pageId, "list", label, submitted, cursor],
+    queryKey: ["module-page", module, pageId, "list", label, submitted, tab, cursor],
     queryFn: () => {
       const params: Record<string, string> = {};
       if (label) params.label = label;
       if (submitted) params.q = submitted;
+      if (tab) params.tab = tab;
       if (cursor) params.cursor = cursor;
       return api.modulePage(module, pageId, params);
     },
@@ -326,7 +431,9 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
   // data (#712): keeping the previous folder on screen resolves the list query to `success` on the
   // very first render of an unvisited folder, before that folder's own read has landed, which would
   // re-open exactly the race the gate exists to close. Search / deeper pages skip it.
-  const isLanding = !submitted && !cursor;
+  // A tab-scoped list is a live provider read (the cache only materializes the *unscoped*
+  // landing page), so it is not a landing view and must not trigger the reconcile read (#765).
+  const isLanding = !submitted && !cursor && !tab;
   const reconcileQuery = useQuery({
     queryKey: ["module-page", module, pageId, "reconcile", label],
     queryFn: () => {
@@ -359,12 +466,21 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
     setLabel(id);
     setSubmitted("");
     setSearch("");
+    setTab("");
     resetPaging();
     setOpenThreadId(null);
     setComposing(false);
   };
   const runSearch = () => {
     setSubmitted(search.trim());
+    // A search spans every folder, so an Inbox category filter can't survive it (#765) — the
+    // module drops the tabs from the payload for a search, and this drops the selection.
+    setTab("");
+    resetPaging();
+    setOpenThreadId(null);
+  };
+  const selectTab = (id: string) => {
+    setTab(id);
     resetPaging();
     setOpenThreadId(null);
   };
@@ -449,6 +565,12 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
           </Button>
         </div>
 
+        {/* Gmail-style category tabs over the Inbox (#765) — present only when the module
+            supplied them, and only over the list (a thread or the composer owns the pane). */}
+        {!composing && !openThreadId && list && list.tabs.length > 0 && (
+          <CategoryTabs tabs={list.tabs} active={tab} onSelect={selectTab} />
+        )}
+
         {/* Each view owns its own scroll so a list can pin its Newer/Older bar to the bottom
             (#624) instead of scrolling it away with the rows. */}
         <div className="min-h-0 flex-1 overflow-hidden">
@@ -500,6 +622,7 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
           ) : list && list.threads.length > 0 ? (
             <ThreadList
               list={list}
+              tabbed={list.tabs.length > 0}
               onOpen={setOpenThreadId}
               onPrev={() => setCursors((c) => (c.length > 1 ? c.slice(0, -1) : c))}
               onNext={() =>
@@ -512,7 +635,11 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
               <EmptyState quote={submitted ? "No messages match your search." : "Nothing here."}>
                 <p className="text-sm text-ink-dim">
                   <Mail size={14} className="mr-1 inline text-ink-faint" />
-                  {submitted ? "Try a different search." : "This folder is empty."}
+                  {submitted
+                    ? "Try a different search."
+                    : tab
+                      ? "This category is empty."
+                      : "This folder is empty."}
                 </p>
               </EmptyState>
             </div>
@@ -525,19 +652,26 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
 
 function ThreadList({
   list,
+  tabbed,
   onOpen,
   onPrev,
   onNext,
   hasPrev,
 }: {
   list: MailboxListData;
+  /** Whether a category tab strip is above this list (#765) — it becomes that strip's panel. */
+  tabbed: boolean;
   onOpen: (id: string) => void;
   onPrev: () => void;
   onNext: () => void;
   hasPrev: boolean;
 }) {
   return (
-    <div className="flex h-full flex-col">
+    <div
+      id={THREAD_LIST_ID}
+      role={tabbed ? "tabpanel" : undefined}
+      className="flex h-full flex-col"
+    >
       {/* the rows scroll… */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {list.threads.map((thread) => (

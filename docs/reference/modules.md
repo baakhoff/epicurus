@@ -571,11 +571,21 @@ still accepts a raw RRULE. The module declares the format once on its tool param
 `actions` vocabulary works for any archetype that wants core-rendered mutations.
 
 **The `mailbox` archetype (a mail client, ADR-0087).** One `GET /pages/{id}` read serves both
-panes (query params forwarded, no new read endpoint): the **list** (`?label=`, `?q=`, `?cursor=`)
+panes (query params forwarded, no new read endpoint): the **list** (`?label=`, `?q=`, `?tab=`, `?cursor=`)
 returns the folders rail + one cursor-paginated page of thread summaries; the **thread**
 (`?thread_id=`) returns `{thread: {id, subject, messages, reply}}`, where each message reuses the
 `EmailMessage` shape (extended with `attachments`) so the page and the panel `email-reader` share
-one renderer. The mail module additionally serves the plain **landing** list (no `?q=`/`?cursor=`)
+one renderer. On the Inbox the list read also carries **category tabs** (#765) — an optional
+`tabs: [{id, title, unread, preview: {from, subject}}]` block plus `active_tab`, which the shell
+renders as a Gmail-style strip over the list (active underline, unread badge, dim one-line preview
+of that category's newest message). Selecting a tab sends its **neutral** id back as `?tab=<id>`
+and the module scopes the listing through the same label/query mechanism the rail and search
+already use — no provider query syntax reaches the shell, so a provider that classifies mail some
+other way (a local classifier through the core's LLM gateway, constraint #8) needs no shell change.
+The block is absent for every non-Inbox folder, for a search, and for a provider without
+categories; **a payload without `tabs` renders exactly the page it did before tabs existed.**
+
+The mail module additionally serves the plain **landing** list (no `?q=`/`?tab=`/`?cursor=`)
 from a tenant-scoped **local cache** for an instant open, with `?reconcile=1` as a background
 second read that pulls only the provider delta into the cache (ADR-0096, #623) — a
 module-internal optimization the archetype contract doesn't otherwise mandate. Pagination is **cursor-only** (`next_cursor`, never offset — mailboxes are unbounded);

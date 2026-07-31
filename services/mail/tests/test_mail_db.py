@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_mail.db import MailCache
-from epicurus_mail.provider import MailCursor, MailLabel, MailThreadSummary
+from epicurus_mail.provider import (
+    MailCategory,
+    MailCategoryPreview,
+    MailCursor,
+    MailLabel,
+    MailThreadSummary,
+)
 
 TENANT = "local"
 OTHER = "tenant-2"
@@ -205,3 +211,108 @@ async def test_init_is_idempotent() -> None:
     cache = await _cache()
     await cache.init()  # second run must not raise
     assert (await cache.get_cursor(tenant_id=TENANT)).is_empty()
+
+
+# ── category tabs (#765) ─────────────────────────────────────────────────────
+
+
+def _category(
+    cid: str, title: str, *, unread: int | None = 1, preview: bool = True
+) -> MailCategory:
+    return MailCategory(
+        id=cid,
+        title=title,
+        unread=unread,
+        preview=MailCategoryPreview(sender=f"{cid}@x.com", subject=f"newest-{cid}")
+        if preview
+        else None,
+    )
+
+
+async def test_categories_round_trip_in_stored_order() -> None:
+    cache = await _cache()
+    await cache.replace_categories(
+        tenant_id=TENANT,
+        label="INBOX",
+        categories=[
+            _category("primary", "Primary", unread=2),
+            _category("promotions", "Promotions", unread=41),
+        ],
+    )
+    tabs = await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=60)
+    assert tabs is not None
+    assert [(t.id, t.title, t.unread) for t in tabs] == [
+        ("primary", "Primary", 2),
+        ("promotions", "Promotions", 41),
+    ]
+    assert tabs[1].preview is not None
+    assert tabs[1].preview.sender == "promotions@x.com"
+
+
+async def test_a_previewless_or_uncountable_tab_round_trips_as_none() -> None:
+    """ "No preview" and "no count" are distinct from blank/zero — the shell renders them so."""
+    cache = await _cache()
+    await cache.replace_categories(
+        tenant_id=TENANT,
+        label="INBOX",
+        categories=[_category("forums", "Forums", unread=None, preview=False)],
+    )
+    tabs = await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=60)
+    assert tabs is not None
+    assert tabs[0].preview is None
+    assert tabs[0].unread is None
+
+
+async def test_a_cold_category_cache_is_a_miss_not_an_empty_answer() -> None:
+    cache = await _cache()
+    assert await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=60) is None
+
+
+async def test_no_categories_is_cached_as_an_answer_not_a_miss() -> None:
+    """Without the negative-cache row an uncategorized mailbox re-probes on every render."""
+    cache = await _cache()
+    await cache.replace_categories(tenant_id=TENANT, label="INBOX", categories=[])
+    assert await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=60) == []
+
+
+async def test_categories_expire_with_the_ttl() -> None:
+    cache = await _cache()
+    await cache.replace_categories(
+        tenant_id=TENANT, label="INBOX", categories=[_category("primary", "Primary")]
+    )
+    # A zero-second TTL makes anything already written stale (the rows were stamped before now).
+    assert await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=-1) is None
+
+
+async def test_invalidate_categories_drops_them_for_the_tenant_only() -> None:
+    cache = await _cache()
+    for tenant in (TENANT, OTHER):
+        await cache.replace_categories(
+            tenant_id=tenant, label="INBOX", categories=[_category("primary", "Primary")]
+        )
+    await cache.invalidate_categories(tenant_id=TENANT)
+    assert await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=60) is None
+    assert await cache.get_categories(tenant_id=OTHER, label="INBOX", max_age_s=60) is not None
+
+
+async def test_categories_are_scoped_per_label() -> None:
+    cache = await _cache()
+    await cache.replace_categories(
+        tenant_id=TENANT, label="INBOX", categories=[_category("primary", "Primary")]
+    )
+    assert await cache.get_categories(tenant_id=TENANT, label="SENT", max_age_s=60) is None
+
+
+async def test_replace_categories_swaps_rather_than_accumulates() -> None:
+    cache = await _cache()
+    await cache.replace_categories(
+        tenant_id=TENANT,
+        label="INBOX",
+        categories=[_category("primary", "Primary"), _category("social", "Social")],
+    )
+    await cache.replace_categories(
+        tenant_id=TENANT, label="INBOX", categories=[_category("primary", "Primary")]
+    )
+    tabs = await cache.get_categories(tenant_id=TENANT, label="INBOX", max_age_s=60)
+    assert tabs is not None
+    assert [t.id for t in tabs] == ["primary"]

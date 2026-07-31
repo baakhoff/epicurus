@@ -42,6 +42,27 @@ images to GHCR.
 
 ### Added
 
+- **Inbox category tabs on the mail page** (#765) — Gmail's Primary / Promotions / Social /
+  Updates tabs, in our mailbox: a strip over the Inbox list, each tab carrying its unread count
+  and a dim one-line preview of its newest message, and Forums appearing only when it has mail
+  (exactly as Gmail hides an empty one). Selecting a tab filters the thread list through the same
+  label/query mechanism the rail and search already use, so **Primary correctly means
+  inbox-minus-categorized**. Gmail's `CATEGORY_*` labels stay out of the folder rail where
+  ADR-0087 put them — a tab over one folder is a different UI element, and this is that element.
+  The `MailProvider` seam gains two **concrete, capability-gated** members — `list_categories`
+  (the tabs, as presentation-ready data) and `category_query` (the single point where a neutral
+  tab id becomes provider query syntax) — so a provider that doesn't classify mail inherits the
+  no-op defaults and the page renders exactly as it did before. The strip is drawn entirely by
+  the shell from module *data* (ADR-0018): no markup leaves the module, and the neutral tab ids
+  are the local-first seam — a future local mail provider can back the same tabs by classifying
+  through the core's LLM gateway (constraint #8) with zero shell change. Assembling the tabs is a
+  provider fan-out, so they are cached in a new tenant-scoped `mail_category` table on a short TTL
+  (`MAIL_CATEGORY_TTL_S`, default 60s, with a negative-cache row so an *uncategorized* mailbox
+  isn't the expensive case); a mark-read drops that cache, so the active tab's count converges
+  through the shell's existing invalidation with no full reload. `mail_search` gains a matching
+  `category` argument, so "summarize today's Promotions" works in chat without the model knowing
+  Gmail query syntax. `mail` 0.16.0→0.17.0 (MINOR) · `web` 0.129.0→0.130.0 (MINOR).
+
 - **External file mounts** (#731) — add a directory to Files the way you'd add a drive: an
   operator binds a host folder (or a whole drive) into `core-app` via a compose overlay
   (`services/core-app/compose.external-mounts.yaml`, `task external-mounts-up` — never a

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -12,6 +12,8 @@ from epicurus_mail.cache import CachedMailbox, LandingBundle
 from epicurus_mail.provider import (
     ComposedMessage,
     MailAttachment,
+    MailCategory,
+    MailCategoryPreview,
     MailLabel,
     MailMessage,
     MailProvider,
@@ -27,6 +29,7 @@ from epicurus_mail.service import (
     build_mailbox_thread,
     build_module,
     message_payload,
+    tab_payload,
 )
 
 
@@ -117,6 +120,58 @@ async def test_mail_search_clamps_min_to_1() -> None:
     module = build_module(provider)
     await module.mcp.call_tool("mail_search", {"query": "x", "max_results": 0})
     provider.search.assert_called_once_with("x", 1)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "category,query,expected",
+    [
+        ("promotions", "newer_than:1d", "category:promotions newer_than:1d"),
+        ("primary", "is:unread", "category:primary is:unread"),
+        # A category on its own is a complete filter — the empty query mustn't leave a
+        # trailing space Gmail would have to forgive.
+        ("social", "", "category:social"),
+        # Case and surrounding whitespace are the model's, not the contract's.
+        ("  Promotions  ", "x", "category:promotions x"),
+    ],
+)
+async def test_mail_search_ands_a_category_into_the_query(
+    category: str, query: str, expected: str
+) -> None:
+    """ "Summarize today's Promotions" works without the model knowing Gmail syntax (#765)."""
+    provider = _make_provider()
+    provider.category_query = MagicMock(  # type: ignore[attr-defined]
+        side_effect=lambda cid: (
+            f"category:{cid}" if cid in {"promotions", "primary", "social"} else None
+        )
+    )
+    module = build_module(provider)
+    await module.mcp.call_tool(
+        "mail_search", {"query": query, "max_results": 5, "category": category}
+    )
+    provider.search.assert_called_once_with(expected, 5)  # type: ignore[attr-defined]
+
+
+async def test_mail_search_without_a_category_is_untouched() -> None:
+    provider = _make_provider()
+    provider.category_query = MagicMock(return_value=None)  # type: ignore[attr-defined]
+    module = build_module(provider)
+    await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    provider.search.assert_called_once_with("from:alice", 10)  # type: ignore[attr-defined]
+    provider.category_query.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_mail_search_reports_an_unsupported_category_instead_of_widening() -> None:
+    """Silently dropping the filter would hand back *all* mail for a narrowed request."""
+    provider = _make_provider()
+    provider.category_query = MagicMock(return_value=None)  # type: ignore[attr-defined]
+    module = build_module(provider)
+    content, _ = await module.mcp.call_tool(
+        "mail_search", {"query": "x", "category": "newsletters"}
+    )
+    text = content[0].text  # type: ignore[attr-defined]
+    assert "newsletters" in text
+    assert "promotions" in text  # names the categories that do exist
+    provider.search.assert_not_called()  # type: ignore[attr-defined]
 
 
 async def test_mail_read_returns_formatted_message() -> None:
@@ -472,11 +527,11 @@ async def test_manifest_declares_resolver() -> None:
     assert manifest.resolver is True
 
 
-async def test_manifest_version_is_0_15_0() -> None:
+async def test_manifest_version_matches_the_packaged_version() -> None:
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.16.0"
+    assert manifest.version == "0.17.0"
 
 
 async def test_manifest_declares_propose_tool_side_effects() -> None:
@@ -586,8 +641,34 @@ def _summary(tid: str = "t1", *, unread: bool = False) -> MailThreadSummary:
     )
 
 
-async def test_build_mailbox_list_shape_and_defaults() -> None:
+def _page_provider(*, categories: list[MailCategory] | None = None) -> AsyncMock:
+    """A provider stub for the page builders, capability-gated **off** categories by default.
+
+    ``list_categories`` / ``category_query`` are concrete no-ops on the seam (#765) — a
+    provider that doesn't classify mail inherits them — but ``AsyncMock(spec=MailProvider)``
+    auto-stubs them into truthy mocks, so the default has to be stated here. Passing
+    *categories* turns the capability on, with Gmail's own id → ``category:<id>`` mapping.
+    """
     provider = AsyncMock(spec=MailProvider)
+    provider.list_categories = AsyncMock(return_value=list(categories or []))
+    known = {c.id for c in categories or []}
+    provider.category_query = MagicMock(
+        side_effect=lambda cid: f"category:{cid}" if cid in known else None
+    )
+    return provider
+
+
+def _category(cid: str, title: str, *, unread: int | None = 3) -> MailCategory:
+    return MailCategory(
+        id=cid,
+        title=title,
+        unread=unread,
+        preview=MailCategoryPreview(sender=f"{cid}@x.com", subject=f"Newest in {title}"),
+    )
+
+
+async def test_build_mailbox_list_shape_and_defaults() -> None:
+    provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox", unread=3)])
     provider.list_threads = AsyncMock(
         return_value=ThreadPage(threads=[_summary("t1", unread=True)], next_cursor="NEXT")
@@ -603,7 +684,7 @@ async def test_build_mailbox_list_shape_and_defaults() -> None:
 
 
 async def test_build_mailbox_list_browses_active_label() -> None:
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
     await build_mailbox_list(provider, label="SENT", cursor="CUR")  # type: ignore[arg-type]
@@ -612,7 +693,7 @@ async def test_build_mailbox_list_browses_active_label() -> None:
 
 
 async def test_build_mailbox_list_search_spans_all_mail() -> None:
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
     data = await build_mailbox_list(provider, label="INBOX", query="is:unread")  # type: ignore[arg-type]
@@ -625,14 +706,14 @@ async def test_build_mailbox_list_search_spans_all_mail() -> None:
 
 
 async def test_build_mailbox_list_clamps_limit_to_cap() -> None:
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
     await build_mailbox_list(provider, limit=9999)  # type: ignore[arg-type]
     assert provider.list_threads.await_args.kwargs["limit"] == 25  # clamped (#539)
 
 
-def _fake_mailbox() -> AsyncMock:
+def _fake_mailbox(*, categories: list[MailCategory] | None = None) -> AsyncMock:
     """A CachedMailbox stub whose landing/reconcile return a one-row bundle (ADR-0096)."""
     mailbox = AsyncMock(spec=CachedMailbox)
     bundle = LandingBundle(
@@ -642,12 +723,13 @@ def _fake_mailbox() -> AsyncMock:
     )
     mailbox.landing = AsyncMock(return_value=bundle)
     mailbox.reconcile = AsyncMock(return_value=bundle)
+    mailbox.categories = AsyncMock(return_value=list(categories or []))
     return mailbox
 
 
 async def test_build_mailbox_list_landing_serves_from_cache() -> None:
     """The plain landing view routes through the cache orchestrator, not a live fetch (#623)."""
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     provider.list_threads = AsyncMock()
     mailbox = _fake_mailbox()
     data = await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
@@ -659,7 +741,7 @@ async def test_build_mailbox_list_landing_serves_from_cache() -> None:
 
 
 async def test_build_mailbox_list_reconcile_flag_pulls_delta() -> None:
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     mailbox = _fake_mailbox()
     await build_mailbox_list(provider, mailbox=mailbox, label="INBOX", reconcile=True)  # type: ignore[arg-type]
     mailbox.reconcile.assert_awaited_once_with("INBOX")
@@ -668,7 +750,7 @@ async def test_build_mailbox_list_reconcile_flag_pulls_delta() -> None:
 
 async def test_build_mailbox_list_search_bypasses_cache() -> None:
     """A query (or a deeper page) reads the provider live even when a cache is present (#623)."""
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
     mailbox = _fake_mailbox()
@@ -678,8 +760,167 @@ async def test_build_mailbox_list_search_bypasses_cache() -> None:
     provider.list_threads.assert_awaited_once()  # live search
 
 
+# ── inbox category tabs (#765) ───────────────────────────────────────────────
+
+
+def _tabbed_provider() -> AsyncMock:
+    """A provider with the full Gmail tab set and an empty thread page."""
+    provider = _page_provider(
+        categories=[
+            _category("primary", "Primary", unread=2),
+            _category("promotions", "Promotions", unread=41),
+            _category("social", "Social", unread=None),
+        ]
+    )
+    provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[_summary("t1")]))
+    return provider
+
+
+def test_tab_payload_renames_sender_to_the_wire_key() -> None:
+    """The wire shape is ``preview: {from, subject}`` — ``from`` being a Python keyword."""
+    payload = tab_payload(_category("promotions", "Promotions", unread=41))
+    assert payload == {
+        "id": "promotions",
+        "title": "Promotions",
+        "unread": 41,
+        "preview": {"from": "promotions@x.com", "subject": "Newest in Promotions"},
+    }
+
+
+def test_tab_payload_keeps_an_empty_category_previewless() -> None:
+    payload = tab_payload(MailCategory(id="forums", title="Forums"))
+    assert payload["preview"] is None
+    assert payload["unread"] is None  # no badge, not a forced zero (ADR-0030)
+
+
+async def test_inbox_carries_the_tab_strip() -> None:
+    data = await build_mailbox_list(_tabbed_provider())  # type: ignore[arg-type]
+    assert [t["id"] for t in data["tabs"]] == ["primary", "promotions", "social"]
+    assert [t["unread"] for t in data["tabs"]] == [2, 41, None]
+    assert data["tabs"][1]["preview"]["subject"] == "Newest in Promotions"
+    assert data["active_tab"] == ""  # nothing selected → the whole Inbox
+
+
+async def test_a_provider_without_categories_renders_exactly_todays_page() -> None:
+    """The capability gate: no tabs block content, and nothing else moves (#765)."""
+    provider = _page_provider()  # list_categories → []
+    provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[_summary("t1")]))
+
+    data = await build_mailbox_list(provider)  # type: ignore[arg-type]
+
+    assert data["tabs"] == []
+    assert data["active_tab"] == ""
+    assert data["threads"][0]["id"] == "t1"
+    provider.list_threads.assert_awaited_once_with(label="INBOX", query=None, cursor=None, limit=25)
+
+
+async def test_no_tabs_over_any_folder_but_the_inbox() -> None:
+    provider = _tabbed_provider()
+    data = await build_mailbox_list(provider, label="SENT")  # type: ignore[arg-type]
+    assert data["tabs"] == []
+    provider.list_categories.assert_not_awaited()  # not even asked for
+
+
+async def test_no_tabs_over_a_search() -> None:
+    """A search spans every folder, so an Inbox category filter would be a lie (#765)."""
+    provider = _tabbed_provider()
+    data = await build_mailbox_list(provider, label="INBOX", query="is:unread")  # type: ignore[arg-type]
+    assert data["tabs"] == []
+    provider.list_categories.assert_not_awaited()
+
+
+async def test_selecting_a_tab_scopes_the_thread_list_within_the_inbox() -> None:
+    provider = _tabbed_provider()
+    data = await build_mailbox_list(provider, tab="promotions")  # type: ignore[arg-type]
+    # Folder AND category — the label keeps it in the Inbox, the query narrows the tab.
+    provider.list_threads.assert_awaited_once_with(
+        label="INBOX", query="category:promotions", cursor=None, limit=25
+    )
+    assert data["active_tab"] == "promotions"
+    assert data["tabs"]  # the strip still renders while a tab is selected
+
+
+async def test_primary_scopes_to_inbox_minus_categorized() -> None:
+    """``category:primary`` is the only expression of "the Inbox, minus the other tabs"."""
+    provider = _tabbed_provider()
+    await build_mailbox_list(provider, tab="primary")  # type: ignore[arg-type]
+    assert provider.list_threads.await_args.kwargs["query"] == "category:primary"
+    assert provider.list_threads.await_args.kwargs["label"] == "INBOX"
+
+
+async def test_a_tab_page_forwards_the_cursor() -> None:
+    provider = _tabbed_provider()
+    await build_mailbox_list(provider, tab="social", cursor="C2")  # type: ignore[arg-type]
+    provider.list_threads.assert_awaited_once_with(
+        label="INBOX", query="category:social", cursor="C2", limit=25
+    )
+
+
+@pytest.mark.parametrize("bogus", ["nonsense", "PROMOTIONS", "category:promotions", ""])
+async def test_an_unoffered_tab_degrades_to_the_whole_inbox(bogus: str) -> None:
+    """A hand-crafted ``?tab=`` never reaches the provider as a query (#765)."""
+    provider = _tabbed_provider()
+    data = await build_mailbox_list(provider, tab=bogus)  # type: ignore[arg-type]
+    assert data["active_tab"] == ""
+    provider.list_threads.assert_awaited_once_with(label="INBOX", query=None, cursor=None, limit=25)
+
+
+async def test_a_tab_the_provider_cant_express_is_not_echoed_as_active() -> None:
+    """The tab is offered but ``category_query`` returns None — don't claim a filter."""
+    provider = _page_provider(categories=[_category("odd", "Odd")])
+    provider.category_query = MagicMock(return_value=None)
+    provider.list_labels = AsyncMock(return_value=[])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
+
+    data = await build_mailbox_list(provider, tab="odd")  # type: ignore[arg-type]
+
+    assert data["active_tab"] == ""
+    assert provider.list_threads.await_args.kwargs["query"] is None
+
+
+async def test_the_unscoped_landing_still_serves_from_cache_with_tabs_on() -> None:
+    """Tabs must not cost the instant open (#623): no selection ⇒ still the cached landing."""
+    provider = _page_provider()
+    provider.list_threads = AsyncMock()
+    mailbox = _fake_mailbox(categories=[_category("primary", "Primary")])
+
+    data = await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
+
+    mailbox.landing.assert_awaited_once_with("INBOX")
+    provider.list_threads.assert_not_awaited()
+    assert data["threads"][0]["id"] == "cached"
+    assert data["tabs"][0]["id"] == "primary"
+
+
+async def test_a_tab_selection_bypasses_the_landing_cache() -> None:
+    """The cache materializes only the *unscoped* landing page, so a tab reads live."""
+    provider = _page_provider(categories=[_category("promotions", "Promotions")])
+    provider.list_labels = AsyncMock(return_value=[])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[_summary("live")]))
+    mailbox = _fake_mailbox(categories=[_category("promotions", "Promotions")])
+
+    data = await build_mailbox_list(provider, mailbox=mailbox, tab="promotions")  # type: ignore[arg-type]
+
+    mailbox.landing.assert_not_awaited()
+    mailbox.reconcile.assert_not_awaited()
+    assert data["threads"][0]["id"] == "live"
+
+
+async def test_tabs_come_through_the_cache_when_there_is_one() -> None:
+    """The fan-out is cached, so the page read asks the orchestrator, not the provider."""
+    provider = _page_provider(categories=[_category("primary", "Primary")])
+    mailbox = _fake_mailbox(categories=[_category("primary", "Primary")])
+
+    await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
+
+    mailbox.categories.assert_awaited_once_with("INBOX")
+    provider.list_categories.assert_not_awaited()
+
+
 async def test_build_mailbox_thread_renders_messages_and_reply() -> None:
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     messages = [
         MailMessage(
             id="m1",
@@ -722,7 +963,7 @@ async def test_build_mailbox_thread_renders_messages_and_reply() -> None:
 
 
 async def test_build_mailbox_thread_empty_has_no_reply() -> None:
-    provider = AsyncMock(spec=MailProvider)
+    provider = _page_provider()
     provider.get_thread = AsyncMock(return_value=MailThread(id="t0", subject="", messages=[]))
     data = await build_mailbox_thread(provider, "t0")  # type: ignore[arg-type]
     assert data["thread"]["reply"] is None

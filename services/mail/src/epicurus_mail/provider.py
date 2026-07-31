@@ -81,6 +81,45 @@ class MailLabel(BaseModel):
     unread: int | None = None
 
 
+class MailCategoryPreview(BaseModel):
+    """The newest message in a category, at a glance — the tab's dim one-line preview (#765).
+
+    Sender + subject only: a tab strip has one line per tab, and the thread list right below
+    it already carries snippets, so anything more would just be noise. ``sender`` is the raw
+    provider ``From`` value (the shell shortens it), matching :attr:`MailThreadSummary.sender`.
+    """
+
+    sender: str = ""
+    subject: str = ""
+
+
+class MailCategory(BaseModel):
+    """One inbox category tab (#765) — provider-neutral, presentation-ready.
+
+    Gmail classifies inbox mail into *categories* (Primary / Promotions / Social / Updates /
+    Forums) and renders them as tabs over the Inbox. That classification is a **provider
+    capability**, not a folder: categories are deliberately absent from the mailbox rail
+    (``_RAIL_SYSTEM_LABELS``), because a tab over one folder is a different UI element from a
+    folder in the rail.
+
+    The model carries no provider syntax — the ``id`` is a neutral tab id (``"primary"``,
+    ``"promotions"``, ``"social"``, ``"updates"``, ``"forums"``) that the page echoes back as
+    ``?tab=``, and :meth:`MailProvider.category_query` is the only place an id turns into a
+    provider-native query. That is the local-first seam: a future local provider can back the
+    same ids with its own classification (through the core's LLM gateway, constraint #8) and
+    neither the page contract nor the shell changes.
+
+    ``unread`` is the category's unread count when the provider supplies it cheaply, else
+    ``None`` (the tab renders a badge only when present — a capability gate, ADR-0030, exactly
+    as :attr:`MailLabel.unread`). ``preview`` is ``None`` for a category with no mail.
+    """
+
+    id: str
+    title: str
+    unread: int | None = None
+    preview: MailCategoryPreview | None = None
+
+
 class MailThreadSummary(BaseModel):
     """One row in the paginated thread list (ADR-0087) — a conversation at a glance."""
 
@@ -280,6 +319,41 @@ class MailProvider(ABC):
         ``next_cursor`` (``None`` for the first page); *limit* bounds the page — the caller
         caps it so one fetch can't scan an unbounded mailbox (#539).
         """
+
+    # ── inbox category tabs (#765) ───────────────────────────────────────────
+    # Deliberately **concrete, not abstract**: categories are a provider capability, so a
+    # backend that doesn't classify mail inherits these no-op defaults and the mailbox page
+    # renders exactly as it did before tabs existed (capability gate, ADR-0030 — asymmetry
+    # is fine, silence isn't; here the silence is an explicit empty answer, not a crash).
+
+    async def list_categories(self, *, label: str) -> list[MailCategory]:
+        """The category tabs over *label* — unread count + newest-message preview each (#765).
+
+        Returns ``[]`` when the provider has no categories at all, **or** when this mailbox
+        isn't actually categorized (nothing outside the default category), so a page that
+        would render a single pointless "Primary" tab renders no tab strip instead — the same
+        thing Gmail does for an account with tabs turned off. The caller only asks for the
+        Inbox; a provider that categorized some other folder would still answer for it.
+
+        The result is presentation data only (:class:`MailCategory`) — no provider query
+        syntax leaks out. Expect this to be a multi-call fan-out (per category: "is it
+        populated", its newest thread, its unread count), which is why the module caches it
+        briefly rather than calling it per render.
+        """
+        return []
+
+    def category_query(self, category_id: str) -> str | None:
+        """The provider-native query term scoping a listing to *category_id*, or ``None``.
+
+        The **only** translation point between a neutral tab id and provider query syntax
+        (Gmail: ``category:promotions``). ``None`` means "this backend can't scope to that
+        category" — an unknown id, or a provider without categories — and the caller then
+        simply doesn't scope, rather than sending a query the provider would misread.
+
+        Synchronous and side-effect free: it is a pure mapping, called on the page read and
+        by ``mail_search``'s ``category`` argument, and must never make a provider call.
+        """
+        return None
 
     @abstractmethod
     async def get_thread(self, thread_id: str) -> MailThread:

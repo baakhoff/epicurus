@@ -17,3 +17,9 @@ class MailSettings(CoreSettings):
     # trigger a reconcile, so an account stuck failing must not storm the event spine once per
     # open. 15 minutes is frequent enough to notice, sparse enough not to be noise.
     mail_sync_failed_cooldown_s: float = 900.0
+    # How long the Inbox's category tabs (#765) stay fresh in the local cache. Assembling them
+    # is a provider fan-out (per category: populated?, newest message, unread count), so they
+    # must not be rebuilt per render; a minute is short enough that newly arrived mail moves
+    # the badges on its own, and our own mark-read drops the cache outright so a count never
+    # sits stale after the operator changed it.
+    mail_category_ttl_s: float = 60.0

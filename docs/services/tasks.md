@@ -243,6 +243,25 @@ Can keeps no View control (a backlog has nothing dated to place, and it is alrea
 list). The cross-module calendar *feed* (#469, v0.16.0 above) is untouched — this is a
 tasks-page-local representation, not a replacement for the calendar page's overlay.
 
+**v0.21.0** finishes wiring **tags** into the board UX (#763) — the model and tools carried
+`tags` since v0.5.0, but the surface was half-built (a bare comma-separated text input; no
+grouping). Three pieces. **Group by → Tags**: offered exactly like *List* — only when a
+visible (dated) task actually has a tag — it is the board's first **multi-membership**
+grouping: a task appears under **each** of its tags, untagged tasks land in an **Untagged**
+column, and columns sort alphabetically (case-insensitive, Untagged last, stable across
+reloads). **Chips input**: the add/edit forms' `tags` field now declares `format: "tags"`
+(the ADR-0082 seam), so the shell renders removable chips + a typeahead; the module supplies
+its distinct tags (across board *and* Can) as `field_suggestions` — a new `field_choices`
+sibling for open suggestions — and the submitted value stays the comma-separated string, so
+the MCP contract is unchanged. **Google honesty**: tags are local-only (Google Tasks has no
+such field and the provider ignores them on write), so the tags field is **hidden wherever
+the write would land on Google** — a Google task's Edit form, and the Add forms whenever the
+list picker shows (it lists external writable lists only) — rather than pretending to save;
+a Google task groups under Untagged. Drag-and-drop stays honest under the new grouping: list
+columns now carry their `list_id`, the shell matches drop targets **by id** (never by a
+display title a tag column might share), and with no list columns on screen cards aren't
+draggable at all — drag-to-retag is deliberately not implemented in v1.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -332,8 +351,13 @@ the Can.
 - **Columns** group the tasks **aggregated across every enabled list** by the operator's
   chosen **Group by** dimension (ADR-0049): **Due date** (default — Overdue / Today / Upcoming;
   the "No date" bucket is gone, #766 — undated tasks live in the Can), **Status**, **Priority**,
-  **List** (one column per category), or **None** (a single flat list). Empty columns are
-  dropped, and each card carries a **category tag** naming the list it came from (ADR-0036).
+  **List** (one column per category), **Tags** (#763 — offered only when a visible task has a
+  tag; **multi-membership**: a task appears under each of its tags, untagged ones under
+  **Untagged**, columns alphabetical with Untagged last), or **None** (a single flat list).
+  Empty columns are dropped, and each card carries a **category tag** naming the list it came
+  from (ADR-0036). List-grouped columns carry their `list_id`, which is what the shell's
+  drag-move matches drop targets by (#763) — a tag column sharing a list's display name is
+  never a target, and with no list columns cards aren't draggable at all.
   Layout is a pure function,
   `build_tasks_board(tasks, today=…, group_by=…, scope=…, lists=…, default_list_id=…)`, so it
   is unit-tested without a clock — ISO date strings compare lexicographically, no parsing; it
@@ -361,7 +385,12 @@ the Can.
   **Delete** (`tasks_delete`, a `danger` action gated behind a confirm dialog, #336) — all
   carrying the task's `list_id` so the mutation routes to the **owning** list; the board
   offers **Add task** (`tasks_add`, a form) whose **list picker** chooses the target list
-  (a labeled `field_choices` entry, value = list id → label = title). With **two or more**
+  (a labeled `field_choices` entry, value = list id → label = title). The forms' `tags`
+  field renders as a **chips input** (`format: "tags"`, #763) with a typeahead over the
+  module's known tags (`field_suggestions`); it is offered only where the write lands on
+  the **local** store — Google Tasks silently drops tags, so a Google task's Edit form and
+  any Add form showing the (external-only) list picker hide the field instead of
+  pretending to save it. With **two or more**
   writable lists the Edit form also gains a **List** picker bound to `to_list_id` (prefilled
   to the task's current list); choosing another **moves** the task there — a recreate+delete
   on Google (ADR-0038). The **Add task** action sets `icon_only: true` so the shell renders it

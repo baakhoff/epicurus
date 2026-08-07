@@ -217,7 +217,9 @@ def test_add_action_has_list_selector_when_lists_given() -> None:
         default_list_id="work",
     )
     add = board["actions"][0]
-    assert add["fields"] == ["title", "list_id", "notes", "due", "priority", "tags", "repeat"]
+    # No tags field here (#763): the picker offers external (Google) lists only, where a
+    # tag would be silently dropped — the form must not pretend to save one.
+    assert add["fields"] == ["title", "list_id", "notes", "due", "priority", "repeat"]
     # the list picker is a labeled `field_choices` (value=list id, label=title)
     assert add["field_choices"]["list_id"] == [
         {"value": "@default", "label": "My Tasks"},
@@ -564,7 +566,8 @@ def test_can_add_offers_list_picker_when_lists_given() -> None:
         default_list_id="work",
     )
     add = can["actions"][0]
-    assert add["fields"] == ["title", "list_id", "notes", "priority", "tags"]
+    # No tags field with a (Google-only) list picker — same honesty rule as the board (#763).
+    assert add["fields"] == ["title", "list_id", "notes", "priority"]
     assert add["field_choices"]["list_id"] == [
         {"value": "@default", "label": "My Tasks"},
         {"value": "work", "label": "Work"},
@@ -619,12 +622,159 @@ def test_schedule_round_trip_moves_a_task_between_can_and_board() -> None:
     assert _card_ids(build_tasks_can([cleared], today=TODAY)) == ["t"]
 
 
+# ── tags: grouping, suggestions, and Google honesty (#763) ────────────────────
+
+
+def test_group_by_tags_is_multi_membership_with_untagged_last() -> None:
+    tasks = [
+        _task("two", "Two tags", due=TODAY, tags=["work", "errand"]),
+        _task("one", "One tag", due=TODAY, tags=["work"]),
+        _task("bare", "No tags", due=TODAY),
+    ]
+    board = build_tasks_board(tasks, today=TODAY, group_by="tags")
+    cols = {c["title"]: [card["id"] for card in c["cards"]] for c in board["columns"]}
+    # Alphabetical column order, Untagged closing the board.
+    assert list(cols.keys()) == ["errand", "work", "Untagged"]
+    # A task with two tags appears under both; untagged tasks land in Untagged.
+    assert cols["errand"] == ["two"]
+    assert cols["work"] == ["two", "one"]
+    assert cols["Untagged"] == ["bare"]
+
+
+def test_tags_columns_sort_case_insensitively_and_stay_stable() -> None:
+    tasks = [
+        _task("1", "a", due=TODAY, tags=["Zoo"]),
+        _task("2", "b", due=TODAY, tags=["api"]),
+        _task("3", "c", due=TODAY, tags=["Beta"]),
+    ]
+    first = build_tasks_board(tasks, today=TODAY, group_by="tags")
+    assert [c["title"] for c in first["columns"]] == ["api", "Beta", "Zoo"]
+    # Deterministic across reloads: the same input yields the same column order.
+    again = build_tasks_board(list(reversed(tasks)), today=TODAY, group_by="tags")
+    assert [c["title"] for c in again["columns"]] == ["api", "Beta", "Zoo"]
+
+
+def test_tags_group_option_offered_only_when_a_visible_task_has_tags() -> None:
+    untagged = build_tasks_board([_task("1", "x", due=TODAY)], today=TODAY)
+    group = next(c for c in untagged["controls"] if c["id"] == "group")
+    assert "tags" not in [o["value"] for o in group["options"]]
+
+    tagged = build_tasks_board([_task("1", "x", due=TODAY, tags=["work"])], today=TODAY)
+    group2 = next(c for c in tagged["controls"] if c["id"] == "group")
+    assert [o["value"] for o in group2["options"]] == ["due", "status", "priority", "tags", "none"]
+
+    # A tag on an *invisible* (undated → Can) task doesn't make the board offer the
+    # grouping — there would be nothing to group.
+    can_only = build_tasks_board([_task("1", "x", tags=["work"])], today=TODAY)
+    group3 = next(c for c in can_only["controls"] if c["id"] == "group")
+    assert "tags" not in [o["value"] for o in group3["options"]]
+
+
+def test_group_options_order_with_lists_and_tags() -> None:
+    board = build_tasks_board(
+        [_task("1", "x", due=TODAY, tags=["work"])],
+        today=TODAY,
+        lists=[("work", "Work")],
+    )
+    group = next(c for c in board["controls"] if c["id"] == "group")
+    assert [o["value"] for o in group["options"]] == [
+        "due",
+        "status",
+        "priority",
+        "list",
+        "tags",
+        "none",
+    ]
+
+
+def test_group_by_tags_without_tags_falls_back_to_due() -> None:
+    board = build_tasks_board([_task("1", "x", due="2026-06-01")], today=TODAY, group_by="tags")
+    assert [c["title"] for c in board["columns"]] == ["Overdue"]
+    group = next(c for c in board["controls"] if c["id"] == "group")
+    assert group["value"] == "due"  # control echoes the corrected grouping
+
+
+def test_add_and_edit_carry_known_tags_as_suggestions() -> None:
+    # The module supplies the distinct tags as field metadata; the shell renders the
+    # typeahead (ADR-0018/0019). Alphabetical, case-insensitive, deduped.
+    tasks = [
+        _task("1", "a", due=TODAY, tags=["Work", "errand"]),
+        _task("2", "b", due=TODAY, tags=["work", "Alpha"]),
+    ]
+    board = build_tasks_board(tasks, today=TODAY)
+    add = next(a for a in board["actions"] if a["tool"] == "tasks_add")
+    assert add["field_suggestions"] == {"tags": ["Alpha", "errand", "Work"]}
+    edit = board["columns"][0]["cards"][0]["actions"][1]
+    assert edit["field_suggestions"] == {"tags": ["Alpha", "errand", "Work"]}
+
+
+def test_tag_suggestions_span_board_and_can() -> None:
+    # A tag used only on a Can (undated) task still autocompletes on the board, and vice
+    # versa — both builders compute suggestions over the full fetched set.
+    tasks = [
+        _task("dated", "On the board", due=TODAY, tags=["planned"]),
+        _task("undated", "In the can", tags=["someday"]),
+    ]
+    board_add = next(
+        a for a in build_tasks_board(tasks, today=TODAY)["actions"] if a["tool"] == "tasks_add"
+    )
+    can_add = build_tasks_can(tasks, today=TODAY)["actions"][0]
+    assert board_add["field_suggestions"] == {"tags": ["planned", "someday"]}
+    assert can_add["field_suggestions"] == {"tags": ["planned", "someday"]}
+
+
+def test_no_suggestions_key_without_any_tags() -> None:
+    board = build_tasks_board([_task("1", "x", due=TODAY)], today=TODAY)
+    add = next(a for a in board["actions"] if a["tool"] == "tasks_add")
+    assert "field_suggestions" not in add
+
+
+def test_google_task_edit_hides_the_tags_field() -> None:
+    # A Google task's tags would be silently dropped by the provider (no such field) —
+    # the Edit form hides the field rather than pretending to save it (#763).
+    external = _task("g1", "On Google", due=TODAY, list_id="work", list_title="Work")
+    board = build_tasks_board([external], today=TODAY, lists=[("work", "Work")])
+    edit = board["columns"][0]["cards"][0]["actions"][1]
+    assert edit["tool"] == "tasks_update"
+    assert "tags" not in edit["fields"]
+    assert "tags" not in edit["form_values"]
+    assert "field_suggestions" not in edit
+
+
+def test_local_task_edit_keeps_the_tags_field() -> None:
+    local = _task("l1", "Local", due=TODAY, tags=["work"])
+    board = build_tasks_board([local], today=TODAY)
+    edit = board["columns"][0]["cards"][0]["actions"][1]
+    assert "tags" in edit["fields"]
+    assert edit["form_values"]["tags"] == "work"
+
+
+def test_list_columns_carry_their_list_id_for_drop_targets() -> None:
+    # Drag-move drop targets match by column `list_id`, not title (#763): a tag or status
+    # column that happens to share a list's name must never accept a list-move drop.
+    tasks = [
+        _task("1", "w", due=TODAY, list_id="L-work", list_title="Work"),
+        _task("2", "p", due=TODAY),  # local → "Personal" fallback, not a droppable list
+    ]
+    by_list = build_tasks_board(tasks, today=TODAY, group_by="list", lists=[("L-work", "Work")])
+    columns = {c["title"]: c for c in by_list["columns"]}
+    assert columns["Work"]["list_id"] == "L-work"
+    assert "list_id" not in columns["Personal"]
+
+    # Under any other grouping no column is a list — none carries a list_id, so a tag
+    # column titled "Work" is not a drop target even though a list shares the name.
+    tagged = [_task("t", "tagged like a list", due=TODAY, tags=["Work"])]
+    by_tags = build_tasks_board(tagged, today=TODAY, group_by="tags", lists=[("L-work", "Work")])
+    assert all("list_id" not in c for c in by_tags["columns"])
+
+
 # ── query-param coercion (ADR-0049) ───────────────────────────────────────────
 
 
 def test_coerce_group_clamps_unknown_to_due() -> None:
     assert coerce_group("priority") == "priority"
     assert coerce_group("list") == "list"
+    assert coerce_group("tags") == "tags"
     assert coerce_group("nonsense") == "due"
     assert coerce_group(None) == "due"
 

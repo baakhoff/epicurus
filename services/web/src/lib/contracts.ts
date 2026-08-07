@@ -782,6 +782,14 @@ export const BoardAction = z
     field_choices: z
       .record(z.string(), z.array(z.object({ value: z.string(), label: z.string() })))
       .optional(),
+    /**
+     * Per-field *open* suggestions (#763) — a `field_choices` sibling for fields where
+     * the listed values are a starting point, not the whole universe: the form offers
+     * them as typeahead but still accepts anything typed. Today the `format: "tags"`
+     * chips input reads these (the module supplies its known tags; the shell renders the
+     * picker — ADR-0018/0019); the semantic is field-generic.
+     */
+    field_suggestions: z.record(z.string(), z.array(z.string())).optional(),
     confirm: z.string().nullish(),
     /**
      * Render this action as a compact icon-only button — the label moves to a tooltip and
@@ -826,6 +834,14 @@ export const BoardColumn = z.object({
   id: z.string(),
   title: z.string(),
   cards: z.array(BoardCard).default([]),
+  /**
+   * The collection (list) this column represents, when it represents one (#763): set by
+   * the module on list-grouped columns so the drag-move drop target matches **by id**
+   * against the move action's `to_list_id` choices — never by the column's display
+   * title, which a tag/status column may coincidentally share. Absent on columns that
+   * aren't lists; a board with no `list_id` anywhere simply has no drop targets.
+   */
+  list_id: z.string().nullish(),
 });
 export type BoardColumn = z.infer<typeof BoardColumn>;
 

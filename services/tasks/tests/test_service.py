@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.20.0"
+    assert manifest.version == "0.21.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -137,6 +137,17 @@ async def test_due_params_declare_the_date_format(module_fixture: object) -> Non
         due = tools[tool].input_schema["properties"]["due"]
         members = due.get("anyOf", [due])
         assert any(m.get("format") == "date" for m in members), (tool, due)
+
+
+async def test_tags_params_declare_the_tags_format(module_fixture: object) -> None:
+    # `format: "tags"` (#763) makes the shell render the chips input; the agent-facing
+    # contract is unchanged — the value is still the comma-separated string.
+    manifest = await module_fixture.manifest()  # type: ignore[attr-defined]
+    tools = {t.name: t for t in manifest.tools}
+    for tool in ("tasks_add", "tasks_update"):
+        tags = tools[tool].input_schema["properties"]["tags"]
+        members = tags.get("anyOf", [tags])
+        assert any(m.get("format") == "tags" for m in members), (tool, tags)
 
 
 async def test_tasks_list_empty(module_fixture: object) -> None:

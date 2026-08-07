@@ -93,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.20.0"
+    assert data["version"] == "0.21.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",
@@ -296,6 +296,38 @@ def test_pages_partition_dated_and_undated_tasks(
     schedule = can["columns"][0]["cards"][0]["actions"][0]
     assert schedule["label"] == "Schedule"
     assert schedule["fields"] == ["due"]
+
+
+def test_page_board_groups_by_tags(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?group=tags echoes and yields multi-membership tag columns + Untagged (#763)."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+    from epicurus_tasks.models import Task
+    from epicurus_tasks.router import TasksRouter
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    monkeypatch.setattr(
+        TasksRouter,
+        "list_tasks",
+        AsyncMock(
+            return_value=[
+                Task(id="both", title="Both", due="2026-01-01", tags=["home", "work"]),
+                Task(id="bare", title="Bare", due="2026-01-01"),
+            ]
+        ),
+    )
+    data = booted_client.get("/pages/board?group=tags").json()
+    group = next(c for c in data["controls"] if c["id"] == "group")
+    assert group["value"] == "tags"
+    assert "tags" in [o["value"] for o in group["options"]]
+    cols = {c["title"]: [card["id"] for card in c["cards"]] for c in data["columns"]}
+    assert list(cols.keys()) == ["home", "work", "Untagged"]
+    assert cols["home"] == ["both"]
+    assert cols["work"] == ["both"]
+    assert cols["Untagged"] == ["bare"]
 
 
 # ── calendar-feed endpoint wiring (#469) — filtering logic itself is unit-tested

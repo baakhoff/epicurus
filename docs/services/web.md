@@ -504,7 +504,15 @@ The `editor` archetype (knowledge, notes) opens a document **rendered and editab
 markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —
 ProseMirror + remark — lazy-loaded so it never enters the main bundle, #377), and an Edit/Preview
 toggle drops to the **raw markdown source** when you prefer it (ADR-0042). Both views write back
-to the same markdown buffer, so the save/version flow below is unchanged. Because notes/knowledge **re-embed on every save**, the editor does not
+to the same markdown buffer, so the save/version flow below is unchanged. Switching documents
+never presents the **outgoing** one as live under the new selection (#781): Crepe is uncontrolled
+once mounted (it reads its initial markdown once and ignores later prop changes, by design — that
+is what lets typing keep a stable cursor), so both the WYSIWYG and the raw-source view stay gated
+behind a loading state until the newly-selected document's content has actually arrived, and only
+then mount, seeded correctly from the start; a document already fetched this session reopens
+instantly (no gating flash), an uncached one shows a brief loading state instead of a frozen,
+still-editable snapshot of whatever was open before. Because notes/knowledge **re-embed on every
+save**, the editor does not
 save on each keystroke: a save fires only when you **leave** (switch document, go back, or
 the editor unmounts/backgrounds), when the doc has **idled** unchanged for a few seconds,
 or when you **Save** explicitly (button / Ctrl-Cmd-S). A live status reads *Saving… →
@@ -518,7 +526,8 @@ When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** 
 past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh
 save (so the timeline only ever grows). The shell reads history from the proxied
 `…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
-version's content), so there is no restore endpoint.
+version's content), so there is no restore endpoint. History doubles as the general recovery
+path if a save ever overwrites content you meant to keep — the previous entry still has it.
 
 ### Right panel / split-screen (ADR-0018)
 

@@ -1057,9 +1057,12 @@ export function EditorView({
     queryKey: ["module-doc", module, pageId, scope, selectedPath],
     queryFn: () => api.modulePageDoc(module, pageId, toModulePath(selectedPath as string)),
     enabled: selectedPath != null && !isNew,
-    // Keep the previous document on screen while the next one loads (#712) — switching the
-    // selected document is a new query key, so without this every switch mounts cold and
-    // blanks to a spinner even though we already have content to show meanwhile.
+    // Keep the previous document's data cached while the next one loads (#712): a WARM switch
+    // (already fetched this session) then reseeds synchronously during render, below, so the
+    // seed gate never flashes a spinner. A COLD switch still carries the *outgoing* document's
+    // data here as `isPlaceholderData` for a moment — the seed refuses it (below) and the gate
+    // it drives refuses to mount any editable surface until this resolves for the new path, so
+    // stale content is never displayed as live under the new selection (#781).
     placeholderData: keepPreviousData,
   });
 
@@ -1071,6 +1074,9 @@ export function EditorView({
   // (#712): right after switching, `doc.data` is still the *old* document's content for a
   // moment — seeding from it would flash the wrong content into the new path's buffer.
   // Adjust state during render (the React-blessed alternative to a setState-in-effect).
+  // `seededPath` doubles as the mount gate below (#781): until it matches `selectedPath`, no
+  // editable surface renders, so this is the only place a document's real content ever reaches
+  // the buffer — a remount can never observe a foreign one.
   const [seededPath, setSeededPath] = useState<string | null>(null);
   if (doc.data && !doc.isPlaceholderData && selectedPath !== seededPath) {
     setSeededPath(selectedPath);
@@ -1078,6 +1084,17 @@ export function EditorView({
     setBaseline(doc.data.content);
     setMode("preview");
   }
+
+  // Buffer-ownership guard (#781): the WYSIWYG reports the identity of the document it was
+  // mounted for with every change (see WysiwygEditor's `docKey`), captured once at its own
+  // mount and never re-read. The seed gate below should already make it impossible for a
+  // surface to mount on a foreign buffer, but this check doesn't rely on that holding — it
+  // drops a report for anything but the live document unconditionally, regardless of how such
+  // a report could arise.
+  const handleWysiwygChange = (reportedDocKey: string, markdown: string) => {
+    if (reportedDocKey !== seededPath) return;
+    setDraft(markdown);
+  };
 
   const save = useMutation({
     // The path travels with the save (not via a `selectedPath` closure) so a flush fired as
@@ -1906,6 +1923,18 @@ export function EditorView({
               <p className="text-sm text-ink-dim">{(doc.error as Error).message}</p>
             </EmptyState>
           </div>
+        ) : !isNew && selectedPath !== seededPath ? (
+          // Cold switch in flight (#781): `doc` still carries the *outgoing* document as
+          // placeholder data (#712) while the new one fetches, so `draft` hasn't been reseeded
+          // yet. Never mount an editable surface — WYSIWYG or raw source — on that stale
+          // buffer under the new selection; show progress instead until the seed above hands
+          // it the real content. A warm switch (cached doc) never takes this branch: the seed
+          // adjusts state during *this* render, before it commits, so `selectedPath ===
+          // seededPath` already holds by the time this check runs — no flash for the common
+          // case.
+          <div className="flex h-full items-center justify-center">
+            <Spinner />
+          </div>
         ) : (
           <>
             {/* toolbar — pinned above the scrolling body so it never scrolls away */}
@@ -2117,6 +2146,10 @@ export function EditorView({
                 // Preview is an editable WYSIWYG surface (#377): edits flow back to `draft`
                 // (markdown) and the existing idle/leave auto-save (ADR-0042). Keyed on the
                 // document so switching docs reseeds the editor; lazy so it stays out of bundle.
+                // Only reachable once `selectedPath === seededPath` (the gate above, #781), so
+                // `draft` already holds this document's real content by the time Crepe reads
+                // it as `defaultValue`; `docKey`/`onChange` are the independent, defense-in-
+                // depth cross-check.
                 <div className="mx-auto w-full max-w-2xl px-5 py-4">
                   <Suspense
                     fallback={
@@ -2127,8 +2160,9 @@ export function EditorView({
                   >
                     <WysiwygEditor
                       key={`${scope}:${selectedPath}`}
+                      docKey={selectedPath}
                       value={draft}
-                      onChange={setDraft}
+                      onChange={handleWysiwygChange}
                     />
                   </Suspense>
                 </div>

@@ -43,7 +43,7 @@ dev = [
     # already resolved transitively (uvicorn[standard]), made an explicit direct
     # dependency since the test takes a real, load-bearing dependency on it.
     "pyyaml>=6.0",
-    "types-python-dateutil>=2.9.0.20260518",
+    "types-python-dateutil>=2.9.0.20260716",
 ]
 
 [tool.ruff]

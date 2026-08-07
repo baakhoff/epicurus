@@ -182,7 +182,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.19.0",
+        version="0.20.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -702,6 +702,22 @@ _SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("all", "All"),
 )
 
+# View-mode options the board's *View* switcher offers (#767): three client-side
+# representations of the same fetched payload. ``view`` is a **reserved control id** — a
+# board-archetype extension of ADR-0049: the shell recognizes it and renders the matching
+# representation (kanban columns / a sortable flat list / a month grid) itself, because
+# only the shell owns rendering. The module's part stays declarative: offer the options,
+# clamp + echo the choice, and omit the *Group by* control when columns aren't what's
+# shown. The card payload is identical across views — the alternate renderings read the
+# structured card fields (``due`` / ``priority`` / ``tags`` / ``list_title``).
+_VIEW_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("board", "Board"),
+    ("list", "List"),
+    ("calendar", "Calendar"),
+)
+_VALID_VIEWS: frozenset[str] = frozenset(value for value, _ in _VIEW_OPTIONS)
+_DEFAULT_VIEW = "board"
+
 # field_options teaches the shell's SchemaForm which values are valid for enum-like
 # string fields.  The shell overlays these onto the tool's raw JSON schema so it
 # can render a <select> instead of a free-text input (ADR-0018 board extension).
@@ -719,6 +735,11 @@ def coerce_group(value: str | None) -> str:
 def coerce_scope(value: str | None) -> TaskScope:
     """Clamp a ``show`` query param to a known task scope, defaulting to open (ADR-0049)."""
     return cast(TaskScope, value) if value in VALID_TASK_SCOPES else "open"
+
+
+def coerce_view(value: str | None) -> str:
+    """Clamp a ``view`` query param to a known view mode, defaulting to the board (#767)."""
+    return value if value in _VALID_VIEWS else _DEFAULT_VIEW
 
 
 def _slug(title: str) -> str:
@@ -863,6 +884,12 @@ def _task_card(
     current list, that moves the task when changed (ADR-0038). With *schedule* (Can cards,
     #766) the card leads with a **Schedule** action — a due-only ``tasks_update`` form,
     prefilled to *today* — which is how a Can task is placed on the board.
+
+    Besides the rendered badges, the card carries its **structured fields** — ``due`` (an
+    ISO date), ``priority``, ``tags``, ``list_title`` — as data (#767): the shell's List
+    and Calendar representations sort/place by them, which rendered badge strings can't
+    support. An additive, documented extension of the board card shape; badges stay for
+    the board rendering.
     """
     due_bucket = _bucket_for(task, today)
     badges: list[dict[str, str]] = []
@@ -962,6 +989,13 @@ def _task_card(
         "badges": badges,
         "done": done,
         "actions": actions,
+        # Structured card fields (#767) — data, not presentation: the shell's List view
+        # sorts by them and the Calendar view places by `due`. `due` is the bare ISO date
+        # (a provider may store a full RFC 3339 timestamp; only the date places a card).
+        "due": task.due[:10] if task.due else None,
+        "priority": task.priority,
+        "tags": list(task.tags),
+        "list_title": task.list_title,
     }
 
 
@@ -976,32 +1010,47 @@ def _show_control(scope: str) -> dict[str, Any]:
 
 
 def _board_controls(
-    *, group_by: str, scope: str, lists: list[tuple[str, str]] | None
+    *, view: str, group_by: str, scope: str, lists: list[tuple[str, str]] | None
 ) -> list[dict[str, Any]]:
-    """The board's declarative view controls (ADR-0049): *Group by* and *Show*.
+    """The board's declarative view controls (ADR-0049 / #767): *View*, *Group by*, *Show*.
 
     The module declares the selectable options and the current value; the shell renders
-    each as a labeled selector and re-fetches the page with ``?<id>=<value>`` on change.
-    The *List* grouping is offered only when there are named lists to group by.
+    each as a labeled selector — except the reserved ``view`` control, which it renders as
+    its standard view switcher — and re-fetches the page with ``?<id>=<value>`` on change.
+    The *List* grouping is offered only when there are named lists to group by, and the
+    *Group by* control only under the **Board** view — grouping shapes kanban columns; the
+    List and Calendar representations are flat/date-keyed and would render it as a dead
+    knob (#767). *Show* applies under every view.
     """
-    group_options = list(_GROUP_OPTIONS)
-    if lists:
-        group_options.insert(len(group_options) - 1, _GROUP_LIST_OPTION)  # before "None"
-    return [
+    controls: list[dict[str, Any]] = [
         {
-            "id": "group",
-            "label": "Group by",
-            "value": group_by,
-            "options": [{"value": value, "label": label} for value, label in group_options],
-        },
-        _show_control(scope),
+            "id": "view",
+            "label": "View",
+            "value": view,
+            "options": [{"value": value, "label": label} for value, label in _VIEW_OPTIONS],
+        }
     ]
+    if view == _DEFAULT_VIEW:
+        group_options = list(_GROUP_OPTIONS)
+        if lists:
+            group_options.insert(len(group_options) - 1, _GROUP_LIST_OPTION)  # before "None"
+        controls.append(
+            {
+                "id": "group",
+                "label": "Group by",
+                "value": group_by,
+                "options": [{"value": value, "label": label} for value, label in group_options],
+            }
+        )
+    controls.append(_show_control(scope))
+    return controls
 
 
 def build_tasks_board(
     tasks: list[Task],
     *,
     today: str,
+    view: str = _DEFAULT_VIEW,
     group_by: str = _DEFAULT_GROUP,
     scope: str = "open",
     lists: list[tuple[str, str]] | None = None,
@@ -1010,10 +1059,13 @@ def build_tasks_board(
     """Build the ``board`` archetype payload for the Tasks page (ADR-0018 / 0036 / 0047).
 
     Pure and deterministic given *today* (an ISO date, e.g. ``"2026-06-14"``) so the
-    grouping is unit-testable without a clock. *group_by* picks the column layout (``"due"``
-    default, ``"status"``, ``"priority"``, ``"list"``, or ``"none"`` for a flat list) and
-    *scope* the *Show* filter echoed into the controls (the caller has already fetched the
-    matching tasks). Empty columns are dropped; the board always declares its **view
+    grouping is unit-testable without a clock. *view* is the operator's chosen
+    representation (#767) — echoed into the *View* control and deciding whether *Group by*
+    is offered; the payload itself is identical across views (the shell renders the
+    switch, reading each card's structured fields). *group_by* picks the column layout
+    (``"due"`` default, ``"status"``, ``"priority"``, ``"list"``, or ``"none"`` for a flat
+    list) and *scope* the *Show* filter echoed into the controls (the caller has already
+    fetched the matching tasks). Empty columns are dropped; the board always declares its **view
     controls** and a board-level **Add task** action. When *lists* (``(list_id, title)``
     pairs for the operator's enabled writable lists) is given, the Add form gains a list
     (category) picker preselecting *default_list_id*, the *Group by* control offers
@@ -1082,7 +1134,7 @@ def build_tasks_board(
     return {
         "title": "Tasks",
         "columns": columns,
-        "controls": _board_controls(group_by=group_by, scope=scope, lists=lists),
+        "controls": _board_controls(view=view, group_by=group_by, scope=scope, lists=lists),
         "actions": actions,
     }
 

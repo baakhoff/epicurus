@@ -93,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.19.0"
+    assert data["version"] == "0.20.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",
@@ -165,7 +165,7 @@ def test_page_board_serves_board_data(
 def test_page_board_declares_view_controls(
     booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The board declares Group-by + Show controls the shell renders (ADR-0049)."""
+    """The board declares View + Group-by + Show controls the shell renders (ADR-0049/#767)."""
     from epicurus_core import CollectionPrefs, PlatformClient
 
     monkeypatch.setattr(
@@ -173,7 +173,8 @@ def test_page_board_declares_view_controls(
     )
     data = booted_client.get("/pages/board").json()
     controls = {c["id"]: c for c in data["controls"]}
-    assert set(controls) == {"group", "show"}
+    assert set(controls) == {"view", "group", "show"}
+    assert controls["view"]["value"] == "board"  # default representation (#767)
     assert controls["group"]["value"] == "due"  # default grouping
     assert controls["show"]["value"] == "open"  # default filter
     # No enabled lists → the "List" grouping option is omitted.
@@ -183,7 +184,7 @@ def test_page_board_declares_view_controls(
 def test_page_board_forwards_and_clamps_query_params(
     booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The core forwards ?group/?show verbatim; the module echoes valid ones and clamps junk."""
+    """The core forwards ?view/?group/?show verbatim; the module echoes valid ones, clamps junk."""
     from epicurus_core import CollectionPrefs, PlatformClient
 
     monkeypatch.setattr(
@@ -191,11 +192,28 @@ def test_page_board_forwards_and_clamps_query_params(
     )
     valid = booted_client.get("/pages/board?group=priority&show=all").json()
     valid_controls = {c["id"]: c["value"] for c in valid["controls"]}
-    assert valid_controls == {"group": "priority", "show": "all"}
+    assert valid_controls == {"view": "board", "group": "priority", "show": "all"}
 
-    junk = booted_client.get("/pages/board?group=nonsense&show=bogus").json()
+    junk = booted_client.get("/pages/board?view=hologram&group=nonsense&show=bogus").json()
     junk_controls = {c["id"]: c["value"] for c in junk["controls"]}
-    assert junk_controls == {"group": "due", "show": "open"}  # clamped to defaults
+    # clamped to defaults
+    assert junk_controls == {"view": "board", "group": "due", "show": "open"}
+
+
+def test_page_board_view_param_echoes_and_hides_grouping(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?view=list/calendar echoes in the View control and drops Group by (#767) — grouping
+    shapes kanban columns; the flat/date-keyed representations would render a dead knob."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    for view in ("list", "calendar"):
+        data = booted_client.get(f"/pages/board?view={view}&show=all").json()
+        controls = {c["id"]: c["value"] for c in data["controls"]}
+        assert controls == {"view": view, "show": "all"}  # Show still applies; no group
 
 
 # ── the Can page (#766) — the undated backlog behind GET /pages/can ─────────────────

@@ -12,6 +12,31 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The Tasks page gets three representations of the same data — Board, List, and
+  Calendar — switchable in place** (#767). The `board` archetype gains a **reserved `view`
+  control** (an extension of ADR-0049's declarative controls): a board page declaring
+  `{id: "view"}` opts into the shell's client-side representations, rendered via the
+  standard segmented view switcher. **List** flattens the columns to one deduped row set —
+  title, due, priority, list, tag chips, the same per-card actions — with every column
+  client-side sortable (stable, missing values last); **Calendar** is a month grid
+  (Monday-start, the calendar archetype's geometry) placing each card on its due date,
+  with prev/today/next paging, chips toned by the board's overdue/today language, and a
+  chip opening the ordinary card + actions in a sheet (no new mutation paths anywhere).
+  To support this, board cards additionally carry their **structured fields** — `due`
+  (bare ISO date), `priority`, `tags`, `list_title` — as data beside the rendered badges
+  (additive; a board that sets none renders as before). The chosen view **persists per
+  page** (localStorage, the #743 pattern), a `?view=` deep-link wins over the stored
+  choice (and is kept in sync on switch), junk clamps to the kanban, and a board with no
+  `view` control ignores the param. The tasks module declares the control (Board / List /
+  Calendar), echoes the clamped `?view=`, and omits *Group by* off the Board view —
+  grouping shapes kanban columns; the flat/date-keyed views would render it as a dead
+  knob — while *Show* applies under every view; the payload is identical across views.
+  Undated tasks never appear in any of the three — they live in the Can (#766). The
+  calendar *page's* cross-module task overlay (#469) is untouched. `BoardView` is now
+  keyed per page in `ModulePageScreen`, so tasks' two board pages can't leak control
+  state onto each other. Day-cell quick-add is deferred. `tasks` 0.19.0→0.20.0 (MINOR) ·
+  `web` 0.130.0→0.131.0 (MINOR).
+
 - **The Can: undated tasks get their own backlog page, and the board shows only what's
   scheduled** (#766) — undated tasks used to land on the Tasks board in a "No date" bucket
   under the due grouping and inside every other grouping's columns, so the backlog and the

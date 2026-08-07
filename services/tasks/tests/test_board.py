@@ -18,6 +18,7 @@ from epicurus_tasks.service import (
     calendar_feed_items,
     coerce_group,
     coerce_scope,
+    coerce_view,
 )
 
 TODAY = "2026-06-14"
@@ -31,6 +32,7 @@ def _task(
     notes: str | None = None,
     status: str = "open",
     priority: str | None = None,
+    tags: list[str] | None = None,
     list_id: str | None = None,
     list_title: str | None = None,
     repeat: str | None = None,
@@ -42,6 +44,7 @@ def _task(
         notes=notes,
         status=status,  # type: ignore[arg-type]
         priority=priority,  # type: ignore[arg-type]
+        tags=tags or [],
         list_id=list_id,
         list_title=list_title,
         repeat=repeat,
@@ -282,13 +285,18 @@ def test_edit_action_has_no_move_picker_with_a_single_list() -> None:
     assert "field_choices" not in edit
 
 
-# ── view controls (ADR-0049) ──────────────────────────────────────────────────
+# ── view controls (ADR-0049 / #767) ───────────────────────────────────────────
 
 
-def test_board_declares_group_and_show_controls() -> None:
+def test_board_declares_view_group_and_show_controls() -> None:
     board = build_tasks_board([], today=TODAY)
     controls = {c["id"]: c for c in board["controls"]}
-    assert set(controls) == {"group", "show"}
+    assert set(controls) == {"view", "group", "show"}
+    # Declaration order is toolbar order: the representation switch leads (#767).
+    assert [c["id"] for c in board["controls"]] == ["view", "group", "show"]
+    assert controls["view"]["label"] == "View"
+    assert controls["view"]["value"] == "board"
+    assert [o["value"] for o in controls["view"]["options"]] == ["board", "list", "calendar"]
     assert controls["group"]["label"] == "Group by"
     assert controls["group"]["value"] == "due"
     group_values = [o["value"] for o in controls["group"]["options"]]
@@ -312,7 +320,72 @@ def test_group_control_offers_list_option_only_with_lists() -> None:
 def test_controls_echo_active_selection() -> None:
     board = build_tasks_board([], today=TODAY, group_by="priority", scope="all")
     values = {c["id"]: c["value"] for c in board["controls"]}
-    assert values == {"group": "priority", "show": "all"}
+    assert values == {"view": "board", "group": "priority", "show": "all"}
+
+
+def test_list_and_calendar_views_hide_the_group_control() -> None:
+    # Grouping shapes kanban columns; the List/Calendar representations are flat/date-keyed,
+    # so offering Group by there would be a dead knob (#767). Show applies under every view.
+    for view in ("list", "calendar"):
+        board = build_tasks_board([], today=TODAY, view=view, scope="done")
+        values = {c["id"]: c["value"] for c in board["controls"]}
+        assert values == {"view": view, "show": "done"}, view
+
+
+def test_view_does_not_change_the_columns_payload() -> None:
+    # The three representations render the *same fetched data* (#767): the module's columns
+    # and cards are identical across views — only the controls echo differs.
+    tasks = [_task("1", "a", due=TODAY), _task("2", "b", due="2026-06-20")]
+    by_view = {
+        view: build_tasks_board(tasks, today=TODAY, view=view)
+        for view in ("board", "list", "calendar")
+    }
+    assert by_view["board"]["columns"] == by_view["list"]["columns"]
+    assert by_view["board"]["columns"] == by_view["calendar"]["columns"]
+    assert by_view["board"]["actions"] == by_view["list"]["actions"]
+
+
+def test_coerce_view_clamps_unknown_to_board() -> None:
+    assert coerce_view("list") == "list"
+    assert coerce_view("calendar") == "calendar"
+    assert coerce_view("hologram") == "board"
+    assert coerce_view(None) == "board"
+
+
+def test_cards_carry_structured_fields_for_alternate_views() -> None:
+    # Data, not presentation (#767): the List view sorts by these and the Calendar places
+    # by `due` — rendered badge strings can't support either. Additive to the card shape.
+    task = _task(
+        "t1",
+        "Structured",
+        due="2026-06-20T00:00:00.000Z",  # a provider may store a full RFC 3339 stamp
+        priority="high",
+        tags=["deep", "q3"],
+        list_id="work",
+        list_title="Work",
+    )
+    board = build_tasks_board([task], today=TODAY)
+    card = board["columns"][0]["cards"][0]
+    assert card["due"] == "2026-06-20"  # sliced to the bare ISO date
+    assert card["priority"] == "high"
+    assert card["tags"] == ["deep", "q3"]
+    assert card["list_title"] == "Work"
+
+
+def test_structured_fields_default_to_none_or_empty() -> None:
+    can = build_tasks_can([_task("t1", "Bare")], today=TODAY)
+    card = can["columns"][0]["cards"][0]
+    assert card["due"] is None
+    assert card["priority"] is None
+    assert card["tags"] == []
+    assert card["list_title"] is None
+
+
+def test_can_declares_no_view_control() -> None:
+    # The Can is a backlog: nothing dated to place on a calendar, and it is already a flat
+    # list — the *View* switcher belongs to the board page only (#767).
+    can = build_tasks_can([], today=TODAY)
+    assert [c["id"] for c in can["controls"]] == ["show"]
 
 
 # ── grouping strategies (ADR-0049) ────────────────────────────────────────────

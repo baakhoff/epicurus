@@ -116,6 +116,13 @@ function classifyExhaustion(
 
 interface ChatState {
   sessionId: string;
+  /** The open chat is **invisible** (#772): it works normally but is hidden from the
+   *  conversations list and from every learner server-side, and it is **deleted — not
+   *  archived — when you leave** (toggle off, switch/new session, or close the app).
+   *  Persisted (with `sessionId`) so an accidental reload mid-conversation keeps the
+   *  thread; {@link useInvisibleLaunchGuard} tells a same-tab reload (resume) apart from a
+   *  fresh app launch (the previous invisible chat is ended). */
+  invisible: boolean;
   /** Unsent composer text. Persisted so it survives a reload, not just navigation. */
   draft: string;
   /** The user message currently being answered (optimistic echo). */
@@ -176,6 +183,11 @@ interface ChatState {
   setDraft: (text: string) => void;
   newSession: () => void;
   openSession: (id: string) => void;
+  /** Toggle invisible mode (#772). On: starts a **fresh** invisible session (never converts
+   *  the open one — its history would already have been learned from) and flags it
+   *  server-side. Off: an exit — the invisible chat is deleted and a fresh normal session
+   *  starts. */
+  toggleInvisible: () => void;
   /** Marks a session as having finished while unseen (#492) — called only by
    *  {@link useAwayFinishedWatch}'s poll diff, never directly by UI code. */
   markUnseenFinished: (id: string) => void;
@@ -243,6 +255,19 @@ interface ChatState {
 
 function freshId(): string {
   return crypto.randomUUID();
+}
+
+/** Session-storage marker telling a same-tab **reload** (marker survives → resume the
+ *  invisible chat) apart from a fresh **launch** (marker gone → the previous app-session's
+ *  invisible chat is ended). Per-tab by nature; a PWA backgrounded keeps its tab — and the
+ *  marker — alive, so backgrounding never ends an invisible chat (#772). */
+const INVISIBLE_LIVE_MARKER = "epicurus-invisible-live";
+
+/** Best-effort server delete of an invisible chat on exit (#772): the full #771 cascade.
+ *  Failure is tolerable — the server's orphan sweep erases any flagged session this client
+ *  stops naming as its live one. */
+function deleteInvisible(sessionId: string): void {
+  void api.deleteSession(sessionId).catch(() => undefined);
 }
 
 export const useChat = create<ChatState>()(
@@ -565,6 +590,7 @@ export const useChat = create<ChatState>()(
 
       return {
         sessionId: freshId(),
+        invisible: false,
         draft: "",
         pendingUser: null,
         pendingAttachments: [],
@@ -599,9 +625,17 @@ export const useChat = create<ChatState>()(
           }),
 
         newSession: () => {
-          get().abort?.abort();
+          const state = get();
+          state.abort?.abort();
+          if (state.invisible) {
+            // Starting a new chat is an exit path (#772): the invisible one is deleted.
+            deleteInvisible(state.sessionId);
+            sessionStorage.removeItem(INVISIBLE_LIVE_MARKER);
+            state.clearUnseenFinished(state.sessionId);
+          }
           set({
             sessionId: freshId(),
+            invisible: false,
             awaiting: null,
             awaitingDraft: null,
             awaitingApproval: null,
@@ -620,8 +654,49 @@ export const useChat = create<ChatState>()(
           });
         },
 
+        toggleInvisible: () => {
+          const state = get();
+          if (state.invisible) {
+            // Toggling off = leaving: delete the invisible chat, start a fresh normal one.
+            // newSession owns exactly that exit, so reuse it.
+            get().newSession();
+            return;
+          }
+          state.abort?.abort();
+          const sessionId = freshId();
+          set({
+            sessionId,
+            invisible: true,
+            awaiting: null,
+            awaitingDraft: null,
+            awaitingApproval: null,
+            liveDocument: null,
+            pendingUser: null,
+            pendingAttachments: [],
+            segments: [],
+            streaming: false,
+            readiness: null,
+            error: null,
+            reconnectable: false,
+            paused: false,
+            abort: null,
+            lastSeq: 0,
+          });
+          sessionStorage.setItem(INVISIBLE_LIVE_MARKER, sessionId);
+          // Flag it server-side (persist-flagged, so a mid-chat reload keeps the thread).
+          // Best-effort: if the mark never lands, the exit's DELETE still erases the chat.
+          void api.markEphemeral(sessionId).catch(() => undefined);
+        },
+
         openSession: (id) => {
-          get().abort?.abort();
+          const state = get();
+          state.abort?.abort();
+          if (state.invisible && state.sessionId !== id) {
+            // Switching sessions is an exit path (#772): the invisible one is deleted.
+            deleteInvisible(state.sessionId);
+            sessionStorage.removeItem(INVISIBLE_LIVE_MARKER);
+            state.clearUnseenFinished(state.sessionId);
+          }
           set((s) => {
             // Opening a session is the one place "the operator has now seen it" is true
             // regardless of how it was opened (sheet row, palette, hover-card) — clear its
@@ -632,6 +707,7 @@ export const useChat = create<ChatState>()(
             unseenFinished.delete(id);
             return {
               sessionId: id,
+              invisible: false,
               awaiting: null,
               awaitingDraft: null,
               awaitingApproval: null,
@@ -796,6 +872,9 @@ export const useChat = create<ChatState>()(
       // durable server-side (24h), so a refresh mid-question can still answer it (ADR-0053).
       partialize: (state) => ({
         sessionId: state.sessionId,
+        // Persisted with the id (#772): a reload mid-invisible-chat must come back invisible,
+        // not silently flip the same session into a normal, listed one.
+        invisible: state.invisible,
         draft: state.draft,
         awaiting: state.awaiting,
         awaitingDraft: state.awaitingDraft,
@@ -804,6 +883,36 @@ export const useChat = create<ChatState>()(
     },
   ),
 );
+
+/** The sessions-list fetch every `["sessions"]` query uses (#772): passes the live invisible
+ *  session (if any) as `active`, so the server's list-read orphan sweep spares it while
+ *  erasing crash-stranded ones. In `stores/chat` rather than `lib/api` because it reads this
+ *  store's state (api.ts must stay store-free). */
+export function fetchSessions(): ReturnType<typeof api.sessions> {
+  const state = useChat.getState();
+  return api.sessions(state.invisible ? state.sessionId : undefined);
+}
+
+/**
+ * Mounted once in the chat screen (#772): reconciles a rehydrated invisible chat with how
+ * this page came to exist. A same-tab **reload** (the sessionStorage marker survived) resumes
+ * it — re-marking server-side, idempotently, so the flag is server truth even if the original
+ * mark never landed. A fresh **launch** (marker gone: the tab that owned it closed) treats
+ * "closing the app" as the exit it is — the stranded invisible chat is deleted and a fresh
+ * normal session starts. Backgrounding a PWA keeps the tab (and marker) alive, so it resumes.
+ */
+export function useInvisibleLaunchGuard(): void {
+  useEffect(() => {
+    const state = useChat.getState();
+    if (!state.invisible) return;
+    if (sessionStorage.getItem(INVISIBLE_LIVE_MARKER) === state.sessionId) {
+      void api.markEphemeral(state.sessionId).catch(() => undefined);
+    } else {
+      state.newSession(); // deletes the stranded invisible chat and starts fresh (see above)
+    }
+    // Runs once per mount: the guard reconciles rehydrated state, not live changes.
+  }, []);
+}
 
 // A dot/count prefix on the document title while any answer is unseen, so a backgrounded
 // PWA/tab shows it too (#492) — restored the moment nothing is left unseen.

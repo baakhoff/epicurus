@@ -12,6 +12,26 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Invisible chats** (#772) — a ghost toggle left of the model chooser starts a **fresh
+  invisible session**: everything works normally while you're in it, and when you leave —
+  toggling off, switching sessions, starting a new chat, or closing the app — the
+  conversation is **deleted, not archived** (the #771 cascade, so nothing survives anywhere).
+  The design is *persist-flagged, then hard-delete*: the session writes normally under a
+  server-side flag (`PUT /agent/sessions/{id}/ephemeral`, table `ephemeral_sessions`), so an
+  accidental mid-chat reload keeps the thread, while the flag hides it from the sessions
+  list and from **every learner** while live — never enqueued for fact extraction (checked
+  at learn time in both extraction modes, failing closed), excluded from nightly
+  reflection's transcript scan (via an `include_ephemeral=False` default on the store's
+  `sessions()`), and from `memory_search`'s past-conversation half. An **orphan sweep** —
+  at startup and on every session-list read (`GET /agent/sessions?active=<live one>`) —
+  erases any flagged session a crash left stranded, sparing the client-named live one and
+  any session with a turn in flight. Honest semantics, in the UI's own words: the header
+  reads "Invisible — deleted when you leave", and the footnote states that nothing is
+  learned while tool effects (tasks, mail, files) persist — like downloads from a private
+  browser window; usage metering still records tokens (the events carry no content).
+  Normal chats are byte-identically unaffected. `core-app` 0.105.0→0.106.0 (MINOR),
+  `web` 0.130.1→0.131.0 (MINOR).
+
 - **Deleting a chat now deletes the chat — everything it produced, everywhere** (#771) —
   `DELETE /agent/sessions/{id}` removed only the `agent_messages` rows, so a "deleted"
   conversation lived on across every sidecar it had touched. Worst: the fact-extraction queue

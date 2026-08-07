@@ -36,7 +36,7 @@ from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.store import AutomationSessionStore
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
+from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, EphemeralSessionStore
 
 log = get_logger("epicurus_core_app.agent.session_delete")
 
@@ -56,6 +56,8 @@ class DeletedSession(BaseModel):
     pending_drafts: int = 0
     pending_approvals: int = 0
     live_run_cancelled: bool = False
+    # The invisible-chat flag row (#772), dropped as the cascade's final step.
+    ephemeral_flag_cleared: bool = False
 
 
 class SessionDeleteCascade:
@@ -79,6 +81,7 @@ class SessionDeleteCascade:
         pending_approvals: PendingApprovalStore | None = None,
         automation_sessions: AutomationSessionStore | None = None,
         live_runs: LiveRunRegistry | None = None,
+        ephemeral: EphemeralSessionStore | None = None,
     ) -> None:
         self._store = store
         self._attachments = attachments
@@ -89,6 +92,7 @@ class SessionDeleteCascade:
         self._pending_approvals = pending_approvals
         self._automation_sessions = automation_sessions
         self._live_runs = live_runs
+        self._ephemeral = ephemeral
 
     async def delete(self, *, tenant: str, session_id: str) -> DeletedSession:
         """Run the cascade; returns per-store counts. See the module docstring for ordering."""
@@ -131,9 +135,14 @@ class SessionDeleteCascade:
             # The badge mapping describes rows about to be erased; a rolling automation's next
             # run re-records it (the store's ``record`` is an upsert) into the same session id.
             await self._automation_sessions.delete_session(tenant=tenant, session_id=session_id)
-        # 5. The attachment bytes, then — last — the messages themselves.
+        # 5. The attachment bytes, then the messages themselves, then — truly last — the
+        #    invisible-chat flag row (#772): while any of the above could still fail, the flag
+        #    must survive so the orphan sweep retries the whole erase.
         attachments = await self._attachments.delete_many(tenant=tenant, att_ids=att_ids)
         messages = await self._store.delete_session(tenant=tenant, session_id=session_id)
+        flag_cleared = False
+        if self._ephemeral is not None:
+            flag_cleared = (await self._ephemeral.clear(tenant=tenant, session_id=session_id)) > 0
         result = DeletedSession(
             deleted=messages,
             attachments=attachments,
@@ -143,6 +152,7 @@ class SessionDeleteCascade:
             pending_drafts=drafts,
             pending_approvals=approvals,
             live_run_cancelled=cancelled,
+            ephemeral_flag_cleared=flag_cleared,
         )
         log.info(
             "session deleted",
@@ -152,3 +162,42 @@ class SessionDeleteCascade:
             messages=messages,
         )
         return result
+
+    async def sweep_ephemeral(self, *, tenant: str, keep: str | None = None) -> int:
+        """Delete every stranded invisible chat (#772); returns how many were erased.
+
+        The safety net behind the exit paths: the client deletes an invisible chat when the
+        operator leaves it, but a crash (or an app close that never got its request out) can
+        strand one on disk — flagged, hidden, and never cleaned. Runs at startup (nothing can
+        be live across a restart) and on session-list reads, where ``keep`` is the session the
+        requesting client says it is currently *in* (`GET /sessions?active=…`), spared so
+        opening the sheet mid-invisible-chat can't nuke the live conversation. A session with
+        a **non-terminal live run** is spared too, regardless of ``keep`` — another client's
+        turn in flight is proof the chat isn't stranded. Best-effort per session: one failed
+        erase is logged and left flagged for the next sweep, never aborting the rest.
+        """
+        if self._ephemeral is None:
+            return 0
+        swept = 0
+        for session_id in await self._ephemeral.list_ids(tenant=tenant):
+            if session_id == keep:
+                continue
+            if (
+                self._live_runs is not None
+                and self._live_runs.active_for_session(tenant=tenant, session_id=session_id)
+                is not None
+            ):
+                continue
+            try:
+                await self.delete(tenant=tenant, session_id=session_id)
+                swept += 1
+            except Exception as exc:  # leave it flagged; the next sweep retries
+                log.warning(
+                    "ephemeral sweep failed for a session",
+                    tenant=tenant,
+                    session_id=session_id,
+                    error=str(exc),
+                )
+        if swept:
+            log.info("swept stranded invisible chats", tenant=tenant, count=swept)
+        return swept

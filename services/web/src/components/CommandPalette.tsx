@@ -38,7 +38,7 @@ import { api } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
 import { rankFiltered } from "@/lib/fuzzy";
 import { moduleIcon } from "@/lib/icons";
-import { useChat } from "@/stores/chat";
+import { fetchSessions, useChat } from "@/stores/chat";
 import { toast } from "@/stores/toasts";
 
 /** The platform-correct hotkey label for affordances that advertise the palette. */
@@ -111,7 +111,9 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
 
   // All three are caches the shell already maintains (sessions sheet, rail, PowerOrb) —
   // mounting the dialog just refreshes them.
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions });
+  // fetchSessions, not api.sessions: every ["sessions"] fetch must name the live invisible
+  // session (#772) or a refetch from this surface would let the server sweep it.
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: fetchSessions });
   const modules = useQuery({
     queryKey: ["modules"],
     queryFn: () => api.modules(),

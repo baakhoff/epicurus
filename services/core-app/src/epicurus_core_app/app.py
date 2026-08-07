@@ -129,7 +129,11 @@ from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.profile import ProfileSynthesizer, StandingProfileStore
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+)
 from epicurus_core_app.messaging import (
     BridgeAdmin,
     InboundConsumer,
@@ -272,6 +276,11 @@ def create_app() -> FastAPI:
     # extractor may target a small dedicated model to keep the nightly pass cheap.
     extraction_queue = ExtractionQueue(engine)
     extractor = FactExtractor(gateway, facts, model=settings.memory_extraction_model or None)
+    # Invisible chats (#772): the flag rows behind ephemeral sessions. A flagged chat works
+    # normally but is hidden from the list and from every learner while live, and each exit
+    # path deletes it via the #771 cascade; the orphan sweep (startup + list reads) erases
+    # any flagged session a crashed client left stranded.
+    ephemeral_sessions = EphemeralSessionStore(engine)
     # Standing user profile (ADR-0094): a compact per-tenant picture of the user, synthesized from
     # the fact store on the nightly maintenance batch and injected STATICALLY in _assemble — no
     # turn-time embed — so the common-case recall cost leaves the response path (the ADR-0051 trade,
@@ -451,6 +460,9 @@ def create_app() -> FastAPI:
         pending_approvals=pending_approvals,
         automation_sessions=automation_sessions,
         live_runs=live_runs,
+        # Invisible chats (#772): the cascade drops the flag row last, and its orphan sweep
+        # walks these flags — sparing the client-named live session and any turn in flight.
+        ephemeral=ephemeral_sessions,
     )
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
@@ -582,6 +594,10 @@ def create_app() -> FastAPI:
         # instead of distilling it inline; "immediate" mode still fires the extractor per turn.
         queue=extraction_queue,
         defer_extraction=settings.defer_extraction,
+        # Invisible chats (#772): a flagged session's exchanges are never enqueued for fact
+        # extraction (and never extracted immediately) — skipped at learn time, with the
+        # #771 session-stamped purge as the exit's backstop.
+        ephemeral=ephemeral_sessions,
         # Time-box the one inline memory step so a cold embedder can't stall the first token.
         recall_timeout_s=settings.memory_recall_timeout_s,
         # Resolve the loop bound per turn from the stored pref (else the env default), so the
@@ -910,6 +926,10 @@ def create_app() -> FastAPI:
         except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
             log.error("extraction queue init failed; nightly extraction off", error=str(exc))
         try:
+            await ephemeral_sessions.init()
+        except Exception as exc:  # flag store down → invisible chats degrade; chat is unaffected
+            log.error("ephemeral-session store init failed; invisible chats off", error=str(exc))
+        try:
             await scheduled_turns.init()
         except Exception as exc:  # store down → scheduled turns degrade; chat is unaffected
             log.error("scheduled-turns init failed; scheduled turns disabled", error=str(exc))
@@ -980,6 +1000,18 @@ def create_app() -> FastAPI:
         # deployment no-ops after one /api/tags round trip; a fresh one pulls in the
         # background while the rest of the core serves.
         model_bootstrap_task = asyncio.create_task(model_bootstrap.run())
+
+        # Startup half of the invisible-chat orphan sweep (#772): nothing can be live across a
+        # restart, so every flagged session is a stranded one — erase them all via the #771
+        # cascade. A one-shot task in the fire-and-forget shape of the loops around it (never
+        # blocks startup); the list-read half of the sweep covers strays that appear later.
+        async def _sweep_stranded_ephemeral() -> None:
+            try:
+                await session_delete.sweep_ephemeral(tenant=settings.default_tenant_id)
+            except Exception as exc:  # the sweep is a cleanup, never a startup gate
+                log.warning("startup ephemeral sweep failed", error=str(exc))
+
+        ephemeral_sweep_task = asyncio.create_task(_sweep_stranded_ephemeral())
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
@@ -1037,6 +1069,7 @@ def create_app() -> FastAPI:
             catalog_task.cancel()
             catalog_size_task.cancel()
             model_bootstrap_task.cancel()
+            ephemeral_sweep_task.cancel()
             extraction_task.cancel()
             scheduled_turns_task.cancel()
             push_digest_task.cancel()
@@ -1049,6 +1082,8 @@ def create_app() -> FastAPI:
                 await catalog_size_task
             with suppress(asyncio.CancelledError):
                 await model_bootstrap_task
+            with suppress(asyncio.CancelledError):
+                await ephemeral_sweep_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
             with suppress(asyncio.CancelledError):
@@ -1183,6 +1218,9 @@ def create_app() -> FastAPI:
             session_models=session_models,
             # The chat delete cascade (#771): DELETE /sessions/{id} erases every store above.
             session_delete=session_delete,
+            # Invisible chats (#772): PUT /sessions/{id}/ephemeral flags one; the sessions
+            # list hides flagged sessions and sweeps stranded ones on every read.
+            ephemeral=ephemeral_sessions,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

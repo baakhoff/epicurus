@@ -134,6 +134,36 @@ class StoredAttachment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class EphemeralSessionRow(Base):
+    """One session flagged **invisible** (#772): deleted — via the #771 cascade — when the
+    operator leaves it.
+
+    The chat *writes normally* while flagged (so an accidental reload mid-conversation keeps
+    the thread); this row is what makes it (a) hidden from every listing and learner while
+    live — the sessions list, the extraction enqueue, reflection's transcript scan, and
+    ``memory_search``'s past-conversation half — and (b) findable by the **orphan sweep**, so
+    a crash never strands an invisible chat on disk. ``session_id`` is the primary key, like
+    ``session_models``: session ids are client-minted uuids, so a cross-tenant collision is
+    unrepresentable by design. A new table, created by ``create_all`` — no migration.
+    """
+
+    __tablename__ = "ephemeral_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(63), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+def _visible_sessions_only(tenant: str) -> Any:
+    """The filter that hides flagged sessions from a listing/learner query (#772).
+
+    A correlated NOT-IN over the flag table — evaluated live, so a session flagged after its
+    first message still disappears from the next read.
+    """
+    flagged = select(EphemeralSessionRow.session_id).where(EphemeralSessionRow.tenant == tenant)
+    return StoredMessage.session_id.not_in(flagged)
+
+
 class ConversationStore:
     """Append-only conversation history in Postgres."""
 
@@ -204,10 +234,18 @@ class ConversationStore:
             rows = await session.scalars(select(StoredMessage.tenant).distinct())
             return list(rows)
 
-    async def sessions(self, *, tenant: str) -> list[SessionSummary]:
+    async def sessions(
+        self, *, tenant: str, include_ephemeral: bool = False
+    ) -> list[SessionSummary]:
         """Summarize the tenant's conversations, most recently active first.
 
         A session's title is its first stored message (the opening user turn).
+
+        **Invisible sessions are excluded by default** (#772): the default is what keeps an
+        ephemeral chat out of the sessions sheet *and* out of every reader built on this
+        method — notably reflection's transcript scan — without each caller having to know
+        the flag exists. ``include_ephemeral=True`` is the deliberate escape hatch (tests,
+        or a future admin surface); no production caller passes it today.
         """
         async with self._session() as session:
             aggregate = (
@@ -221,6 +259,8 @@ class ConversationStore:
                 .group_by(StoredMessage.session_id)
                 .order_by(func.max(StoredMessage.created_at).desc())
             )
+            if not include_ephemeral:
+                aggregate = aggregate.where(_visible_sessions_only(tenant))
             rows = (await session.execute(aggregate)).all()
             titles: dict[int, str] = {}
             first_ids = [row.first_id for row in rows]
@@ -300,6 +340,9 @@ class ConversationStore:
                 .where(
                     StoredMessage.tenant == tenant,
                     StoredMessage.content.ilike(pattern, escape="\\"),
+                    # An invisible chat must never surface in another conversation via
+                    # deliberate recall while it is live (#772) — same rule as the list.
+                    _visible_sessions_only(tenant),
                 )
                 .order_by(StoredMessage.created_at.desc(), StoredMessage.id.desc())
                 .limit(limit)
@@ -516,6 +559,63 @@ class AttachmentStore:
             result = await session.execute(
                 delete(StoredAttachment).where(
                     StoredAttachment.tenant == tenant, StoredAttachment.att_id.in_(att_ids)
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0
+
+
+class EphemeralSessionStore:
+    """The invisible-chat flag rows (#772) — see :class:`EphemeralSessionRow`.
+
+    Shares ``Base`` with :class:`ConversationStore`, so its table is created by
+    ``ConversationStore.init``; :meth:`init` also creates it so the store is self-sufficient
+    in a test. All reads/writes are tenant-scoped (constraint #1).
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def init(self) -> None:
+        """Create the flag table if it does not exist (idempotent; shares the store's Base)."""
+        async with self._engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def mark(self, *, tenant: str, session_id: str) -> None:
+        """Flag a session invisible — idempotent, so the client can safely re-mark on reload."""
+        async with self._session() as session:
+            row = await session.get(EphemeralSessionRow, session_id)
+            if row is None:
+                session.add(EphemeralSessionRow(session_id=session_id, tenant=tenant))
+                await session.commit()
+            elif row.tenant != tenant:
+                # Unreachable with uuid session ids; refuse rather than silently re-own.
+                raise ValueError(f"session {session_id!r} is flagged under another tenant")
+
+    async def is_ephemeral(self, *, tenant: str, session_id: str) -> bool:
+        """Whether this session is flagged invisible (the learners' skip check)."""
+        async with self._session() as session:
+            row = await session.get(EphemeralSessionRow, session_id)
+            return row is not None and row.tenant == tenant
+
+    async def list_ids(self, *, tenant: str) -> list[str]:
+        """Every flagged session id for *tenant*, oldest first — the orphan sweep's worklist."""
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(EphemeralSessionRow.session_id)
+                .where(EphemeralSessionRow.tenant == tenant)
+                .order_by(EphemeralSessionRow.created_at, EphemeralSessionRow.session_id)
+            )
+            return list(rows)
+
+    async def clear(self, *, tenant: str, session_id: str) -> int:
+        """Drop a session's flag row (the cascade's final step); returns rows removed."""
+        async with self._session() as session:
+            result = await session.execute(
+                delete(EphemeralSessionRow).where(
+                    EphemeralSessionRow.tenant == tenant,
+                    EphemeralSessionRow.session_id == session_id,
                 )
             )
             await session.commit()

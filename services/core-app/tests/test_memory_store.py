@@ -12,7 +12,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, StoredMessage
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+    StoredMessage,
+)
 
 
 async def _fresh_store() -> tuple[ConversationStore, AsyncEngine]:
@@ -394,6 +399,53 @@ async def test_truncate_after_is_tenant_and_session_scoped() -> None:
     assert removed == [a]  # only this tenant's, this session's tail
     assert [m.content for m in await store.messages(tenant="t2", session_id="s")] == ["y"]
     assert [m.content for m in await store.messages(tenant="t1", session_id="other")] == ["z"]
+
+
+# ── invisible sessions (#772): the flag store + the default exclusions ───────
+
+
+async def test_sessions_hides_ephemeral_by_default() -> None:
+    store, engine = await _fresh_store()
+    flags = EphemeralSessionStore(engine)
+    await store.append(tenant="t", session_id="normal", role="user", content="listed")
+    await store.append(tenant="t", session_id="ghost", role="user", content="hidden")
+    await flags.mark(tenant="t", session_id="ghost")
+
+    assert [s.id for s in await store.sessions(tenant="t")] == ["normal"]
+    # The deliberate escape hatch still sees it (tests / a future admin surface).
+    assert {s.id for s in await store.sessions(tenant="t", include_ephemeral=True)} == {
+        "normal",
+        "ghost",
+    }
+    # The flag is tenant-scoped: another tenant's identically-named session stays listed.
+    await store.append(tenant="t2", session_id="ghost", role="user", content="other tenant")
+    assert [s.id for s in await store.sessions(tenant="t2")] == ["ghost"]
+
+
+async def test_search_messages_excludes_ephemeral_sessions() -> None:
+    """An invisible chat must never leak into another conversation via memory_search (#772)."""
+    store, engine = await _fresh_store()
+    flags = EphemeralSessionStore(engine)
+    await store.append(tenant="t", session_id="normal", role="user", content="the secret plan")
+    await store.append(tenant="t", session_id="ghost", role="user", content="the secret party")
+    await flags.mark(tenant="t", session_id="ghost")
+    hits = await store.search_messages(tenant="t", query="secret")
+    assert [h.content for h in hits] == ["the secret plan"]
+
+
+async def test_ephemeral_store_mark_is_idempotent_and_tenant_scoped() -> None:
+    _, engine = await _fresh_store()
+    flags = EphemeralSessionStore(engine)
+    await flags.mark(tenant="t1", session_id="s")
+    await flags.mark(tenant="t1", session_id="s")  # a reload re-marks — must not raise
+    assert await flags.is_ephemeral(tenant="t1", session_id="s") is True
+    assert await flags.is_ephemeral(tenant="t2", session_id="s") is False
+    assert await flags.list_ids(tenant="t1") == ["s"]
+    assert await flags.list_ids(tenant="t2") == []
+    assert await flags.clear(tenant="t2", session_id="s") == 0  # other tenant can't clear it
+    assert await flags.clear(tenant="t1", session_id="s") == 1
+    assert await flags.is_ephemeral(tenant="t1", session_id="s") is False
+    assert await flags.clear(tenant="t1", session_id="s") == 0  # idempotent
 
 
 async def test_distinct_tenants_lists_every_tenant_with_history() -> None:

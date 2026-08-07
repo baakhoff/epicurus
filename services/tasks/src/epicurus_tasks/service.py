@@ -1,12 +1,19 @@
 """Tasks module — provider-agnostic MCP tool surface (ADR-0016).
 
-Also serves the **Tasks** left-nav page: a core-rendered ``board`` archetype
-(ADR-0018). The module supplies data only — :func:`build_tasks_board` groups tasks
-into columns by the operator's chosen dimension (due date / status / priority / list,
-or a flat list) and *Show* filter (open / completed / all), declares those choices as
-**view controls** (ADR-0049), and attaches per-card actions that invoke the module's
-own MCP tools through the core (complete / reopen / edit) plus a board-level add — and
-the shell renders it. No markup ever leaves this module.
+Also serves two left-nav pages, both core-rendered ``board`` archetypes (ADR-0018).
+The module supplies data only — no markup ever leaves this module:
+
+- **Tasks** (:func:`build_tasks_board`): the *scheduled* picture. Groups **dated** tasks
+  into columns by the operator's chosen dimension (due date / status / priority / list,
+  or a flat list) and *Show* filter (open / completed / all), declares those choices as
+  **view controls** (ADR-0049), and attaches per-card actions that invoke the module's
+  own MCP tools through the core (complete / reopen / edit) plus a board-level add.
+- **Can** (:func:`build_tasks_can`, #766): the backlog — every task **without** a due
+  date, in one flat column, partitioned out of the board entirely so the board is always
+  a clean picture of what's actually scheduled. Its Add creates undated tasks and each
+  card carries a one-tap **Schedule** action (a due-only form) that places the task on
+  the board; clearing a task's due date moves it back. A pure read-partition — no
+  provider contract change.
 """
 
 from __future__ import annotations
@@ -51,12 +58,15 @@ log = get_logger("epicurus_tasks.service")
 
 MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
+"""The id of the Tasks left-nav page; forms its nav route and data path."""
+
+CAN_PAGE_ID = "can"
+"""The id of the Can left-nav page (#766) — the undated-task backlog."""
 
 # An async hook returning the operator's enabled writable lists as ``(id, title)`` pairs.
 # Backs the ``tasks_lists`` tool so the chat agent can discover lists and pick one when
 # adding/moving (the web pickers get the same data via the page). ``None`` in unit tests.
 ListCategories = Callable[[], Awaitable[list[tuple[str, str]]]]
-"""The id of the Tasks left-nav page; forms its nav route and data path."""
 
 # The external providers the tasks module can connect (ADR-0030); ``local`` is the
 # implicit default and is never listed. Maps the account id to its shell display label.
@@ -94,6 +104,25 @@ _REPEAT_DESCRIPTION = (
 # the submitted value is still a bare RRULE string, so the agent tool surface is unchanged.
 _Repeat = Annotated[
     str, Field(json_schema_extra={"format": "rrule"}, description=_REPEAT_DESCRIPTION)
+]
+
+# The due date rides the same `format` seam (ADR-0082's precedent): ``format: "date"`` makes
+# the shell's SchemaForm render a native date picker emitting a floating ``YYYY-MM-DD``. The
+# descriptions double as the form's field hint and the agent's parameter doc — both say where
+# an undated task goes (the Can, #766), so nothing ever vanishes silently from the board.
+_ADD_DUE_DESCRIPTION = (
+    'Due date as an ISO date, e.g. "2026-01-15". A task without one is saved to the Can'
+    " — the undated backlog page — instead of the board, until it's scheduled."
+)
+_UPDATE_DUE_DESCRIPTION = (
+    'New due date as an ISO date, e.g. "2026-01-15". Pass "" to clear it — the task then'
+    " moves off the board into the Can (the undated backlog page)."
+)
+_AddDue = Annotated[
+    str, Field(json_schema_extra={"format": "date"}, description=_ADD_DUE_DESCRIPTION)
+]
+_UpdateDue = Annotated[
+    str, Field(json_schema_extra={"format": "date"}, description=_UPDATE_DUE_DESCRIPTION)
 ]
 
 # Short labels for a repeat rule, for the board badge / hover-card. Best-effort: an exotic
@@ -153,7 +182,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.18.0",
+        version="0.19.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -176,7 +205,16 @@ def build_module(
                 archetype="board",
                 icon="check",
                 nav_order=40,
-            )
+            ),
+            # The Can (#766): the undated-task backlog, right under the board in the nav.
+            # Same `board` archetype — one flat column, its own Add / Schedule actions.
+            PageSpec(
+                id=CAN_PAGE_ID,
+                title="Can",
+                archetype="board",
+                icon="inbox",
+                nav_order=41,
+            ),
         ],
         resolver=True,
         attachable=True,
@@ -314,7 +352,7 @@ def build_module(
     async def tasks_add(
         title: str,
         notes: str | None = None,
-        due: str | None = None,
+        due: _AddDue | None = None,
         priority: str | None = None,
         tags: str | None = None,
         status: str = "open",
@@ -323,13 +361,18 @@ def build_module(
     ) -> Task:
         """Create a new task.
 
-        If more than one task list exists and the user hasn't said which to use, call
-        ``tasks_lists`` first and ask which list, then pass its id as ``list_id``.
+        A task **without a due date is filed into the Can** — the undated backlog page —
+        rather than the board, so "note down: buy a drill" lands there until it's
+        scheduled (#766). Mention that when confirming an undated add. If more than one
+        task list exists and the user hasn't said which to use, call ``tasks_lists``
+        first and ask which list, then pass its id as ``list_id``.
 
         Args:
             title: Task title (required).
             notes: Optional free-text notes or description.
             due: Optional due date as an ISO date string, e.g. ``"2025-01-15"``.
+                Omit it to file the task in the Can (the undated backlog) instead of
+                the board.
             priority: Optional priority level — ``"low"``, ``"medium"``, or ``"high"``.
                 Google Tasks ignores this field.
             tags: Optional comma-separated labels, e.g. ``"work, urgent"``.
@@ -396,7 +439,7 @@ def build_module(
         task_id: str,
         title: str | None = None,
         notes: str | None = None,
-        due: str | None = None,
+        due: _UpdateDue | None = None,
         priority: str | None = None,
         tags: str | None = None,
         status: str | None = None,
@@ -425,9 +468,11 @@ def build_module(
             title: New title.  Omit to leave it unchanged.
             notes: New free-text notes.  Omit to leave them unchanged; pass ``""`` to clear.
             due: New due date as an ISO date string, e.g. ``"2025-01-15"``.  Omit
-                to leave it unchanged; pass ``""`` to clear it — rejected if the task has a
-                live ``repeat`` rule and this call doesn't also touch ``repeat``, since
-                clearing the anchor would strand the recurrence (#534).
+                to leave it unchanged; pass ``""`` to clear it — the task then moves off
+                the board into the Can (the undated backlog, #766). Clearing is rejected
+                if the task has a live ``repeat`` rule and this call doesn't also touch
+                ``repeat``, since clearing the anchor would strand the recurrence (#534).
+                Setting a due date on a Can task schedules it onto the board.
             priority: New priority (``"low"``/``"medium"``/``"high"``).  Omit to
                 leave unchanged.  Google Tasks ignores this field.
             tags: New comma-separated tags, e.g. ``"work, urgent"``.  Omit to leave
@@ -613,15 +658,20 @@ async def enabled_write_lists(
     return lists, default
 
 
-# ── Tasks page: the `board` archetype data (ADR-0018 / ADR-0049) ─────────────────
+# ── Tasks + Can pages: the `board` archetype data (ADR-0018 / ADR-0049 / #766) ────
 #
 # The module supplies data only; the core shell renders it. The board groups tasks into
 # columns by the operator's chosen *group-by* dimension and *Show* filter — declared as
 # **view controls** the shell renders as a toolbar (ADR-0049) — and attaches per-card
 # actions that the shell turns into buttons, each invoking one of this module's MCP tools
 # through the core (validated against the manifest), so mutations never bypass the contract.
+#
+# The two pages partition every task by whether it has a due date (#766): the board shows
+# only *dated* tasks (under every grouping — there is no "No date" bucket any more) and the
+# Can holds the rest, so scheduling is exactly "give it a due date" and un-scheduling is
+# "clear it". The partition is read-side only; providers are untouched.
 
-_BUCKET_ORDER = ("Overdue", "Today", "Upcoming", "No date")
+_BUCKET_ORDER = ("Overdue", "Today", "Upcoming")
 _BUCKET_TONE = {"Overdue": "danger", "Today": "accent"}
 
 # Grouping dimensions (ADR-0049). Each is a board column layout the operator can switch to.
@@ -714,6 +764,9 @@ def _bucket_for(task: Task, today: str) -> str:
     """The due-date column a task belongs in, relative to *today* (ISO date).
 
     ISO date strings sort lexicographically, so the comparison needs no parsing.
+    "No date" is unreachable as a *column* now — the board holds dated tasks only
+    (#766) — but the card builder still calls this for an undated Can card's badge
+    tone (where no due badge is even added), so the branch stays for totality.
     """
     if not task.due:
         return "No date"
@@ -792,7 +845,11 @@ def _group_columns(
 
 
 def _task_card(
-    task: Task, *, today: str, move_lists: list[tuple[str, str]] | None = None
+    task: Task,
+    *,
+    today: str,
+    move_lists: list[tuple[str, str]] | None = None,
+    schedule: bool = False,
 ) -> dict[str, Any]:
     """One board card: the task plus its primary (complete / reopen) and edit actions.
 
@@ -803,7 +860,9 @@ def _task_card(
     **completed** card offers *Reopen* in place of *Complete* (both one-tap) and is marked
     ``done`` so the shell strikes it through. When *move_lists* is given (more than one
     writable list exists) the Edit form gains a **List** picker, prefilled to the task's
-    current list, that moves the task when changed (ADR-0038).
+    current list, that moves the task when changed (ADR-0038). With *schedule* (Can cards,
+    #766) the card leads with a **Schedule** action — a due-only ``tasks_update`` form,
+    prefilled to *today* — which is how a Can task is placed on the board.
     """
     due_bucket = _bucket_for(task, today)
     badges: list[dict[str, str]] = []
@@ -877,13 +936,42 @@ def _task_card(
         "confirm": "Delete this task permanently? This cannot be undone.",
         "args": args,
     }
+    actions = [primary_action, edit_action, delete_action]
+    if schedule:
+        # The Can's headline verb (#766): a one-tap form with just the due picker
+        # (`format: "date"` renders the shell's native date field), prefilled to today so
+        # opening and submitting schedules for today; picking another date wins. Setting
+        # the due date is what moves the task onto the board.
+        actions.insert(
+            0,
+            {
+                "tool": "tasks_update",
+                "label": "Schedule",
+                "icon": "calendar",
+                "intent": "primary",
+                "form": True,
+                "fields": ["due"],
+                "args": args,
+                "form_values": {"due": today},
+            },
+        )
     return {
         "id": task.id,
         "title": task.title,
         "subtitle": task.notes or None,
         "badges": badges,
         "done": done,
-        "actions": [primary_action, edit_action, delete_action],
+        "actions": actions,
+    }
+
+
+def _show_control(scope: str) -> dict[str, Any]:
+    """The *Show* (task scope) view control — shared by the board and the Can (#766)."""
+    return {
+        "id": "show",
+        "label": "Show",
+        "value": scope,
+        "options": [{"value": value, "label": label} for value, label in _SCOPE_OPTIONS],
     }
 
 
@@ -906,12 +994,7 @@ def _board_controls(
             "value": group_by,
             "options": [{"value": value, "label": label} for value, label in group_options],
         },
-        {
-            "id": "show",
-            "label": "Show",
-            "value": scope,
-            "options": [{"value": value, "label": label} for value, label in _SCOPE_OPTIONS],
-        },
+        _show_control(scope),
     ]
 
 
@@ -944,7 +1027,13 @@ def build_tasks_board(
     it here would need the module to write the operator's collection prefs, which it has
     no path to do today. With two or more lists each task's Edit form also gains a List
     picker that moves it (ADR-0038).
+
+    The board shows **dated tasks only** (#766): undated ones are partitioned into the Can
+    (:func:`build_tasks_can`) under every grouping, so there is no "No date" bucket and the
+    board is always the picture of what's actually scheduled. Callers pass the full fetched
+    list; the partition happens here so no caller can accidentally leak backlog onto it.
     """
+    tasks = [t for t in tasks if t.due]
     # Grouping by list needs named lists; with none, fall back to the due-date layout so the
     # control and the columns stay consistent.
     if group_by == "list" and not lists:
@@ -995,6 +1084,63 @@ def build_tasks_board(
         "columns": columns,
         "controls": _board_controls(group_by=group_by, scope=scope, lists=lists),
         "actions": actions,
+    }
+
+
+_CAN_COLUMN = "Backlog"
+
+
+def build_tasks_can(
+    tasks: list[Task],
+    *,
+    today: str,
+    scope: str = "open",
+    lists: list[tuple[str, str]] | None = None,
+    default_list_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the ``board`` archetype payload for the **Can** page (#766).
+
+    The Can is the backlog: every task **without** a due date, across the same enabled
+    lists the board aggregates (each card keeps its list/category badge), in one flat
+    column. It takes the same full fetched task list as :func:`build_tasks_board` and
+    keeps the complement — the two pages partition the tasks, so a task lives on exactly
+    one of them and moves between them purely by gaining or losing a due date.
+
+    Cards are the ordinary task cards plus a leading **Schedule** action (a due-only
+    ``tasks_update`` form, prefilled to *today*) that places the task on the board; the
+    board-level **Add** creates a task with *no* due field offered (and no ``repeat`` —
+    a rule needs a due date to anchor it), so new entries land here by construction.
+    The only view control is *Show* (open / completed / all — completed undated tasks
+    stay reachable, per the page's own filter); grouping would be noise in one column.
+    When *lists* is given the Add form gains the same list picker as the board, and with
+    two or more lists each card's Edit form gains the move picker (ADR-0038).
+    """
+    undated = [t for t in tasks if not t.due]
+    move_lists = lists if lists and len(lists) >= 2 else None
+    cards = [_task_card(t, today=today, move_lists=move_lists, schedule=True) for t in undated]
+    columns = [{"id": _slug(_CAN_COLUMN), "title": _CAN_COLUMN, "cards": cards}] if cards else []
+    add_action: dict[str, Any] = {
+        "tool": "tasks_add",
+        "label": "Add task",
+        "intent": "primary",
+        "icon": "plus",
+        "icon_only": True,
+        "form": True,
+        "fields": ["title", "notes", "priority", "tags"],
+        "field_options": _TASK_FIELD_OPTIONS,
+    }
+    if lists:
+        add_action["fields"] = ["title", "list_id", "notes", "priority", "tags"]
+        add_action["field_choices"] = {
+            "list_id": [{"value": list_id, "label": title} for list_id, title in lists],
+        }
+        if default_list_id is not None:
+            add_action["form_values"] = {"list_id": default_list_id}
+    return {
+        "title": "Can",
+        "columns": columns,
+        "controls": [_show_control(scope)],
+        "actions": [add_action],
     }
 
 
@@ -1049,6 +1195,10 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         details.append(HoverCardDetail(label="Tags", value=", ".join(task.tags)))
     if task.repeat:
         details.append(HoverCardDetail(label="Repeat", value=_repeat_label(task.repeat)))
+    # The link leads to the page the task actually lives on (#766): the board for a dated
+    # task, the Can for an undated one — "appears in the Can and nowhere else" includes
+    # where we send the operator looking for it.
+    page_id = TASKS_PAGE_ID if task.due else CAN_PAGE_ID
     return HoverCard(
         title=task.title,
         description=task.notes or "",
@@ -1056,7 +1206,7 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         # A calendar-feed chip's hover-card needs a way back to the task (#469's own
         # acceptance criteria); every task hover-card gains it, not just those reached
         # from the calendar — consistent regardless of where the chip was clicked.
-        href=HoverCardLink(label="Open in Tasks", url=f"/m/{MODULE_NAME}/{TASKS_PAGE_ID}"),
+        href=HoverCardLink(label="Open in Tasks", url=f"/m/{MODULE_NAME}/{page_id}"),
     ).model_dump()
 
 

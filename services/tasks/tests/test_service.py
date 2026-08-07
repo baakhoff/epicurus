@@ -48,7 +48,7 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.18.0"
+    assert manifest.version == "0.19.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -62,10 +62,15 @@ async def test_manifest(module_fixture: object) -> None:
         "tasks_update",
         "tasks_delete",
     }
-    # The Tasks left-nav page is declared as a core `board` archetype (ADR-0018).
+    # Both left-nav pages are core `board` archetypes (ADR-0018): the Tasks board and,
+    # right under it, the Can — the undated backlog (#766).
     pages = {p.id: p for p in manifest.pages}
+    assert set(pages) == {"board", "can"}
     assert pages["board"].archetype == "board"
     assert pages["board"].title == "Tasks"
+    assert pages["can"].archetype == "board"
+    assert pages["can"].title == "Can"
+    assert pages["can"].nav_order == pages["board"].nav_order + 1
     # Tasks references tasks in chat (resolver) and is a chat-attachment source (ADR-0019).
     assert manifest.resolver is True
     assert manifest.attachable is True
@@ -104,6 +109,34 @@ async def test_manifest_declares_automation_templates(module_fixture: object) ->
     assert overdue.trigger == {"module": "tasks", "event_type": "tasks.task_overdue"}
     assert overdue.autonomy == "notify"
     assert overdue.sinks == ["push"]
+
+
+async def test_tool_descriptions_report_the_can_for_undated_tasks(
+    module_fixture: object,
+) -> None:
+    # "Note down: buy a drill" must land in the backlog *knowingly* (#766): tasks_add says
+    # an undated task files into the Can, and both due params say so too — the same
+    # descriptions double as the web form's field hints, so the board's Add form tells the
+    # operator where a dateless task goes instead of letting it silently vanish.
+    manifest = await module_fixture.manifest()  # type: ignore[attr-defined]
+    tools = {t.name: t for t in manifest.tools}
+    assert "Can" in (tools["tasks_add"].description or "")
+    add_due = tools["tasks_add"].input_schema["properties"]["due"]
+    assert "Can" in str(add_due)
+    update_due = tools["tasks_update"].input_schema["properties"]["due"]
+    assert "Can" in str(update_due)
+
+
+async def test_due_params_declare_the_date_format(module_fixture: object) -> None:
+    # `format: "date"` rides the ADR-0082 format seam: the shell's SchemaForm renders a
+    # native date picker (the Can's Schedule form is exactly this field); the agent-facing
+    # contract is unchanged — the value is still an ISO date string.
+    manifest = await module_fixture.manifest()  # type: ignore[attr-defined]
+    tools = {t.name: t for t in manifest.tools}
+    for tool in ("tasks_add", "tasks_update"):
+        due = tools[tool].input_schema["properties"]["due"]
+        members = due.get("anyOf", [due])
+        assert any(m.get("format") == "date" for m in members), (tool, due)
 
 
 async def test_tasks_list_empty(module_fixture: object) -> None:
@@ -447,8 +480,14 @@ def test_task_hover_card_full() -> None:
 def test_task_hover_card_links_back_to_the_board() -> None:
     # A calendar-feed chip's hover-card needs a way back to the task (#469); every task
     # hover-card carries it now, not just those reached from the calendar.
-    card = task_hover_card(_task())
+    card = task_hover_card(_task(due="2026-06-20"))
     assert card["href"] == {"label": "Open in Tasks", "url": "/m/tasks/board"}
+
+
+def test_undated_task_hover_card_links_to_the_can() -> None:
+    # An undated task lives in the Can (#766) — the link goes where the task actually is.
+    card = task_hover_card(_task())
+    assert card["href"] == {"label": "Open in Tasks", "url": "/m/tasks/can"}
 
 
 def test_task_hover_card_omits_due_when_absent_and_marks_completed() -> None:

@@ -12,6 +12,28 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Nightly reflection can no longer propose edits to the base system prompt** (#762) — the
+  pass (ADR-0093) offered two targets: a named playbook, or `"instructions"` — the base
+  prompt itself. The second target is removed, by design: reflection reads **tainted
+  transcripts** (mail bodies, web results, document text the agent quoted), so outside text
+  could surface as a plausible edit to the very document the agent's rules live in; an
+  instructions proposal was a **full-document replacement** reviewed nightly under approval
+  fatigue, and a poisoned approval would persist in every future turn's system prompt; and
+  the governed system drafting its own governing document is a conflict of interest even
+  with review. Enforced at three layers: the reflection prompt now offers **playbooks only**
+  (the base prompt stays in its context read-only, explicitly non-proposable, so playbooks
+  don't duplicate base rules); `_resolve` drops any `"instructions"` target the model
+  returns anyway (logged); and the review sink refuses to stage a proposal against the
+  instructions path **for every origin**, with the instructions apply-path removed outright
+  — no future proposal source can quietly reintroduce the target. A pending instructions
+  proposal from before the upgrade still renders with its diff and is cleanly rejectable;
+  Approve refuses it with a clear message. Operator editing of the base prompt in Settings
+  is unchanged. Reflection also gains its **own off-switch**,
+  `PLAYBOOK_REFLECTION_ENABLED` (default on, now that it is playbook-only): disabled, the
+  nightly job reports "skipped — disabled" without spending a gateway call — previously the
+  only way to stop it was disabling all nightly maintenance. `core-app` 0.106.0→0.107.0
+  (MINOR).
+
 - **Invisible chats** (#772) — a ghost toggle left of the model chooser starts a **fresh
   invisible session**: everything works normally while you're in it, and when you leave —
   toggling off, switching sessions, starting a new chat, or closing the app — the

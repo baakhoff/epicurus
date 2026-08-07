@@ -793,7 +793,11 @@ def create_app() -> FastAPI:
         [
             extraction_drain_job(extraction_runner.drain_once),
             profile_synthesis_job(profile_synthesizer.run),
-            playbook_reflection_job(playbook_reflector.run),
+            # Reflection's own off-switch (#762): disabled, the job reports "skipped" without
+            # spending a gateway call — independent of the whole-schedule toggle.
+            playbook_reflection_job(
+                playbook_reflector.run, enabled=settings.playbook_reflection_enabled
+            ),
             module_reindex_job(registry.reembed),
             facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
             prune_run_history_job(lambda: maintenance_history.prune(settings.default_tenant_id)),

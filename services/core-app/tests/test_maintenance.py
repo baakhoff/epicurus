@@ -432,6 +432,20 @@ async def test_playbook_reflection_job_failure_is_contained() -> None:
     assert "the model exploded" in run.jobs[0].detail
 
 
+async def test_playbook_reflection_job_disabled_skips_without_a_gateway_call() -> None:
+    """#762's dedicated toggle: disabled, the job spends nothing and says so in its status
+    line — the pass no longer requires turning off ALL nightly maintenance to silence."""
+
+    async def reflect() -> int:
+        raise AssertionError("a disabled reflection pass must not run at all")
+
+    job = playbook_reflection_job(reflect, enabled=False)
+    status, detail = await job.run()
+    assert status == "skipped"
+    assert "disabled" in detail
+    assert "PLAYBOOK_REFLECTION_ENABLED" in detail
+
+
 async def test_prune_run_history_job_reports_count() -> None:
     async def prune() -> int:
         return 4

@@ -485,17 +485,26 @@ def profile_synthesis_job(synthesize: Callable[[], Awaitable[int]]) -> Maintenan
     )
 
 
-def playbook_reflection_job(reflect: Callable[[], Awaitable[int]]) -> MaintenanceJob:
-    """Propose edits to the agent's own guidance from recent sessions (ADR-0093 §1) — nightly.
+def playbook_reflection_job(
+    reflect: Callable[[], Awaitable[int]], *, enabled: bool = True
+) -> MaintenanceJob:
+    """Propose edits to the agent's playbooks from recent sessions (ADR-0093 §1, #762) — nightly.
 
     *reflect* is :meth:`PlaybookReflector.run`; it is best-effort per tenant, skips a paused
-    gateway, and only ever *stages* proposals for the operator's approval — it never writes the
-    agent's instructions or playbooks — so this job reports how many now await review. One gateway
-    call per active tenant over a night's conversations is light enough for the scheduled batch,
-    the same tier as the extraction drain and profile synthesis.
+    gateway, and only ever *stages* playbook proposals for the operator's approval — it never
+    writes the agent's instructions or playbooks — so this job reports how many now await
+    review. One gateway call per active tenant over a night's conversations is light enough for
+    the scheduled batch, the same tier as the extraction drain and profile synthesis.
+
+    ``enabled`` is the feature's own off-switch (#762, ``PLAYBOOK_REFLECTION_ENABLED``): the job
+    stays registered — the maintenance panel keeps showing it, honestly, as skipped — but a
+    disabled pass spends **no gateway call** and says so in its status line. Before this knob
+    existed, the only way to stop reflection was disabling all nightly maintenance.
     """
 
     async def _run() -> tuple[JobStatus, str]:
+        if not enabled:
+            return "skipped", "disabled (PLAYBOOK_REFLECTION_ENABLED=false)"
         count = await reflect()
         return "ok", f"staged {count} proposal(s) for review"
 

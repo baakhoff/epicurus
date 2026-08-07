@@ -189,7 +189,7 @@ a winner and the rest sit invisible underneath) rather than stack; as column chi
 toast, the update prompt, and a download pill all show at once. Add any future corner
 surface as a `CornerStack` child, never as a new `fixed` element.
 
-### Offline & backend-unreachable banner (#494)
+### Offline & backend-unreachable banner (#494, debounced #791)
 
 The PWA shell loads from the service-worker cache even when nothing behind it is
 reachable — so silence is confusing, and on a LAN/VPN self-hosted setup (#460) "app up,
@@ -199,7 +199,8 @@ quiet, moonlight-toned banner at the top of the main column:
 
 - **offline — reconnecting** (`navigator.onLine` + the `online`/`offline` events): the
   device has no network at all. Wins when both signals fire — an offline phone also
-  fails its probes, and "offline" is the truer story.
+  fails its probes, and "offline" is the truer story. No debounce — `navigator.onLine`
+  isn't flaky the way a single dropped fetch is.
 - **can't reach epicurus — retrying**: the device is fine but epicurus isn't answering.
   Evidence-based, with **no dedicated probe endpoint**: every `/platform` request flows
   through one fetch wrapper (`epFetch`, `src/lib/http.ts`), and each doubles as evidence
@@ -209,6 +210,31 @@ quiet, moonlight-toned banner at the top of the main column:
   the *paused* state). The PowerOrb's existing 15 s `power` poll is the heartbeat that
   trips and clears the banner while the tab is visible; TanStack pauses that poll in
   hidden tabs, so a backgrounded PWA makes no extra requests.
+
+**Debounced, not single-strike (#791).** A loaded self-hosted box (CPU-only inference,
+Docker Desktop VM) throws transient blips that read exactly like outage evidence — a
+gateway 502 while core-app is momentarily pegged, a 504 past the gateway timeout, a
+stray network `TypeError` — so one failure alone no longer trips the banner. `coreDown`
+itself stays eager and single-strike, unchanged: the composer's Send-gate and the
+Files/Mail "connection lost" states still read it directly, since a send-adjacent action
+would rather refuse instantly than let one through a debounce window only to have it
+fail anyway. The banner instead reads a second, debounced pair the store derives from
+the same evidence: a first failure *arms* `pendingDown`, and `useConnectionWatch` reacts
+by firing one confirming re-probe immediately (the same vitals refetch recovery already
+uses) — so in the common "just a blip" case it resolves via a healthy re-probe well
+before anything renders. `confirmedDown` — what the banner actually renders on — trips
+only once that evidence **persists past a short grace window**
+(`UNREACHABLE_GRACE_MS`, 5 s) **or a second failure confirms it sooner** (very often the
+confirming re-probe's own failure). A genuinely stopped stack still surfaces within
+~5 s either way, and any healthy response clears `coreDown`/`pendingDown`/`confirmedDown`
+together — recovery was never the flaky half of this signal, so it stays instant.
+
+**Diagnosable, not silent (#791).** Every report carries the evidence that produced it —
+the failing request's method, path (no query string), and failure class (`TypeError` /
+`502` / `504`) — kept in the store as `lastEvidence` and logged via `console.debug` on
+every report, armed or confirmed. While the banner shows, its `title` tooltip names that
+same evidence (e.g. `GET /platform/v1/power — 502`), so a flap can be attributed to a
+specific request without network-tab archaeology.
 
 Recovery is event-shaped (`useConnectionWatch`, mounted once in the Shell): the
 browser's `online` event re-checks the vitals (`power`, `modules`) immediately;

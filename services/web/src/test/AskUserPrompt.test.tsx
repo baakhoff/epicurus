@@ -138,7 +138,11 @@ describe("AskUserPrompt — the ask_user clarifying prompt (#360)", () => {
 
     const input = await screen.findByLabelText(/answer the assistant/i);
     fireEvent.change(input, { target: { value: "the readme" } });
-    act(() => useConnection.getState().reportUnreachable());
+    act(() =>
+      useConnection
+        .getState()
+        .reportUnreachable({ method: "GET", path: "/platform/v1/power", kind: "502" }),
+    );
 
     expect(screen.getByLabelText(/send answer/i)).toBeDisabled();
 

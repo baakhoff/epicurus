@@ -783,7 +783,9 @@ class Agent:
             )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         if not blocked:
-            self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
+            self._schedule_extraction(
+                tenant=tenant, messages=messages, answer=turn.content, session_id=session_id
+            )
         return turn
 
     async def run_stream(
@@ -1130,11 +1132,18 @@ class Agent:
         # must still flush it. The model call above stays promptly cancellable; losing the
         # finished answer here would be the very bug this decoupling fixes (#376).
         await asyncio.shield(self._persist_answer(turn, tenant=tenant, session_id=session_id))
-        self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
+        self._schedule_extraction(
+            tenant=tenant, messages=messages, answer=turn.content, session_id=session_id
+        )
         yield AgentEvent(type="done", turn=turn)
 
     def _schedule_extraction(
-        self, *, tenant: str, messages: list[ChatMessage], answer: str
+        self,
+        *,
+        tenant: str,
+        messages: list[ChatMessage],
+        answer: str,
+        session_id: str | None = None,
     ) -> None:
         """Persist this exchange for fact extraction, off the response path (ADR-0045/0051).
 
@@ -1144,7 +1153,8 @@ class Agent:
         ADR-0045 path). Either way it is fire-and-forget so it never delays the reply, and the
         task is tracked until it finishes so it isn't garbage-collected mid-flight. Skips when
         there is nothing to learn from — no user text, no answer, or only the empty-answer
-        fallback (a canned non-answer) — or when no sink is configured.
+        fallback (a canned non-answer) — or when no sink is configured. ``session_id`` stamps
+        the queued row so deleting the chat can purge it before the drain (#771).
         """
         if not answer or answer == _EMPTY_ANSWER_FALLBACK:
             return
@@ -1160,7 +1170,12 @@ class Agent:
             return
         coro: Coroutine[Any, Any, object]
         if self._defer_extraction and self._queue is not None:
-            coro = self._queue.enqueue(tenant=tenant, user_text=user_text, assistant_text=answer)
+            coro = self._queue.enqueue(
+                tenant=tenant,
+                user_text=user_text,
+                assistant_text=answer,
+                session_id=session_id,
+            )
         elif self._extractor is not None:
             coro = self._extractor.extract(
                 tenant=tenant, user_text=user_text, assistant_text=answer

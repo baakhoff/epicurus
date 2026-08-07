@@ -66,6 +66,7 @@ from epicurus_core_app.agent.playbook_review import (
 from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.session_delete import SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.document_sinks import make_kb_sink, make_notes_sink
@@ -437,6 +438,20 @@ def create_app() -> FastAPI:
     # detached task that buffers its events, so a client disconnect (PWA backgrounded, refresh)
     # no longer aborts it — the answer still persists and a reconnecting client re-attaches.
     live_runs = LiveRunRegistry(grace_seconds=settings.live_run_grace_seconds)
+    # Deleting a chat deletes the chat — everywhere (#771): messages, attachments, still-queued
+    # extraction exchanges, the session-model row, suspended/pending paused runs, the automation
+    # badge mapping, and any in-flight run's buffered state, in one tenant-scoped cascade.
+    session_delete = SessionDeleteCascade(
+        store=conversation_store,
+        attachments=attachment_store,
+        queue=extraction_queue,
+        session_models=session_models,
+        suspended=suspended_runs,
+        pending_drafts=pending_drafts,
+        pending_approvals=pending_approvals,
+        automation_sessions=automation_sessions,
+        live_runs=live_runs,
+    )
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
     # restart-only path for Ollama's KV-cache apply (#307). Reaches docker-proxy-core by default
@@ -1166,6 +1181,8 @@ def create_app() -> FastAPI:
             # A session's persisted model override (#707): the sessions list reads it back;
             # the picker's explicit change route writes it (the same field set_chat_model does).
             session_models=session_models,
+            # The chat delete cascade (#771): DELETE /sessions/{id} erases every store above.
+            session_delete=session_delete,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

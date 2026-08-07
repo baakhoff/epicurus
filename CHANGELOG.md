@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The automations `push` sink is wired up — all ten starter templates now deliver
+  something** (#723) — `push` has been valid sink vocabulary since the automations engine
+  shipped (ADR-0105), but `SinkDispatcher` never had a handler registered for it: a run
+  configured with `sinks=["push"]` executed, recorded a ledger row, and delivered nothing an
+  operator could see — exactly the case every one of the ten starter templates #717 shipped
+  was in. `make_push_sink` closes the gap the same way `document_sinks.py` closed it for
+  `notes`/`kb`: a thin adapter that calls `PushService.notify` under a fixed `"automation"`
+  category (with `automation_id`, so a per-automation override can silence just one without
+  touching the category default), title the automation's own name, body the run's raw output.
+  It goes *through* `notify()`, never around it, so quiet hours, the tenant-wide rate cap, and
+  the push/center toggles all apply exactly as they do for the settings UI's test button or
+  #732's event alerts. `PushService.notify` gains `NotifyResult.notification_id` — the
+  notification-center row's id, set the moment that row is written regardless of what push
+  delivery itself then does — so the sink can record it as an `EntityRef`
+  (`module="core"`, `kind="notification"`) on the run's `artifacts`, the same ledger field the
+  notes/kb sinks already populate; the runs feed renders a chip for it with no further UI
+  work. `PushService._send_now` also gains a 500-character cap on the outgoing push payload's
+  body (an automation's full report should not be able to blow a push service's own size
+  ceiling) — the notification-center row keeps the caller's complete text regardless. `core-app`
+  0.104.0→0.105.0 (MINOR).
+
 - **Approving a delete suggestion no longer reports success when the file is already gone**
   (#761) — `SuggestionReview.approve`'s `delete` branch caught the file API's 404 (the vault
   document had already been removed some other way) and swallowed it outright, so both

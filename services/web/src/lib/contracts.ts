@@ -782,6 +782,14 @@ export const BoardAction = z
     field_choices: z
       .record(z.string(), z.array(z.object({ value: z.string(), label: z.string() })))
       .optional(),
+    /**
+     * Per-field *open* suggestions (#763) — a `field_choices` sibling for fields where
+     * the listed values are a starting point, not the whole universe: the form offers
+     * them as typeahead but still accepts anything typed. Today the `format: "tags"`
+     * chips input reads these (the module supplies its known tags; the shell renders the
+     * picker — ADR-0018/0019); the semantic is field-generic.
+     */
+    field_suggestions: z.record(z.string(), z.array(z.string())).optional(),
     confirm: z.string().nullish(),
     /**
      * Render this action as a compact icon-only button — the label moves to a tooltip and
@@ -806,6 +814,18 @@ export const BoardCard = z.object({
   badges: z.array(BoardBadge).default([]),
   done: z.boolean().default(false),
   actions: z.array(BoardAction).default([]),
+  /**
+   * Structured card fields (#767) — optional, additive data the alternate board
+   * representations read: the List view sorts by `due` / `priority` / `title` and shows
+   * `list_title` + `tags` as columns/chips; the Calendar view places a card by `due`.
+   * Badges stay presentation-only for the kanban rendering; these carry the same facts
+   * as *data*. `due` is a bare ISO date (`YYYY-MM-DD`). A module that sets none of them
+   * renders exactly as before (the board view never reads them).
+   */
+  due: z.string().nullish(),
+  priority: z.string().nullish(),
+  tags: z.array(z.string()).default([]),
+  list_title: z.string().nullish(),
 });
 export type BoardCard = z.infer<typeof BoardCard>;
 
@@ -814,6 +834,14 @@ export const BoardColumn = z.object({
   id: z.string(),
   title: z.string(),
   cards: z.array(BoardCard).default([]),
+  /**
+   * The collection (list) this column represents, when it represents one (#763): set by
+   * the module on list-grouped columns so the drag-move drop target matches **by id**
+   * against the move action's `to_list_id` choices — never by the column's display
+   * title, which a tag/status column may coincidentally share. Absent on columns that
+   * aren't lists; a board with no `list_id` anywhere simply has no drop targets.
+   */
+  list_id: z.string().nullish(),
 });
 export type BoardColumn = z.infer<typeof BoardColumn>;
 
@@ -823,6 +851,15 @@ export type BoardColumn = z.infer<typeof BoardColumn>;
  * and the current `value`; the shell renders a selector and re-fetches the page with
  * `?<id>=<value>` on change, so regrouping/filtering stays module-side (the board carries
  * no task fields to the client). Generic and reusable across board modules.
+ *
+ * One control id is **reserved**: `view` (#767). A board page declaring it (with option
+ * values from `board` / `list` / `calendar`) opts into the shell's client-side
+ * representations of the same payload — kanban columns, a sortable flat list, a month
+ * grid placing cards by their structured `due`. The shell renders it as its standard
+ * segmented view switcher (not a select), persists the choice per page in localStorage,
+ * and lets a `?view=` URL param win over the stored choice; the param still rides the
+ * page re-fetch like any control, so the module echoes it and can adjust the *other*
+ * controls it offers (tasks drops "Group by" off the Board view).
  */
 export const BoardControl = z.object({
   id: z.string(),

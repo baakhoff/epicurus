@@ -2,10 +2,22 @@
 
 Once a night (on the maintenance orchestrator's batch, ADR-0060) this scans each tenant's
 sessions active since the last reflection run and makes **one** gateway call asking for candidate
-edits to the base instructions or a named playbook: recurring corrections, discovered procedures.
-Each candidate is **staged** as a ``ReviewSuggestion`` on the core's own review page
+edits to **named playbooks only** (#762): recurring corrections, discovered procedures. Each
+candidate is **staged** as a ``ReviewSuggestion`` on the core's own review page
 (``playbook_review.py``); the operator approves or rejects. This module writes proposals and
 nothing else (ADR-0093 §1 + its hard non-goal).
+
+**The base system prompt is off-limits — read-only context, never a target (#762, amending
+ADR-0093 §1/§2).** This pass reads *tainted* input: transcripts contain external content the
+agent quoted (mail bodies, web results, document text), so text an outsider authored could
+otherwise surface as a plausible "edit" to the very document the agent's rules live in — and an
+instructions proposal was a full-document replacement, the largest possible diff, reviewed
+nightly under approval fatigue. Playbooks have none of that: additive, named, rendered under a
+visible heading, individually disable-able, and they never rewrite operator-authored text. The
+pass still *sees* the base prompt (so it doesn't propose playbooks duplicating base rules), but
+an ``"instructions"`` target in the model's reply is dropped and logged, and the review sink
+refuses the path outright as defense in depth. Operator editing of the base prompt via Settings
+(``instructions_routes.py``) is unchanged — humans edit freely.
 
 **That constraint is enforced structurally, not by discipline**: the reflector is handed a
 proposal *sink* and read-only playbook and base-instructions *lookups* (the Protocols below),
@@ -36,7 +48,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from epicurus_core import ChatMessage, ChatResult, get_logger
 from epicurus_core.review import ReviewDecision
 from epicurus_core_app.agent.playbook_review import (
-    INSTRUCTIONS_PATH,
     PlaybookProposal,
     playbook_path,
 )
@@ -61,28 +72,30 @@ MAX_PROPOSAL_CHARS = 8_000
 
 _SYSTEM_PROMPT = """\
 You review an AI assistant's recent conversations with its operator and propose improvements to \
-the assistant's own standing guidance. You are looking for durable lessons, not one-off details: \
+the assistant's standing guidance. You are looking for durable lessons, not one-off details: \
 a correction the operator had to repeat, a procedure that worked and should be reused, a \
 preference stated as a general rule.
 
-You may propose changes to two kinds of document:
-- "instructions": the assistant's base system prompt — its identity, voice, and general rules.
+You may propose changes to ONE kind of document only:
 - "playbook": a named block of guidance for a recurring task (e.g. "Morning briefing").
+
+The assistant's base system prompt (its identity, voice, and general rules) is shown to you \
+below for context only. It is operator-authored and off-limits: you may NOT propose changes to \
+it, and any such proposal will be discarded. Do not create a playbook that merely restates \
+rules already present in it.
 
 Rules:
 - Propose ONLY what the transcripts actually support. If nothing durable emerged, propose nothing.
-- Prefer a playbook for anything task-specific; reserve the base instructions for general rules.
-- For an update to a document shown below, START from its current text and edit it — keep \
+- For an update to a playbook shown below, START from its current text and edit it — keep \
 everything that still applies; do not regenerate it from scratch.
-- Give the FULL new text of the document, not a diff or a fragment — it replaces what is there.
+- Give the FULL new text of the playbook, not a diff or a fragment — it replaces what is there.
 - Never propose a change that was already rejected below, unless the transcripts show the \
 pattern has meaningfully changed.
 - Do not invent facts, preferences, or events the transcripts do not show.
 
 Reply with JSON only, in this exact shape:
-{"proposals": [{"target": "instructions" | "playbook", "name": "<playbook name, omit for \
-instructions>", "content": "<the full new text>", "note": "<one sentence: why, citing what you \
-saw>"}]}
+{"proposals": [{"target": "playbook", "name": "<playbook name>", "content": "<the full new \
+text>", "note": "<one sentence: why, citing what you saw>"}]}
 
 If you have nothing worth proposing, reply exactly: {"proposals": []}"""
 
@@ -345,11 +358,15 @@ class PlaybookReflector:
         asked the model to regenerate the whole base prompt from nothing (#658).
         """
         parts: list[str] = []
-        docs = [f'### "instructions" (base system prompt)\n{base_instructions}']
+        docs = [
+            "### The assistant's base system prompt — READ-ONLY context; you may NOT propose "
+            f"changes to it\n{base_instructions}"
+        ]
         docs += [f'### "playbook" named {p.name!r}\n{p.content}' for p in playbooks]
         parts.append(
-            "Current documents. Propose an update against one of these by name, or a create for "
-            "a new playbook not listed here:\n\n" + "\n\n".join(docs)
+            "Current documents. Propose an update against a playbook by name, or a create for "
+            "a new playbook not listed here. The base system prompt is shown for context only "
+            "(so you don't duplicate its rules) and cannot be changed:\n\n" + "\n\n".join(docs)
         )
         if rejected:
             # Negative context first, so it frames the reading rather than trailing it
@@ -413,6 +430,11 @@ class PlaybookReflector:
         already has is an ``update``, otherwise a ``create``. Trusting the model's own word would
         mis-render the review — a "create" shows an empty *current* side, so a mislabelled update
         would hide from the operator exactly what their approval is about to overwrite.
+
+        An ``"instructions"`` target is **dropped and logged** (#762): the base system prompt is
+        off-limits to this pass (see the module docstring). The prompt no longer offers the
+        target, so seeing one means the model ignored the rule — or repeated something planted
+        in a transcript — which is exactly the case to refuse, loudly.
         """
         body = str(raw.get("content") or "").strip()
         if not body or len(body) > MAX_PROPOSAL_CHARS:
@@ -420,9 +442,11 @@ class PlaybookReflector:
         note = str(raw.get("note") or "").strip()[:500]
         target = str(raw.get("target") or "").strip().lower()
         if target == "instructions":
-            # The base prompt always exists (stored, or the shipped default), so it is only ever
-            # an update.
-            return INSTRUCTIONS_PATH, "update", body, note
+            log.warning(
+                "reflection proposed a base-instructions edit; dropped (the base prompt is "
+                "operator-authored and off-limits to this pass)",
+            )
+            return None
         if target != "playbook":
             return None
         name = str(raw.get("name") or "").strip()

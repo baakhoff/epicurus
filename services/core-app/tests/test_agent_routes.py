@@ -24,12 +24,18 @@ from epicurus_core_app.agent.live_runs import LiveRun, LiveRunRegistry
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.session_delete import SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
 from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.memory.profile import StandingProfileStore
-from epicurus_core_app.memory.store import SessionSummary
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+    SessionSummary,
+)
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
 
 
@@ -181,6 +187,7 @@ class _FakeMemory:
     ) -> None:
         self.searched: list[str] = []
         self.forgotten: list[str] = []
+        self.forgot_sessions: list[str] = []
         self._last_user = last_user
         # The session's messages by id — a lookup miss stands for "not in this conversation"
         # (the real scoping is SQL, covered in test_memory_store.py).
@@ -223,6 +230,10 @@ class _FakeMemory:
         self.forgotten.append(memory_id)
         return 1
 
+    async def forget(self, *, tenant: str, session_id: str) -> int:
+        self.forgot_sessions.append(session_id)
+        return 3
+
 
 def _memory_app(
     memory: object,
@@ -230,6 +241,8 @@ def _memory_app(
     live_runs: LiveRunRegistry | None = None,
     session_models: SessionModelStore | None = None,
     agent: object | None = None,
+    session_delete: SessionDeleteCascade | None = None,
+    ephemeral: EphemeralSessionStore | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
@@ -242,6 +255,8 @@ def _memory_app(
             # active-run guard sees no live turn (what every non-#552 test here wants).
             live_runs=live_runs,
             session_models=session_models,
+            session_delete=session_delete,
+            ephemeral=ephemeral,
         )
     )
     return app
@@ -281,6 +296,109 @@ async def test_sessions_enriches_with_the_persisted_model_override() -> None:
         resp = await client.get("/platform/v1/agent/sessions")
     by_id = {s["id"]: s["model"] for s in resp.json()}
     assert by_id == {"s1": "grok/grok-4.5-latest", "s2": None}
+
+
+async def test_delete_session_runs_the_cascade_and_reports_counts() -> None:
+    """DELETE /sessions/{id} erases the chat everywhere, not just its message rows (#771)."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    store = ConversationStore(engine)
+    await store.init()
+    attachments = AttachmentStore(engine)
+    session_models = SessionModelStore(engine)
+    await session_models.init()
+    att_id = await attachments.save(tenant="local", kind="text/plain", title="n", content=b"x")
+    await store.append(
+        tenant="local",
+        session_id="s1",
+        role="user",
+        content="q",
+        attachments=[{"att_id": att_id, "source": "file", "title": "n"}],
+    )
+    await store.append(tenant="local", session_id="s1", role="assistant", content="a")
+    await session_models.set(tenant="local", session_id="s1", model="llama3.2")
+    cascade = SessionDeleteCascade(
+        store=store, attachments=attachments, session_models=session_models
+    )
+    memory = _FakeMemory()
+    app = _memory_app(memory, session_delete=cascade)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.delete("/platform/v1/agent/sessions/s1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] == 2  # the field pre-#771 clients read, still the message count
+    assert body["attachments"] == 1
+    assert body["session_model_cleared"] is True
+    assert memory.forgot_sessions == []  # the cascade ran, not the messages-only fallback
+    assert await store.messages(tenant="local", session_id="s1") == []
+    assert await attachments.get(tenant="local", att_id=att_id) is None
+    assert await session_models.get(tenant="local", session_id="s1") is None
+
+
+async def test_mark_ephemeral_flags_the_session_idempotently() -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    ephemeral = EphemeralSessionStore(engine)
+    await ephemeral.init()
+    app = _memory_app(_FakeMemory(), ephemeral=ephemeral)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first = await client.put("/platform/v1/agent/sessions/ghost/ephemeral")
+        again = await client.put("/platform/v1/agent/sessions/ghost/ephemeral")  # reload re-marks
+    assert first.status_code == 200 and first.json() == {"ephemeral": True}
+    assert again.status_code == 200
+    assert await ephemeral.is_ephemeral(tenant="local", session_id="ghost") is True
+
+
+async def test_mark_ephemeral_without_a_store_is_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/agent/sessions/s/ephemeral")
+    assert resp.status_code == 503
+
+
+async def test_sessions_list_sweeps_stranded_invisible_chats_but_spares_active() -> None:
+    """GET /sessions is the sweep's second trigger (#772): flagged sessions not named by
+    `active` (and with no turn in flight) are fully erased on the way to the list."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    store = ConversationStore(engine)
+    await store.init()
+    ephemeral = EphemeralSessionStore(engine)
+    await store.append(tenant="local", session_id="stranded", role="user", content="x")
+    await store.append(tenant="local", session_id="live", role="user", content="y")
+    await ephemeral.mark(tenant="local", session_id="stranded")
+    await ephemeral.mark(tenant="local", session_id="live")
+    cascade = SessionDeleteCascade(
+        store=store, attachments=AttachmentStore(engine), ephemeral=ephemeral
+    )
+    app = _memory_app(_FakeMemory(), session_delete=cascade, ephemeral=ephemeral)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/sessions", params={"active": "live"})
+    assert resp.status_code == 200
+    assert await store.messages(tenant="local", session_id="stranded") == []  # swept
+    assert len(await store.messages(tenant="local", session_id="live")) == 1  # spared
+    assert await ephemeral.list_ids(tenant="local") == ["live"]
+
+
+async def test_delete_session_without_a_cascade_falls_back_to_messages_only() -> None:
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.delete("/platform/v1/agent/sessions/s9")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 3
+    assert memory.forgot_sessions == ["s9"]
 
 
 async def test_sessions_enrichment_degrades_on_a_lookup_failure() -> None:

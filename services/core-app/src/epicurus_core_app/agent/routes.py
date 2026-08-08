@@ -23,13 +23,19 @@ from epicurus_core_app.agent.live_runs import (
 )
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftStore
+from epicurus_core_app.agent.session_delete import DeletedSession, SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.store import AutomationSessionStore, SessionMeta
 from epicurus_core_app.llm.models import ChatMessage
 from epicurus_core_app.memory.memory import Memory, MemoryItem
 from epicurus_core_app.memory.profile import SOURCE_EDITED, StandingProfile, StandingProfileStore
-from epicurus_core_app.memory.store import AttachmentStore, MessageRecord, SessionSummary
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    EphemeralSessionStore,
+    MessageRecord,
+    SessionSummary,
+)
 from epicurus_core_app.readiness import ReadinessProbe
 
 # Chat-upload limits (#175) — shared with the Files-page upload (#479). Re-exported under
@@ -234,6 +240,8 @@ def create_agent_router(
     profile: StandingProfileStore | None = None,
     automation_sessions: AutomationSessionStore | None = None,
     session_models: SessionModelStore | None = None,
+    session_delete: SessionDeleteCascade | None = None,
+    ephemeral: EphemeralSessionStore | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
@@ -365,7 +373,20 @@ def create_agent_router(
         )
 
     @router.get("/sessions", response_model=list[SessionSummary])
-    async def sessions() -> list[SessionSummary]:
+    async def sessions(active: str | None = Query(default=None)) -> list[SessionSummary]:
+        """The tenant's conversations — **invisible chats excluded** (#772).
+
+        ``active`` names the invisible session the requesting client is currently *in* (if
+        any), so the orphan sweep that piggybacks on this read never erases the live one:
+        every list read garbage-collects crash-stranded invisible chats (flagged sessions
+        that aren't ``active`` and have no turn in flight). The sweep is best-effort — a
+        hiccup must cost the cleanup, never the list.
+        """
+        if session_delete is not None:
+            try:
+                await session_delete.sweep_ephemeral(tenant=tenant, keep=active)
+            except Exception as exc:  # the list must never fail over the sweep
+                log.warning("ephemeral sweep on list read failed", error=str(exc))
         summaries = await memory.sessions(tenant=tenant)
         # Badge/group automation chats (#672) and stamp each session's persisted model
         # override (#707) — enriched here, not in the ConversationStore, so that store stays
@@ -390,10 +411,22 @@ def create_agent_router(
     async def session_messages(session_id: str) -> list[MessageRecord]:
         return await memory.messages(tenant=tenant, session_id=session_id)
 
-    @router.delete("/sessions/{session_id}")
-    async def delete_session(session_id: str) -> dict[str, int]:
-        removed = await memory.forget(tenant=tenant, session_id=session_id)
-        return {"deleted": removed}
+    @router.delete("/sessions/{session_id}", response_model=DeletedSession)
+    async def delete_session(session_id: str) -> DeletedSession:
+        """Delete a conversation — everything it produced, everywhere (#771).
+
+        A full cascade, not just the message rows: attachments, still-queued extraction
+        exchanges (so the nightly drain can't distil a deleted chat), the session-model row,
+        suspended/pending paused runs, the automation badge mapping, and any in-flight run's
+        buffered state. Facts already extracted on *previous* nights are curated memory,
+        managed in the Memory view — deleting a chat stops all future derivation but does not
+        un-learn them. Falls back to a messages-only delete when no cascade is wired (bare
+        test routers); the response's ``deleted`` field is the message count either way.
+        """
+        if session_delete is None:
+            removed = await memory.forget(tenant=tenant, session_id=session_id)
+            return DeletedSession(deleted=removed)
+        return await session_delete.delete(tenant=tenant, session_id=session_id)
 
     @router.put("/sessions/{session_id}/model")
     async def set_session_model(
@@ -418,6 +451,23 @@ def create_agent_router(
             raise HTTPException(status_code=400, detail="model must not be blank")
         await session_models.set(tenant=tenant, session_id=session_id, model=model)
         return {"model": model}
+
+    @router.put("/sessions/{session_id}/ephemeral")
+    async def mark_ephemeral(session_id: str) -> dict[str, bool]:
+        """Flag a session **invisible** (#772): deleted — via the #771 cascade — on exit.
+
+        Called once when the client starts an invisible chat, and again (idempotently) on a
+        mid-chat reload, so the flag is server truth rather than client memory. There is no
+        un-mark: toggling invisibility off *is* an exit, and exits delete
+        (``DELETE /sessions/{id}``). While flagged, the session writes normally but is hidden
+        from the sessions list and from every learner (extraction enqueue, reflection's
+        transcript scan, ``memory_search``'s past-conversation half); the orphan sweep erases
+        it if the client never comes back.
+        """
+        if ephemeral is None:
+            raise HTTPException(status_code=503, detail="invisible chats are not available")
+        await ephemeral.mark(tenant=tenant, session_id=session_id)
+        return {"ephemeral": True}
 
     @router.get("/sessions/{session_id}/active-run", response_model=ActiveRunInfo | None)
     async def active_run(session_id: str) -> ActiveRunInfo | None:

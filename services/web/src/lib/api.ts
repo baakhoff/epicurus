@@ -468,7 +468,23 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  sessions: () => request(z.array(SessionSummary), "/platform/v1/agent/sessions"),
+  // `active` names the invisible session this client is currently in (#772), so the server's
+  // orphan sweep — which piggybacks on every list read — spares the live one while erasing
+  // any crash-stranded invisible chat. Omit it when not in an invisible chat.
+  sessions: (active?: string) =>
+    request(
+      z.array(SessionSummary),
+      `/platform/v1/agent/sessions${active ? `?active=${encodeURIComponent(active)}` : ""}`,
+    ),
+  // Flag a session invisible (#772): it works normally but is hidden from the list and from
+  // every learner, and every exit path deletes it. Idempotent — re-marked on reload so the
+  // flag is server truth. There is no un-mark: leaving the chat deletes it.
+  markEphemeral: (id: string) =>
+    request(
+      z.object({ ephemeral: z.boolean() }),
+      `/platform/v1/agent/sessions/${encodeURIComponent(id)}/ephemeral`,
+      { method: "PUT" },
+    ),
   sessionMessages: (id: string) =>
     request(z.array(MessageRecord), `/platform/v1/agent/sessions/${encodeURIComponent(id)}`),
   // The session's in-flight turn to re-attach to after a reload/reconnect, or null (#376).

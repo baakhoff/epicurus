@@ -12,7 +12,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, StoredMessage
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+    StoredMessage,
+)
 
 
 async def _fresh_store() -> tuple[ConversationStore, AsyncEngine]:
@@ -212,6 +217,55 @@ async def test_attachment_store_save_and_get_is_tenant_scoped() -> None:
     assert await blobs.get(tenant="t1", att_id="missing") is None
 
 
+async def test_attachment_ids_collects_file_attachments_for_one_session() -> None:
+    """#771: the cascade reads a chat's uploaded att_ids from its messages' JSON — the only
+    place the link lives — before those messages drop. Only ``source == "file"`` counts."""
+    store, _ = await _fresh_store()
+    await store.append(
+        tenant="t",
+        session_id="s",
+        role="user",
+        content="see these",
+        attachments=[
+            {"att_id": "up1", "source": "file", "kind": "text/plain", "title": "a.txt"},
+            {"att_id": "chat1", "source": "chat", "title": "another chat"},
+            {"att_id": "mod1", "source": "module", "module": "mail", "title": "a thread"},
+        ],
+    )
+    await store.append(
+        tenant="t",
+        session_id="s",
+        role="user",
+        content="and this",
+        attachments=[
+            {"att_id": "up2", "source": "file", "kind": "image/png", "title": "b.png"},
+            {"att_id": "up1", "source": "file", "kind": "text/plain", "title": "a.txt"},  # dupe
+        ],
+    )
+    await store.append(tenant="t", session_id="s", role="assistant", content="ok")  # none
+    await store.append(
+        tenant="t",
+        session_id="other",
+        role="user",
+        content="different chat",
+        attachments=[{"att_id": "up3", "source": "file", "title": "c.txt"}],
+    )
+    assert await store.attachment_ids(tenant="t", session_id="s") == ["up1", "up2"]
+    assert await store.attachment_ids(tenant="other-tenant", session_id="s") == []
+
+
+async def test_attachment_store_delete_many_is_tenant_scoped() -> None:
+    _, engine = await _fresh_store()
+    blobs = AttachmentStore(engine)
+    mine = await blobs.save(tenant="t1", kind="text/plain", title="mine.txt", content=b"x")
+    other = await blobs.save(tenant="t2", kind="text/plain", title="other.txt", content=b"y")
+    # Naming another tenant's id must not delete it; unknown ids are skipped, not an error.
+    assert await blobs.delete_many(tenant="t1", att_ids=[mine, other, "missing"]) == 1
+    assert await blobs.get(tenant="t1", att_id=mine) is None
+    assert await blobs.get(tenant="t2", att_id=other) is not None
+    assert await blobs.delete_many(tenant="t1", att_ids=[]) == 0
+
+
 async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
     # A pre-v0.3 deployment: agent_messages exists without the entity_refs column.
     engine = create_async_engine(
@@ -345,6 +399,53 @@ async def test_truncate_after_is_tenant_and_session_scoped() -> None:
     assert removed == [a]  # only this tenant's, this session's tail
     assert [m.content for m in await store.messages(tenant="t2", session_id="s")] == ["y"]
     assert [m.content for m in await store.messages(tenant="t1", session_id="other")] == ["z"]
+
+
+# ── invisible sessions (#772): the flag store + the default exclusions ───────
+
+
+async def test_sessions_hides_ephemeral_by_default() -> None:
+    store, engine = await _fresh_store()
+    flags = EphemeralSessionStore(engine)
+    await store.append(tenant="t", session_id="normal", role="user", content="listed")
+    await store.append(tenant="t", session_id="ghost", role="user", content="hidden")
+    await flags.mark(tenant="t", session_id="ghost")
+
+    assert [s.id for s in await store.sessions(tenant="t")] == ["normal"]
+    # The deliberate escape hatch still sees it (tests / a future admin surface).
+    assert {s.id for s in await store.sessions(tenant="t", include_ephemeral=True)} == {
+        "normal",
+        "ghost",
+    }
+    # The flag is tenant-scoped: another tenant's identically-named session stays listed.
+    await store.append(tenant="t2", session_id="ghost", role="user", content="other tenant")
+    assert [s.id for s in await store.sessions(tenant="t2")] == ["ghost"]
+
+
+async def test_search_messages_excludes_ephemeral_sessions() -> None:
+    """An invisible chat must never leak into another conversation via memory_search (#772)."""
+    store, engine = await _fresh_store()
+    flags = EphemeralSessionStore(engine)
+    await store.append(tenant="t", session_id="normal", role="user", content="the secret plan")
+    await store.append(tenant="t", session_id="ghost", role="user", content="the secret party")
+    await flags.mark(tenant="t", session_id="ghost")
+    hits = await store.search_messages(tenant="t", query="secret")
+    assert [h.content for h in hits] == ["the secret plan"]
+
+
+async def test_ephemeral_store_mark_is_idempotent_and_tenant_scoped() -> None:
+    _, engine = await _fresh_store()
+    flags = EphemeralSessionStore(engine)
+    await flags.mark(tenant="t1", session_id="s")
+    await flags.mark(tenant="t1", session_id="s")  # a reload re-marks — must not raise
+    assert await flags.is_ephemeral(tenant="t1", session_id="s") is True
+    assert await flags.is_ephemeral(tenant="t2", session_id="s") is False
+    assert await flags.list_ids(tenant="t1") == ["s"]
+    assert await flags.list_ids(tenant="t2") == []
+    assert await flags.clear(tenant="t2", session_id="s") == 0  # other tenant can't clear it
+    assert await flags.clear(tenant="t1", session_id="s") == 1
+    assert await flags.is_ephemeral(tenant="t1", session_id="s") is False
+    assert await flags.clear(tenant="t1", session_id="s") == 0  # idempotent
 
 
 async def test_distinct_tenants_lists_every_tenant_with_history() -> None:

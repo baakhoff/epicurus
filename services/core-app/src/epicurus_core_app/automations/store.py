@@ -810,6 +810,23 @@ class AutomationSessionStore:
             await session.commit()
             return cast("CursorResult[Any]", result).rowcount or 0
 
+    async def delete_session(self, *, tenant: str, session_id: str) -> int:
+        """Drop one session's badge mapping (the chat-delete cascade, #771). Returns rows removed.
+
+        The mapping describes chat rows that are being erased, so it goes with them; a rolling
+        automation's next run simply re-records it (:meth:`record` is an upsert) into the same,
+        now-fresh session id. Tenant-scoped (constraint #1).
+        """
+        async with self._session() as session:
+            result = await session.execute(
+                delete(_StoredAutomationSession).where(
+                    _StoredAutomationSession.tenant == tenant,
+                    _StoredAutomationSession.session_id == session_id,
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0
+
 
 def rate_cap_window_start(now: datetime) -> datetime:
     """The start of the rolling hour a rate cap counts within."""

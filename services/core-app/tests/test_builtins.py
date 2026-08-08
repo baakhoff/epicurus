@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Iterator
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from epicurus_core_app.agent import builtins as builtins_module
 from epicurus_core_app.agent.builtins import (
+    _WEEKDAYS,
     MEMORY_SEARCH_SPEC,
     MEMORY_SEARCH_TOOL,
     NOW_SPEC,
@@ -15,6 +19,7 @@ from epicurus_core_app.agent.builtins import (
     SET_CHAT_MODEL_SPEC,
     SET_CHAT_MODEL_TOOL,
     _resolve_model,
+    _upcoming_weekdays,
     make_memory_search_handler,
     make_now_handler,
     make_remember_handler,
@@ -85,6 +90,111 @@ async def test_now_ignores_calendar_lookup_failure() -> None:
     out = json.loads(await _handler(tz="UTC", calendar_raises=True)({}, "local"))
     assert out["timezone"] == "UTC"
     assert "calendar_timezone" not in out
+
+
+# ── weekday resolution (#793) ───────────────────────────────────────────────────
+#
+# `_upcoming_weekdays` is a pure function of an explicit `today: date`, so most of the
+# semantics below need no clock-freezing at all — the codebase's existing preference
+# (`render_document_path(..., *, now)`, `rate_cap_window_start(now)`) over a global freeze.
+# The handful of handler-level tests further down freeze the clock only where the point is
+# to prove the *handler* resolves the zone before computing the date (#559's trap).
+
+
+def test_upcoming_weekdays_friday_to_monday_crosses_the_weekend() -> None:
+    # The issue's own repro instant: Friday 2026-08-07.
+    upcoming = _upcoming_weekdays(date(2026, 8, 7))
+    assert upcoming["Monday"] == "2026-08-10"
+    assert upcoming["Wednesday"] == "2026-08-12"
+
+
+def test_upcoming_weekdays_asked_on_sunday() -> None:
+    upcoming = _upcoming_weekdays(date(2026, 8, 9))  # Sunday
+    assert upcoming["Monday"] == "2026-08-10"
+    assert upcoming["Saturday"] == "2026-08-15"
+    # Sunday's own weekday is a week out too, not today.
+    assert upcoming["Sunday"] == "2026-08-16"
+
+
+def test_upcoming_weekdays_todays_own_weekday_resolves_next_week_not_today() -> None:
+    # Asked on a Friday for "Friday": next Friday, not this one.
+    upcoming = _upcoming_weekdays(date(2026, 8, 7))
+    assert upcoming["Friday"] == "2026-08-14"
+
+
+def test_upcoming_weekdays_month_boundary() -> None:
+    upcoming = _upcoming_weekdays(date(2026, 8, 26))  # Wednesday
+    assert upcoming["Monday"] == "2026-08-31"
+    # Tuesday is the one that actually rolls into September.
+    assert upcoming["Tuesday"] == "2026-09-01"
+    assert upcoming["Wednesday"] == "2026-09-02"  # own weekday, a week out
+
+
+def test_upcoming_weekdays_year_boundary() -> None:
+    upcoming = _upcoming_weekdays(date(2026, 12, 30))  # Wednesday
+    assert upcoming["Thursday"] == "2026-12-31"
+    assert upcoming["Friday"] == "2027-01-01"
+
+
+def test_upcoming_weekdays_covers_all_seven_days_strictly_in_the_future() -> None:
+    today = date(2026, 8, 7)
+    upcoming = _upcoming_weekdays(today)
+    assert set(upcoming) == set(_WEEKDAYS)
+    for iso in upcoming.values():
+        assert date.fromisoformat(iso) > today
+
+
+@contextlib.contextmanager
+def _frozen_at(when: datetime) -> Iterator[None]:
+    """Patch ``builtins.datetime.now()`` to always return *when* (tz-aware, any zone).
+
+    The ``now`` handler resolves ``today``/``tomorrow``/``upcoming`` via ``datetime.now(tz=zone)``
+    — freezing it is what makes the handler-level tests below deterministic without a real
+    clock (mirrors ``test_maintenance._frozen_at``).
+    """
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return when if tz is None else when.astimezone(tz)
+
+    real = builtins_module.datetime
+    builtins_module.datetime = _Frozen  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        builtins_module.datetime = real
+
+
+async def test_now_resolves_the_reported_repro_friday_to_monday() -> None:
+    # The exact reported turn (#793): Friday 2026-08-07, asked for "monday" — must resolve
+    # to the 10th, never the 17th a naive +7 would give.
+    with _frozen_at(datetime(2026, 8, 7, 12, 0, tzinfo=ZoneInfo("Europe/Belgrade"))):
+        out = json.loads(await _handler(tz="Europe/Belgrade")({}, "local"))
+    assert out["today"] == "2026-08-07"
+    assert out["tomorrow"] == "2026-08-08"
+    assert out["upcoming"]["Monday"] == "2026-08-10"
+    assert out["upcoming"]["Wednesday"] == "2026-08-12"
+
+
+async def test_now_date_does_not_shift_across_the_day_boundary_zone_ahead_of_utc() -> None:
+    # Same trap #559 fixed for calendar read paths: the *resolved* zone decides what "today"
+    # is, not UTC. Fixed instant is Friday 23:30 UTC — already Saturday in a zone ahead.
+    with _frozen_at(datetime(2026, 8, 7, 23, 30, tzinfo=UTC)):
+        out = json.loads(await _handler(tz="Pacific/Kiritimati")({}, "local"))  # UTC+14
+    assert out["weekday"] == "Saturday"
+    assert out["today"] == "2026-08-08"
+    assert out["upcoming"]["Monday"] == "2026-08-10"
+
+
+async def test_now_date_does_not_shift_across_the_day_boundary_zone_behind_utc() -> None:
+    # Mirror case: fixed instant is just after midnight UTC on Saturday — still Friday in a
+    # zone far enough behind UTC.
+    with _frozen_at(datetime(2026, 8, 8, 5, 0, tzinfo=UTC)):
+        out = json.loads(await _handler(tz="Pacific/Niue")({}, "local"))  # UTC-11
+    assert out["weekday"] == "Friday"
+    assert out["today"] == "2026-08-07"
+    assert out["upcoming"]["Monday"] == "2026-08-10"
 
 
 # ── remember (ADR-0045) ───────────────────────────────────────────────────────

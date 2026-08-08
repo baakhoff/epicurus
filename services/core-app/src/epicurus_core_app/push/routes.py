@@ -37,6 +37,11 @@ class SubscriptionView(BaseModel):
 
 
 class ChannelPrefsView(BaseModel):
+    """One category/event's channel pair. Since #797 the center is a superset of push:
+    every notification that fires is recorded in the center regardless of ``center`` (kept
+    on the wire for contract compatibility; stored but no longer consulted by delivery),
+    and ``push`` means "also deliver to devices"."""
+
     push: bool
     center: bool
 
@@ -66,6 +71,30 @@ class TestNotificationView(BaseModel):
     outcome: str
     sent_count: int
     pruned_count: int
+    #: Devices delivery was attempted for and failed (non-Gone) — `outcome == "sent"` with
+    #: `sent_count == 0` and `failed_count > 0` is a delivery that failed outright (#797).
+    failed_count: int = 0
+
+
+class PushAttemptView(BaseModel):
+    """One delivery attempt, as ``GET /push/status`` reports it (#797)."""
+
+    at: str
+    category: str
+    outcome: str
+    sent_count: int
+    failed_count: int
+    pruned_count: int
+
+
+class PushStatusView(BaseModel):
+    """Delivery-state diagnostics for the settings card (#797) — answers "is anything
+    registered, and what happened last time a push was tried" without reading logs.
+    ``last_attempt`` is in-memory (single-instance v1, same trade as the rate caps): ``None``
+    means no push has been attempted since the core started, not never."""
+
+    device_count: int
+    last_attempt: PushAttemptView | None = None
 
 
 class EventSubscriptionView(BaseModel):
@@ -221,7 +250,33 @@ def create_push_router(
             deep_link="/",
         )
         return TestNotificationView(
-            outcome=result.outcome, sent_count=result.sent_count, pruned_count=result.pruned_count
+            outcome=result.outcome,
+            sent_count=result.sent_count,
+            pruned_count=result.pruned_count,
+            failed_count=result.failed_count,
+        )
+
+    @router.get("/status", response_model=PushStatusView)
+    async def push_status(tenant_id: str | None = Query(None)) -> PushStatusView:
+        """The settings card's delivery-state readout (#797): registered-device count plus
+        the most recent delivery attempt — every gate also logs, but this is the answer an
+        operator gets without leaving the UI."""
+        tenant = tenant_id or default_tenant
+        attempt = service.last_attempt(tenant)
+        return PushStatusView(
+            device_count=len(await subscriptions.list(tenant)),
+            last_attempt=(
+                PushAttemptView(
+                    at=attempt.at.isoformat(),
+                    category=attempt.category,
+                    outcome=attempt.outcome,
+                    sent_count=attempt.sent_count,
+                    failed_count=attempt.failed_count,
+                    pruned_count=attempt.pruned_count,
+                )
+                if attempt is not None
+                else None
+            ),
         )
 
     @router.get("/event-subscriptions", response_model=list[EventSubscriptionView])

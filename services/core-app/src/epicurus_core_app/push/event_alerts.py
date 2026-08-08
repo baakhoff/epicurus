@@ -18,6 +18,13 @@ chatty event type must not be able to spend a tenant's *entire* hourly push budg
 subscription, starving every other category and alert. It gates the whole notification
 (push and center together), not push alone — a firehose into the notification center is
 still a firehose even when no device is subscribed to receive a push for it.
+
+An *enabled* subscription always lands in the notification center (#797 — the center is a
+superset of push, see ``push/service.py``): the subscription's ``push`` flag decides whether
+devices are also notified, and its stored ``center`` flag only matters as "either channel on
+means the alert is on" in the gate below. Both decline paths log a distinct line — ``event
+alert declined: no subscription for this event`` and ``event alert rate cap reached`` — so
+silence is always attributable to a specific gate rather than a mystery.
 """
 
 from __future__ import annotations
@@ -89,6 +96,16 @@ class EventAlertListener:
             entry.tenant, module=entry.module, event_type=entry.type
         )
         if prefs is None or not (prefs.push or prefs.center):
+            # The most invisible gate on the whole notification path (#797): everything
+            # defaults to unsubscribed, so "no notification" is usually *this*, working as
+            # configured — logged so an operator can tell it from a broken pipeline. Info,
+            # one line per recorded event, the same volume as intake's "event recorded".
+            log.info(
+                "event alert declined: no subscription for this event",
+                tenant=entry.tenant,
+                module=entry.module,
+                type=entry.type,
+            )
             return
         key = (entry.tenant, entry.module, entry.type)
         if not self._check_rate_cap(key):

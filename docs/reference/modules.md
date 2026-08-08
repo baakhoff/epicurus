@@ -686,6 +686,15 @@ The assistant can mention a module entity (an event, task, email, doc…) as an
   "list then act on that one" flow (list events → `calendar_update_event`) has an id to
   pass — no need to print ids in your `text`. The block is model-only context, never
   rendered in chat. So set `ref_id` to the id your own edit/delete/get tools accept.
+- **The model also learns the entity-link syntax** (#794): the same listing carries a
+  ready-made `epicurus://entity/{module}/{kind}/{ref_id}` link per ref (every component
+  percent-encoded, so a `ref_id` with a slash, space, or paren round-trips safely), and
+  tells the model to use it — `[text](link)` — when it mentions that entity in its reply.
+  Nothing to do on the module side beyond what the two bullets above already require:
+  a correct `ref_id`/`module`/`kind` on the `EntityRef` is all a working link needs. The
+  web shell already renders such a link as an interactive chip and excludes it from the
+  "Sources" pill — see [web's entity-references
+  section](../services/web.md#entity-references-in-chat-adr-0019).
 - **The id block is capped, and your own list text should be too** (#468, ADR-0084): past
   `LIST_CAP` (50) refs the id block above truncates with a "showing 50 of N" note — the
   full ref list still reaches the UI's chips unchanged, only the model-facing text is

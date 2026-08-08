@@ -6,8 +6,9 @@ routes per the operator's stored selection, fetched from the core via a
 module — **each enabled list is a category**:
 
 * **reads** (``list_tasks`` with no ``list_id``) aggregate every *enabled* list, tagging
-  each task with the list it came from (``list_id`` / ``list_title``); a failing source is
-  skipped, not fatal (#209). An explicit ``list_id`` reads just that one list.
+  each task with the list it came from (``list_id`` / ``list_title``); a source whose read
+  call itself errors is skipped, not fatal (#209). An explicit ``list_id`` reads just that
+  one list.
 * **creates** (``add_task``) target the list named by ``list_id``; with none, the default
   write target is the *active* list, else the first enabled, else local.
 * **per-task mutations** (``complete_task`` / ``update_task`` / ``delete_task``) target the
@@ -19,9 +20,21 @@ module — **each enabled list is a category**:
 * ``create_list`` routes to the sole configured external provider (Google, today) — the
   local store has no lists of its own to create (ADR-0030, #474).
 
+Every path above — read and write alike — resolves a :class:`CollectionRef` to a provider
+through the single :meth:`TasksRouter._resolve_provider` rule (#795): a live provider for
+the ref's account is used as-is; a **missing** one — most often a stale ``enabled``/
+``active`` entry left behind once its account was disconnected, since nothing currently
+prunes ``enabled`` when that happens — **degrades to the local collection**, logging a
+warning. Before #795 the write and read paths each hardcoded their own half of this and
+disagreed: a write silently landed in local while the read aggregate ``continue``d past the
+very same ref without ever trying local, so a task was created, persisted, and permanently
+unreadable through the router — "write succeeded, read empty" for a ref nothing had pruned.
+A *degraded* ref is therefore never "skipped" the way a source that errors mid-read is;
+reads fall back to local whenever nothing is enabled, a ref's provider is gone, or the core
+itself is unreachable (local-first, ADR-0030).
+
 It satisfies the :class:`~epicurus_tasks.providers.TasksProvider` Protocol, so the module's
-tools and board treat it like any other backend. Reads fall back to the local store when
-nothing is enabled or the core is unreachable (local-first).
+tools and board treat it like any other backend.
 
 ``add_task``/``complete_task``/``update_task``/``_move_task`` are also the module-event-spine
 emission seam (#664, ADR-0103): ``task_created``/``task_completed``/``task_updated``/
@@ -38,7 +51,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, tzinfo
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -182,6 +195,61 @@ class TasksRouter:
             return self._local
         return self._external.get(account)
 
+    def _resolve_provider(self, ref: CollectionRef) -> tuple[TasksProvider, CollectionRef]:
+        """The provider actually backing *ref* — the one rule every read and write path
+        shares for "this ref's provider is gone" (#795).
+
+        A live provider for ``ref.account`` is used as-is. Otherwise — typically a stale
+        ``prefs.enabled``/``prefs.active`` entry left over once its account was
+        disconnected, since nothing prunes ``enabled`` when that happens — this degrades to
+        the local collection rather than raising or (on a read) silently disappearing:
+        ADR-0030 makes local the silent default, always available, so a write that falls
+        back to local must be found by the very next read, not swallowed into a hole
+        neither side can see. ``self._local`` is a required constructor argument, so this
+        never returns ``None`` — the router always has *somewhere* to route a ref, and the
+        returned ref is always the one the caller should actually use (the degraded case
+        returns :data:`_LOCAL_REF`, not the stale input, so a write that falls back to
+        local is never mislabeled with the account/collection it fell back *from*). Every
+        degradation is logged, naming the account and collection that went missing, since
+        before this the dropped read left no trace at all.
+        """
+        provider = self._provider_for(ref.account)
+        if provider is not None:
+            return provider, ref
+        log.warning(
+            "collection provider unavailable; degrading to local (#795)",
+            account=ref.account,
+            collection=ref.collection,
+        )
+        return self._local, _LOCAL_REF
+
+    def _dedup_refs(
+        self, refs: Iterable[CollectionRef]
+    ) -> list[tuple[TasksProvider, CollectionRef]]:
+        """Resolve each ref via :meth:`_resolve_provider`, in input order, collapsing
+        duplicate effective targets to their first occurrence.
+
+        Several input refs can resolve to the *same* effective target — two independently
+        stale refs both degrading to local, or a degraded ref landing on local when local is
+        also already present in *refs* — so without this a disconnected account could read
+        (or search) local twice: once at the degraded ref's position, once at local's own.
+        Harmless on its own (a read is idempotent) but wasteful, and for an aggregate read it
+        would double-count local's tasks in the result. Shared by the multi-collection
+        aggregate (:meth:`list_tasks`) and the ordered task search (:meth:`get_task` /
+        :meth:`_locate_task`), so both read shapes get the same fallback, dedup, and warning
+        behavior from one place.
+        """
+        resolved: list[tuple[TasksProvider, CollectionRef]] = []
+        seen: set[tuple[str, str]] = set()
+        for ref in refs:
+            provider, effective = self._resolve_provider(ref)
+            key = (effective.account, effective.collection)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append((provider, effective))
+        return resolved
+
     async def list_tasks(
         self, tenant_id: str, *, list_id: str | None = None, scope: TaskScope = "open"
     ) -> list[Task]:
@@ -199,13 +267,10 @@ class TasksRouter:
             tasks = await self._sweep_overdue(tenant_id, target, ref, tasks, today=today)
             titles = await self._title_map(tenant_id, [ref])
             return self._stamp(tasks, ref=ref, title=titles.get((ref.account, ref.collection)))
-        targets = prefs.enabled or [_LOCAL_REF]
-        titles = await self._title_map(tenant_id, targets)
+        targets = self._dedup_refs(prefs.enabled or [_LOCAL_REF])
+        titles = await self._title_map(tenant_id, [ref for _provider, ref in targets])
         out: list[Task] = []
-        for ref in targets:
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue  # an unknown / disconnected account is skipped, not fatal
+        for provider, ref in targets:
             try:
                 tasks = await provider.list_tasks(
                     tenant_id, list_id=ref.collection or None, scope=scope
@@ -700,10 +765,7 @@ class TasksRouter:
             target, ref = self._resolve_collection(list_id, prefs)
             return await target.get_task(tenant_id, task_id, list_id=ref.collection or None)
         # No list given (resolver / attachment): search active → enabled → local.
-        for ref in self._search_refs(prefs):
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue
+        for provider, ref in self._dedup_refs(self._search_refs(prefs)):
             try:
                 task = await provider.get_task(tenant_id, task_id, list_id=ref.collection or None)
             except Exception as exc:
@@ -767,10 +829,7 @@ class TasksRouter:
         """
         if list_id is not None:
             return self._resolve_collection(list_id, prefs)
-        for ref in self._search_refs(prefs):
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue
+        for provider, ref in self._dedup_refs(self._search_refs(prefs)):
             try:
                 task = await provider.get_task(tenant_id, task_id, list_id=ref.collection or None)
             except Exception as exc:
@@ -793,15 +852,23 @@ class TasksRouter:
 
         ``list_id`` given → the enabled ref whose collection matches (else the sole external
         account, else local); ``None`` → the default write target: the active list, else the
-        first enabled, else local.
+        first enabled, else local. Both branches funnel a matched ref through
+        :meth:`_resolve_provider` (#795), so a ref naming a since-disconnected account
+        degrades to local — the same rule the read paths use — instead of either silently
+        mislabeling a local write with the stale ref (the default-target branch, pre-#795)
+        or falling through to "the sole external account owns an unlisted id" and routing an
+        explicit, matched request to some *other*, unrelated provider (the ``list_id``
+        branch's own asymmetry, flagged alongside #795 but not itself the reported bug: with
+        today's single external provider type it can't actually misfire, since the ref's own
+        account being gone means ``self._external`` has zero entries, not one — but resolving
+        it the same way closes the hole before a second provider type ever makes it live).
         """
         if list_id is None:
             ref = prefs.active or (prefs.enabled[0] if prefs.enabled else _LOCAL_REF)
-            return self._provider_for(ref.account) or self._local, ref
+            return self._resolve_provider(ref)
         for ref in prefs.enabled:
-            provider = self._provider_for(ref.account)
-            if ref.collection == list_id and provider is not None:
-                return provider, ref
+            if ref.collection == list_id:
+                return self._resolve_provider(ref)
         if len(self._external) == 1:  # the sole external account owns an unlisted id
             account, provider = next(iter(self._external.items()))
             return provider, CollectionRef(account=account, collection=list_id)

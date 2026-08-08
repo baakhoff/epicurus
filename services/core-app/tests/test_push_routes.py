@@ -1,12 +1,14 @@
-"""Tests for the push routes: VAPID key, subscribe/unsubscribe, prefs, test-send."""
+"""Tests for the push routes: VAPID key, subscribe/unsubscribe, prefs, test-send, status."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from pywebpush import WebPushException
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -246,7 +248,95 @@ async def test_test_notification_endpoint_sends_when_subscribed(
             json={"endpoint": "e1", "p256dh": "p", "auth": "a"},
         )
         resp = await c.post("/platform/v1/push/test", json={"category": "system"})
-    assert resp.json() == {"outcome": "sent", "sent_count": 1, "pruned_count": 0}
+    assert resp.json() == {
+        "outcome": "sent",
+        "sent_count": 1,
+        "pruned_count": 0,
+        "failed_count": 0,
+    }
+
+
+async def test_test_notification_endpoint_reports_a_failed_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`outcome: "sent"` with zero delivered and a non-zero failure count is how an outright
+    delivery failure surfaces (#797) — the settings card renders it as a failure."""
+
+    def _boom(**_kwargs: Any) -> str:
+        raise WebPushException("boom", response=SimpleNamespace(status_code=500))
+
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _boom)
+    app = await _app()
+    async with _client(app) as c:
+        await c.post(
+            "/platform/v1/push/subscriptions",
+            json={"endpoint": "e1", "p256dh": "p", "auth": "a"},
+        )
+        resp = await c.post("/platform/v1/push/test", json={})
+    body = resp.json()
+    assert body["outcome"] == "sent"
+    assert body["sent_count"] == 0
+    assert body["failed_count"] == 1
+
+
+# ── delivery status (#797) ────────────────────────────────────────────────────────
+
+
+async def test_status_starts_with_no_devices_and_no_attempt() -> None:
+    app = await _app()
+    async with _client(app) as c:
+        resp = await c.get("/platform/v1/push/status")
+    assert resp.status_code == 200
+    assert resp.json() == {"device_count": 0, "last_attempt": None}
+
+
+async def test_status_reflects_the_last_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", lambda **_kwargs: "ok")
+    app = await _app()
+    async with _client(app) as c:
+        await c.post(
+            "/platform/v1/push/subscriptions",
+            json={"endpoint": "e1", "p256dh": "p", "auth": "a"},
+        )
+        await c.post("/platform/v1/push/test", json={})
+        resp = await c.get("/platform/v1/push/status")
+    body = resp.json()
+    assert body["device_count"] == 1
+    attempt = body["last_attempt"]
+    assert attempt is not None
+    assert attempt["outcome"] == "sent"
+    assert attempt["category"] == "system"
+    assert attempt["sent_count"] == 1
+    assert attempt["failed_count"] == 0
+    assert attempt["at"]  # ISO timestamp, present
+
+
+async def test_status_records_a_no_devices_attempt() -> None:
+    """The misconfiguration the settings card warns about: push tried, nowhere to send."""
+    app = await _app()
+    async with _client(app) as c:
+        await c.post("/platform/v1/push/test", json={})
+        resp = await c.get("/platform/v1/push/status")
+    body = resp.json()
+    assert body["device_count"] == 0
+    assert body["last_attempt"]["outcome"] == "skipped_no_devices"
+
+
+async def test_status_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", lambda **_kwargs: "ok")
+    app = await _app()
+    async with _client(app) as c:
+        await c.post(
+            "/platform/v1/push/subscriptions",
+            params={"tenant_id": "b"},
+            json={"endpoint": "e1", "p256dh": "p", "auth": "a"},
+        )
+        await c.post("/platform/v1/push/test", params={"tenant_id": "b"}, json={})
+        default_status = await c.get("/platform/v1/push/status")
+        b_status = await c.get("/platform/v1/push/status", params={"tenant_id": "b"})
+    assert default_status.json() == {"device_count": 0, "last_attempt": None}
+    assert b_status.json()["device_count"] == 1
+    assert b_status.json()["last_attempt"]["outcome"] == "sent"
 
 
 # ── event subscriptions (#732) ────────────────────────────────────────────────────

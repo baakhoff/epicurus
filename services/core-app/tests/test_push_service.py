@@ -1,6 +1,9 @@
 """Unit tests for PushService.notify/send_digest — prefs routing, quiet hours, rate caps,
-delivery, and Gone-subscription pruning. ``pywebpush.webpush`` is monkeypatched (a real
-send needs a live push service); the send-path *decisions* are what's under test.
+delivery, Gone-subscription pruning, the unconditional center write, the per-gate decline
+logs, and the last-attempt diagnostics (#797). ``pywebpush.webpush`` is monkeypatched (a
+real send needs a live push service); the send-path *decisions* are what's under test.
+The module logger is monkeypatched with a recording double where log lines are asserted —
+deterministic regardless of global structlog configuration or logger caching.
 """
 
 from __future__ import annotations
@@ -57,6 +60,23 @@ class _FakeEventBus:
 
 async def _utc() -> str:
     return "UTC"
+
+
+class _CapturingLog:
+    """Records every structured log call so tests can assert the exact decline lines."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kw: Any) -> None:
+        self.events.append(("info", event, kw))
+
+    def warning(self, event: str, **kw: Any) -> None:
+        self.events.append(("warning", event, kw))
+
+    @property
+    def messages(self) -> list[str]:
+        return [event for _, event, _ in self.events]
 
 
 def _queued(category: str, title: str) -> QueuedPush:
@@ -210,15 +230,30 @@ async def test_notify_records_a_center_row_by_default(monkeypatch: pytest.Monkey
     assert rows[0].read_at is None
 
 
-async def test_notify_skips_the_center_row_when_center_is_off(
+async def test_notify_records_the_center_row_even_when_center_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#797: the center is a superset of push — a stored `center: false` (a pre-#797 pref,
+    or one sent by an old client) no longer suppresses the durable row."""
     monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
     fx = await _fixture()
     await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
     await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=True, center=False)})
     await fx.service.notify(TENANT, category="mail", title="t", body="b")
-    assert await fx.notifications.list(TENANT) == []
+    assert len(await fx.notifications.list(TENANT)) == 1
+
+
+async def test_notify_records_the_center_row_even_when_both_channels_are_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even `{push: false, center: false}` keeps the durable record (#797) — the only way to
+    not record an alert is for it not to fire (e.g. no event subscription upstream)."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=False, center=False)})
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.outcome == "skipped_disabled"
+    assert len(await fx.notifications.list(TENANT)) == 1
 
 
 async def test_notify_records_the_center_row_even_when_push_is_disabled(
@@ -262,9 +297,11 @@ async def test_notify_records_the_center_row_even_when_rate_limited(
     assert len(rows) == 2  # both recorded, even though only the first was actually pushed
 
 
-async def test_notify_uses_the_automation_overrides_center_value(
+async def test_notify_ignores_the_automation_overrides_center_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An automation override can still silence *push* per automation, but its `center` half
+    is vestigial (#797) — the durable row is always written."""
     monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
     fx = await _fixture()
     await fx.prefs.set_categories(TENANT, {"automation": ChannelPrefs(push=True, center=True)})
@@ -272,7 +309,23 @@ async def test_notify_uses_the_automation_overrides_center_value(
     await fx.service.notify(
         TENANT, category="automation", title="t", body="b", automation_id="auto-1"
     )
-    assert await fx.notifications.list(TENANT) == []  # override's center=False wins
+    assert len(await fx.notifications.list(TENANT)) == 1
+
+
+async def test_notify_records_the_center_row_when_delivery_fails_outright(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The issue's motivating case (#797): every device errors, nothing is delivered — the
+    center row must already exist, so the notification is never simply gone."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_server_error)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.sent_count == 0
+    assert result.failed_count == 1
+    rows = await fx.notifications.list(TENANT)
+    assert len(rows) == 1
+    assert result.notification_id == rows[0].id
 
 
 # ── notify: NotifyResult.notification_id (#723) ────────────────────────────────────
@@ -290,14 +343,15 @@ async def test_notify_returns_the_center_rows_id_when_center_is_on(
     assert result.notification_id == rows[0].id
 
 
-async def test_notify_returns_no_notification_id_when_center_is_off(
+async def test_notify_returns_the_notification_id_even_when_center_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#797: a row is always written, so the id always comes back — no caller branch needed."""
     monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
     fx = await _fixture()
     await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=True, center=False)})
     result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
-    assert result.notification_id is None
+    assert result.notification_id is not None
 
 
 async def test_notify_carries_the_notification_id_through_every_outcome(
@@ -486,7 +540,153 @@ async def test_a_non_gone_error_does_not_prune_the_subscription(
     result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
     assert result.sent_count == 0
     assert result.pruned_count == 0
+    assert result.failed_count == 1  # counted as a failure, not silently absorbed (#797)
     assert len(await fx.subscriptions.list(TENANT)) == 1  # a transient 500 is not Gone
+
+
+# ── the delivery gates each log a distinct line (#797) ────────────────────────────
+# A push crosses several independent gates and used to die quietly at whichever was closed.
+# Every declined/deferred path must log an identifiable line so an operator can tell
+# "working as configured" from "broken" — parametrized over every gate this service owns
+# (the event-alert listener's two upstream gates are asserted in test_event_alerts.py).
+
+_GATE_LINES: dict[str, str] = {
+    "push_disabled": "push skipped: push disabled for this notification",
+    "quiet_hours_queued": "push queued for quiet-hours digest",
+    "tenant_rate_capped": "push rate cap reached; delivery skipped",
+    "no_devices": "push skipped: no registered devices",
+    "delivery_failed": "push send failed",
+    "dead_subscription_pruned": "pruned dead push subscription",
+}
+
+
+@pytest.mark.parametrize("gate", sorted(_GATE_LINES))
+async def test_every_push_gate_logs_its_own_distinct_line(
+    gate: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs = _CapturingLog()
+    monkeypatch.setattr("epicurus_core_app.push.service.log", logs)
+    monkeypatch.setattr(
+        "epicurus_core_app.push.service.webpush",
+        {
+            "delivery_failed": _webpush_server_error,
+            "dead_subscription_pruned": _webpush_gone,
+        }.get(gate, _webpush_ok),
+    )
+    fx = await _fixture(rate_cap_per_hour=1 if gate == "tenant_rate_capped" else 30)
+    if gate != "no_devices":
+        await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    if gate == "push_disabled":
+        await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=False, center=True)})
+    if gate == "quiet_hours_queued":
+        await fx.prefs.set_quiet_hours(TENANT, enabled=True, start="00:00", end="23:59")
+    if gate == "tenant_rate_capped":
+        await fx.service.notify(TENANT, category="mail", title="warm-up", body="b")
+        logs.events.clear()  # only the capped call's lines are under test
+
+    await fx.service.notify(TENANT, category="mail", title="t", body="b")
+
+    assert _GATE_LINES[gate] in logs.messages
+    matched = next(kw for _level, event, kw in logs.events if event == _GATE_LINES[gate])
+    assert matched["tenant"] == TENANT  # attributable, not just present
+    other_lines = {line for name, line in _GATE_LINES.items() if name != gate}
+    assert not other_lines.intersection(logs.messages)  # distinct: no cross-talk between gates
+
+
+async def test_a_clean_send_logs_no_decline_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The inverse guard: a healthy delivery stays quiet, so a decline line always means
+    something actually declined."""
+    logs = _CapturingLog()
+    monkeypatch.setattr("epicurus_core_app.push.service.log", logs)
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.outcome == "sent"
+    assert not set(_GATE_LINES.values()).intersection(logs.messages)
+
+
+# ── last-attempt diagnostics (#797) ───────────────────────────────────────────────
+# GET /push/status surfaces the most recent delivery attempt so the settings card can answer
+# "when was a push last tried, and did it succeed" without the operator reading logs.
+
+
+async def test_last_attempt_is_none_until_a_push_is_attempted() -> None:
+    fx = await _fixture()
+    assert fx.service.last_attempt(TENANT) is None
+
+
+async def test_a_send_records_the_last_attempt_with_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    attempt = fx.service.last_attempt(TENANT)
+    assert attempt is not None
+    assert attempt.outcome == "sent"
+    assert attempt.category == "mail"
+    assert attempt.sent_count == 1
+    assert attempt.failed_count == 0
+
+
+async def test_a_failed_delivery_records_the_attempt_with_its_failure_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_server_error)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    attempt = fx.service.last_attempt(TENANT)
+    assert attempt is not None
+    assert attempt.outcome == "sent"
+    assert attempt.sent_count == 0
+    assert attempt.failed_count == 1  # "sent" outcome, zero delivered — the status can say so
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected_outcome"),
+    [
+        ("quiet_hours_queued", "queued"),
+        ("tenant_rate_capped", "skipped_rate_limited"),
+        ("no_devices", "skipped_no_devices"),
+    ],
+)
+async def test_every_non_delivery_attempt_is_still_recorded(
+    gate: str, expected_outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture(rate_cap_per_hour=1 if gate == "tenant_rate_capped" else 30)
+    if gate != "no_devices":
+        await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    if gate == "quiet_hours_queued":
+        await fx.prefs.set_quiet_hours(TENANT, enabled=True, start="00:00", end="23:59")
+    if gate == "tenant_rate_capped":
+        await fx.service.notify(TENANT, category="mail", title="warm-up", body="b")
+    await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    attempt = fx.service.last_attempt(TENANT)
+    assert attempt is not None
+    assert attempt.outcome == expected_outcome
+
+
+async def test_a_disabled_push_never_records_an_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Push off means nothing was attempted — recording it would overwrite the diagnostics
+    of the last real attempt with a non-event."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=False, center=True)})
+    await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert fx.service.last_attempt(TENANT) is None
+
+
+async def test_last_attempt_is_tenant_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant="a", endpoint="e1", p256dh="p", auth="a")
+    await fx.service.notify("a", category="mail", title="t", body="b")
+    assert fx.service.last_attempt("a") is not None
+    assert fx.service.last_attempt("b") is None
 
 
 async def test_notify_emits_a_best_effort_usage_event(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -609,19 +809,21 @@ async def test_notify_effective_skips_push_when_the_passed_in_prefs_say_off(
     assert len(rows) == 1  # center is independent, and was on
 
 
-async def test_notify_effective_records_no_center_row_when_off(
+async def test_notify_effective_records_the_center_row_even_when_center_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#797 applies to the event-alerts path identically: firing at all is what records."""
     monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
     fx = await _fixture()
-    await fx.service.notify_effective(
+    result = await fx.service.notify_effective(
         TENANT,
         effective=ChannelPrefs(push=False, center=False),
         category="mail",
         title="t",
         body="b",
     )
-    assert await fx.notifications.list(TENANT) == []
+    assert result.notification_id is not None
+    assert len(await fx.notifications.list(TENANT)) == 1
 
 
 async def test_notify_effective_queues_during_quiet_hours(monkeypatch: pytest.MonkeyPatch) -> None:

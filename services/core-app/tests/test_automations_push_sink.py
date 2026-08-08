@@ -152,8 +152,10 @@ async def test_push_sink_returns_an_entity_ref_when_a_center_row_was_written() -
     )
 
 
-async def test_push_sink_returns_no_artifact_when_the_center_toggle_is_off() -> None:
-    """No durable row exists to point at — the one case notes/kb never hits."""
+async def test_push_sink_returns_no_artifact_when_the_notifier_returns_no_id() -> None:
+    """Defensive only since #797 (the real send path always writes a center row and returns
+    its id): a notifier that hands back no id still yields no artifact rather than a broken
+    ref."""
     notifier = _FakeNotifier(notification_id=None)
     handler = make_push_sink(notifier)
     ref = await handler(_automation(), "out")
@@ -317,7 +319,11 @@ async def test_push_sink_still_records_the_center_row_during_quiet_hours(tmp_pat
     await env.engine.dispose()
 
 
-async def test_push_sink_records_no_artifact_when_the_category_toggle_is_off(tmp_path: Any) -> None:
+async def test_push_sink_records_the_center_row_even_with_the_category_toggle_off(
+    tmp_path: Any,
+) -> None:
+    """#797: the center is a superset of push — turning the "automation" category off
+    silences *devices*, never the durable record, so the run still gets its artifact."""
     env = await _env(tmp_path)
     await env.push_prefs.set_categories(
         TENANT, {"automation": ChannelPrefs(push=False, center=False)}
@@ -332,15 +338,18 @@ async def test_push_sink_records_no_artifact_when_the_category_toggle_is_off(tmp
     )
     run = await env.runner.run_once(automation, trigger_refs=[], summaries=[], verdict="schedule")
     assert run is not None
-    assert "push" in run.sinks_fired  # dispatch still ran the handler successfully
-    assert run.artifacts == []  # nothing durable was written to point at
-    assert await env.notifications.list(TENANT) == []
+    assert "push" in run.sinks_fired
+    rows = await env.notifications.list(TENANT)
+    assert len(rows) == 1  # recorded despite push being off
+    assert len(run.artifacts) == 1
+    assert run.artifacts[0].ref_id == rows[0].id
+    assert await env.push_queue.list_for_tenant(TENANT) == []  # but nothing push-shaped moved
     await env.engine.dispose()
 
 
-async def test_push_sink_respects_a_per_automation_override(tmp_path: Any) -> None:
-    """The seam ADR-0102 §4 built for this: silencing one automation without touching the
-    "automation" category default for every other one."""
+async def test_push_sink_honors_a_per_automation_override_for_push_only(tmp_path: Any) -> None:
+    """The ADR-0102 §4 seam still silences one automation's *push* without touching the
+    category default — but since #797 the center row is written regardless."""
     env = await _env(tmp_path)
     automation = await env.store.create(
         tenant=TENANT,
@@ -355,8 +364,10 @@ async def test_push_sink_respects_a_per_automation_override(tmp_path: Any) -> No
     )
     run = await env.runner.run_once(automation, trigger_refs=[], summaries=[], verdict="schedule")
     assert run is not None
-    assert run.artifacts == []
-    assert await env.notifications.list(TENANT) == []
+    rows = await env.notifications.list(TENANT)
+    assert len(rows) == 1
+    assert len(run.artifacts) == 1
+    assert await env.push_queue.list_for_tenant(TENANT) == []  # push itself stayed silenced
     await env.engine.dispose()
 
 

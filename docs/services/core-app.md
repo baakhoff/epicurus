@@ -1111,12 +1111,13 @@ no-second-write-path rule), at a per-automation `DocumentTarget` (`{path_pattern
 an `EntityRef` on the run's `artifacts` so the runs feed links what was written. The **push** sink
 (`automations/push_sink.py`, #723) closes the last gap the seam left open: it calls
 [`PushService.notify`](#push-notifications-adr-0102) under the `"automation"` category (with
-`automation_id`, so a per-automation override can silence just one), title the automation's own
-name, body the run's raw output — quiet hours, the rate cap, and the push/center toggles all apply
-exactly as for any other caller. When `notify()`'s `center` toggle wrote a notification-center row,
-the sink records its id as an `EntityRef` (`module="core"`, `kind="notification"`) on the run's
-`artifacts`, the same field notes/kb already populate — so a `sinks=["push"]` template (all ten
-#717 shipped with) now delivers something visible instead of silently completing.
+`automation_id`, so a per-automation override can silence just one's *push*), title the
+automation's own name, body the run's raw output — quiet hours, the rate cap, and the push
+toggles all apply exactly as for any other caller. `notify()` always writes a
+notification-center row (#797 — the center is a superset of push), and the sink records its id
+as an `EntityRef` (`module="core"`, `kind="notification"`) on the run's `artifacts`, the same
+field notes/kb already populate — so a `sinks=["push"]` template (all ten #717 shipped with)
+always leaves a durable, linkable record even when push delivery itself is off or fails.
 
 **Agent-gated delivery (#706).** The sink fan-out above is deterministic by default — but a
 per-automation toggle (`agent_gated_delivery`, off by default) lets the run's own turn decide.
@@ -1172,28 +1173,43 @@ path but new work creates an automation.
 `PushService.notify(tenant, category=..., title=..., body=...)` (`push/service.py`) is the
 core-internal send path a category-based caller uses in-process (#670) — today, the settings
 UI's test button and the [automations engine's push sink](#automations-engine-adr-0105)
-(#723). Every call first records a notification-center row (`notifications.py`) if the
-category/automation's `center` toggle is on, regardless of what push delivery does below
-(#671, ADR-0102 §4); `NotifyResult.notification_id` carries that row's id back to the caller
-(`None` when `center` was off), so a caller like the push sink can build an `EntityRef`
-without a second lookup. Push delivery then resolves, in order: the effective push toggle (off
-skips delivery entirely), quiet hours in the tenant's timezone (ADR-0039 — queues for a digest
-instead of sending), and an in-memory per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`,
-single-instance v1 — the same disposable-cache trade the live-run registry makes, ADR-0055).
-Delivery fans out to every device via VAPID-signed webpush (RFC 8291/8292) — the outgoing
-payload's `body` is capped at 500 characters (an automation's full report should not be able
-to blow a push service's own size ceiling), independent of the untruncated text already
-written to the notification-center row above — pruning any subscription the push service
-reports Gone (404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
+(#723). Every call first records a notification-center row (`notifications.py`)
+**unconditionally** (#797, amending ADR-0102 §4/ADR-0104 §1): **the center is a superset of
+push** — the durable log of every notification that fired — and `push` means "also deliver
+to devices", so a push missed while the device was off (or that failed outright) is never
+simply gone. `ChannelPrefs.center` is still stored and carried on the wire for contract
+compatibility but no longer consulted by delivery. `NotifyResult.notification_id` carries the
+row's id back to the caller (always set), so a caller like the push sink can build an
+`EntityRef` without a second lookup. Push delivery then resolves, in order: the effective
+push toggle (off skips delivery entirely), quiet hours in the tenant's timezone (ADR-0039 —
+queues for a digest instead of sending), and an in-memory per-tenant rate cap
+(`PUSH_RATE_CAP_PER_HOUR`, single-instance v1 — the same disposable-cache trade the live-run
+registry makes, ADR-0055). Delivery fans out to every device via VAPID-signed webpush
+(RFC 8291/8292) — the outgoing payload's `body` is capped at 500 characters (an automation's
+full report should not be able to blow a push service's own size ceiling), independent of the
+untruncated text already written to the notification-center row above — pruning any
+subscription the push service reports Gone (404/410) as expected churn (uninstalled PWA,
+cleared site data), not an error.
+
+**Every declined or deferred push logs a distinct line** (#797), so an operator can tell
+"working as configured" from "broken" straight from the logs: `push skipped: push disabled
+for this notification` · `push queued for quiet-hours digest` · `push rate cap reached;
+delivery skipped` · `push skipped: no registered devices` (warning — a push was wanted with
+nowhere to go) · `push send failed` · `pruned dead push subscription`, plus the event-alert
+listener's `event alert declined: no subscription for this event` / `event alert rate cap
+reached`. The most recent delivery *attempt* per tenant (anything except a disabled skip) is
+kept in memory and served by `GET /platform/v1/push/status` — the settings card's
+delivery-state readout (device count + what happened last, `null` after a restart).
 
 `/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
 service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
-/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below), and
-`POST /test` (the settings UI's "send test notification" button, category `"system"`).
-`/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
-`GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
-[the reference page](../reference/notifications.md) for the full contract and the web-side
-subscribe flow.
+/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below),
+`POST /test` (the settings UI's "send test notification" button, category `"system"` — its
+response carries `failed_count` alongside the sent/pruned counts since #797), and
+`GET /status` (above). `/platform/v1/notifications/*` (`notifications_routes.py`) is the
+notification-center half: `GET ""` (list), `GET /unread-count`, `POST /{id}/read`,
+`POST /read-all`. See [the reference page](../reference/notifications.md) for the full
+contract and the web-side subscribe flow.
 
 **Event alerts (#732, ADR-0114).** `push/event_subscriptions.py` + `push/event_alerts.py`:
 a tenant-scoped `(module, event_type) -> ChannelPrefs` store, off by default, and a listener

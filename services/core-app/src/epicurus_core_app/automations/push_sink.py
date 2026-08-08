@@ -37,15 +37,16 @@ deep-link target the Automations page's own per-row run history uses (`docs/refe
 automations.md#the-automations-page-668`), landing the operator on this automation's run
 history rather than the flat automations list.
 
-**Artifact.** ``notify()`` returns the notification-center row's id whenever the category's
-``center`` toggle is on (the default). When it does, the handler returns an ``EntityRef``
-pointing at it, the same way :func:`document_sinks.make_document_sink` returns one for the
-document it wrote — ``module="core"``, no resolver, exactly the precedent
+**Artifact.** ``notify()`` returns the notification-center row's id — since #797
+unconditionally, because the center records every notification that fires (the center is a
+superset of push; a per-automation override can still silence *push*, never the row). The
+handler returns an ``EntityRef`` pointing at it, the same way
+:func:`document_sinks.make_document_sink` returns one for the document it wrote —
+``module="core"``, no resolver, exactly the precedent
 :meth:`~epicurus_core_app.core_events.CoreEventEmitter._file_ref` already sets for the Files
 page: the runs feed still renders a chip from the ref's own title even with nothing to
-hover-resolve. When ``center`` is off, there is no durable row to point at, so the handler
-returns ``None`` — the one case notes/kb never hits, since a document sink always writes
-something.
+hover-resolve. The no-id branch below survives only as defense against a notifier that
+returns none; the real send path no longer has such a case.
 """
 
 from __future__ import annotations

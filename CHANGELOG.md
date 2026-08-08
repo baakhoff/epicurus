@@ -12,6 +12,43 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A push notification could die at any of six gates without a single trace** (#797) — push
+  crossed six independent conditions on the way to a device (no event subscription, the
+  per-subscription rate cap, the category's push toggle, quiet hours, the tenant-wide rate cap,
+  no registered device) and several of them declined in complete silence, so "I got no
+  notification" was indistinguishable from a broken pipeline and there was no way to bisect the
+  two without instrumenting the code. Every gate now logs one distinct, greppable line naming
+  the tenant and the category or module/type — `event alert declined: no subscription for this
+  event`, `event alert rate cap reached`, `push skipped: push disabled for this notification`,
+  `push queued for quiet-hours digest`, `push rate cap reached; delivery skipped`, `push
+  skipped: no registered devices`, `push send failed`, `pruned dead push subscription` — and a
+  clean send logs none of them, so a decline line always means a decline. Settings gained a
+  delivery-state surface behind a new `GET /platform/v1/push/status`: the registered-device
+  count and the most recent delivery *attempt* with what became of it, in plain language, where
+  a send that reached zero devices with failures reads as failed rather than as success. A
+  warning banner now fires at configure time when push is enabled somewhere but no device is
+  registered — the misconfiguration that used to fail silently once per delivery. The
+  last-attempt readout is in-memory, single-instance v1, the same disposable-cache trade the
+  rate windows make: `null` after a restart means "nothing attempted since boot", not "never".
+
+  **Behavior change — the notification center is now a superset of push, amending ADR-0102 §4
+  and ADR-0104 §1.** `push` and `center` used to be independent per-category toggles, so a push
+  missed while the device was off — or that failed outright — could simply be *gone*, and
+  `center: off` suppressed the durable row entirely. The center row is now written
+  unconditionally for every notification that fires, quiet-hours-queued and outright-failed
+  deliveries included, and `push` means "*also* deliver to devices". `ChannelPrefs.center` is
+  vestigial: still accepted, stored, and returned on the wire, so nothing on the contract
+  breaks, but delivery no longer consults it, and `NotifyResult.notification_id` is therefore
+  always set. **Anyone relying on `center: off` to suppress rows is affected** — that state no
+  longer exists; the only way for an alert not to be recorded is for it not to fire. The event
+  alerts card's independent Push/Center switch pair collapses accordingly into two coupled
+  switches over the unchanged `{push, center}` wire shape — **Alert** (the master, on iff either
+  stored flag is on) and **Push** (also deliver to devices, implying Alert) — and legacy
+  `{push: true, center: false}` rows read as both on. The per-subscription event-alert rate cap
+  still gates the whole notification, center row included: a firehose into the center is still a
+  firehose. The tenant-wide push cap gates delivery only.
+  `core-app` 0.111.0 (MINOR), `web` 0.134.1→0.135.0 (MINOR).
+
 - **Tasks added while an account was disconnected were saved and then invisible forever**
   (#795) — `TasksRouter` resolved a *missing provider* in exactly opposite ways on its write and
   read paths, and the trigger is a stale `enabled`/`active` collection reference, which nothing

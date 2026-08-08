@@ -12,6 +12,34 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Tasks added while an account was disconnected were saved and then invisible forever**
+  (#795) — `TasksRouter` resolved a *missing provider* in exactly opposite ways on its write and
+  read paths, and the trigger is a stale `enabled`/`active` collection reference, which nothing
+  prunes when the account behind it goes away. A write fell back to the local store — but kept
+  the stale reference, so the task was mislabeled with the account and collection it had fallen
+  back *from*, visible in the emitted `tasks.task_created` event's `dedup_key` and in the list
+  id handed to the local provider. The read aggregate hit the very same condition and
+  `continue`d past it, never trying local at all, because its fallback only fires when `enabled`
+  is *empty*, never when an entry inside it is dead. So `tasks_add` reported a genuine,
+  persisted task and the very next `tasks_list` or board read came back empty — not lost, just
+  unreadable through the router — and the skip was silent, unlike the neighbouring read-failure
+  path which logs. Fixed by giving every read and write one shared rule, `_resolve_provider`: a
+  live provider for the reference's account is used as-is; a missing one degrades to the local
+  collection — replacing the reference rather than merely re-pointing it, so a write is never
+  mislabeled — and logs a warning naming the account and collection that went missing. A
+  `_dedup_refs` helper applies the rule across a multi-collection read and de-duplicates by
+  *effective* target, so two independently stale references, or a degraded one landing on a
+  local entry already enabled, read local once instead of double-counting its tasks. The
+  explicit-`list_id` write branch funnels through the same rule, which also closes a related
+  asymmetry: a `list_id` matching a stale enabled reference now degrades to local instead of
+  falling through to "the sole external provider owns this unlisted id" and potentially
+  misrouting to an unrelated account. Pruning the stale reference itself is deliberately left
+  alone — the core's disconnect cleanup is best-effort by design and a module-side prune would
+  need a new write-back into the shared library — because the router-level rule makes staleness
+  permanently harmless whatever caused it. The calendar module had the identical defect; it is
+  fixed separately as #814.
+  `tasks` 0.21.0→0.22.0 (MINOR).
+
 - **`mail.received` only fired while the Mail page was open, so automations and push alerts on
   new mail never ran** (#796) — the event had exactly one emitter, `CachedMailbox.reconcile`, and
   exactly one caller: the mailbox page's `?reconcile=1` read, which the web fires when an operator

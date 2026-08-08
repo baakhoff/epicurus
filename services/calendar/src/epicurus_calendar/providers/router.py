@@ -13,6 +13,19 @@ and routes per the operator's stored selection (ADR-0030), fetched from the core
 * ``get_event`` searches the active, then the other enabled, then local — so a
   referenced event resolves wherever it lives.
 
+Every path above — read and write alike — resolves a :class:`CollectionRef` to a provider
+through the single :meth:`CollectionRouter._resolve_provider` rule (#814): a live provider
+for the ref's account is used as-is; a **missing** one — most often a stale ``enabled``/
+``active`` entry left behind once its account was disconnected, since nothing currently
+prunes ``enabled`` when that happens — **degrades to the local collection**, logging a
+warning. Before #814 the write and read paths each hardcoded their own half of this and
+disagreed: a write silently landed in local while the ``list_events`` aggregate ``continue``d
+past the very same ref without ever trying local, so an event was created, persisted, and
+absent from the Calendar page — "write succeeded, read empty" for a ref nothing had pruned
+(the tasks module's #795, one module over). A *degraded* ref is therefore never "skipped" the
+way a source that errors mid-read is; reads fall back to local whenever nothing is enabled, a
+ref's provider is gone, or the core itself is unreachable (local-first, ADR-0030).
+
 It satisfies :class:`CalendarProvider`, so the module's tools and page treat it like
 any other backend; the per-call ``calendar_id`` argument is resolved internally from
 the selection, so a value passed in is ignored.
@@ -30,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Protocol
 
@@ -99,6 +113,64 @@ class CollectionRouter(CalendarProvider):
             return self._local
         return self._external.get(account)
 
+    def _resolve_provider(self, ref: CollectionRef) -> tuple[CalendarProvider, CollectionRef]:
+        """The provider actually backing *ref* — the one rule every read and write path
+        shares for "this ref's provider is gone" (#814).
+
+        A live provider for ``ref.account`` is used as-is. Otherwise — typically a stale
+        ``prefs.enabled``/``prefs.active`` entry left over once its account was
+        disconnected, since nothing prunes ``enabled`` when that happens — this degrades to
+        the local collection rather than raising or (on a read) silently disappearing:
+        ADR-0030 makes local the silent default, always available, so a write that falls
+        back to local must be found by the very next read, not swallowed into a hole
+        neither side can see. ``self._local`` is a required constructor argument, so this
+        never returns ``None`` — the router always has *somewhere* to route a ref, and the
+        returned ref is always the one the caller should actually use (the degraded case
+        returns :data:`_LOCAL_REF`, not the stale input, so a write that falls back to local
+        is never handed the dead account's collection id, and a read tags its events with
+        ``local`` — the token the page's per-calendar visibility toggles can actually match,
+        #378 — rather than a calendar the operator no longer has). Every degradation is
+        logged, naming the account and collection that went missing, since before this the
+        dropped read left no trace at all.
+
+        A ref whose provider is live but whose *call* then fails is a different condition,
+        handled where it happens: those paths keep their own ``except``/``continue`` (#209).
+        """
+        provider = self._provider_for(ref.account)
+        if provider is not None:
+            return provider, ref
+        log.warning(
+            "collection provider unavailable; degrading to local (#814)",
+            account=ref.account,
+            collection=ref.collection,
+        )
+        return self._local, _LOCAL_REF
+
+    def _dedup_refs(
+        self, refs: Iterable[CollectionRef]
+    ) -> list[tuple[CalendarProvider, CollectionRef]]:
+        """Resolve each ref via :meth:`_resolve_provider`, in input order, collapsing
+        duplicate effective targets to their first occurrence.
+
+        Several input refs can resolve to the *same* effective target — two independently
+        stale refs both degrading to local, or a degraded ref landing on local when local is
+        also already present in *refs* (which :meth:`_search_refs` always appends) — so
+        without this a disconnected account could read local twice. For the ordered
+        single-event search that is merely wasteful; for the :meth:`list_events` aggregate it
+        would **double-count** local's events in the returned window. Shared by both read
+        shapes so each gets the same fallback, dedup, and warning behavior from one place.
+        """
+        resolved: list[tuple[CalendarProvider, CollectionRef]] = []
+        seen: set[tuple[str, str]] = set()
+        for ref in refs:
+            provider, effective = self._resolve_provider(ref)
+            key = (effective.account, effective.collection)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append((provider, effective))
+        return resolved
+
     async def list_events(
         self,
         *,
@@ -107,12 +179,9 @@ class CollectionRouter(CalendarProvider):
         calendar_id: str | None = None,
     ) -> list[Event]:
         prefs = await self._load_prefs()
-        targets = prefs.enabled or [_LOCAL_REF]
+        targets = self._dedup_refs(prefs.enabled or [_LOCAL_REF])
         events: list[Event] = []
-        for ref in targets:
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue  # an unknown / disconnected account is skipped, not fatal
+        for provider, ref in targets:
             token = encode_collection_token(ref)
             try:
                 for event in await provider.list_events(
@@ -145,6 +214,13 @@ class CollectionRouter(CalendarProvider):
         goes straight to the owning calendar instead of probing the whole enabled set
         (#435). Then the active collection, the rest of the enabled set, and the local
         store — a referenced event resolves (and is edited/deleted) wherever it lives.
+
+        These are the *intended* targets; callers pass the result through
+        :meth:`_dedup_refs` to resolve each to a live provider (#814). The de-duplication
+        here is by input ref and stays useful on its own (it keeps this a pure, independently
+        correct ordering); ``_dedup_refs`` then de-duplicates again by *effective* target,
+        which is what collapses a stale ref that degraded onto the ``_LOCAL_REF`` this always
+        appends.
         """
         refs: list[CollectionRef] = []
         if first is not None:
@@ -167,10 +243,7 @@ class CollectionRouter(CalendarProvider):
         self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
     ) -> Event | None:
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs):
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue
+        for provider, ref in self._dedup_refs(self._search_refs(prefs)):
             try:
                 event = await provider.get_event(
                     tenant_id=tenant_id, event_id=event_id, calendar_id=ref.collection or None
@@ -213,7 +286,12 @@ class CollectionRouter(CalendarProvider):
             if calendar_id
             else await self._active_ref(tenant_id=tenant_id)
         )
-        provider = self._provider_for(ref.account) or self._local
+        # Both branches funnel through ``_resolve_provider`` (#814), so a token naming a
+        # since-disconnected account — whether the operator picked it on the form or it is a
+        # stale ``active``/``enabled`` entry — degrades to local under the same rule the read
+        # paths use, and the write is carried out against ``_LOCAL_REF`` rather than the dead
+        # account's collection id.
+        provider, ref = self._resolve_provider(ref)
         event = await provider.create_event(
             tenant_id=tenant_id,
             title=title,
@@ -260,10 +338,7 @@ class CollectionRouter(CalendarProvider):
         # first source that has it wins (#208, #435).
         first = decode_collection_token(calendar_id) if calendar_id else None
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs, first=first):
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue
+        for provider, ref in self._dedup_refs(self._search_refs(prefs, first=first)):
             try:
                 event = await provider.update_event(
                     tenant_id=tenant_id,
@@ -314,10 +389,7 @@ class CollectionRouter(CalendarProvider):
         # tried first (#435), mirroring update_event.
         first = decode_collection_token(calendar_id) if calendar_id else None
         prefs = await self._load_prefs()
-        for ref in self._search_refs(prefs, first=first):
-            provider = self._provider_for(ref.account)
-            if provider is None:
-                continue
+        for provider, ref in self._dedup_refs(self._search_refs(prefs, first=first)):
             try:
                 if await provider.delete_event(
                     tenant_id=tenant_id,
@@ -420,9 +492,11 @@ class CollectionRouter(CalendarProvider):
         calendar_id: str | None = None,
     ) -> list[DateTimeRange]:
         # Free/busy is computed for the write-default calendar — the one a new event
-        # lands on (see ``_active_ref``).
+        # lands on (see ``_active_ref``) — resolved through the same rule the write itself
+        # uses (#814), so free/busy is never computed against a calendar the create would
+        # not have landed on.
         ref = await self._active_ref(tenant_id=tenant_id)
-        provider = self._provider_for(ref.account) or self._local
+        provider, ref = self._resolve_provider(ref)
         return await provider.find_free_slots(
             tenant_id=tenant_id,
             time_range=time_range,
@@ -447,6 +521,15 @@ class CollectionRouter(CalendarProvider):
         external provider's own default calendar (Google resolves an empty collection to
         ``primary``), and only when nothing external is connected does the silent local
         store take the write. An explicit ``active`` always wins.
+
+        This returns the *intended* target; the caller resolves it through
+        :meth:`_resolve_provider` (#814). So an explicit ``active`` naming a
+        since-disconnected account degrades to **local**, deliberately not to whichever other
+        external calendar the ``#433`` preference order would have picked had ``active`` been
+        unset: the operator named one calendar, and quietly writing into a *different*
+        account's calendar instead is a worse surprise than the always-available silent
+        default. The enabled-set scan below still skips a dead ref while looking for its
+        candidate — there it is choosing among alternatives, not honouring a stated one.
         """
         prefs = await self._load_prefs()
         if prefs.active is not None:

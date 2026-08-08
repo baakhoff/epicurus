@@ -52,7 +52,7 @@ async def test_the_decorator_carries_the_class_into_the_manifest() -> None:
 
 
 async def test_an_explicit_tool_name_is_classified_under_that_name() -> None:
-    # The annotation keys on the name FastMCP publishes, not the function's.
+    # The annotation keys on the name the MCP server publishes, not the function's.
     module = EpicurusModule("demo")
 
     @module.tool(name="published_name", side_effect="read")

@@ -68,7 +68,7 @@ from epicurus_core.messaging import (
     OutboundMessage,
     session_id_for,
 )
-from epicurus_core.module import EpicurusModule, add_manifest_route
+from epicurus_core.module import EpicurusModule, ToolError, add_manifest_route
 from epicurus_core.module_events import (
     EVENTS_PREFIX,
     EVENTS_WILDCARD,
@@ -172,6 +172,7 @@ __all__ = [
     "SideEffect",
     "TenantError",
     "ToolEnvelope",
+    "ToolError",
     "ToolSpec",
     "UiAction",
     "UiSection",

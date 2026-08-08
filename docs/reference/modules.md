@@ -5,8 +5,11 @@ describes itself with a **manifest**.
 
 ## `EpicurusModule`
 
-`epicurus_core.module.EpicurusModule` — wraps the MCP SDK's `FastMCP` with epicurus
-conventions.
+`epicurus_core.module.EpicurusModule` — wraps the MCP SDK's `MCPServer` (named `FastMCP`
+before mcp 2.0) with epicurus conventions. Modules reach the SDK **through this wrapper**
+— register with `tool()`, invoke in-process with `call_tool()`, assert failures with the
+re-exported `ToolError` — so an SDK API move (like the 2.0 rename) lands here once, not
+in every module.
 
 ```python
 EpicurusModule(
@@ -30,12 +33,17 @@ EpicurusModule(
 | Member | Description |
 | --- | --- |
 | `name` *(property)* | The module name. |
-| `mcp` *(property)* | The underlying `FastMCP` (advanced use / testing). |
+| `mcp` *(property)* | The underlying `MCPServer` (advanced use). The one legitimate direct use is `mcp.session_manager.run()` in the service lifespan (requires `http_app()` to have been called first). |
 | `tool(name=None, description=None)` | Decorator registering a tool; the function signature becomes the tool's typed input schema. |
+| `async call_tool(name, arguments) -> tuple[list[ContentBlock], Any]` | Invoke a registered tool in-process and return `(content blocks, structured_content)` — the stable invocation surface for module tests. Raises `ToolError` when the tool is unknown or its function raised (over the wire the same failure travels as an `isError` result instead). |
 | `emits(subject, description="") -> None` | Declare a published event subject. |
 | `consumes(subject, description="") -> None` | Declare a subscribed subject. |
 | `async manifest(*, config=None, secrets=None) -> ModuleManifest` | Build the manifest from registered tools + declared events (args override the constructor's `config`/`secrets`). |
-| `http_app() -> starlette.applications.Starlette` | ASGI app serving the tools over streamable HTTP (internal network). |
+| `http_app() -> starlette.applications.Starlette` | ASGI app serving the tools over streamable HTTP (internal network): served at the app root, DNS-rebinding protection off (the contract is local-only, ADR-0004). |
+
+`epicurus_core.ToolError` is re-exported from the SDK (`mcp.server.mcpserver.exceptions`
+as of 2.0; previously `mcp.server.fastmcp.exceptions`) so module code and tests never
+import an SDK path that moves between major versions.
 
 ### `add_manifest_route`
 

@@ -893,14 +893,16 @@ a timeout, or a connection failure becomes a `502` carrying the operation — so
 erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
 
 The **tool-invocation POST** (the board/calendar UI actions above) is held to the same
-guarantee (#472). Its dispatch runs over MCP rather than a plain HTTP proxy, so the host
-(`McpHost.call`) bounds every hop — connect, `initialize`, and the tool RPC — with a 30s
-timeout and normalizes a refused/dropped connection or an RPC read timeout (which the
-streamable-HTTP client's anyio task group raises **wrapped in an `ExceptionGroup`**) into a
-single `ModuleUnreachableError`. `ModuleRegistry.invoke` maps that to the **502** above; a
-tool that *ran* and reported failure stays a **400** with its own message (`ToolCallError`,
-#435). The two are kept distinct on purpose — "the module never answered" vs. "the tool
-rejected the request".
+guarantee (#472). Its dispatch runs over MCP rather than a plain HTTP proxy — the mcp 2.x
+`Client` (one object owning transport + session + handshake; per-operation connections as
+before) — so the host (`McpHost.call`) bounds every hop: the RPC rounds (handshake and the
+tool call) with a 30s session-level read timeout, the connect phase by the SDK HTTP
+client's 30s connect default. It normalizes a refused/dropped connection or an RPC read
+timeout (which the client's anyio task group can raise **wrapped in an
+`ExceptionGroup`**) into a single `ModuleUnreachableError`. `ModuleRegistry.invoke` maps
+that to the **502** above; a tool that *ran* and reported failure stays a **400** with its
+own message (`ToolCallError`, #435). The two are kept distinct on purpose — "the module
+never answered" vs. "the tool rejected the request".
 
 ### Chat bridges (ADR-0062)
 

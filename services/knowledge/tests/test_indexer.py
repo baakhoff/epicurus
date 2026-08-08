@@ -452,7 +452,7 @@ async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Pa
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
     module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
-    _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
+    _content, structured = await module.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
     assert "indexed" in payload
@@ -560,7 +560,7 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Pat
     docs_indexer = _make_docs_indexer(tmp_path)
     await docs_indexer._notes.init()  # type: ignore[attr-defined]
     module = _module_for(vault_indexer, docs_indexer, MagicMock(), vault)
-    _content, structured = await module.mcp.call_tool("knowledge_search", {"query": "B", "k": 1})
+    _content, structured = await module.call_tool("knowledge_search", {"query": "B", "k": 1})
     assert structured is not None
 
 
@@ -634,7 +634,7 @@ async def test_merged_search_returns_hits_from_both_sources(
     module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
     from epicurus_core.contracts import ToolEnvelope
 
-    content, _ = await module.mcp.call_tool("knowledge_search", {"query": "platform", "k": 5})
+    content, _ = await module.call_tool("knowledge_search", {"query": "platform", "k": 5})
     env = ToolEnvelope.model_validate_json(content[0].text)  # type: ignore[attr-defined]
     # Both chunks' text reaches the model.
     assert "Vault content." in env.text
@@ -672,7 +672,7 @@ async def test_reindex_sums_both_sources(
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
     module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
-    _content, structured = await module.mcp.call_tool("knowledge_reindex", {})
+    _content, structured = await module.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
     payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
     # vault has 2 notes, docs has 1 → total indexed >= 3 on first run

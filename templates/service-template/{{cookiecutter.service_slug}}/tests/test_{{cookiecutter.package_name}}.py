@@ -12,5 +12,5 @@ async def test_module_builds() -> None:
 
 
 async def test_ping_tool() -> None:
-    _, structured = await build_module().mcp.call_tool("ping", {"message": "hi"})
+    _, structured = await build_module().call_tool("ping", {"message": "hi"})
     assert structured == {"result": "{{ cookiecutter.service_slug }}: hi"}

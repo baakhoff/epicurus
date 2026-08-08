@@ -30,7 +30,7 @@ SAMPLE_RESULTS: list[SearchResult] = [
 async def test_web_search_returns_entity_refs() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client)
-    content, _ = await module.mcp.call_tool("web_search", {"query": "hello"})
+    content, _ = await module.call_tool("web_search", {"query": "hello"})
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == 2
     ref = envelope.entity_refs[0]
@@ -43,7 +43,7 @@ async def test_web_search_returns_entity_refs() -> None:
 async def test_web_search_text_mentions_titles_and_urls() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client)
-    content, _ = await module.mcp.call_tool("web_search", {"query": "hello"})
+    content, _ = await module.call_tool("web_search", {"query": "hello"})
     envelope = _parse_envelope(content)
     assert "T1" in envelope.text
     assert "https://t1.com" in envelope.text
@@ -54,7 +54,7 @@ async def test_web_search_text_mentions_titles_and_urls() -> None:
 async def test_web_search_tool_caps_at_20() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client)
-    await module.mcp.call_tool("web_search", {"query": "q", "num_results": 999})
+    await module.call_tool("web_search", {"query": "q", "num_results": 999})
     client.search.assert_called_once_with("q", 20)  # type: ignore[attr-defined]
 
 
@@ -62,7 +62,7 @@ async def test_web_search_returns_no_refs_on_exception() -> None:
     client = AsyncMock(spec=SearXNGClient)
     client.search = AsyncMock(side_effect=Exception("network error"))
     module = build_module(client)  # type: ignore[arg-type]
-    content, _ = await module.mcp.call_tool("web_search", {"query": "q"})
+    content, _ = await module.call_tool("web_search", {"query": "q"})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
     assert "No web results" in envelope.text
@@ -71,7 +71,7 @@ async def test_web_search_returns_no_refs_on_exception() -> None:
 async def test_web_search_empty_results_returns_no_refs() -> None:
     client = _make_client([])
     module = build_module(client)
-    content, _ = await module.mcp.call_tool("web_search", {"query": "q"})
+    content, _ = await module.call_tool("web_search", {"query": "q"})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
     assert "No web results" in envelope.text
@@ -88,7 +88,7 @@ async def test_web_search_dedupes_same_url_within_one_call() -> None:
     ]
     client = _make_client(results)
     module = build_module(client)
-    content, _ = await module.mcp.call_tool("web_search", {"query": "q"})
+    content, _ = await module.call_tool("web_search", {"query": "q"})
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == 2
     assert envelope.entity_refs[0].title == "A"  # first occurrence kept
@@ -98,8 +98,8 @@ async def test_web_search_two_calls_same_result_produce_same_ref_id() -> None:
     """The core's cross-call `_RefCollector` dedupes on `ref_id` — verify determinism."""
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client)
-    content_a, _ = await module.mcp.call_tool("web_search", {"query": "hello"})
-    content_b, _ = await module.mcp.call_tool("web_search", {"query": "hello again"})
+    content_a, _ = await module.call_tool("web_search", {"query": "hello"})
+    content_b, _ = await module.call_tool("web_search", {"query": "hello again"})
     ref_ids_a = {r.ref_id for r in _parse_envelope(content_a).entity_refs}
     ref_ids_b = {r.ref_id for r in _parse_envelope(content_b).entity_refs}
     assert ref_ids_a == ref_ids_b
@@ -140,12 +140,12 @@ async def test_default_max_results_respected() -> None:
     """max_results passed to build_module becomes the tool default."""
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client, max_results=3)
-    await module.mcp.call_tool("web_search", {"query": "q"})
+    await module.call_tool("web_search", {"query": "q"})
     client.search.assert_called_once_with("q", 3)  # type: ignore[attr-defined]
 
 
 async def test_custom_num_results_overrides_default() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client, max_results=5)
-    await module.mcp.call_tool("web_search", {"query": "q", "num_results": 2})
+    await module.call_tool("web_search", {"query": "q", "num_results": 2})
     client.search.assert_called_once_with("q", 2)  # type: ignore[attr-defined]

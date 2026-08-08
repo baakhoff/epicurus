@@ -12,6 +12,31 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The MCP SDK moved to 2.0** (#792) — a genuine breaking API change in the two places that
+  carry the module↔core contract: `epicurus_core.module`, imported by every module, and the
+  core's MCP host. `FastMCP` became `MCPServer` (the decorator API itself unchanged), every
+  transport parameter moved off the server constructor onto `streamable_http_app()`, the result
+  attributes went snake_case (`inputSchema`→`input_schema`, `isError`→`is_error`, the wire JSON
+  unchanged via aliases), `call_tool` returns a `CallToolResult` rather than a
+  `(content, structured)` pair, the low-level transport/session/`initialize()` layering
+  collapsed into a single `Client` owning all three with `float`-seconds timeouts instead of
+  `timedelta`s, and the SDK now raises `httpx2` exceptions from its own httpx fork. **No module
+  source changed**: the `EpicurusModule` constructor, the `tool()` decorator, `manifest()`,
+  `http_app()`, and the `session_manager.run()` lifespan hook all survive 2.0 verbatim. Two
+  additive members close the one hole 2.0 opened — module *tests* were reaching through
+  `module.mcp` into raw SDK surface that moved — so `EpicurusModule.call_tool()` is now the
+  stable in-process invocation surface returning the pre-2.0 pair, and `ToolError` is
+  re-exported from `epicurus_core`; an SDK reshape now lands in the library once instead of in
+  every module's tests. `McpHost`'s outward contract is byte-identical: discovery returns the
+  same specs and routes, and a call still distinguishes a tool that ran and reported failure
+  (#435) from a module that never answered (#472), with every hop bounded. One deliberate
+  hardening: discovery now carries the same 30s RPC read bound as a call, because 2.0's default
+  HTTP read timeout is 300s — sized for long-lived SSE streams, far too generous for a scan
+  that runs on every agent turn.
+  `epicurus-core` 0.33.0→0.34.0 (MINOR), `core-app` 0.112.0 (MINOR), and a test-only PATCH for
+  every module whose tests were migrated: `tasks` 0.22.1, `mail` 0.18.1, `calendar` 0.18.1,
+  `notes` 0.12.1, `knowledge` 0.27.3, `storage` 0.9.1, `echo` 0.5.1, `websearch` 0.2.2.
+
 - **A push notification could die at any of six gates without a single trace** (#797) — push
   crossed six independent conditions on the way to a device (no event subscription, the
   per-subscription rate cap, the category's push toggle, quiet hours, the tenant-wide rate cap,

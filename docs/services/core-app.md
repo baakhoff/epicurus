@@ -114,6 +114,20 @@ pass back. The block is model-only context: never rendered in chat, never part o
 text. The module-author side of this contract is in
 [the modules reference](../reference/modules.md).
 
+**The same block also teaches the entity-link syntax** (#794). Each line additionally carries
+the ready-made `epicurus://entity/{module}/{kind}/{ref_id}` link — every component
+percent-encoded (`urllib.parse.quote(..., safe="")`) — and the intro tells the model: when you
+*mention* one of these entities in your reply, link it inline as `[text](link)` using the URL
+shown, verbatim, rather than building one by hand. The web shell already renders such a link as
+an interactive chip and excludes it from the "Sources" pill (see
+[web.md's entity-references section](web.md#entity-references-in-chat-adr-0019)) — that half of
+the contract predates this change and was simply never exercised, because nothing told the model
+the syntax existed. Percent-encoding every component (not just characters known to be unsafe
+today) matters because the web's inline-link matcher stops at the first `)` or whitespace and
+then `decodeURIComponent`s the captured id; an unencoded id containing either would silently
+degrade to a dead link rather than error. The model is told to link only what it names, not
+every ref — the pill stays the outlet for the long tail.
+
 **The id block is capped at `LIST_CAP` (50) refs** (ADR-0084, #468): past that, it truncates
 with a "showing 50 of N — narrow the query/range or ask for more" note (logged with the
 tenant id) instead of echoing an unbounded list into the model's context — a large result

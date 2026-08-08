@@ -12,6 +12,26 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Entities the assistant named in an answer were plain text, never clickable** (#794) — the
+  shell has rendered an inline `epicurus://entity/<module>/<kind>/<ref_id>` markdown link as an
+  interactive chip since ADR-0019, excluding anything so linked from the trailing "Sources"
+  pill, but the model was never told the syntax exists — so it never emitted one, and every
+  reference fell through to the pill unconditionally. The one place the model does see
+  reference ids, the "Referenced items" block appended to a tool result whose envelope carries
+  entity refs (ADR-0079), framed them as tool *inputs* only: "pass an item's id to a tool that
+  needs one". That block now carries each reference's ready-made link beside its id, and the
+  intro teaches the syntax — link what you mention, using the URL shown, verbatim. Fixing it in
+  that one place fixes every module at once, the same reasoning that introduced the id listing.
+  Every component of the URL is percent-encoded, `/` included, because the web's inline-link
+  matcher stops at the first `)` or whitespace and then decodes: a `ref_id` containing either
+  would otherwise break the link, and being markdown, break it *silently*. Handing the model
+  the finished URL rather than three raw fields to assemble removes the failure mode entirely.
+  The instruction is deliberately to link what is actually named rather than everything — a
+  twenty-hit search should not become twenty chips, and the pill remains the outlet for the
+  long tail. No web change: the renderer, the pill exclusion, and the graceful degradation for
+  an unknown or malformed link all already existed.
+  `core-app` 0.109.0→0.110.0 (MINOR).
+
 - **A bare weekday name landed the event exactly one week late** (#793) — the `now` built-in
   handed the model the current date, time and weekday *name*, leaving weekday-to-date
   conversion as head arithmetic: count forward from today's weekday, carry the month or year

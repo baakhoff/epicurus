@@ -17,6 +17,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -349,8 +350,24 @@ class AgentTurn(BaseModel):
     quiet_reason: str | None = None
 
 
+def _entity_url(ref: EntityRef) -> str:
+    """The ready-made ``epicurus://entity/<module>/<kind>/<ref_id>`` link for *ref* (#794).
+
+    Every component is percent-encoded (``quote(..., safe="")``, i.e. ``/`` included) because
+    the web's inline-link regex (``EntityRef.tsx``) stops at the first ``)`` or whitespace and
+    then applies ``decodeURIComponent`` — a ``ref_id`` containing either would otherwise break
+    the link, and because it's just markdown, break it *silently* rather than erroring. Handing
+    the model the finished URL, rather than the three raw fields to assemble itself, removes
+    that failure mode entirely: there is no way to build a not-quite-right link.
+    """
+    return (
+        f"epicurus://entity/{quote(ref.module, safe='')}/{quote(ref.kind, safe='')}"
+        f"/{quote(ref.ref_id, safe='')}"
+    )
+
+
 def _entity_refs_for_model(refs: list[EntityRef], *, tenant_id: str | None = None) -> str:
-    """A compact, model-facing listing of a tool result's entity refs and their ids (#449).
+    """A compact, model-facing listing of a tool result's entity refs, ids, and links (#449, #794).
 
     Modules return entity refs on an envelope for the UI to render as chips, but their text
     typically names entities *without* an id (``calendar_list_events`` prints
@@ -361,14 +378,30 @@ def _entity_refs_for_model(refs: list[EntityRef], *, tenant_id: str | None = Non
     part of the tool *result* — model-only context, never rendered in chat — so unlike an inline
     marker in displayed text it needs no display-stripping.
 
+    Each line also carries the ready-made link (:func:`_entity_url`), and the intro teaches the
+    model the syntax to use it: ``[text](link)`` when it *mentions* one of these entities in its
+    reply, so the mention renders as an interactive chip in the shell instead of falling through
+    to the "Sources" pill — the model was previously never told this syntax exists at all (#794),
+    so it never emitted one, so every ref fell through to the pill unconditionally. The
+    instruction is to link what's actually named, not to link everything — a wide search
+    shouldn't turn into a wall of chips; the pill remains for the long tail.
+
     A large ref list (RRULE-expanded calendar events, a wide search) roughly doubles its
-    context cost once each id is echoed here too, so the block itself is capped at
-    :data:`~epicurus_core.LIST_CAP` (#468) — independent of ``entity_refs`` on the envelope,
+    context cost once each id (and now link) is echoed here too, so the block itself is capped
+    at :data:`~epicurus_core.LIST_CAP` (#468) — independent of ``entity_refs`` on the envelope,
     which stays uncapped and unchanged for the UI's chips. ``tenant_id`` is only for the
     truncation log line; it plays no part in which refs are shown.
     """
     capped = refs[:LIST_CAP]
-    lines = [f"- {ref.title} — id: {ref.ref_id} ({ref.module} {ref.kind})" for ref in capped]
+    lines = [
+        f"- {ref.title} — id: {ref.ref_id} ({ref.module} {ref.kind}) → {_entity_url(ref)}"
+        for ref in capped
+    ]
+    link_howto = (
+        "When you mention one of these in your reply, link it — `[text](link)` using the link"
+        " shown for that item, verbatim, never assembled by hand — so the user can open it"
+        " directly. Only the ones you actually name need this; leave the rest unlinked."
+    )
     if len(refs) > LIST_CAP:
         log.warning(
             "entity-ref id block truncated for the model",
@@ -379,12 +412,12 @@ def _entity_refs_for_model(refs: list[EntityRef], *, tenant_id: str | None = Non
         intro = (
             f"\n\nReferenced items — showing {LIST_CAP} of {len(refs)} (pass an item's id to"
             " a tool that needs one — e.g. to open, edit, or delete it; narrow the query/range"
-            " or ask for more to see the rest):\n"
+            f" or ask for more to see the rest). {link_howto}\n"
         )
     else:
         intro = (
             "\n\nReferenced items (pass an item's id to a tool that needs one — e.g. to open, "
-            "edit, or delete it):\n"
+            f"edit, or delete it). {link_howto}\n"
         )
     return intro + "\n".join(lines)
 

@@ -227,6 +227,22 @@ read-partition: no provider or DB change; dateless tasks from any provider (Goog
 them) appear in the Can, and lead-time notifications are untouched (they key on due dates,
 which Can items don't have — by design).
 
+**v0.20.0** gives the Tasks board **three representations of the same data** (#767) —
+**Board** (kanban), **List** (sortable flat rows), and **Calendar** (a month grid placing
+tasks by due date) — switchable in place. The module's part is declarative: a third view
+control, **View**, using the board archetype's **reserved `view` control id** (a #767
+extension of ADR-0049 — the shell renders the switcher and the representations; see
+[modules.md](../reference/modules.md)); the `?view=` param is clamped/echoed like
+`group`/`show`, and *Group by* is omitted off the Board view (grouping shapes kanban
+columns — the flat/date-keyed views would render it as a dead knob) while *Show* applies
+everywhere. Cards additionally carry their **structured fields** — `due` (bare ISO date),
+`priority`, `tags`, `list_title` — as data beside the rendered badges, which is what the
+List sorts by and the Calendar places by. The payload is identical across views; the chosen
+view persists per page shell-side (localStorage), with a `?view=` deep-link winning. The
+Can keeps no View control (a backlog has nothing dated to place, and it is already a flat
+list). The cross-module calendar *feed* (#469, v0.16.0 above) is untouched — this is a
+tasks-page-local representation, not a replacement for the calendar page's overlay.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -285,7 +301,7 @@ side table keyed by task id (ADR-0082).
 | `GET /manifest` | Module manifest (tools, UI declaration, `collections` spec). |
 | `GET /status` | `{"google_connected": bool}` (best-effort live OAuth check). |
 | `GET /accounts` | Connected accounts + their task lists for the picker (ADR-0030). The core proxies + merges this at `GET /platform/v1/modules/tasks/collections`. |
-| `GET /pages/{id}` | Page data for a manifest-declared page — `board` (the Tasks board) or `can` (the undated backlog, #766); both `board`-archetype payloads the core proxies (ADR-0018). Accepts forwarded `show` (open/done/all) on both pages and `group` (due/status/priority/list/none) on the board (ADR-0049), each clamped to a known value. 404 for an unknown id. |
+| `GET /pages/{id}` | Page data for a manifest-declared page — `board` (the Tasks board) or `can` (the undated backlog, #766); both `board`-archetype payloads the core proxies (ADR-0018). Accepts forwarded `show` (open/done/all) on both pages, plus `group` (due/status/priority/list/none) and `view` (board/list/calendar, #767) on the board (ADR-0049), each clamped to a known value. 404 for an unknown id. |
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
@@ -325,13 +341,20 @@ the Can.
   `today` the columns key off is the **operator's** day, resolved from the same operator-timezone
   clock the overdue sweep runs on, so the Today/Overdue split and the sweep never disagree within
   a render (#555); it degrades to UTC when the core is unreachable.
-- **View controls** (`controls` in the board data) are a **Group by** selector and a **Show**
-  filter (Open / Completed / All), rendered by the shell as a toolbar; changing one re-fetches
-  the page with a forwarded query param (`group` / `show`, each clamped to a known value). The
-  *Show* filter chooses the **scope** the providers read (`open` / `done` / `all`), so the
-  operator can review completed work. Completing an open task removes it from the open view;
-  in the Completed/All views a completed card is struck through (`done: true`) and offers
-  **Reopen** (`tasks_update status=open`) in place of **Complete**.
+- **View controls** (`controls` in the board data) are a **View** switcher (#767 — Board /
+  List / Calendar, the archetype's reserved `view` control; the shell renders the segmented
+  switcher, the alternate representations, and the per-page persistence — see
+  [modules.md](../reference/modules.md)), a **Group by** selector, and a **Show** filter
+  (Open / Completed / All), rendered by the shell as a toolbar; changing one re-fetches the
+  page with a forwarded query param (`view` / `group` / `show`, each clamped to a known
+  value). *Group by* is offered only under the Board view — grouping shapes kanban columns;
+  the List and Calendar representations are flat/date-keyed. The *Show* filter chooses the
+  **scope** the providers read (`open` / `done` / `all`) and applies under every view, so
+  the operator can review completed work. Completing an open task removes it from the open
+  view; in the Completed/All views a completed card is struck through (`done: true`) and
+  offers **Reopen** (`tasks_update status=open`) in place of **Complete**. Each card also
+  carries its structured `due` / `priority` / `tags` / `list_title` fields as data (#767) —
+  what the List view sorts by and the Calendar view places by.
 - **Mutations are declarative actions** that name an MCP tool; the shell invokes it through
   the core (validated against the manifest) and refetches. Each card offers **Complete**
   (`tasks_complete`, one-tap), **Edit** (`tasks_update`, a form prefilled from the card), and

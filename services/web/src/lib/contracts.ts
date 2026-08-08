@@ -806,6 +806,18 @@ export const BoardCard = z.object({
   badges: z.array(BoardBadge).default([]),
   done: z.boolean().default(false),
   actions: z.array(BoardAction).default([]),
+  /**
+   * Structured card fields (#767) — optional, additive data the alternate board
+   * representations read: the List view sorts by `due` / `priority` / `title` and shows
+   * `list_title` + `tags` as columns/chips; the Calendar view places a card by `due`.
+   * Badges stay presentation-only for the kanban rendering; these carry the same facts
+   * as *data*. `due` is a bare ISO date (`YYYY-MM-DD`). A module that sets none of them
+   * renders exactly as before (the board view never reads them).
+   */
+  due: z.string().nullish(),
+  priority: z.string().nullish(),
+  tags: z.array(z.string()).default([]),
+  list_title: z.string().nullish(),
 });
 export type BoardCard = z.infer<typeof BoardCard>;
 
@@ -823,6 +835,15 @@ export type BoardColumn = z.infer<typeof BoardColumn>;
  * and the current `value`; the shell renders a selector and re-fetches the page with
  * `?<id>=<value>` on change, so regrouping/filtering stays module-side (the board carries
  * no task fields to the client). Generic and reusable across board modules.
+ *
+ * One control id is **reserved**: `view` (#767). A board page declaring it (with option
+ * values from `board` / `list` / `calendar`) opts into the shell's client-side
+ * representations of the same payload — kanban columns, a sortable flat list, a month
+ * grid placing cards by their structured `due`. The shell renders it as its standard
+ * segmented view switcher (not a select), persists the choice per page in localStorage,
+ * and lets a `?view=` URL param win over the stored choice; the param still rides the
+ * page re-fetch like any control, so the module echoes it and can adjust the *other*
+ * controls it offers (tasks drops "Group by" off the Board view).
  */
 export const BoardControl = z.object({
   id: z.string(),

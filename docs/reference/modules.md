@@ -329,10 +329,47 @@ form action over `tasks_update` narrowed to the `due` field). Each page is a ful
 never knows they partition one underlying collection — that split lives module-side, where
 the domain does.
 
+**View modes — the reserved `view` control (#767).** One control id is reserved: a board
+page declaring a control with `id: "view"` (option values from `board` / `list` /
+`calendar`) opts into the shell's three client-side **representations of the same
+payload**, switchable in place:
+
+- **Board** — the kanban columns (the default rendering, exactly as above).
+- **List** — the columns flattened to one row set (**deduped by card id**, first
+  appearance winning — a grouping may place a card under several columns), rendered as a
+  table: title, due, priority, list, tag chips, plus the same per-card actions. Every
+  column is client-side sortable (stable; missing values always sort last).
+- **Calendar** — a month grid (Monday-start, the calendar archetype's geometry) placing
+  each card on its `due` date; prev/today/next navigation; a chip opens the ordinary card
+  (same badges, same actions) in a sheet. Cards without a `due` never appear.
+
+The shell renders the control as its standard segmented view switcher (not a labeled
+select), **persists the choice per page** in localStorage (`board-view:<module>/<page>`),
+and keeps the page URL's `?view=` param up to date — an explicit `?view=` deep-link wins
+over the stored choice, and junk values clamp to the board. The param still rides the
+normal control re-fetch, so the module echoes the resolved value and may adjust the other
+controls it declares — tasks omits *Group by* off the Board view (grouping shapes kanban
+columns; the flat/date-keyed views would render it as a dead knob) while *Show* applies
+everywhere. A board that declares no `view` control renders the kanban exactly as before,
+whatever the URL says. Switching views is a client-side re-render of the same fetched
+data; the re-fetch only refreshes it.
+
+**Structured card fields (#767).** To support those representations a `Card` may carry —
+besides its rendered `badges` — the same facts as **data**: `due` (a bare ISO date,
+`YYYY-MM-DD`), `priority`, `tags` (a string list), and `list_title`. The List view sorts
+by them and shows them as columns/chips; the Calendar view places by `due`. All are
+optional and additive — a module that sets none renders exactly as before (the kanban
+never reads them). Badges stay the presentation channel for the board rendering; the
+structured fields are never re-derived from badge strings.
+
 ```jsonc
 {
   "title": "Tasks",                                  // optional page heading
   "controls": [                                      // view controls (ADR-0049)
+    { "id": "view", "label": "View", "value": "board",   // reserved: representations (#767)
+      "options": [ { "value": "board", "label": "Board" },
+                   { "value": "list", "label": "List" },
+                   { "value": "calendar", "label": "Calendar" } ] },
     { "id": "group", "label": "Group by", "value": "due",
       "options": [ { "value": "due", "label": "Due date" },
                    { "value": "status", "label": "Status" } ] },
@@ -348,6 +385,8 @@ the domain does.
           "id": "t1", "title": "Buy milk", "subtitle": "2 litres",
           "badges": [{ "label": "2026-06-14", "tone": "accent" }],
           "done": false,
+          // structured card fields (#767): data for the List/Calendar representations
+          "due": "2026-06-14", "priority": "high", "tags": ["errand"], "list_title": "Personal",
           "actions": [
             { "tool": "tasks_complete", "label": "Complete", "icon": "check",
               "args": { "task_id": "t1" } },

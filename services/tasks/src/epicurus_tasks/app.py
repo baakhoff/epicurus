@@ -40,6 +40,7 @@ from epicurus_tasks.service import (
     calendar_feed_items,
     coerce_group,
     coerce_scope,
+    coerce_view,
     enabled_write_lists,
     fetch_task,
     task_attachment,
@@ -189,10 +190,13 @@ def create_app() -> FastAPI:
         the undated backlog via ``build_tasks_can`` — same fetch, two read views. Each
         card is tagged with its list (category). The **view controls** drive forwarded
         query params (ADR-0049): ``group`` picks the board's column layout (due / status
-        / priority / list / none; the Can is a single flat column and ignores it) and
-        ``show`` the task scope (open / completed / all) fetched from the providers; both
-        are clamped to known values. A single failing list is skipped inside the router
-        (#209), so the page degrades rather than blanking; the ``(GoogleTasksError,
+        / priority / list / none; the Can is a single flat column and ignores it),
+        ``view`` the board's client-side representation (board / list / calendar, #767 —
+        echoed so the *View* switcher shows the active choice and *Group by* hides off
+        the Board view), and ``show`` the task scope (open / completed / all) fetched
+        from the providers; all are clamped to known values. A single failing list is
+        skipped inside the router (#209), so the page degrades rather than blanking; the
+        ``(GoogleTasksError,
         ValueError) → 502`` is a backstop. The Add forms offer a picker of the operator's
         enabled writable lists.
         """
@@ -227,6 +231,7 @@ def create_app() -> FastAPI:
         return build_tasks_board(
             tasks,
             today=today,
+            view=coerce_view(request.query_params.get("view")),
             group_by=coerce_group(request.query_params.get("group")),
             scope=scope,
             lists=lists,

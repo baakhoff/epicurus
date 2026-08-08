@@ -58,6 +58,7 @@ import {
   ProviderInfo,
   PushDeviceRecord,
   PushPrefs,
+  PushStatus,
   PushTestResult,
   Readiness,
   ReviewAuditData,
@@ -357,6 +358,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ category }),
     }),
+  // Delivery-state diagnostics (#797): device count + the most recent delivery attempt,
+  // so the settings card can answer "did the last push work" without the operator
+  // reading server logs.
+  pushStatus: () => request(PushStatus, "/platform/v1/push/status"),
 
   // Per-event alerts (#732): "push me when X happens" for any module-declared event, no
   // automation required. Sparse — only subscribed events come back; the settings UI unions

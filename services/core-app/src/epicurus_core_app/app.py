@@ -308,9 +308,9 @@ def create_app() -> FastAPI:
     push_subscriptions = PushSubscriptionStore(engine)
     push_prefs = PushPrefsStore(engine)
     push_queue = PushQueueStore(engine)
-    # The notification center (#671): the durable record every push-worthy event lands in,
-    # written by push_service.notify() itself whenever a category's `center` toggle is on —
-    # independent of whether push delivery fires, queues, or skips (ADR-0102 §4).
+    # The notification center (#671): the durable record every notification lands in,
+    # written by push_service.notify() itself unconditionally (#797 — the center is a
+    # superset of push), independent of whether push delivery fires, queues, or skips.
     notifications = NotificationStore(engine)
     push_service = PushService(
         subscriptions=push_subscriptions,

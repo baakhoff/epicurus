@@ -325,16 +325,30 @@ unsubscribe, a list of every subscribed device (any row removable), one Switch p
 [known category](../reference/notifications.md#pushprefs), a quiet-hours editor (`<input
 type="time">` pair + explicit Save, the same "interdependent fields" reasoning as the
 maintenance schedule editor above — mirrors the settings-primitives shared with the
-notification center, #671), and a "send test notification" button — the only trigger for a
-category-based push; the automations engine's own push sink is still deferred.
+notification center, #671), and a **Delivery** section (#797). Since #797 the center records
+everything unconditionally, so each category Switch governs *push delivery only* (the card
+says so, and every write sends `center: true` to converge stored pre-#797 values). The
+delivery-state surface answers, without server logs: a **warning banner** when push is on
+anywhere (any category, or any push-enabled event alert — the `["event-subscriptions"]`
+query is shared with the card below) but `GET /push/status` reports zero registered devices
+— the misconfiguration that used to fail silently per notification; a **last-attempt
+readout** from the same endpoint (when, category, and a plain-language outcome — `sent` with
+zero delivered and failures reads as *failed*, not success; `null` reads as "none since the
+server started"); and the **"send test notification"** button (`POST /push/test`), which
+invalidates the status query on settle so the readout reflects the attempt immediately and
+calls out an all-devices-failed send explicitly.
 
 **Settings → Event alerts** (#732, `EventAlertsCard.tsx`): every module's declared events
 (`api.modules()`'s `manifest.events_emitted`, the same client-side derivation the Automations
-trigger picker uses — reused, not duplicated), grouped by module, each with its own
-push/center `Switch` pair (default off, unlike the category toggles above); a "Custom"
-section renders any subscribed `(module, event_type)` outside the declared catalog and a
-free-text form to add another. Turning both switches off on a row is the removal action —
-there is no separate delete control. See
+trigger picker uses — reused, not duplicated), grouped by module. Since #797 each row renders
+two **coupled** switches over the unchanged `{push, center}` wire contract — **Alert** (the
+master: on means the event notifies at all, and an enabled alert always lands in the
+notification center) and **Push** (also deliver to devices) — instead of the old independent
+push/center pair: Alert on writes `{push: true, center: true}`, Alert off writes both false
+(which deletes the row — still the removal action, no separate delete control), Push off
+keeps a center-only `{push: false, center: true}`, and Push on from fully-off enables the
+alert with it. A "Custom" section renders any subscribed `(module, event_type)` outside the
+declared catalog and a free-text form to add another. See
 [the reference page](../reference/notifications.md#event-alerts-732-adr-0114) for the API
 contract.
 

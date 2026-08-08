@@ -1,4 +1,5 @@
-"""Unit tests for EventAlertListener — match/dispatch/rate-cap for per-event alerts (#732).
+"""Unit tests for EventAlertListener — match/dispatch/rate-cap for per-event alerts (#732),
+plus the distinct decline-log lines its two gates emit (#797).
 
 ``Notifier`` is faked (a recording double), not the real ``PushService`` — this file tests
 only the listener's own decision logic (subscribe/skip, rate cap, rendering); PushService's
@@ -11,6 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -261,3 +263,83 @@ async def test_rate_cap_is_tenant_scoped() -> None:
     await listener.on_event(_event(tenant="a", event_id=1))
     await listener.on_event(_event(tenant="b", event_id=2))
     assert len(push.calls) == 2  # separate tenants, separate budgets
+
+
+# ── the listener's gates each log a distinct line (#797) ─────────────────────────
+# The two gates upstream of PushService's own send path (whose gate lines are asserted in
+# test_push_service.py). Gate 2 — no subscription for the (module, event_type) pair — was
+# the issue's "bare return": the likeliest reason a notification never fires, and the most
+# invisible.
+
+
+class _CapturingLog:
+    """Records every structured log call so tests can assert the exact decline lines."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kw: Any) -> None:
+        self.events.append(("info", event, kw))
+
+    def warning(self, event: str, **kw: Any) -> None:
+        self.events.append(("warning", event, kw))
+
+    @property
+    def messages(self) -> list[str]:
+        return [event for _, event, _ in self.events]
+
+
+_LISTENER_GATE_LINES = {
+    "no_subscription": "event alert declined: no subscription for this event",
+    "rate_capped": "event alert rate cap reached",
+}
+
+
+@pytest.mark.parametrize("gate", sorted(_LISTENER_GATE_LINES))
+async def test_every_listener_gate_logs_its_own_distinct_line(
+    gate: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs = _CapturingLog()
+    monkeypatch.setattr("epicurus_core_app.push.event_alerts.log", logs)
+    subs = await _subscriptions()
+    if gate == "rate_capped":
+        await subs.set(
+            TENANT,
+            module="mail",
+            event_type="mail.received",
+            prefs=ChannelPrefs(push=True, center=True),
+        )
+    push = _FakeNotifier()
+    listener = EventAlertListener(subs, push, rate_cap_per_hour=1)
+    if gate == "rate_capped":
+        await listener.on_event(_event(event_id=1))  # consumes the per-subscription budget
+        logs.events.clear()
+
+    await listener.on_event(_event(event_id=2))
+
+    assert _LISTENER_GATE_LINES[gate] in logs.messages
+    matched = next(kw for _lvl, event, kw in logs.events if event == _LISTENER_GATE_LINES[gate])
+    assert matched["tenant"] == TENANT
+    assert matched["module"] == "mail"
+    assert matched["type"] == "mail.received"
+    other = {line for name, line in _LISTENER_GATE_LINES.items() if name != gate}
+    assert not other.intersection(logs.messages)
+
+
+async def test_a_dispatched_alert_logs_no_decline_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subscribed, under-cap event notifies without logging either decline — so a decline
+    line in the logs always means an alert actually declined."""
+    logs = _CapturingLog()
+    monkeypatch.setattr("epicurus_core_app.push.event_alerts.log", logs)
+    subs = await _subscriptions()
+    await subs.set(
+        TENANT,
+        module="mail",
+        event_type="mail.received",
+        prefs=ChannelPrefs(push=True, center=True),
+    )
+    push = _FakeNotifier()
+    listener = EventAlertListener(subs, push, rate_cap_per_hour=0)
+    await listener.on_event(_event())
+    assert len(push.calls) == 1
+    assert not set(_LISTENER_GATE_LINES.values()).intersection(logs.messages)

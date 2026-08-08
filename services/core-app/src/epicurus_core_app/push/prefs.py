@@ -1,9 +1,10 @@
 """Push/center preferences (tenant-scoped) — one row, shared by #670 (push) and #671 (center).
 
 Per-category and per-automation toggles are each a :class:`ChannelPrefs` pair — ``push``
-(deliver a browser push) and ``center`` (keep a durable row in the #671 notification
-center) — so an operator can, say, silence push for "chat" notices while still keeping
-them in the center. Same settings-primitives shape as ``timezone_prefs``/``page_order_prefs``
+(deliver a browser push) and ``center`` (vestigial since #797; every notification is
+recorded in the center regardless) — so an operator can, say, silence push for "chat"
+notices while they keep landing in the center.
+Same settings-primitives shape as ``timezone_prefs``/``page_order_prefs``
 (a single-row-per-tenant table, self-healing ``init()``, an unset value falls back to a
 sane default) rather than a dedicated ADR of its own — see ADR-0039 for the canonical
 instance of the pattern.
@@ -57,7 +58,14 @@ _DEFAULT_QUIET_END = "07:00"
 
 @dataclass(frozen=True)
 class ChannelPrefs:
-    """Whether a category/automation delivers a push and/or lands in the notification center."""
+    """One category/automation/event's channel pair.
+
+    ``push`` decides whether devices are notified. ``center`` is **vestigial since #797**
+    (the center is a superset of push: every notification that fires is recorded there
+    unconditionally) — it is still stored and carried on the wire for contract
+    compatibility, and an event subscription still reads "either channel on" as "the alert
+    is on" (``event_alerts``), but the send path itself no longer consults it.
+    """
 
     push: bool = True
     center: bool = True

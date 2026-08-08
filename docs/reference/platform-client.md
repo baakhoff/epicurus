@@ -94,6 +94,17 @@ prefs = await client.get_collections()
 targets = prefs.enabled or [CollectionRef(account="local")]  # overlay, or local default
 ```
 
+**A non-empty `enabled`/`active` is not proof its account is still connected.** Nothing
+prunes a ref when the account behind it is later disconnected, so `enabled` can hold a
+stale entry — this snippet's `targets` line only degrades to local when the list *itself*
+is empty, not when one of its refs names an account that's since gone. A module that
+resolves each ref to a provider **must** apply the same "missing provider → local" rule on
+every read path it has, not just its default-target write resolution, or a write can
+silently succeed into local while a read of the very same ref comes back empty — the
+exact bug in tasks' `TasksRouter` (#795; see `TasksRouter._resolve_provider` /
+`_dedup_refs` in [tasks.md](../services/tasks.md) for the worked fix, including the
+warning a degraded ref should log).
+
 ### `await client.get_timezone() -> str`
 
 The operator's configured IANA timezone (ADR-0039), e.g. `"Europe/Belgrade"`. Backed by

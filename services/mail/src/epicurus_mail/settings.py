@@ -23,3 +23,11 @@ class MailSettings(CoreSettings):
     # the badges on its own, and our own mark-read drops the cache outright so a count never
     # sits stale after the operator changed it.
     mail_category_ttl_s: float = 60.0
+    # How often the background poller reconciles the mailbox (#796) — the loop that makes
+    # ``mail.received`` fire without the Mail page being open. **On by default**: an event
+    # contract that only holds while a human is looking at the page isn't a contract, and every
+    # downstream consumer (automations, per-event push alerts) is already wired for it. A tick
+    # with no connected account costs nothing (a token-presence check, then return); a tick with
+    # one is a single history-delta call. Five minutes keeps that well inside any provider's
+    # quota while still being "promptly" for mail. ``0`` disables the loop entirely.
+    mail_poll_interval_s: float = 300.0

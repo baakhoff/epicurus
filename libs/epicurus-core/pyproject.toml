@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core"
-version = "0.33.0"
+version = "0.34.0"
 description = "Shared contract and runtime for epicurus services."
 requires-python = ">=3.11"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "prometheus-client>=0.21",
     "nats-py>=2.6",
-    "mcp>=1.2",
+    "mcp>=2,<3",
     "hvac>=2.1",
     "httpx>=0.27",
     # OpenTelemetry tracing (epicurus_core.tracing, #57). Core — not an optional extra —

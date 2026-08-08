@@ -506,6 +506,24 @@ class GmailProvider(MailProvider):
             next_cursor=MailCursor(history_id=latest),
         )
 
+    async def messages_since(self, *, since_ms: int, limit: int) -> list[str]:
+        """Message ids received since *since_ms*, via one ``messages.list`` search (#796).
+
+        Gmail's search grammar accepts an epoch-**second** ``after:`` term, so a single call
+        bounds the backlog by time and ``maxResults`` bounds it by count — the cheap way to
+        recover the window a lapsed ``historyId`` can no longer replay. Gmail returns newest
+        first and excludes spam/trash from a bare query by default, both of which is what a
+        backlog replay wants.
+
+        ``after:`` is inclusive at second granularity, so a message that arrived in the same
+        second as the last successful sync can come back a second time. That is intentionally
+        left alone: ``mail.received`` carries the provider message id as its ``dedup_key``, so
+        the spine's intake collapses the repeat (ADR-0103) rather than the module guessing.
+        """
+        token = await self._get_token()
+        async with self._make_client(token) as client:
+            return await self._list_message_ids(client, f"after:{since_ms // 1000}", limit)
+
     async def get_thread_summary(self, thread_id: str) -> MailThreadSummary | None:
         """One thread's list row, or ``None`` if it was deleted (a 404) (ADR-0096, #623)."""
         token = await self._get_token()

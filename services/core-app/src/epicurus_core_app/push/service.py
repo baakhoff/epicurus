@@ -11,23 +11,40 @@ per-``(module, event_type)`` subscription *is* the effective ``ChannelPrefs``, w
 category to resolve. See docs/reference/notifications.md for both signatures as the
 documented contract every caller codes against.
 
-Every call first records a notification-center row (``epicurus_core_app.notifications``) if
-the category/automation's ``center`` toggle is on — regardless of what push delivery does
-below (#671, ADR-0102 §4). ``NotifyResult.notification_id`` carries that row's id back to the
-caller (``None`` when ``center`` was off), so a caller that wants to reference what was
-recorded — the automations engine's push sink (#723) does exactly this, building an
-``EntityRef`` for the run's ledger — never has to make a second, racy lookup. Push delivery
-then resolves, in order: (1) the effective push toggle — off skips delivery entirely; (2)
-quiet hours in the tenant's timezone (ADR-0039) — queues for a digest rather than sending;
-(3) an in-memory per-tenant rate cap — single-instance v1, the same disposable-cache trade
-ADR-0055's live-run registry makes, not backed by a table since losing counts on a restart
-just under-limits for one window, never over-limits. Delivery itself fans out to every device
-via VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service reports
-Gone (404/410) — a dead endpoint is expected churn (uninstalled PWA, cleared site data), not
-an error. The outgoing wire payload's ``body`` is shortened to ``_MAX_PUSH_BODY_CHARS`` if
-needed (a push service enforces its own size ceiling); the notification-center row written
-above always keeps the caller's full, untruncated text — a push payload limit is not a reason
-to lose part of the durable record.
+Every call first records a notification-center row (``epicurus_core_app.notifications``) —
+**unconditionally** (#797, amending ADR-0102 §4 / ADR-0104 §1): the center is a superset of
+push, the durable log of every notification that fired, and ``push`` means "*also* deliver to
+devices". ``ChannelPrefs.center`` is still accepted and stored for contract compatibility but
+the send path no longer consults it — a push missed because the device was off, delivery
+failed, or quiet hours held it is never simply gone; its center row already exists.
+``NotifyResult.notification_id`` carries that row's id back to the caller (always set), so a
+caller that wants to reference what was recorded — the automations engine's push sink (#723)
+does exactly this, building an ``EntityRef`` for the run's ledger — never has to make a
+second, racy lookup. Push delivery then resolves, in order: (1) the effective push toggle —
+off skips delivery entirely; (2) quiet hours in the tenant's timezone (ADR-0039) — queues for
+a digest rather than sending; (3) an in-memory per-tenant rate cap — single-instance v1, the
+same disposable-cache trade ADR-0055's live-run registry makes, not backed by a table since
+losing counts on a restart just under-limits for one window, never over-limits. Delivery
+itself fans out to every device via VAPID-signed webpush (RFC 8291/8292), pruning any
+subscription the push service reports Gone (404/410) — a dead endpoint is expected churn
+(uninstalled PWA, cleared site data), not an error. The outgoing wire payload's ``body`` is
+shortened to ``_MAX_PUSH_BODY_CHARS`` if needed (a push service enforces its own size
+ceiling); the notification-center row written above always keeps the caller's full,
+untruncated text — a push payload limit is not a reason to lose part of the durable record.
+
+**Every declined or deferred push logs a distinct, identifiable line** (#797): a push has to
+clear several independent gates to reach a device, and an operator reading the logs must be
+able to tell "working as configured" from "broken" without instrumenting the code. The
+messages, greppable verbatim: ``push skipped: push disabled for this notification`` ·
+``push queued for quiet-hours digest`` · ``push rate cap reached; delivery skipped`` ·
+``push skipped: no registered devices`` · ``push send failed`` · ``pruned dead push
+subscription`` (and, upstream, ``event_alerts``' ``event alert declined: no subscription for
+this event`` / ``event alert rate cap reached``). The most recent *attempt* (any call that
+actually wanted push delivery — everything above except the disabled skip) is also kept
+in-memory per tenant as a :class:`PushAttempt`, surfaced by ``GET /platform/v1/push/status``
+so the settings card can answer "when was the last push attempted, and did it succeed"
+without the operator reading logs. Same disposable-cache trade as the rate windows: a restart
+costs one "no attempt yet" reading, nothing more.
 """
 
 from __future__ import annotations
@@ -50,7 +67,7 @@ from epicurus_core_app.push.subscriptions import PushSubscriptionStore
 from epicurus_core_app.push.vapid import generate_vapid_keypair, load_vapid_signer
 from epicurus_core_app.scheduling import TimezoneProvider
 
-__all__ = ["NotifyResult", "PushService"]
+__all__ = ["NotifyResult", "PushAttempt", "PushService"]
 
 log = get_logger("epicurus_core_app.push.service")
 
@@ -64,7 +81,7 @@ _TTL_SECONDS = 24 * 60 * 60
 # the ~4KB most push services accept) — long enough that an ordinary title/body is never
 # touched, short enough that an automation's full multi-paragraph report can't blow the
 # budget. Only `_send_now`'s outgoing JSON is shortened; by the time it runs, `_deliver` has
-# already written the notification-center row (if any) with the untruncated text.
+# already written the notification-center row with the untruncated text.
 _MAX_PUSH_BODY_CHARS = 500
 
 Outcome = Literal[
@@ -86,12 +103,36 @@ class NotifyResult:
     outcome: Outcome
     sent_count: int = 0
     pruned_count: int = 0
-    #: The notification-center row's id, when `effective.center` wrote one — independent of
-    #: whatever `outcome` says about push (a row is written before push is ever resolved).
-    #: `None` when `center` was off, and always `None` from `send_digest` (a summary send with
-    #: no single center row of its own). Lets a caller build an `EntityRef` pointing at what
-    #: was recorded — see the module docstring.
+    #: Devices a delivery was attempted for and failed with a non-Gone error (a Gone device
+    #: is pruned and counted in ``pruned_count`` instead). Always 0 unless ``outcome`` is
+    #: ``"sent"`` — which describes "the send path ran", not per-device success: ``sent``
+    #: with ``sent_count == 0`` and ``failed_count > 0`` is a delivery that failed outright.
+    failed_count: int = 0
+    #: The notification-center row's id. Always set by ``notify``/``notify_effective`` — the
+    #: center records every notification that fires, before push is ever resolved (#797) —
+    #: and always `None` from `send_digest` (a summary send with no single center row of its
+    #: own). Lets a caller build an `EntityRef` pointing at what was recorded — see the
+    #: module docstring.
     notification_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PushAttempt:
+    """The tenant's most recent push delivery *attempt* — the ``GET /push/status`` payload.
+
+    Recorded whenever the send path actually wanted push delivery: a send (however it went
+    per-device), a quiet-hours queue, a rate-cap skip, or a no-devices skip — never a
+    ``skipped_disabled`` (push was off, so nothing was attempted; overwriting a real
+    attempt's diagnostics with it would hide exactly what the operator came to check).
+    In-memory, single-instance v1 — the same disposable-cache trade the rate windows make.
+    """
+
+    at: datetime
+    category: str
+    outcome: Outcome
+    sent_count: int = 0
+    failed_count: int = 0
+    pruned_count: int = 0
 
 
 class PushService:
@@ -124,11 +165,17 @@ class PushService:
         # tenant -> (window_start_monotonic, count). In-memory, single-instance v1 (see the
         # module docstring) — never persisted, so a restart resets every tenant's window.
         self._rate_windows: dict[str, tuple[float, int]] = {}
+        # tenant -> most recent delivery attempt (see PushAttempt) — same disposable trade.
+        self._last_attempts: dict[str, PushAttempt] = {}
 
     async def get_vapid_public_key(self, tenant: str) -> str:
         """The tenant's ``applicationServerKey`` bytes, base64url — for the browser to subscribe."""
         _, public_key = await self._vapid_keypair(tenant)
         return public_key
+
+    def last_attempt(self, tenant: str) -> PushAttempt | None:
+        """The tenant's most recent push delivery attempt, or ``None`` since startup."""
+        return self._last_attempts.get(tenant)
 
     async def notify(
         self,
@@ -141,10 +188,10 @@ class PushService:
         entity_ref: dict[str, Any] | None = None,
         automation_id: str | None = None,
     ) -> NotifyResult:
-        """Record the notification-center row (if `center` is on), then route push delivery:
-        deliver now, queue for quiet hours, or skip. The two are independent — a category can
-        have push off and center on (or vice versa), so the center write never depends on
-        anything push-related below it (#671, ADR-0102 §4)."""
+        """Record the notification-center row (always), then route push delivery: deliver
+        now, queue for quiet hours, or skip. The center is a superset of push (#797) — the
+        write never depends on anything push-related below it, and there is no toggle that
+        suppresses it; `effective.push` only decides whether devices are *also* notified."""
         prefs = await self.prefs.get(tenant)
         effective = prefs.effective(category, automation_id)
         return await self._deliver(
@@ -170,10 +217,11 @@ class PushService:
         deep_link: str | None = None,
         entity_ref: dict[str, Any] | None = None,
     ) -> NotifyResult:
-        """Like :meth:`notify`, but the caller has already resolved push/center — for a prefs
-        source outside `PushPrefs` (#732's event alerts: the effective channels come from a
+        """Like :meth:`notify`, but the caller has already resolved the effective channels —
+        for a prefs source outside `PushPrefs` (#732's event alerts: they come from a
         per-``(module, event_type)`` subscription row, not a category or automation override,
-        so there is nothing here for `PushPrefs.effective` to resolve). Quiet hours are still
+        so there is nothing here for `PushPrefs.effective` to resolve). Only ``effective.
+        push`` is consulted (#797 — the center write is unconditional); quiet hours are still
         tenant-wide, so this still reads `PushPrefs` for that half of the decision.
         """
         quiet_prefs = await self.prefs.get(tenant)
@@ -202,22 +250,27 @@ class PushService:
         automation_id: str | None,
         quiet_prefs: PushPrefs,
     ) -> NotifyResult:
-        """The shared send path once push/center are resolved: center write, then push routes
-        to delivered now / queued for quiet hours / skipped — independent of the center write
-        (#671, ADR-0102 §4)."""
-        notification_id: str | None = None
-        if effective.center:
-            notification = await self._notifications.create(
+        """The shared send path once push is resolved: unconditional center write, then push
+        routes to delivered now / queued for quiet hours / skipped — every non-delivery
+        outcome logging its own distinct line (#797, see the module docstring)."""
+        notification = await self._notifications.create(
+            tenant=tenant,
+            category=category,
+            title=title,
+            body=body,
+            deep_link=deep_link,
+            entity_ref=entity_ref,
+            automation_id=automation_id,
+        )
+        notification_id = notification.id
+        if not effective.push:
+            # Working as configured, not an attempt — logged so a silent category is
+            # diagnosable, never recorded as the tenant's last delivery attempt.
+            log.info(
+                "push skipped: push disabled for this notification",
                 tenant=tenant,
                 category=category,
-                title=title,
-                body=body,
-                deep_link=deep_link,
-                entity_ref=entity_ref,
-                automation_id=automation_id,
             )
-            notification_id = notification.id
-        if not effective.push:
             return NotifyResult(outcome="skipped_disabled", notification_id=notification_id)
         local_now = await self._local_now()
         if is_quiet_now(quiet_prefs, local_now.time()):
@@ -229,8 +282,17 @@ class PushService:
                 deep_link=deep_link,
                 entity_ref=entity_ref,
             )
+            log.info("push queued for quiet-hours digest", tenant=tenant, category=category)
+            self._record_attempt(tenant, category, NotifyResult(outcome="queued"))
             return NotifyResult(outcome="queued", notification_id=notification_id)
         if not self._check_rate_cap(tenant):
+            log.warning(
+                "push rate cap reached; delivery skipped",
+                tenant=tenant,
+                category=category,
+                cap_per_hour=self._rate_cap_per_hour,
+            )
+            self._record_attempt(tenant, category, NotifyResult(outcome="skipped_rate_limited"))
             return NotifyResult(outcome="skipped_rate_limited", notification_id=notification_id)
         sent = await self._send_now(tenant, category, title, body, deep_link, entity_ref)
         return replace(sent, notification_id=notification_id)
@@ -242,7 +304,15 @@ class PushService:
         passed) but still honors the rate cap — a burst of digests is exactly what it guards.
         """
         if not self._check_rate_cap(tenant):
-            return NotifyResult(outcome="skipped_rate_limited")
+            log.warning(
+                "push rate cap reached; delivery skipped",
+                tenant=tenant,
+                category="digest",
+                cap_per_hour=self._rate_cap_per_hour,
+            )
+            return self._record_attempt(
+                tenant, "digest", NotifyResult(outcome="skipped_rate_limited")
+            )
         count = len(items)
         title = f"{count} notification{'s' if count != 1 else ''} while you were quiet"
         categories = sorted({item.category for item in items})
@@ -260,7 +330,13 @@ class PushService:
     ) -> NotifyResult:
         subs = await self._subscriptions.list(tenant)
         if not subs:
-            return NotifyResult(outcome="skipped_no_devices")
+            # A push was wanted and there is nowhere to send it — the classic silent gate
+            # (#797). Warning, not info: unlike a disabled toggle this is almost never what
+            # the operator meant, and the settings card mirrors it as a warning state.
+            log.warning("push skipped: no registered devices", tenant=tenant, category=category)
+            return self._record_attempt(
+                tenant, category, NotifyResult(outcome="skipped_no_devices")
+            )
         private_key_pem, _ = await self._vapid_keypair(tenant)
         payload = json.dumps(
             {
@@ -273,6 +349,7 @@ class PushService:
         )
         sent = 0
         pruned = 0
+        failed = 0
         for sub in subs:
             try:
                 signer = load_vapid_signer(private_key_pem)
@@ -297,10 +374,28 @@ class PushService:
                         tenant=tenant, endpoint=sub.endpoint
                     )
                     pruned += 1
+                    log.info(
+                        "pruned dead push subscription",
+                        tenant=tenant,
+                        subscription_id=sub.id,
+                        device_label=sub.device_label,
+                        status=status,
+                    )
                 else:
-                    log.warning("push send failed", tenant=tenant, status=status, error=str(exc))
+                    failed += 1
+                    log.warning(
+                        "push send failed",
+                        tenant=tenant,
+                        subscription_id=sub.id,
+                        status=status,
+                        error=str(exc),
+                    )
         await self._emit_usage(tenant, category, sent)
-        return NotifyResult(outcome="sent", sent_count=sent, pruned_count=pruned)
+        return self._record_attempt(
+            tenant,
+            category,
+            NotifyResult(outcome="sent", sent_count=sent, pruned_count=pruned, failed_count=failed),
+        )
 
     async def _vapid_keypair(self, tenant: str) -> tuple[str, str]:
         """Read the tenant's stored VAPID keypair, generating and persisting one on first use."""
@@ -316,6 +411,23 @@ class PushService:
             )
             log.info("generated a new VAPID keypair", tenant=tenant)
             return private_key, public_key
+
+    def _record_attempt(self, tenant: str, category: str, result: NotifyResult) -> NotifyResult:
+        """Remember *result* as the tenant's most recent delivery attempt; returns it unchanged.
+
+        Called on every outcome that actually wanted push delivery (see :class:`PushAttempt`) —
+        the ``GET /push/status`` surface reads this back so the settings card can show "last
+        attempt: <when> — <what happened>" without the operator grepping logs.
+        """
+        self._last_attempts[tenant] = PushAttempt(
+            at=datetime.now(UTC),
+            category=category,
+            outcome=result.outcome,
+            sent_count=result.sent_count,
+            failed_count=result.failed_count,
+            pruned_count=result.pruned_count,
+        )
+        return result
 
     def _check_rate_cap(self, tenant: str) -> bool:
         """A blunt per-tenant-per-hour cap across every category and device. 0 = unlimited."""

@@ -24,9 +24,9 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from epicurus_core import ToolError
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_core.files import FileEntry, LocalFileStore
 from epicurus_knowledge.indexer import KnowledgeIndexer
@@ -549,7 +549,7 @@ def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
 async def test_propose_edit_stages_a_suggestion(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_propose_edit",
         {"path": "ideas/new.md", "content": "# Idea\n", "operation": "create"},
     )
@@ -568,7 +568,7 @@ async def test_propose_edit_rejects_bad_operation(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match="operation must be one of"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_propose_edit",
             {"path": "a.md", "content": "x", "operation": "rename"},
         )
@@ -579,7 +579,7 @@ async def test_propose_edit_rejects_traversal_path(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match=r"(?i)cannot propose change"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_propose_edit",
             {"path": "../escape.md", "content": "x", "operation": "create"},
         )
@@ -590,7 +590,7 @@ async def test_propose_edit_rejects_non_md_path(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match=r"(?i)cannot propose change"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_propose_edit",
             {"path": "notes.txt", "content": "x", "operation": "create"},
         )
@@ -603,7 +603,7 @@ async def test_propose_edit_rejects_non_md_path(tmp_path: Path) -> None:
 async def test_create_document_stages_a_create_suggestion(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_create_document",
         {"path": "ideas/new.md", "content": "# Idea\n"},
     )
@@ -621,7 +621,7 @@ async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
     module = await _module_with_store(store, tmp_path)
     (vault_dir(tmp_path) / "existing.md").write_text("# Already here\n", encoding="utf-8")
     with pytest.raises(ToolError, match=r"(?i)already exists"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_create_document",
             {"path": "existing.md", "content": "# New\n"},
         )
@@ -631,7 +631,7 @@ async def test_create_document_rejects_an_existing_path(tmp_path: Path) -> None:
 async def test_create_document_applies_directly_when_review_off(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path, review_on=False)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_create_document",
         {"path": "kb/auto.md", "content": "# Auto\n"},
     )
@@ -771,7 +771,7 @@ async def test_approve_endpoint_accepts_content_body(tmp_path: Path) -> None:
 async def test_propose_move_stages_suggestion(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_propose_move", {"from_path": "kb/a.md", "to_path": "kb/sub/a.md"}
     )
     env = _envelope(content)
@@ -786,7 +786,7 @@ async def test_propose_move_stages_suggestion(tmp_path: Path) -> None:
 async def test_propose_folder_stages_suggestion(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_propose_folder", {"path": "kb/ideas"})
+    content, _ = await module.call_tool("knowledge_propose_folder", {"path": "kb/ideas"})
     _envelope(content)
     rows = await store.list(tenant=TENANT)
     assert len(rows) == 1 and rows[0].operation == "mkdir" and rows[0].path == "kb/ideas"
@@ -795,7 +795,7 @@ async def test_propose_folder_stages_suggestion(tmp_path: Path) -> None:
 async def test_propose_project_stages_suggestion(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_propose_project", {"name": "research"})
+    content, _ = await module.call_tool("knowledge_propose_project", {"name": "research"})
     _envelope(content)
     rows = await store.list(tenant=TENANT)
     assert len(rows) == 1 and rows[0].operation == "mkproject" and rows[0].path == "research"
@@ -804,7 +804,7 @@ async def test_propose_project_stages_suggestion(tmp_path: Path) -> None:
 async def test_propose_project_rejects_bad_name(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_propose_project", {"name": "a/b"})
+    content, _ = await module.call_tool("knowledge_propose_project", {"name": "a/b"})
     env = _envelope(content)
     assert "cannot propose" in env.text.lower()
     assert await store.list(tenant=TENANT) == []
@@ -814,7 +814,7 @@ async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match=r"(?i)structural"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_propose_edit", {"path": "kb/a.md", "content": "x", "operation": "move"}
         )
     assert await store.list(tenant=TENANT) == []
@@ -823,7 +823,7 @@ async def test_propose_edit_rejects_structural_operation(tmp_path: Path) -> None
 async def test_propose_rename_stages_a_move(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "b"}
     )
     env = _envelope(content)
@@ -838,7 +838,7 @@ async def test_propose_rename_stages_a_move(tmp_path: Path) -> None:
 async def test_propose_rename_rejects_a_slash(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_propose_rename", {"path": "kb/a.md", "new_name": "sub/b"}
     )
     env = _envelope(content)
@@ -850,7 +850,7 @@ async def test_propose_edit_auto_applies_when_review_off(tmp_path: Path) -> None
     # With review turned off, the agent's change is applied directly — nothing left pending.
     store = await _store()
     module = await _module_with_store(store, tmp_path, review_on=False)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_propose_edit",
         {"path": "kb/new.md", "content": "# Auto\n", "operation": "create"},
     )
@@ -869,7 +869,7 @@ async def test_propose_edit_delete_already_gone_reports_not_found_when_review_of
     store = await _store()
     module = await _module_with_store(store, tmp_path, review_on=False)
     with pytest.raises(ToolError, match=r"does not exist") as err:
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_propose_edit",
             {"path": "kb/ghost.md", "operation": "delete"},
         )
@@ -1176,10 +1176,10 @@ async def test_review_withdraw_already_withdrawn_404s(tmp_path: Path) -> None:
 async def test_list_suggestions_tool_shows_pending(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    await module.mcp.call_tool(
+    await module.call_tool(
         "knowledge_create_document", {"path": "a.md", "content": "# A\n", "note": "first"}
     )
-    content, _ = await module.mcp.call_tool("knowledge_list_suggestions", {})
+    content, _ = await module.call_tool("knowledge_list_suggestions", {})
     text = content[0].text
     assert "a.md" in text
     assert "first" in text
@@ -1188,7 +1188,7 @@ async def test_list_suggestions_tool_shows_pending(tmp_path: Path) -> None:
 async def test_list_suggestions_tool_empty_queue(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_list_suggestions", {})
+    content, _ = await module.call_tool("knowledge_list_suggestions", {})
     assert "no suggestions" in content[0].text.lower()
 
 
@@ -1196,17 +1196,17 @@ async def test_list_suggestions_tool_rejects_non_pending_status(tmp_path: Path) 
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match=r"(?i)status must be"):
-        await module.mcp.call_tool("knowledge_list_suggestions", {"status": "approved"})
+        await module.call_tool("knowledge_list_suggestions", {"status": "approved"})
 
 
 async def test_read_suggestion_tool_returns_full_content(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    await module.mcp.call_tool(
+    await module.call_tool(
         "knowledge_create_document", {"path": "ideas/a.md", "content": "# Idea\nbody"}
     )
     sid = (await store.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool("knowledge_read_suggestion", {"id": sid})
+    content, _ = await module.call_tool("knowledge_read_suggestion", {"id": sid})
     text = content[0].text
     assert "ideas/a.md" in text
     assert "# Idea" in text
@@ -1217,15 +1217,15 @@ async def test_read_suggestion_tool_unknown_id_raises(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match=r"(?i)no such suggestion"):
-        await module.mcp.call_tool("knowledge_read_suggestion", {"id": "nope"})
+        await module.call_tool("knowledge_read_suggestion", {"id": "nope"})
 
 
 async def test_update_suggestion_tool_revises_in_place(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    await module.mcp.call_tool("knowledge_create_document", {"path": "a.md", "content": "draft v1"})
+    await module.call_tool("knowledge_create_document", {"path": "a.md", "content": "draft v1"})
     sid = (await store.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "knowledge_update_suggestion", {"id": sid, "content": "draft v2"}
     )
     assert "revised" in content[0].text.lower()
@@ -1239,23 +1239,21 @@ async def test_update_suggestion_tool_on_resolved_raises_model_actionable_messag
 ) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    await module.mcp.call_tool("knowledge_create_document", {"path": "a.md", "content": "x"})
+    await module.call_tool("knowledge_create_document", {"path": "a.md", "content": "x"})
     sid = (await store.list(tenant=TENANT))[0].sid
     # Withdraw it via the MCP tool itself, then try to update the now-resolved suggestion —
     # the refusal message must say *why* (already withdrawn), not just 404 (#697 precedent).
-    await module.mcp.call_tool("knowledge_withdraw_suggestion", {"id": sid})
+    await module.call_tool("knowledge_withdraw_suggestion", {"id": sid})
     with pytest.raises(ToolError, match=r"(?i)already withdrawn"):
-        await module.mcp.call_tool(
-            "knowledge_update_suggestion", {"id": sid, "content": "too late"}
-        )
+        await module.call_tool("knowledge_update_suggestion", {"id": sid, "content": "too late"})
 
 
 async def test_withdraw_suggestion_tool_removes_from_queue(tmp_path: Path) -> None:
     store = await _store()
     module = await _module_with_store(store, tmp_path)
-    await module.mcp.call_tool("knowledge_create_document", {"path": "a.md", "content": "x"})
+    await module.call_tool("knowledge_create_document", {"path": "a.md", "content": "x"})
     sid = (await store.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool("knowledge_withdraw_suggestion", {"id": sid})
+    content, _ = await module.call_tool("knowledge_withdraw_suggestion", {"id": sid})
     assert "withdrawn" in content[0].text.lower()
     assert await store.list(tenant=TENANT) == []
 
@@ -1264,7 +1262,7 @@ async def test_withdraw_suggestion_tool_unknown_id_raises(tmp_path: Path) -> Non
     store = await _store()
     module = await _module_with_store(store, tmp_path)
     with pytest.raises(ToolError, match=r"(?i)no such suggestion"):
-        await module.mcp.call_tool("knowledge_withdraw_suggestion", {"id": "nope"})
+        await module.call_tool("knowledge_withdraw_suggestion", {"id": "nope"})
 
 
 async def test_suggestion_lifecycle_tools_are_not_side_effect_write(tmp_path: Path) -> None:

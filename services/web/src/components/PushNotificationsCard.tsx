@@ -1,14 +1,16 @@
-/** Web push (#670, ADR-0102) — subscribe this device, manage subscribed devices, per-category
- *  toggles, and quiet hours. Prefs are shared with the notification center (#671): this card
- *  edits each category's `push` half only — `center` has nothing to preview until that card
- *  exists, so it's left at its default here rather than growing a second half-finished UI. */
+/** Web push (#670, ADR-0102; delivery-state surface #797) — subscribe this device, manage
+ *  subscribed devices, per-category push toggles, quiet hours, and a delivery-state readout.
+ *  Since #797 the notification center records everything unconditionally, so each category's
+ *  toggle governs push delivery only (`center` is sent as `true` to converge stored prefs);
+ *  the card also warns loudly when push is on but no device is registered — the
+ *  misconfiguration that used to fail silently, per notification, forever. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, BellOff, Send, Trash2 } from "lucide-react";
+import { Bell, BellOff, Send, Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button, Card, EmptyState, Spinner, Switch, TextInput } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
-import type { PushDeviceRecord } from "@/lib/contracts";
+import type { PushDeviceRecord, PushStatus } from "@/lib/contracts";
 import {
   getExistingSubscription,
   guessDeviceLabel,
@@ -19,11 +21,89 @@ import {
 
 const SUBSCRIPTIONS_KEY = ["push-subscriptions"];
 const PREFS_KEY = ["push-prefs"];
+const STATUS_KEY = ["push-status"];
+// Shared with EventAlertsCard so both cards read/invalidate one cache entry.
+const EVENT_SUBSCRIPTIONS_KEY = ["event-subscriptions"];
 
 function formatWhen(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Plain-language reading of one delivery attempt (#797) — `outcome: "sent"` only means the
+ *  send path ran, so the counts decide whether it actually worked. */
+function describeAttempt(attempt: NonNullable<PushStatus["last_attempt"]>): {
+  text: string;
+  failed: boolean;
+} {
+  if (attempt.outcome === "sent") {
+    if (attempt.sent_count > 0) {
+      const failures = attempt.failed_count > 0 ? `, ${attempt.failed_count} failed` : "";
+      return { text: `delivered to ${attempt.sent_count} device(s)${failures}`, failed: false };
+    }
+    if (attempt.failed_count > 0) {
+      return { text: `failed — 0 of ${attempt.failed_count} device(s) reached`, failed: true };
+    }
+    if (attempt.pruned_count > 0) {
+      return { text: `no live devices — ${attempt.pruned_count} stale registration(s) removed`, failed: true };
+    }
+    return { text: "nothing was delivered", failed: true };
+  }
+  if (attempt.outcome === "queued") return { text: "held for the quiet-hours digest", failed: false };
+  if (attempt.outcome === "skipped_rate_limited") return { text: "skipped — hourly rate cap reached", failed: false };
+  if (attempt.outcome === "skipped_no_devices") return { text: "skipped — no registered devices", failed: true };
+  return { text: attempt.outcome, failed: false };
+}
+
+/** The loud configure-time warning (#797): push is on somewhere, but there is no device to
+ *  deliver to — previously discovered per-notification in server logs, or never. */
+function NoDeviceWarning() {
+  const status = useQuery({ queryKey: STATUS_KEY, queryFn: api.pushStatus });
+  const prefs = useQuery({ queryKey: PREFS_KEY, queryFn: api.pushPrefs });
+  const eventSubs = useQuery({ queryKey: EVENT_SUBSCRIPTIONS_KEY, queryFn: api.eventSubscriptions });
+
+  if (!status.data || status.data.device_count > 0) return null;
+  const categoryPushOn = prefs.data
+    ? Object.values(prefs.data.categories).some((c) => c.push)
+    : false;
+  const eventPushOn = (eventSubs.data ?? []).some((s) => s.push);
+  if (!categoryPushOn && !eventPushOn) return null;
+
+  return (
+    <div className="mb-4 flex items-start gap-2.5 rounded-(--radius-card) border border-warn/40 bg-warn/5 p-3">
+      <TriangleAlert size={15} className="mt-0.5 shrink-0 text-warn" />
+      <p className="text-sm text-warn">
+        Push is turned on, but no device is registered — notifications will be recorded in
+        the notification center and reach no device. Subscribe a device below to receive them.
+      </p>
+    </div>
+  );
+}
+
+/** Last-attempt readout (#797): when a push was last tried and what happened to it, straight
+ *  from `GET /push/status` — the answer that used to require reading server logs. */
+function DeliveryState() {
+  const status = useQuery({ queryKey: STATUS_KEY, queryFn: api.pushStatus });
+
+  if (status.isLoading) return <Spinner />;
+  if (status.isError || !status.data)
+    return <p className="text-sm text-danger">Could not load delivery status.</p>;
+
+  const attempt = status.data.last_attempt;
+  if (!attempt) {
+    return (
+      <p className="text-xs text-ink-dim">
+        No push attempted since the server last started. Send a test to check the pipeline.
+      </p>
+    );
+  }
+  const { text, failed } = describeAttempt(attempt);
+  return (
+    <p className={`text-xs ${failed ? "text-warn" : "text-ink-dim"}`}>
+      Last push attempt {formatWhen(attempt.at)} ({attempt.category}): {text}.
+    </p>
+  );
 }
 
 /** Subscribe/unsubscribe control for the browser the operator is currently using. Its
@@ -153,8 +233,10 @@ function CategoryToggles() {
   const qc = useQueryClient();
   const prefs = useQuery({ queryKey: PREFS_KEY, queryFn: api.pushPrefs });
   const setPrefs = useMutation({
-    mutationFn: (vars: { id: string; push: boolean; center: boolean }) =>
-      api.setPushPrefs({ categories: { [vars.id]: { push: vars.push, center: vars.center } } }),
+    // `center` is always sent as true (#797): the notification center records everything
+    // regardless, so writing true converges any stored pre-#797 value to the new truth.
+    mutationFn: (vars: { id: string; push: boolean }) =>
+      api.setPushPrefs({ categories: { [vars.id]: { push: vars.push, center: true } } }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: PREFS_KEY }),
   });
 
@@ -170,9 +252,7 @@ function CategoryToggles() {
             <span className="text-sm text-ink">{cat.label}</span>
             <Switch
               checked={current.push}
-              onChange={(next) =>
-                setPrefs.mutate({ id: cat.id, push: next, center: current.center })
-              }
+              onChange={(next) => setPrefs.mutate({ id: cat.id, push: next })}
               disabled={setPrefs.isPending}
               label={`Push notifications for ${cat.label}`}
             />
@@ -272,11 +352,21 @@ function QuietHoursEditor() {
 }
 
 function TestNotificationButton() {
-  const send = useMutation({ mutationFn: () => api.sendTestPushNotification("system") });
+  const qc = useQueryClient();
+  const send = useMutation({
+    mutationFn: () => api.sendTestPushNotification("system"),
+    // The delivery-state readout should reflect this attempt immediately (#797).
+    onSettled: () => void qc.invalidateQueries({ queryKey: STATUS_KEY }),
+  });
 
   const resultLabel = (): string | null => {
     if (!send.data) return null;
-    if (send.data.outcome === "sent") return `Sent to ${send.data.sent_count} device(s).`;
+    if (send.data.outcome === "sent") {
+      if (send.data.sent_count === 0 && send.data.failed_count > 0) {
+        return "Delivery failed on every device — see the delivery status above.";
+      }
+      return `Sent to ${send.data.sent_count} device(s).`;
+    }
     if (send.data.outcome === "skipped_no_devices") return "No devices to send it to.";
     if (send.data.outcome === "skipped_disabled") return "The System category has push turned off.";
     if (send.data.outcome === "queued") return "Quiet hours are active — queued for the digest.";
@@ -304,8 +394,11 @@ export function PushNotificationsCard() {
       <h3 className="mb-3 font-serif text-base text-ink">Push notifications</h3>
       <p className="mb-4 text-sm text-ink-dim">
         Get notified on this device, even when the app isn&apos;t open. Works on desktop
-        Chrome/Edge and installed Android/iOS PWAs.
+        Chrome/Edge and installed Android/iOS PWAs. Every notification is always recorded in
+        the notification center — push is how it also reaches your devices.
       </p>
+
+      <NoDeviceWarning />
 
       <ThisDeviceControl />
 
@@ -331,6 +424,10 @@ export function PushNotificationsCard() {
       <div className="my-4 border-t border-edge" />
 
       <h4 className="mb-2 text-xs font-medium tracking-wide text-ink-dim uppercase">Categories</h4>
+      <p className="mb-2 text-xs text-ink-dim">
+        These switches control push delivery only — every category is always recorded in the
+        notification center.
+      </p>
       <CategoryToggles />
 
       <div className="my-4 border-t border-edge" />
@@ -339,7 +436,11 @@ export function PushNotificationsCard() {
 
       <div className="my-4 border-t border-edge" />
 
-      <TestNotificationButton />
+      <h4 className="mb-2 text-xs font-medium tracking-wide text-ink-dim uppercase">Delivery</h4>
+      <div className="flex flex-col gap-3">
+        <DeliveryState />
+        <TestNotificationButton />
+      </div>
     </Card>
   );
 }

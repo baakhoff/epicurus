@@ -223,7 +223,7 @@ async def test_list_merges_filespace_and_objects(
     await _seed_objects(tmp_index, fake_objects, "uploads/report.md", "hi")
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
 
-    _c, s = await module.mcp.call_tool("storage_list", {"path": ""})
+    _c, s = await module.call_tool("storage_list", {"path": ""})
     # Both sources are present.
     assert _names(s) == {"knowledge", "uploads", "z-top.md"}
     # Dirs precede files, each group sorted by lower-cased name.
@@ -236,7 +236,7 @@ async def test_list_default_path_is_root(
 ) -> None:
     platform = _FakePlatform(listing={"": [_entry("a.md", "file")]})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_list", {})  # default path=""
+    _c, s = await module.call_tool("storage_list", {})  # default path=""
     assert _names(s) == {"a.md"}
     assert platform.list_calls == [""]
 
@@ -246,7 +246,7 @@ async def test_list_subdir_forwards_path(
 ) -> None:
     platform = _FakePlatform(listing={"docs": [_entry("docs/guide.md", "file")]})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_list", {"path": "docs"})
+    _c, s = await module.call_tool("storage_list", {"path": "docs"})
     assert _names(s) == {"guide.md"}
     assert platform.list_calls == ["docs"]
 
@@ -258,7 +258,7 @@ async def test_list_tolerates_core_down_returns_objects_only(
     platform = _FakePlatform(raise_on={"list"})
     await _seed_objects(tmp_index, fake_objects, "uploads/x.md", "x")
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_list", {"path": ""})
+    _c, s = await module.call_tool("storage_list", {"path": ""})
     assert _names(s) == {"uploads"}
 
 
@@ -270,7 +270,7 @@ async def test_search_merges_and_caps(tmp_index: FileIndex, fake_objects: _FakeO
     await _seed_objects(tmp_index, fake_objects, "quarterly-upload.md", "x")
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
 
-    _c, s = await module.mcp.call_tool("storage_search", {"query": "quarterly"})
+    _c, s = await module.call_tool("storage_search", {"query": "quarterly"})
     assert _names(s) == {"quarterly.md", "quarterly-upload.md"}
     # The capped limit (default 50) is forwarded to the platform.
     assert platform.search_calls == [("quarterly", 50)]
@@ -281,7 +281,7 @@ async def test_search_limit_is_clamped_to_200(
 ) -> None:
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    await module.mcp.call_tool("storage_search", {"query": "q", "limit": 9999})
+    await module.call_tool("storage_search", {"query": "q", "limit": 9999})
     assert platform.search_calls == [("q", 200)]
 
 
@@ -290,7 +290,7 @@ async def test_search_empty_query_returns_empty(
 ) -> None:
     platform = _FakePlatform(search_hits=[_entry("x.md")])
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_search", {"query": "   "})
+    _c, s = await module.call_tool("storage_search", {"query": "   "})
     assert _result(s) == []
     assert platform.search_calls == []  # short-circuits before hitting the core
 
@@ -301,7 +301,7 @@ async def test_search_tolerates_core_down(
     platform = _FakePlatform(raise_on={"search"})
     await _seed_objects(tmp_index, fake_objects, "obj-hit.md", "x")
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_search", {"query": "hit"})
+    _c, s = await module.call_tool("storage_search", {"query": "hit"})
     assert _names(s) == {"obj-hit.md"}
 
 
@@ -311,7 +311,7 @@ async def test_search_tolerates_core_down(
 async def test_read_filespace_text(tmp_index: FileIndex, fake_objects: _FakeObjectStore) -> None:
     platform = _FakePlatform(reads={"docs/readme.txt": "0123456789"})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "docs/readme.txt"})
+    _c, s = await module.call_tool("storage_read", {"path": "docs/readme.txt"})
     assert _result(s) == "0123456789"
     assert platform.read_calls == ["docs/readme.txt"]
 
@@ -324,7 +324,7 @@ async def test_read_prefers_object_over_filespace(
     await _seed_objects(tmp_index, fake_objects, "report.md", "from-object")
     platform = _FakePlatform(reads={"report.md": "from-filespace"})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "report.md"})
+    _c, s = await module.call_tool("storage_read", {"path": "report.md"})
     assert _result(s) == "from-object"
     assert platform.read_calls == []  # object short-circuits the file-space read
 
@@ -343,7 +343,7 @@ async def test_read_object_binary_rejected(
     )
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "blob.bin"})
+    _c, s = await module.call_tool("storage_read", {"path": "blob.bin"})
     assert str(_result(s)).startswith("Error:")
     assert "UTF-8" in str(_result(s))
 
@@ -362,7 +362,7 @@ async def test_read_object_too_large_rejected(
     )
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "big.txt"})
+    _c, s = await module.call_tool("storage_read", {"path": "big.txt"})
     assert str(_result(s)).startswith("Error:")
     assert "too large" in str(_result(s))
 
@@ -372,7 +372,7 @@ async def test_read_maps_filespace_404(
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/nope.txt": 404})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "docs/nope.txt"})
+    _c, s = await module.call_tool("storage_read", {"path": "docs/nope.txt"})
     assert _result(s) == "Error: file not found"
 
 
@@ -381,7 +381,7 @@ async def test_read_maps_filespace_413(
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/huge.txt": 413})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "docs/huge.txt"})
+    _c, s = await module.call_tool("storage_read", {"path": "docs/huge.txt"})
     payload = str(_result(s))
     assert payload.startswith("Error:") and "too large" in payload
 
@@ -391,7 +391,7 @@ async def test_read_maps_filespace_415(
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/blob.bin": 415})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "docs/blob.bin"})
+    _c, s = await module.call_tool("storage_read", {"path": "docs/blob.bin"})
     payload = str(_result(s))
     assert payload.startswith("Error:") and "UTF-8" in payload
 
@@ -401,7 +401,7 @@ async def test_read_maps_other_status_code(
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/x.txt": 500})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "docs/x.txt"})
+    _c, s = await module.call_tool("storage_read", {"path": "docs/x.txt"})
     assert _result(s) == "Error: read failed (HTTP 500)"
 
 
@@ -410,7 +410,7 @@ async def test_read_maps_transport_error_to_unavailable(
 ) -> None:
     platform = _FakePlatform(raise_on={"read"})
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "docs/x.txt"})
+    _c, s = await module.call_tool("storage_read", {"path": "docs/x.txt"})
     assert _result(s) == "Error: file space unavailable"
 
 
@@ -424,7 +424,7 @@ async def test_status_reports_object_counts(
     await _seed_objects(tmp_index, fake_objects, "b.md", "y")  # 1 file
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, s = await module.mcp.call_tool("storage_status", {})
+    _c, s = await module.call_tool("storage_status", {})
     payload = _result(s)
     assert isinstance(payload, dict)
     assert payload == {"object_files": 2, "object_dirs": 1}
@@ -437,14 +437,14 @@ async def test_object_put_then_get(tmp_index: FileIndex, fake_objects: _FakeObje
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
 
-    _c, put_result = await module.mcp.call_tool(
+    _c, put_result = await module.call_tool(
         "storage_object_put", {"key": "report.txt", "content": "hello world"}
     )
     put_payload = _result(put_result)
     assert isinstance(put_payload, dict)
     assert put_payload == {"status": "ok", "key": "report.txt"}
 
-    _c, get_result = await module.mcp.call_tool("storage_object_get", {"key": "report.txt"})
+    _c, get_result = await module.call_tool("storage_object_get", {"key": "report.txt"})
     get_payload = _result(get_result)
     assert isinstance(get_payload, dict)
     assert get_payload.get("content") == "hello world"
@@ -455,7 +455,7 @@ async def test_object_get_missing_is_null(
 ) -> None:
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    _c, get_result = await module.mcp.call_tool("storage_object_get", {"key": "does-not-exist.txt"})
+    _c, get_result = await module.call_tool("storage_object_get", {"key": "does-not-exist.txt"})
     get_payload = _result(get_result)
     assert isinstance(get_payload, dict)
     assert get_payload.get("content") is None
@@ -467,14 +467,12 @@ async def test_object_put_appears_in_list_and_reads_back(
     # End-to-end through the tools: put an object, then it lists and reads back.
     platform = _FakePlatform()
     module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
-    await module.mcp.call_tool(
-        "storage_object_put", {"key": "memo.md", "content": "agent wrote it"}
-    )
+    await module.call_tool("storage_object_put", {"key": "memo.md", "content": "agent wrote it"})
 
-    _c, listed = await module.mcp.call_tool("storage_list", {"path": ""})
+    _c, listed = await module.call_tool("storage_list", {"path": ""})
     assert "memo.md" in _names(listed)
 
-    _c, read = await module.mcp.call_tool("storage_read", {"path": "memo.md"})
+    _c, read = await module.call_tool("storage_read", {"path": "memo.md"})
     assert _result(read) == "agent wrote it"
 
 
@@ -490,7 +488,7 @@ async def test_list_hides_hidden_prefix(
     await _seed_objects(tmp_index, fake_objects, "notes/secret-obj.md", "x")
     await _seed_objects(tmp_index, fake_objects, "uploads/ok.md", "y")
     module = _build(tmp_index, fake_objects, platform=platform, hidden_prefixes=("notes",))
-    _c, s = await module.mcp.call_tool("storage_list", {"path": ""})
+    _c, s = await module.call_tool("storage_list", {"path": ""})
     names = _names(s)
     assert "knowledge" in names
     assert "uploads" in names
@@ -502,7 +500,7 @@ async def test_cannot_browse_into_hidden_prefix(
 ) -> None:
     platform = _FakePlatform(listing={"notes": [_entry("notes/secret.md", "file")]})
     module = _build(tmp_index, fake_objects, platform=platform, hidden_prefixes=("notes",))
-    _c, s = await module.mcp.call_tool("storage_list", {"path": "notes"})
+    _c, s = await module.call_tool("storage_list", {"path": "notes"})
     assert _result(s) == []
     assert platform.list_calls == []  # short-circuits before hitting the core
 
@@ -513,7 +511,7 @@ async def test_search_hides_hidden_prefix(
     platform = _FakePlatform(search_hits=[_entry("notes/secret.md", "file")])
     await _seed_objects(tmp_index, fake_objects, "notes/secret-obj.md", "x")
     module = _build(tmp_index, fake_objects, platform=platform, hidden_prefixes=("notes",))
-    _c, s = await module.mcp.call_tool("storage_search", {"query": "secret"})
+    _c, s = await module.call_tool("storage_search", {"query": "secret"})
     assert _result(s) == []
 
 
@@ -524,7 +522,7 @@ async def test_read_refuses_hidden_prefix(
     await _seed_objects(tmp_index, fake_objects, "notes/secret.md", "private note body")
     platform = _FakePlatform(reads={"notes/secret.md": "private note body"})
     module = _build(tmp_index, fake_objects, platform=platform, hidden_prefixes=("notes",))
-    _c, s = await module.mcp.call_tool("storage_read", {"path": "notes/secret.md"})
+    _c, s = await module.call_tool("storage_read", {"path": "notes/secret.md"})
     assert _result(s) == "Error: not available"
     assert platform.read_calls == []
 

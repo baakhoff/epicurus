@@ -152,7 +152,7 @@ async def test_tags_params_declare_the_tags_format(module_fixture: object) -> No
 
 async def test_tasks_list_empty(module_fixture: object) -> None:
     mod = module_fixture
-    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    content, _ = await mod.call_tool("tasks_list", {})  # type: ignore[attr-defined]
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
     assert "No open tasks" in envelope.text
@@ -161,14 +161,14 @@ async def test_tasks_list_empty(module_fixture: object) -> None:
 async def test_tasks_add_and_list(module_fixture: object) -> None:
     mod = module_fixture
     # Pydantic model return → model dict directly (not wrapped in "result")
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Deploy to prod", "due": "2025-12-31"}
     )
     assert task["title"] == "Deploy to prod"
     assert task["due"] == "2025-12-31"
     assert not task["completed"]
 
-    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    content, _ = await mod.call_tool("tasks_list", {})  # type: ignore[attr-defined]
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == 1
     ref = envelope.entity_refs[0]
@@ -187,8 +187,8 @@ async def test_tasks_list_text_truncates_past_the_cap_but_chips_stay_full(
     mod = module_fixture
     total = LIST_CAP + 5
     for i in range(total):
-        await mod.mcp.call_tool("tasks_add", {"title": f"Task {i}"})  # type: ignore[attr-defined]
-    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+        await mod.call_tool("tasks_add", {"title": f"Task {i}"})  # type: ignore[attr-defined]
+    content, _ = await mod.call_tool("tasks_list", {})  # type: ignore[attr-defined]
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == total  # chips: every task, uncapped
     assert envelope.text.startswith(f"Found {total} open task(s):")
@@ -198,12 +198,12 @@ async def test_tasks_list_text_truncates_past_the_cap_but_chips_stay_full(
 
 async def test_tasks_complete(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Fix the bug"}
     )
     task_id = task["id"]
 
-    _, done = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, done = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_complete", {"task_id": task_id}
     )
     assert done["completed"]
@@ -211,18 +211,18 @@ async def test_tasks_complete(module_fixture: object) -> None:
 
 async def test_tasks_delete(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Throwaway"}
     )
     task_id = task["id"]
 
-    content, _ = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    content, _ = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_delete", {"task_id": task_id}
     )
     assert "deleted" in content[0].text.lower()
 
     # The task is gone — listing returns nothing.
-    content, _ = await mod.mcp.call_tool("tasks_list", {})  # type: ignore[attr-defined]
+    content, _ = await mod.call_tool("tasks_list", {})  # type: ignore[attr-defined]
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
 
@@ -230,7 +230,7 @@ async def test_tasks_delete(module_fixture: object) -> None:
 async def test_tasks_delete_unknown_id_is_a_noop(module_fixture: object) -> None:
     mod = module_fixture
     # The local store deletes by id without error, so deleting a missing task is harmless.
-    content, _ = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    content, _ = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_delete", {"task_id": "does-not-exist"}
     )
     assert "deleted" in content[0].text.lower()
@@ -239,17 +239,17 @@ async def test_tasks_delete_unknown_id_is_a_noop(module_fixture: object) -> None
 async def test_complete_nonexistent_raises(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="not found"):
-        await mod.mcp.call_tool("tasks_complete", {"task_id": "bad-id"})  # type: ignore[attr-defined]
+        await mod.call_tool("tasks_complete", {"task_id": "bad-id"})  # type: ignore[attr-defined]
 
 
 async def test_tasks_update(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Draft", "notes": "rough"}
     )
     task_id = task["id"]
 
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task_id, "title": "Final", "due": "2026-01-01"}
     )
     assert updated["title"] == "Final"
@@ -260,7 +260,7 @@ async def test_tasks_update(module_fixture: object) -> None:
 async def test_update_nonexistent_raises(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="not found"):
-        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        await mod.call_tool(  # type: ignore[attr-defined]
             "tasks_update", {"task_id": "bad-id", "title": "x"}
         )
 
@@ -271,10 +271,10 @@ async def test_update_nonexistent_raises(module_fixture: object) -> None:
 async def test_tasks_update_rejects_field_less_call(module_fixture: object) -> None:
     """A tasks_update with nothing to change is a loud error, not a silent success."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool("tasks_add", {"title": "Untouched"})  # type: ignore[attr-defined]
+    _, task = await mod.call_tool("tasks_add", {"title": "Untouched"})  # type: ignore[attr-defined]
 
     with pytest.raises(Exception, match="nothing to change"):
-        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        await mod.call_tool(  # type: ignore[attr-defined]
             "tasks_update", {"task_id": task["id"]}
         )
 
@@ -283,9 +283,9 @@ async def test_tasks_update_with_only_to_list_id_is_not_rejected(module_fixture:
     """to_list_id alone is a legitimate move, not a no-op — the local provider ignores the
     move target (single flat list) but the call must not raise "nothing to change"."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool("tasks_add", {"title": "Movable"})  # type: ignore[attr-defined]
+    _, task = await mod.call_tool("tasks_add", {"title": "Movable"})  # type: ignore[attr-defined]
 
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "to_list_id": "somewhere"}
     )
     assert updated["title"] == "Movable"
@@ -293,11 +293,11 @@ async def test_tasks_update_with_only_to_list_id_is_not_rejected(module_fixture:
 
 async def test_tasks_update_clears_due_with_empty_string(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Has a date", "due": "2026-01-01"}
     )
 
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "due": ""}
     )
     assert updated["due"] is None
@@ -305,11 +305,11 @@ async def test_tasks_update_clears_due_with_empty_string(module_fixture: object)
 
 async def test_tasks_update_clears_notes_with_empty_string(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Has notes", "notes": "some notes"}
     )
 
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "notes": ""}
     )
     assert updated["notes"] is None
@@ -320,7 +320,7 @@ async def test_tasks_update_clears_notes_with_empty_string(module_fixture: objec
 
 async def test_tasks_add_persists_repeat(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Water plants", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
     )
     assert task["repeat"] == "FREQ=WEEKLY"
@@ -329,7 +329,7 @@ async def test_tasks_add_persists_repeat(module_fixture: object) -> None:
 async def test_tasks_add_repeat_requires_a_due_date(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="due date"):
-        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        await mod.call_tool(  # type: ignore[attr-defined]
             "tasks_add", {"title": "No anchor", "repeat": "FREQ=DAILY"}
         )
 
@@ -337,7 +337,7 @@ async def test_tasks_add_repeat_requires_a_due_date(module_fixture: object) -> N
 async def test_tasks_add_rejects_invalid_repeat(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="invalid recurrence rule"):
-        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        await mod.call_tool(  # type: ignore[attr-defined]
             "tasks_add", {"title": "Bad rule", "due": "2026-07-06", "repeat": "NONSENSE"}
         )
 
@@ -345,10 +345,10 @@ async def test_tasks_add_rejects_invalid_repeat(module_fixture: object) -> None:
 async def test_tasks_update_only_repeat_is_not_rejected(module_fixture: object) -> None:
     """`repeat` counts as a mutable field, so a repeat-only update isn't a no-op error (#475)."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Make recurring", "due": "2026-07-06"}
     )
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "repeat": "FREQ=WEEKLY"}
     )
     assert updated["repeat"] == "FREQ=WEEKLY"
@@ -356,10 +356,10 @@ async def test_tasks_update_only_repeat_is_not_rejected(module_fixture: object) 
 
 async def test_tasks_update_clears_repeat_with_empty_string(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Recurring", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
     )
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "repeat": ""}
     )
     assert updated["repeat"] is None
@@ -371,11 +371,11 @@ async def test_tasks_update_rejects_repeat_on_a_task_with_no_due_date(
     """Setting `repeat` on a task with no due — and none supplied here — can't anchor the
     rule, so it would silently never materialize (#515). Rejects like tasks_add does."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "No date yet"}
     )
     with pytest.raises(Exception, match="due date"):
-        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        await mod.call_tool(  # type: ignore[attr-defined]
             "tasks_update", {"task_id": task["id"], "repeat": "FREQ=WEEKLY"}
         )
 
@@ -384,10 +384,10 @@ async def test_tasks_update_accepts_repeat_when_due_supplied_in_the_same_call(
     module_fixture: object,
 ) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "No date yet"}
     )
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "due": "2026-08-01", "repeat": "FREQ=WEEKLY"}
     )
     assert updated["repeat"] == "FREQ=WEEKLY"
@@ -401,11 +401,11 @@ async def test_tasks_update_rejects_clearing_due_on_a_task_with_a_live_repeat(
     would strand a live rule (the sweep skips a due-less task; a later completion can't
     compute a next occurrence with no anchor) — reject like a due-less `repeat` set does."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Recurring", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
     )
     with pytest.raises(Exception, match="live repeat rule"):
-        await mod.mcp.call_tool(  # type: ignore[attr-defined]
+        await mod.call_tool(  # type: ignore[attr-defined]
             "tasks_update", {"task_id": task["id"], "due": ""}
         )
 
@@ -416,10 +416,10 @@ async def test_tasks_update_clearing_due_and_repeat_together_is_allowed(
     """Clearing both at once is a coherent, intentional "end the series entirely" — only an
     *omitted* `repeat` alongside a cleared `due` is the silent-strand hazard (#534)."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "Recurring", "due": "2026-07-06", "repeat": "FREQ=WEEKLY"}
     )
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "due": "", "repeat": ""}
     )
     assert updated["due"] is None
@@ -432,10 +432,10 @@ async def test_tasks_update_clearing_due_on_a_non_recurring_task_is_unaffected(
     """The new guard only looks at a *live* repeat rule — an ordinary due clear on a
     one-off task is untouched (#534)."""
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add", {"title": "One-off", "due": "2026-07-06"}
     )
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": task["id"], "due": ""}
     )
     assert updated["due"] is None
@@ -616,7 +616,7 @@ def test_task_excerpt_includes_priority_and_tags() -> None:
 
 async def test_add_task_with_rich_fields(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, task = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_add",
         {
             "title": "Rich task",
@@ -633,10 +633,10 @@ async def test_add_task_with_rich_fields(module_fixture: object) -> None:
 
 async def test_update_task_rich_fields(module_fixture: object) -> None:
     mod = module_fixture
-    _, task = await mod.mcp.call_tool("tasks_add", {"title": "Plain"})  # type: ignore[attr-defined]
+    _, task = await mod.call_tool("tasks_add", {"title": "Plain"})  # type: ignore[attr-defined]
     task_id = task["id"]
 
-    _, updated = await mod.mcp.call_tool(  # type: ignore[attr-defined]
+    _, updated = await mod.call_tool(  # type: ignore[attr-defined]
         "tasks_update",
         {"task_id": task_id, "priority": "medium", "tags": "home, weekend"},
     )
@@ -647,13 +647,13 @@ async def test_update_task_rich_fields(module_fixture: object) -> None:
 async def test_add_task_invalid_priority_raises(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="invalid priority"):
-        await mod.mcp.call_tool("tasks_add", {"title": "Bad", "priority": "critical"})  # type: ignore[attr-defined]
+        await mod.call_tool("tasks_add", {"title": "Bad", "priority": "critical"})  # type: ignore[attr-defined]
 
 
 async def test_add_task_invalid_status_raises(module_fixture: object) -> None:
     mod = module_fixture
     with pytest.raises(Exception, match="invalid status"):
-        await mod.mcp.call_tool("tasks_add", {"title": "Bad", "status": "pending"})  # type: ignore[attr-defined]
+        await mod.call_tool("tasks_add", {"title": "Bad", "status": "pending"})  # type: ignore[attr-defined]
 
 
 # ── Connected accounts + router (ADR-0030) ────────────────────────────────────
@@ -957,7 +957,7 @@ async def test_tasks_update_tool_moves_via_router() -> None:
     router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
     google.tasks = [Task(id="d1", title="Move me")]
     module = build_module(router, tenant_id=TENANT)
-    await module.mcp.call_tool(  # type: ignore[attr-defined]
+    await module.call_tool(  # type: ignore[attr-defined]
         "tasks_update", {"task_id": "d1", "list_id": "@default", "to_list_id": "work"}
     )
     assert ("@default", "d1") in google.deleted
@@ -982,7 +982,7 @@ async def test_tasks_lists_tool_reports_categories() -> None:
         return [("@default", "My Tasks"), ("work", "Work")]
 
     module = build_module(_FakeGoogleTasks(), tenant_id=TENANT, categories=cats)
-    content, _ = await module.mcp.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
+    content, _ = await module.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
     text = content[0].text
     assert "My Tasks — id: @default" in text
     assert "Work — id: work" in text
@@ -990,7 +990,7 @@ async def test_tasks_lists_tool_reports_categories() -> None:
 
 async def test_tasks_lists_tool_reports_default_only_without_categories() -> None:
     module = build_module(_FakeGoogleTasks(), tenant_id=TENANT)  # no discovery hook
-    content, _ = await module.mcp.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
+    content, _ = await module.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
     assert "default task list" in content[0].text.lower()
 
 
@@ -1074,7 +1074,7 @@ async def test_tasks_complete_tool_resolves_across_lists_without_list_id() -> No
     router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
     google.tasks_by_list = {"@default": [], "work": [Task(id="w1", title="Hiding in work")]}
     module = build_module(router, tenant_id=TENANT)
-    await module.mcp.call_tool("tasks_complete", {"task_id": "w1"})  # type: ignore[attr-defined]
+    await module.call_tool("tasks_complete", {"task_id": "w1"})  # type: ignore[attr-defined]
     assert google.last_list_id == "work"
 
 
@@ -1120,7 +1120,7 @@ async def _empty_store() -> TaskStore:
 async def test_tasks_create_list_tool_returns_the_new_collection() -> None:
     router, _local, _google = await _local_router(CollectionPrefs())
     module = build_module(router, tenant_id=TENANT)
-    _, result = await module.mcp.call_tool(  # type: ignore[attr-defined]
+    _, result = await module.call_tool(  # type: ignore[attr-defined]
         "tasks_create_list", {"title": "Groceries"}
     )
     assert result["account"] == "google"
@@ -1131,6 +1131,6 @@ async def test_tasks_create_list_tool_returns_the_new_collection() -> None:
 async def test_tasks_create_list_tool_raises_with_no_external_provider() -> None:
     module = build_module(LocalTasksProvider(await _empty_store()), tenant_id=TENANT)
     with pytest.raises(Exception, match="connect Google"):
-        await module.mcp.call_tool(  # type: ignore[attr-defined]
+        await module.call_tool(  # type: ignore[attr-defined]
             "tasks_create_list", {"title": "Groceries"}
         )

@@ -262,6 +262,31 @@ columns now carry their `list_id`, the shell matches drop targets **by id** (nev
 display title a tag column might share), and with no list columns on screen cards aren't
 draggable at all — drag-to-retag is deliberately not implemented in v1.
 
+**v0.22.0** fixes a stale-account trapdoor: disabling a connected account could make the
+Tasks page go silently blank while the agent kept reporting success (#795). `TasksRouter`
+resolved a **missing provider** — a `prefs.enabled`/`prefs.active` ref whose account had
+since been disconnected, which nothing prunes when that happens — oppositely on write and
+read: `add_task`'s default-target resolution fell back to the local store, but the read
+aggregate's `continue` skipped the same ref and never tried local at all, so a task written
+through the stale ref was created, persisted, and permanently invisible through the router.
+**The fix**: every read and write path now resolves a ref through one function,
+`TasksRouter._resolve_provider` — a live provider is used as-is; a missing one **degrades to
+local**, logging a warning that names the account and collection (previously nothing logged
+at all). A `_dedup_refs` helper applies this across a multi-ref read (the aggregate
+`list_tasks`, and the active→enabled→local task search behind `get_task`/mutations) so two
+independently stale refs — or a degraded ref landing on a local entry already present —
+collapse to a single local read rather than double-counting. The explicit-`list_id` write
+branch is unified the same way, closing a related (lower-severity, not independently
+reachable with today's single external provider type) asymmetry where a stale id could fall
+through to "the sole external provider owns this unlisted id" and misroute to an unrelated
+account instead of degrading to local. Nothing about *pruning* `prefs.enabled` changed —
+core-app's disconnect flow (`ModuleRegistry.disconnect_collections`) already best-effort
+removes a disconnected provider's refs, but that cleanup can still fail silently (a module
+hiccup mid-disconnect), and a ref can go stale by other paths a central prune can't fully
+close either; making every read/write path tolerate a stale ref regardless of *why* it went
+stale is the durable fix (ADR-0030's local-is-the-silent-default already implied this — the
+router just didn't fully honor it).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -325,7 +350,7 @@ side table keyed by task id (ADR-0082).
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
 | `GET /calendar-feed?start=&end=` | Open tasks with a due date in `[start, end)` (`end` exclusive), as calendar-feed items (#469, ADR-0088): `{id, title, date, status, ref_id, kind}`. No manifest declaration — probed generically by the core's cross-module aggregate, `GET /platform/v1/calendar-feed` (see [core-app](core-app.md)). |
-| `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
+| `GET /mcp` (streamable-HTTP) | MCP tool surface (served by the MCP SDK's `MCPServer`). |
 
 ### Web UI (manifest, ADR-0007 Tier 1)
 
@@ -424,7 +449,20 @@ The core merges this with the stored selection at
 write target). The module reads it via `PlatformClient.get_collections()` (a Postgres-only read
 at `GET …/collections/prefs`) and, being **`multi`**, **aggregates the board across every enabled
 list** while routing each write/mutation to the list named by `list_id` (or the default — active,
-else first enabled, else local). If the core is unreachable it degrades to local (local-first).
+else first enabled, else local).
+
+**Resolution rule (`TasksRouter._resolve_provider`, #795, v0.22.0):** every read and write
+path resolves a `CollectionRef` to a provider through this one function. A live provider for
+the ref's account is used as-is. Otherwise — the core is unreachable, or the ref names an
+account that isn't (or is no longer) connected, most commonly a stale `enabled`/`active`
+entry left behind once its account was disconnected — it **degrades to the local
+collection**, logging a warning that names the account and collection. This makes the local
+default genuinely silent end-to-end (ADR-0030): a write that falls back to local is always
+found by the very next read, never "write succeeded, read empty." A multi-ref read (the
+aggregated `list_tasks`, and the active→enabled→local search behind `get_task` and the
+per-task mutations) de-duplicates by effective target, so more than one stale ref — or a
+stale ref alongside local already being present — reads local exactly once, not once per
+ref.
 
 ### Entity references & hover-cards (ADR-0019)
 
@@ -654,7 +692,7 @@ Package `epicurus_tasks`:
 | `providers.py` | `TasksProvider` Protocol — the swappable back-end seam (list (by `scope`)/add/complete/update/delete + `get_task` + `is_available`/`list_collections`/`create_list`). |
 | `local_provider.py` | `LocalTasksProvider` — Postgres-backed task store (the silent default); `create_list` raises `NotImplementedError` (#474) — a single implicit list has nothing to create. |
 | `google_provider.py` | `GoogleTasksProvider` — Google Tasks REST API (+ list-discovery + delete + `create_list` via `tasklists.insert`, #474); persists/fills/GCs emulated recurrence rules via an injected `RepeatStore` (#471, ADR-0082). |
-| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082), and `list_tasks` sweeps overdue ones the same way (#515) — both funnel through the shared `_materialize`, guarded by an in-process `_claim_materialize`/`_release_materialize` pair against concurrent double-materialization and retire-failure amplification (#533); `operator_clock` resolves the sweep's "today" in the operator's timezone rather than UTC (#433, #535). |
+| `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); every read and write resolves a ref to a provider through the shared `_resolve_provider`, degrading a missing/disconnected one to local with a warning (#795), and a multi-ref read de-dupes through `_dedup_refs`; moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082), and `list_tasks` sweeps overdue ones the same way (#515) — both funnel through the shared `_materialize`, guarded by an in-process `_claim_materialize`/`_release_materialize` pair against concurrent double-materialization and retire-failure amplification (#533); `operator_clock` resolves the sweep's "today" in the operator's timezone rather than UTC (#433, #535). |
 | `recurrence.py` | Pure RRULE math (#471, ADR-0082): `validate_rrule` (tool-boundary check) + `next_due` (the next occurrence, **skip-missed** policy), date-only (naive) parsing. |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store (incl. the `repeat` column); `RepeatStore` — the `task_repeats` side table for external-provider recurrence rules (#471). |
 | `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks + Can `board` pages (two `PageSpec`s + the pure `build_tasks_board` / `build_tasks_can` builders partitioning dated from undated (#766), group-by/scope **view controls**, the **New list** board action, the **Schedule** Can-card action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |

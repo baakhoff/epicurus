@@ -518,6 +518,24 @@ class MailCache:
                 uid_next=row.uid_next,
             )
 
+    async def get_last_synced_at(self, *, tenant_id: str) -> datetime | None:
+        """When this tenant's change cursor was last stamped — ``None`` if never (#796).
+
+        The signal that separates a **first-ever** sync from a **resumed** one. Both arrive at
+        :meth:`~epicurus_mail.cache.CachedMailbox._full_sync` looking identical from the cursor
+        alone (an empty cursor, or one the provider can no longer replay), yet they mean
+        opposite things: nothing has ever been seen (there is no "new" to report) versus a
+        known gap since a known instant (everything in it *is* news). ``synced_at`` is written
+        on every :meth:`set_cursor`, so it is exactly the start of that gap.
+
+        Read it **before** the sync that overwrites it, or it degrades to "now".
+        """
+        async with self._session() as session:
+            stamp = await session.scalar(
+                select(_StoredSync.synced_at).where(_StoredSync.tenant_id == tenant_id)
+            )
+            return _as_utc(stamp) if stamp is not None else None
+
     async def set_cursor(self, *, tenant_id: str, cursor: MailCursor) -> None:
         """Persist the advanced change cursor (upsert, delete-then-insert)."""
         now = datetime.now(UTC)

@@ -114,6 +114,20 @@ pass back. The block is model-only context: never rendered in chat, never part o
 text. The module-author side of this contract is in
 [the modules reference](../reference/modules.md).
 
+**The same block also teaches the entity-link syntax** (#794). Each line additionally carries
+the ready-made `epicurus://entity/{module}/{kind}/{ref_id}` link — every component
+percent-encoded (`urllib.parse.quote(..., safe="")`) — and the intro tells the model: when you
+*mention* one of these entities in your reply, link it inline as `[text](link)` using the URL
+shown, verbatim, rather than building one by hand. The web shell already renders such a link as
+an interactive chip and excludes it from the "Sources" pill (see
+[web.md's entity-references section](web.md#entity-references-in-chat-adr-0019)) — that half of
+the contract predates this change and was simply never exercised, because nothing told the model
+the syntax existed. Percent-encoding every component (not just characters known to be unsafe
+today) matters because the web's inline-link matcher stops at the first `)` or whitespace and
+then `decodeURIComponent`s the captured id; an unencoded id containing either would silently
+degrade to a dead link rather than error. The model is told to link only what it names, not
+every ref — the pill stays the outlet for the long tail.
+
 **The id block is capped at `LIST_CAP` (50) refs** (ADR-0084, #468): past that, it truncates
 with a "showing 50 of N — narrow the query/range or ask for more" note (logged with the
 tenant id) instead of echoing an unbounded list into the model's context — a large result
@@ -333,10 +347,18 @@ dispatched in-process (no module round-trip). They're registered on the `McpHost
 per-tool disable filter as module tools.
 
 - **`now(timezone?)`** — the current date/time. The agent has no inherent clock, so it
-  calls this for anything date/time-relative ("tomorrow", "at 19:00"). Returns the time
-  in the operator's configured timezone (or the `timezone` argument) plus UTC and the
-  weekday; when a connected calendar uses a *different* timezone, that is reported with a
-  note so events land in the intended zone. The configured timezone is read from:
+  calls this for anything date/time-relative ("tomorrow", "at 19:00", a bare weekday name
+  like "monday"). Returns the time in the operator's configured timezone (or the
+  `timezone` argument) plus UTC and the weekday; when a connected calendar uses a
+  *different* timezone, that is reported with a note so events land in the intended zone.
+  The payload also resolves bare weekday names to dates (#793), so the model never does
+  the arithmetic itself: `today`, `tomorrow`, and `upcoming` — a map from each weekday
+  name to its next date **strictly in the future** (asked on a Friday, `upcoming.Friday`
+  is next Friday, not today) — all computed from the same zone-resolved instant as the
+  rest of the payload, so the operator's zone (not UTC) decides what "today" is, the same
+  care #559 took for calendar read paths. The tool description tells the model to use
+  `upcoming` verbatim and to `ask_user` rather than guess when phrasing like "next Monday"
+  is genuinely ambiguous. The configured timezone is read from:
 
 | Method · Path | Purpose |
 | --- | --- |
@@ -871,14 +893,16 @@ a timeout, or a connection failure becomes a `502` carrying the operation — so
 erroring module can no longer surface as an opaque **Bad Gateway** to the shell.
 
 The **tool-invocation POST** (the board/calendar UI actions above) is held to the same
-guarantee (#472). Its dispatch runs over MCP rather than a plain HTTP proxy, so the host
-(`McpHost.call`) bounds every hop — connect, `initialize`, and the tool RPC — with a 30s
-timeout and normalizes a refused/dropped connection or an RPC read timeout (which the
-streamable-HTTP client's anyio task group raises **wrapped in an `ExceptionGroup`**) into a
-single `ModuleUnreachableError`. `ModuleRegistry.invoke` maps that to the **502** above; a
-tool that *ran* and reported failure stays a **400** with its own message (`ToolCallError`,
-#435). The two are kept distinct on purpose — "the module never answered" vs. "the tool
-rejected the request".
+guarantee (#472). Its dispatch runs over MCP rather than a plain HTTP proxy — the mcp 2.x
+`Client` (one object owning transport + session + handshake; per-operation connections as
+before) — so the host (`McpHost.call`) bounds every hop: the RPC rounds (handshake and the
+tool call) with a 30s session-level read timeout, the connect phase by the SDK HTTP
+client's 30s connect default. It normalizes a refused/dropped connection or an RPC read
+timeout (which the client's anyio task group can raise **wrapped in an
+`ExceptionGroup`**) into a single `ModuleUnreachableError`. `ModuleRegistry.invoke` maps
+that to the **502** above; a tool that *ran* and reported failure stays a **400** with its
+own message (`ToolCallError`, #435). The two are kept distinct on purpose — "the module
+never answered" vs. "the tool rejected the request".
 
 ### Chat bridges (ADR-0062)
 
@@ -1089,12 +1113,13 @@ no-second-write-path rule), at a per-automation `DocumentTarget` (`{path_pattern
 an `EntityRef` on the run's `artifacts` so the runs feed links what was written. The **push** sink
 (`automations/push_sink.py`, #723) closes the last gap the seam left open: it calls
 [`PushService.notify`](#push-notifications-adr-0102) under the `"automation"` category (with
-`automation_id`, so a per-automation override can silence just one), title the automation's own
-name, body the run's raw output — quiet hours, the rate cap, and the push/center toggles all apply
-exactly as for any other caller. When `notify()`'s `center` toggle wrote a notification-center row,
-the sink records its id as an `EntityRef` (`module="core"`, `kind="notification"`) on the run's
-`artifacts`, the same field notes/kb already populate — so a `sinks=["push"]` template (all ten
-#717 shipped with) now delivers something visible instead of silently completing.
+`automation_id`, so a per-automation override can silence just one's *push*), title the
+automation's own name, body the run's raw output — quiet hours, the rate cap, and the push
+toggles all apply exactly as for any other caller. `notify()` always writes a
+notification-center row (#797 — the center is a superset of push), and the sink records its id
+as an `EntityRef` (`module="core"`, `kind="notification"`) on the run's `artifacts`, the same
+field notes/kb already populate — so a `sinks=["push"]` template (all ten #717 shipped with)
+always leaves a durable, linkable record even when push delivery itself is off or fails.
 
 **Agent-gated delivery (#706).** The sink fan-out above is deterministic by default — but a
 per-automation toggle (`agent_gated_delivery`, off by default) lets the run's own turn decide.
@@ -1150,28 +1175,43 @@ path but new work creates an automation.
 `PushService.notify(tenant, category=..., title=..., body=...)` (`push/service.py`) is the
 core-internal send path a category-based caller uses in-process (#670) — today, the settings
 UI's test button and the [automations engine's push sink](#automations-engine-adr-0105)
-(#723). Every call first records a notification-center row (`notifications.py`) if the
-category/automation's `center` toggle is on, regardless of what push delivery does below
-(#671, ADR-0102 §4); `NotifyResult.notification_id` carries that row's id back to the caller
-(`None` when `center` was off), so a caller like the push sink can build an `EntityRef`
-without a second lookup. Push delivery then resolves, in order: the effective push toggle (off
-skips delivery entirely), quiet hours in the tenant's timezone (ADR-0039 — queues for a digest
-instead of sending), and an in-memory per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`,
-single-instance v1 — the same disposable-cache trade the live-run registry makes, ADR-0055).
-Delivery fans out to every device via VAPID-signed webpush (RFC 8291/8292) — the outgoing
-payload's `body` is capped at 500 characters (an automation's full report should not be able
-to blow a push service's own size ceiling), independent of the untruncated text already
-written to the notification-center row above — pruning any subscription the push service
-reports Gone (404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
+(#723). Every call first records a notification-center row (`notifications.py`)
+**unconditionally** (#797, amending ADR-0102 §4/ADR-0104 §1): **the center is a superset of
+push** — the durable log of every notification that fired — and `push` means "also deliver
+to devices", so a push missed while the device was off (or that failed outright) is never
+simply gone. `ChannelPrefs.center` is still stored and carried on the wire for contract
+compatibility but no longer consulted by delivery. `NotifyResult.notification_id` carries the
+row's id back to the caller (always set), so a caller like the push sink can build an
+`EntityRef` without a second lookup. Push delivery then resolves, in order: the effective
+push toggle (off skips delivery entirely), quiet hours in the tenant's timezone (ADR-0039 —
+queues for a digest instead of sending), and an in-memory per-tenant rate cap
+(`PUSH_RATE_CAP_PER_HOUR`, single-instance v1 — the same disposable-cache trade the live-run
+registry makes, ADR-0055). Delivery fans out to every device via VAPID-signed webpush
+(RFC 8291/8292) — the outgoing payload's `body` is capped at 500 characters (an automation's
+full report should not be able to blow a push service's own size ceiling), independent of the
+untruncated text already written to the notification-center row above — pruning any
+subscription the push service reports Gone (404/410) as expected churn (uninstalled PWA,
+cleared site data), not an error.
+
+**Every declined or deferred push logs a distinct line** (#797), so an operator can tell
+"working as configured" from "broken" straight from the logs: `push skipped: push disabled
+for this notification` · `push queued for quiet-hours digest` · `push rate cap reached;
+delivery skipped` · `push skipped: no registered devices` (warning — a push was wanted with
+nowhere to go) · `push send failed` · `pruned dead push subscription`, plus the event-alert
+listener's `event alert declined: no subscription for this event` / `event alert rate cap
+reached`. The most recent delivery *attempt* per tenant (anything except a disabled skip) is
+kept in memory and served by `GET /platform/v1/push/status` — the settings card's
+delivery-state readout (device count + what happened last, `null` after a restart).
 
 `/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
 service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
-/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below), and
-`POST /test` (the settings UI's "send test notification" button, category `"system"`).
-`/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
-`GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
-[the reference page](../reference/notifications.md) for the full contract and the web-side
-subscribe flow.
+/subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below),
+`POST /test` (the settings UI's "send test notification" button, category `"system"` — its
+response carries `failed_count` alongside the sent/pruned counts since #797), and
+`GET /status` (above). `/platform/v1/notifications/*` (`notifications_routes.py`) is the
+notification-center half: `GET ""` (list), `GET /unread-count`, `POST /{id}/read`,
+`POST /read-all`. See [the reference page](../reference/notifications.md) for the full
+contract and the web-side subscribe flow.
 
 **Event alerts (#732, ADR-0114).** `push/event_subscriptions.py` + `push/event_alerts.py`:
 a tenant-scoped `(module, event_type) -> ChannelPrefs` store, off by default, and a listener

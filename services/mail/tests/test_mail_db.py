@@ -8,6 +8,9 @@ reads back. Includes a large-int round-trip that guards the ``BigInteger`` mappi
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
+
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -183,6 +186,39 @@ async def test_cursor_roundtrip_survives_large_history_id() -> None:
     assert restored.history_id is None
     assert restored.uid_validity == big + 1
     assert restored.uid_next == big + 2
+
+
+async def test_last_synced_at_is_none_until_a_first_sync_lands() -> None:
+    """The signal that separates a first-ever sync from a resumed one (#796).
+
+    ``None`` is not "long ago" — it is "never", which is exactly why the backlog replay can be
+    gated on it without a sentinel timestamp.
+    """
+    cache = await _cache()
+    assert await cache.get_last_synced_at(tenant_id=TENANT) is None
+
+    await cache.set_cursor(tenant_id=TENANT, cursor=MailCursor(history_id=1))
+    stamp = await cache.get_last_synced_at(tenant_id=TENANT)
+
+    assert stamp is not None
+    # Timezone-aware on both backends: SQLite hands back a naive value, and comparing that to
+    # `datetime.now(UTC)` — which the replay window does — would raise.
+    assert stamp.tzinfo is not None
+    assert abs((datetime.now(UTC) - stamp).total_seconds()) < 60
+    # Tenant-scoped like every other read (constraint #1).
+    assert await cache.get_last_synced_at(tenant_id=OTHER) is None
+
+
+async def test_last_synced_at_advances_with_every_successful_sync() -> None:
+    cache = await _cache()
+    await cache.set_cursor(tenant_id=TENANT, cursor=MailCursor(history_id=1))
+    first = await cache.get_last_synced_at(tenant_id=TENANT)
+    await asyncio.sleep(0.01)
+    await cache.set_cursor(tenant_id=TENANT, cursor=MailCursor(history_id=2))
+    second = await cache.get_last_synced_at(tenant_id=TENANT)
+
+    assert first is not None and second is not None
+    assert second >= first
 
 
 async def test_big_sort_ts_roundtrips() -> None:

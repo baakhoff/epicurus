@@ -77,7 +77,7 @@ def _parse_draft(content: list) -> DraftReview:  # type: ignore[type-arg]
 async def test_mail_search_returns_entity_refs() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    content, _ = await module.call_tool("mail_search", {"query": "from:alice"})
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == 1
     ref = envelope.entity_refs[0]
@@ -91,7 +91,7 @@ async def test_mail_search_returns_entity_refs() -> None:
 async def test_mail_search_text_summary_mentions_count() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    content, _ = await module.call_tool("mail_search", {"query": "from:alice"})
     envelope = _parse_envelope(content)
     assert "1" in envelope.text
     assert "Hello" in envelope.text
@@ -102,7 +102,7 @@ async def test_mail_search_empty_returns_no_refs() -> None:
     provider.search = AsyncMock(return_value=[])
     provider.read = AsyncMock(return_value=_sample())
     module = build_module(provider)  # type: ignore[arg-type]
-    content, _ = await module.mcp.call_tool("mail_search", {"query": "nothing"})
+    content, _ = await module.call_tool("mail_search", {"query": "nothing"})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
     assert "No messages" in envelope.text
@@ -111,14 +111,14 @@ async def test_mail_search_empty_returns_no_refs() -> None:
 async def test_mail_search_caps_at_50() -> None:
     provider = _make_provider()
     module = build_module(provider)
-    await module.mcp.call_tool("mail_search", {"query": "x", "max_results": 999})
+    await module.call_tool("mail_search", {"query": "x", "max_results": 999})
     provider.search.assert_called_once_with("x", 50)  # type: ignore[attr-defined]
 
 
 async def test_mail_search_clamps_min_to_1() -> None:
     provider = _make_provider()
     module = build_module(provider)
-    await module.mcp.call_tool("mail_search", {"query": "x", "max_results": 0})
+    await module.call_tool("mail_search", {"query": "x", "max_results": 0})
     provider.search.assert_called_once_with("x", 1)  # type: ignore[attr-defined]
 
 
@@ -145,9 +145,7 @@ async def test_mail_search_ands_a_category_into_the_query(
         )
     )
     module = build_module(provider)
-    await module.mcp.call_tool(
-        "mail_search", {"query": query, "max_results": 5, "category": category}
-    )
+    await module.call_tool("mail_search", {"query": query, "max_results": 5, "category": category})
     provider.search.assert_called_once_with(expected, 5)  # type: ignore[attr-defined]
 
 
@@ -155,7 +153,7 @@ async def test_mail_search_without_a_category_is_untouched() -> None:
     provider = _make_provider()
     provider.category_query = MagicMock(return_value=None)  # type: ignore[attr-defined]
     module = build_module(provider)
-    await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    await module.call_tool("mail_search", {"query": "from:alice"})
     provider.search.assert_called_once_with("from:alice", 10)  # type: ignore[attr-defined]
     provider.category_query.assert_not_called()  # type: ignore[attr-defined]
 
@@ -165,9 +163,7 @@ async def test_mail_search_reports_an_unsupported_category_instead_of_widening()
     provider = _make_provider()
     provider.category_query = MagicMock(return_value=None)  # type: ignore[attr-defined]
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool(
-        "mail_search", {"query": "x", "category": "newsletters"}
-    )
+    content, _ = await module.call_tool("mail_search", {"query": "x", "category": "newsletters"})
     text = content[0].text  # type: ignore[attr-defined]
     assert "newsletters" in text
     assert "promotions" in text  # names the categories that do exist
@@ -177,7 +173,7 @@ async def test_mail_search_reports_an_unsupported_category_instead_of_widening()
 async def test_mail_read_returns_formatted_message() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_read", {"message_id": "msg1"})
+    content, _ = await module.call_tool("mail_read", {"message_id": "msg1"})
     text = content[0].text  # type: ignore[attr-defined]
     assert "Subject: Hello" in text
     assert "From: alice@example.com" in text
@@ -191,7 +187,7 @@ async def test_mail_read_returns_formatted_message() -> None:
 async def test_mail_send_composes_a_draft_and_does_not_send() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "mail_send", {"to": "bob@example.com", "subject": "Hi", "body": "Hello!"}
     )
     draft = _parse_draft(content)
@@ -207,7 +203,7 @@ async def test_mail_send_composes_a_draft_and_does_not_send() -> None:
 async def test_mail_send_rejects_a_blank_recipient() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "mail_send", {"to": "   ", "subject": "Hi", "body": "Hello!"}
     )
     text = content[0].text  # type: ignore[attr-defined]
@@ -218,7 +214,7 @@ async def test_mail_send_rejects_a_blank_recipient() -> None:
 async def test_mail_reply_composes_a_draft_via_compose_reply_and_does_not_send() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "mail_reply", {"message_id": "msg1", "body": "Sounds good!"}
     )
     draft = _parse_draft(content)
@@ -238,12 +234,12 @@ async def test_no_mcp_tool_transmits() -> None:
     # provider.transmit — there is no MCP tool that sends. Only the /send HTTP endpoint does.
     provider = _make_provider(_sample())
     module = build_module(provider)
-    await module.mcp.call_tool("mail_search", {"query": "x"})
-    await module.mcp.call_tool("mail_read", {"message_id": "msg1"})
-    await module.mcp.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
-    await module.mcp.call_tool("mail_reply", {"message_id": "msg1", "body": "b"})
-    await module.mcp.call_tool("mail_mark_read", {"message_id": "msg1"})
-    await module.mcp.call_tool("mail_mark_unread", {"message_id": "msg1"})
+    await module.call_tool("mail_search", {"query": "x"})
+    await module.call_tool("mail_read", {"message_id": "msg1"})
+    await module.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
+    await module.call_tool("mail_reply", {"message_id": "msg1", "body": "b"})
+    await module.call_tool("mail_mark_read", {"message_id": "msg1"})
+    await module.call_tool("mail_mark_unread", {"message_id": "msg1"})
     provider.transmit.assert_not_called()  # type: ignore[attr-defined]
 
 
@@ -253,7 +249,7 @@ async def test_no_mcp_tool_transmits() -> None:
 async def test_mail_mark_read_clears_unread() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_mark_read", {"message_id": "msg1"})
+    content, _ = await module.call_tool("mail_mark_read", {"message_id": "msg1"})
     text = content[0].text  # type: ignore[attr-defined]
     assert "marked-read:msg1" in str(text)
     provider.set_unread.assert_called_once_with("msg1", unread=False)  # type: ignore[attr-defined]
@@ -262,7 +258,7 @@ async def test_mail_mark_read_clears_unread() -> None:
 async def test_mail_mark_unread_sets_unread() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_mark_unread", {"message_id": "msg1"})
+    content, _ = await module.call_tool("mail_mark_unread", {"message_id": "msg1"})
     text = content[0].text  # type: ignore[attr-defined]
     assert "marked-unread:msg1" in str(text)
     provider.set_unread.assert_called_once_with("msg1", unread=True)  # type: ignore[attr-defined]
@@ -279,7 +275,7 @@ async def test_mail_mark_read_returns_hint_on_missing_scope() -> None:
         )
     )
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_mark_read", {"message_id": "msg1"})
+    content, _ = await module.call_tool("mail_mark_read", {"message_id": "msg1"})
     text = content[0].text  # type: ignore[attr-defined]
     assert "Reconnect Google" in str(text)
 
@@ -298,7 +294,7 @@ async def test_mail_mark_read_403_rate_limit_reason_is_not_mislabeled_as_scope()
         )
     )
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_mark_read", {"message_id": "msg1"})
+    content, _ = await module.call_tool("mail_mark_read", {"message_id": "msg1"})
     text = content[0].text  # type: ignore[attr-defined]
     assert "rate-limiting" in str(text)
     assert "Reconnect Google" not in str(text)
@@ -317,7 +313,7 @@ async def test_mail_reply_returns_lookup_hint_on_missing_scope() -> None:
         )
     )
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "mail_reply", {"message_id": "msg1", "body": "Sounds good!"}
     )
     text = content[0].text  # type: ignore[attr-defined]
@@ -337,7 +333,7 @@ async def test_mail_reply_reraises_non_scope_errors() -> None:
     )
     module = build_module(provider)
     with pytest.raises(Exception, match="500"):
-        await module.mcp.call_tool("mail_reply", {"message_id": "msg1", "body": "Sounds good!"})
+        await module.call_tool("mail_reply", {"message_id": "msg1", "body": "Sounds good!"})
 
 
 # ── AIP-193 error shape + 429 rate limiting (#557) ─────────────────────────────
@@ -436,7 +432,7 @@ async def test_mail_read_paths_429_return_rate_limit_hint_not_raw(tool: str) -> 
     provider.read = AsyncMock(side_effect=err)  # type: ignore[method-assign]
     module = build_module(provider)
     args = {"query": "x"} if tool == "mail_search" else {"message_id": "msg1"}
-    content, _ = await module.mcp.call_tool(tool, args)
+    content, _ = await module.call_tool(tool, args)
     assert "rate-limiting" in str(content[0].text)  # type: ignore[attr-defined]
 
 
@@ -444,7 +440,7 @@ async def test_mail_reply_429_returns_rate_limit_hint() -> None:
     provider = _make_provider(_sample())
     provider.compose_reply = AsyncMock(side_effect=_http_error(429))  # type: ignore[method-assign]
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_reply", {"message_id": "msg1", "body": "hi"})
+    content, _ = await module.call_tool("mail_reply", {"message_id": "msg1", "body": "hi"})
     assert "rate-limiting" in str(content[0].text)  # type: ignore[attr-defined]
     provider.transmit.assert_not_called()  # type: ignore[attr-defined]
 
@@ -454,7 +450,7 @@ async def test_mail_search_reraises_a_non_rate_limit_http_error() -> None:
     provider.search = AsyncMock(side_effect=_http_error(500))  # type: ignore[method-assign]
     module = build_module(provider)
     with pytest.raises(Exception, match="500"):
-        await module.mcp.call_tool("mail_search", {"query": "x"})
+        await module.call_tool("mail_search", {"query": "x"})
 
 
 async def test_mail_search_uses_capped_listing_format() -> None:
@@ -462,7 +458,7 @@ async def test_mail_search_uses_capped_listing_format() -> None:
     # matching calendar's #522 adoption instead of hand-rolling its own "Found N ...:" text.
     provider = _make_provider(_sample())
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_search", {"query": "from:alice"})
+    content, _ = await module.call_tool("mail_search", {"query": "from:alice"})
     envelope = _parse_envelope(content)
     expected_line = "- [Hello] from alice@example.com (Mon, 1 Jan 2024 10:00:00 +0000)"
     assert envelope.text == f"Found 1 message(s):\n{expected_line}"
@@ -605,7 +601,7 @@ async def test_mail_archive_calls_provider_and_confirms() -> None:
     provider = _make_provider()
     provider.archive = AsyncMock(return_value=None)  # type: ignore[attr-defined]
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_archive", {"message_id": "m1"})
+    content, _ = await module.call_tool("mail_archive", {"message_id": "m1"})
     provider.archive.assert_awaited_once_with("m1")  # type: ignore[attr-defined]
     assert content[0].text == "archived:m1"  # type: ignore[attr-defined]
 
@@ -614,7 +610,7 @@ async def test_mail_trash_calls_provider_and_confirms() -> None:
     provider = _make_provider()
     provider.trash = AsyncMock(return_value=None)  # type: ignore[attr-defined]
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_trash", {"message_id": "m2"})
+    content, _ = await module.call_tool("mail_trash", {"message_id": "m2"})
     provider.trash.assert_awaited_once_with("m2")  # type: ignore[attr-defined]
     assert content[0].text == "trashed:m2"  # type: ignore[attr-defined]
 
@@ -628,7 +624,7 @@ async def test_mail_archive_softens_gmail_scope_error() -> None:
         side_effect=httpx.HTTPStatusError("403", request=request, response=response)
     )
     module = build_module(provider)
-    content, _ = await module.mcp.call_tool("mail_archive", {"message_id": "m1"})
+    content, _ = await module.call_tool("mail_archive", {"message_id": "m1"})
     assert "Reconnect Google" in content[0].text  # type: ignore[attr-defined]
 
 

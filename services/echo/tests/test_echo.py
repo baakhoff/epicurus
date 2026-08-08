@@ -13,7 +13,7 @@ from epicurus_echo.service import (
 
 
 async def test_echo_tool_returns_message() -> None:
-    content, structured = await build_module().mcp.call_tool("echo", {"message": "hello"})
+    content, structured = await build_module().call_tool("echo", {"message": "hello"})
     assert structured == {"result": "hello"}
     assert content[0].text == "hello"
 

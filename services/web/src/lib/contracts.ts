@@ -84,8 +84,10 @@ export type TimezonePrefs = z.infer<typeof TimezonePrefs>;
 export const PageOrderPrefs = z.object({ order: z.array(z.string()) });
 export type PageOrderPrefs = z.infer<typeof PageOrderPrefs>;
 
-/** One category's push / notification-center toggle pair (#670/#671, ADR-0102) — shared by
- *  both features so a category can be silenced for push while still landing in the center. */
+/** One category/event's channel pair (#670/#671, ADR-0102). Since #797 the center is a
+ *  superset of push: everything that fires is recorded in the notification center regardless
+ *  of `center` (kept on the wire for contract compatibility), and `push` means "also deliver
+ *  to devices". For an event subscription, "either flag on" still means "the alert is on". */
 export const ChannelPrefs = z.object({ push: z.boolean(), center: z.boolean() });
 export type ChannelPrefs = z.infer<typeof ChannelPrefs>;
 
@@ -115,13 +117,37 @@ export const PushDeviceRecord = z.object({
 });
 export type PushDeviceRecord = z.infer<typeof PushDeviceRecord>;
 
-/** Outcome of the Settings "send test notification" button (#670). */
+/** Outcome of the Settings "send test notification" button (#670). `outcome: "sent"` with
+ *  `sent_count: 0` and a non-zero `failed_count` is a delivery that failed outright (#797). */
 export const PushTestResult = z.object({
   outcome: z.string(),
   sent_count: z.number(),
   pruned_count: z.number(),
+  failed_count: z.number().default(0),
 });
 export type PushTestResult = z.infer<typeof PushTestResult>;
+
+/**
+ * Delivery-state diagnostics for the Notifications settings card (#797) — device count plus
+ * the most recent push delivery attempt. `last_attempt` is held in memory server-side, so
+ * `null` means "none since the core started", not "never"; a `sent` attempt with
+ * `sent_count: 0` and `failed_count > 0` failed outright.
+ */
+export const PushStatus = z.object({
+  device_count: z.number(),
+  last_attempt: z
+    .object({
+      at: z.string(),
+      category: z.string(),
+      outcome: z.string(),
+      sent_count: z.number(),
+      failed_count: z.number(),
+      pruned_count: z.number(),
+    })
+    .nullable()
+    .default(null),
+});
+export type PushStatus = z.infer<typeof PushStatus>;
 
 /**
  * One "push me when X happens" subscription (#732) — `(module, event_type)` plus its own

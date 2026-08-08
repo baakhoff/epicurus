@@ -6,10 +6,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import EpicurusModule, PlatformClient
+from epicurus_core import EpicurusModule, PlatformClient, ToolError
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_knowledge.indexer import KnowledgeIndexer, SearchHit
 from epicurus_knowledge.refs import SOURCE_DOC, SOURCE_NOTE, decode_ref
@@ -77,7 +76,7 @@ async def test_search_returns_chunks_and_chips() -> None:
         [_hit("note.md", "Vault answer about cats.", 0.9, "Cats")],
         [_hit("services/knowledge.md", "Docs answer.", 0.5)],
     )
-    content, _ = await module.mcp.call_tool("knowledge_search", {"query": "cats"})
+    content, _ = await module.call_tool("knowledge_search", {"query": "cats"})
     env = _envelope(content)
     # The chunk text itself reaches the model (RAG content).
     assert "Vault answer about cats." in env.text
@@ -95,7 +94,7 @@ async def test_search_dedupes_chips_per_document() -> None:
         [_hit("note.md", "First chunk.", 0.9, "A"), _hit("note.md", "Second chunk.", 0.8, "B")],
         [],
     )
-    content, _ = await module.mcp.call_tool("knowledge_search", {"query": "x"})
+    content, _ = await module.call_tool("knowledge_search", {"query": "x"})
     env = _envelope(content)
     # Both chunks appear in the text, but the document yields a single chip.
     assert "First chunk." in env.text
@@ -105,7 +104,7 @@ async def test_search_dedupes_chips_per_document() -> None:
 
 async def test_search_empty_returns_no_chips() -> None:
     module = _module([], [])
-    content, _ = await module.mcp.call_tool("knowledge_search", {"query": "nothing"})
+    content, _ = await module.call_tool("knowledge_search", {"query": "nothing"})
     env = _envelope(content)
     assert env.entity_refs == []
     assert "No matching content" in env.text
@@ -181,7 +180,7 @@ async def test_list_projects_lists_top_level_folders(tmp_path: Path) -> None:
     (tmp_path / "work").mkdir()
     (tmp_path / "_reserved").mkdir()  # underscore-prefixed: never a project
     module = _nav_module(tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_list_projects", {})
+    content, _ = await module.call_tool("knowledge_list_projects", {})
     out = _text(content)
     assert "personal" in out and "work" in out
     assert "_reserved" not in out
@@ -189,7 +188,7 @@ async def test_list_projects_lists_top_level_folders(tmp_path: Path) -> None:
 
 async def test_list_projects_empty(tmp_path: Path) -> None:
     module = _nav_module(tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_list_projects", {})
+    content, _ = await module.call_tool("knowledge_list_projects", {})
     assert "No knowledge bases" in _text(content)
 
 
@@ -198,7 +197,7 @@ async def test_tree_shows_structure(tmp_path: Path) -> None:
     (tmp_path / "kb" / "alpha.md").write_text("# A\n", encoding="utf-8")
     (tmp_path / "kb" / "sub" / "beta.md").write_text("# B\n", encoding="utf-8")
     module = _nav_module(tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_tree", {"project": "kb"})
+    content, _ = await module.call_tool("knowledge_tree", {"project": "kb"})
     out = _text(content)
     assert "kb/" in out
     assert "sub/" in out
@@ -210,20 +209,20 @@ async def test_read_document_returns_content(tmp_path: Path) -> None:
     (tmp_path / "kb").mkdir()
     (tmp_path / "kb" / "a.md").write_text("# Hello\nbody\n", encoding="utf-8")
     module = _nav_module(tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "kb/a.md"})
+    content, _ = await module.call_tool("knowledge_read_document", {"path": "kb/a.md"})
     assert "# Hello" in _text(content)
 
 
 async def test_read_document_missing(tmp_path: Path) -> None:
     (tmp_path / "kb").mkdir()
     module = _nav_module(tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "kb/missing.md"})
+    content, _ = await module.call_tool("knowledge_read_document", {"path": "kb/missing.md"})
     assert "No such document" in _text(content)
 
 
 async def test_read_document_rejects_traversal(tmp_path: Path) -> None:
     module = _nav_module(tmp_path)
-    content, _ = await module.mcp.call_tool("knowledge_read_document", {"path": "../escape.md"})
+    content, _ = await module.call_tool("knowledge_read_document", {"path": "../escape.md"})
     assert "cannot read" in _text(content).lower()
 
 
@@ -233,7 +232,7 @@ async def test_read_document_rejects_traversal(tmp_path: Path) -> None:
 # off the MCP call's structural `isError`, not the returned text (core-app's `_invoke`
 # docstring). Before #690 these guard clauses returned a normal `tool_envelope`, so a
 # rejected write left `is_error=False` and the pane opened an editor on content that was
-# never written. `pytest.raises(ToolError)` is how FastMCP surfaces a raised exception
+# never written. `pytest.raises(ToolError)` is how the MCP server surfaces a raised exception
 # from inside a `@module.tool()` function (proven pattern: calendar's
 # `test_calendar_update_event_tool_unknown_raises`).
 
@@ -245,9 +244,7 @@ async def test_create_document_rejects_bad_path_by_raising(tmp_path: Path) -> No
     the shared `_stage_doc_write`."""
     module = _nav_module(tmp_path)
     with pytest.raises(ToolError, match="Cannot propose change"):
-        await module.mcp.call_tool(
-            "knowledge_create_document", {"path": "notes.txt", "content": "x"}
-        )
+        await module.call_tool("knowledge_create_document", {"path": "notes.txt", "content": "x"})
 
 
 async def test_finalize_apply_failure_raises_not_a_success_envelope(tmp_path: Path) -> None:
@@ -279,7 +276,7 @@ async def test_finalize_apply_failure_raises_not_a_success_envelope(tmp_path: Pa
         reader=reader,
     )
     with pytest.raises(ToolError, match=r"applying failed.*disk full"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_create_document", {"path": "kb/new.md", "content": "hello"}
         )
 
@@ -322,7 +319,7 @@ async def test_finalize_target_gone_reports_honest_outcome_not_generic_failure(
         reader=reader,
     )
     with pytest.raises(ToolError, match=r"does not exist") as err:
-        await module.mcp.call_tool(
+        await module.call_tool(
             "knowledge_propose_edit", {"path": "kb/ghost.md", "operation": "delete"}
         )
     message = str(err.value)

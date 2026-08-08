@@ -194,7 +194,7 @@ async def test_reject_keeps_the_note() -> None:
 async def test_tool_append_stages_a_suggestion() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    content, _ = await module.mcp.call_tool("notes_append", {"slug": "n", "text": "more"})
+    content, _ = await module.call_tool("notes_append", {"slug": "n", "text": "more"})
     env = _envelope(content)
     assert "pending your review" in env.text.lower()
     rows = await sugg.list(tenant=TENANT)
@@ -207,7 +207,7 @@ async def test_tool_append_stages_a_suggestion() -> None:
 async def test_tool_delete_stages_a_suggestion() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool("notes_delete", {"slug": "n"})
+    await module.call_tool("notes_delete", {"slug": "n"})
     rows = await sugg.list(tenant=TENANT)
     assert len(rows) == 1 and rows[0].operation == "delete"
 
@@ -216,7 +216,7 @@ async def test_tool_list_shows_titles_not_bodies() -> None:
     store, sugg = await _stores()
     await store.upsert(tenant=TENANT, slug="n", title="My Note", content="secret body")
     module, _ = await _module_for(store, sugg)
-    content, _ = await module.mcp.call_tool("notes_list", {})
+    content, _ = await module.call_tool("notes_list", {})
     text = content[0].text
     assert "My Note" in text
     assert "secret body" not in text  # privacy: never leaks the body
@@ -243,7 +243,7 @@ async def test_tool_append_auto_applies_when_review_off() -> None:
     store, sugg = await _stores()
     await store.upsert(tenant=TENANT, slug="n", title="N", content="a")
     module, _ = await _module_for(store, sugg, review_on=False)
-    content, _ = await module.mcp.call_tool("notes_append", {"slug": "n", "text": "b"})
+    content, _ = await module.call_tool("notes_append", {"slug": "n", "text": "b"})
     env = _envelope(content)
     assert "applied directly" in env.text.lower()
     note = await store.get(tenant=TENANT, slug="n")
@@ -515,8 +515,8 @@ async def test_review_withdraw_unknown_404s() -> None:
 async def test_list_suggestions_tool_shows_pending() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool("notes_create", {"slug": "n", "content": "x", "note": "first"})
-    content, _ = await module.mcp.call_tool("notes_list_suggestions", {})
+    await module.call_tool("notes_create", {"slug": "n", "content": "x", "note": "first"})
+    content, _ = await module.call_tool("notes_list_suggestions", {})
     text = content[0].text
     assert "n" in text
     assert "first" in text
@@ -525,25 +525,25 @@ async def test_list_suggestions_tool_shows_pending() -> None:
 async def test_list_suggestions_tool_empty_queue() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    content, _ = await module.mcp.call_tool("notes_list_suggestions", {})
+    content, _ = await module.call_tool("notes_list_suggestions", {})
     assert "no suggestions" in content[0].text.lower()
 
 
 async def test_list_suggestions_tool_rejects_non_pending_status() -> None:
-    from mcp.server.fastmcp.exceptions import ToolError
+    from epicurus_core import ToolError
 
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
     with pytest.raises(ToolError, match=r"(?i)status must be"):
-        await module.mcp.call_tool("notes_list_suggestions", {"status": "approved"})
+        await module.call_tool("notes_list_suggestions", {"status": "approved"})
 
 
 async def test_read_suggestion_tool_returns_the_proposal() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool("notes_create", {"slug": "n", "content": "draft body"})
+    await module.call_tool("notes_create", {"slug": "n", "content": "draft body"})
     sid = (await sugg.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool("notes_read_suggestion", {"id": sid})
+    content, _ = await module.call_tool("notes_read_suggestion", {"id": sid})
     text = content[0].text
     assert "n" in text
     assert "draft body" in text
@@ -555,31 +555,31 @@ async def test_read_suggestion_tool_never_reads_a_notes_stored_body() -> None:
     store, sugg = await _stores()
     await store.upsert(tenant=TENANT, slug="n", title="N", content="PRIVATE STORED BODY")
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool(
+    await module.call_tool(
         "notes_propose_edit", {"slug": "n", "content": "agent's proposed replacement"}
     )
     sid = (await sugg.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool("notes_read_suggestion", {"id": sid})
+    content, _ = await module.call_tool("notes_read_suggestion", {"id": sid})
     text = content[0].text
     assert "agent's proposed replacement" in text
     assert "PRIVATE STORED BODY" not in text
 
 
 async def test_read_suggestion_tool_unknown_id_raises() -> None:
-    from mcp.server.fastmcp.exceptions import ToolError
+    from epicurus_core import ToolError
 
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
     with pytest.raises(ToolError, match=r"(?i)no such suggestion"):
-        await module.mcp.call_tool("notes_read_suggestion", {"id": "nope"})
+        await module.call_tool("notes_read_suggestion", {"id": "nope"})
 
 
 async def test_update_suggestion_tool_revises_in_place() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool("notes_create", {"slug": "n", "content": "draft v1"})
+    await module.call_tool("notes_create", {"slug": "n", "content": "draft v1"})
     sid = (await sugg.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool(
+    content, _ = await module.call_tool(
         "notes_update_suggestion", {"id": sid, "content": "draft v2"}
     )
     assert "revised" in content[0].text.lower()
@@ -589,34 +589,34 @@ async def test_update_suggestion_tool_revises_in_place() -> None:
 
 
 async def test_update_suggestion_tool_on_resolved_raises_model_actionable_message() -> None:
-    from mcp.server.fastmcp.exceptions import ToolError
+    from epicurus_core import ToolError
 
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool("notes_create", {"slug": "n", "content": "x"})
+    await module.call_tool("notes_create", {"slug": "n", "content": "x"})
     sid = (await sugg.list(tenant=TENANT))[0].sid
-    await module.mcp.call_tool("notes_withdraw_suggestion", {"id": sid})
+    await module.call_tool("notes_withdraw_suggestion", {"id": sid})
     with pytest.raises(ToolError, match=r"(?i)already withdrawn"):
-        await module.mcp.call_tool("notes_update_suggestion", {"id": sid, "content": "too late"})
+        await module.call_tool("notes_update_suggestion", {"id": sid, "content": "too late"})
 
 
 async def test_withdraw_suggestion_tool_removes_from_queue() -> None:
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
-    await module.mcp.call_tool("notes_create", {"slug": "n", "content": "x"})
+    await module.call_tool("notes_create", {"slug": "n", "content": "x"})
     sid = (await sugg.list(tenant=TENANT))[0].sid
-    content, _ = await module.mcp.call_tool("notes_withdraw_suggestion", {"id": sid})
+    content, _ = await module.call_tool("notes_withdraw_suggestion", {"id": sid})
     assert "withdrawn" in content[0].text.lower()
     assert await sugg.list(tenant=TENANT) == []
 
 
 async def test_withdraw_suggestion_tool_unknown_id_raises() -> None:
-    from mcp.server.fastmcp.exceptions import ToolError
+    from epicurus_core import ToolError
 
     store, sugg = await _stores()
     module, _ = await _module_for(store, sugg)
     with pytest.raises(ToolError, match=r"(?i)no such suggestion"):
-        await module.mcp.call_tool("notes_withdraw_suggestion", {"id": "nope"})
+        await module.call_tool("notes_withdraw_suggestion", {"id": "nope"})
 
 
 async def test_suggestion_lifecycle_tools_are_not_side_effect_write() -> None:

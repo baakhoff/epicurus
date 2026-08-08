@@ -109,7 +109,11 @@ describe("Chat tail controls while unreachable (#530)", () => {
     const regenerate = await screen.findByRole("button", { name: "Regenerate response" });
     expect(regenerate).not.toBeDisabled();
 
-    act(() => useConnection.getState().reportUnreachable());
+    act(() =>
+      useConnection
+        .getState()
+        .reportUnreachable({ method: "GET", path: "/platform/v1/power", kind: "502" }),
+    );
     expect(regenerate).toBeDisabled();
   });
 
@@ -118,7 +122,11 @@ describe("Chat tail controls while unreachable (#530)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit message" }));
     const editor = await screen.findByLabelText("Edit message");
 
-    act(() => useConnection.getState().reportUnreachable());
+    act(() =>
+      useConnection
+        .getState()
+        .reportUnreachable({ method: "GET", path: "/platform/v1/power", kind: "502" }),
+    );
     expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
 
     // Enter-to-resend bypasses the button entirely (composer parity, #494) — the guard
@@ -231,7 +239,11 @@ describe("Editing any user message in history (#552)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Resend" }));
     const dialog = await screen.findByRole("alertdialog");
 
-    act(() => useConnection.getState().reportUnreachable());
+    act(() =>
+      useConnection
+        .getState()
+        .reportUnreachable({ method: "GET", path: "/platform/v1/power", kind: "502" }),
+    );
     fireEvent.click(within(dialog).getByRole("button", { name: "Resend" }));
 
     expect(editAndRerun).not.toHaveBeenCalled();

@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The "can't reach epicurus" banner no longer flaps on a single dropped request**
+  (#791) — the banner (`ConnectionBanner`, `src/App.tsx`) used to be one single-strike
+  fetch failure away from covering the shell: any one `TypeError` or gateway 502/504,
+  anywhere in the app, rendered it on the next paint, and any one healthy response
+  cleared it — on a loaded self-hosted box (CPU-only inference, Docker Desktop VM) a
+  transient gateway hiccup reads exactly like an outage, so the banner appeared
+  regularly, lived a few seconds, and vanished, with nothing shown about what actually
+  failed. The banner's own signal (`confirmedDown`, `src/stores/connection.ts`) is now
+  debounced: a first failure only arms a `pendingDown` state, and `useConnectionWatch`
+  immediately fires one confirming re-probe (the same vitals refetch recovery already
+  uses); the banner renders only once that evidence persists past a short grace window
+  (`UNREACHABLE_GRACE_MS`, 5 s) or a second failure confirms it sooner — so an ordinary
+  blip resolves silently and a genuinely stopped stack still surfaces within ~5 s.
+  `coreDown` itself is unchanged (still eager, single-strike) — the composer's Send-gate
+  and the Files/Mail "connection lost" states still refuse instantly rather than wait out
+  a debounce window on an action that would just fail anyway. Every report now also
+  carries its evidence — the failing request's method, path, and failure class
+  (`TypeError`/`502`/`504`) — kept in the store and logged via `console.debug`, and named
+  in the banner's `title` tooltip on hover, so a flap can be attributed without
+  network-tab archaeology. `web` 0.133.0→0.134.0 (MINOR).
+
 - **The automations `push` sink is wired up — all ten starter templates now deliver
   something** (#723) — `push` has been valid sink vocabulary since the automations engine
   shipped (ADR-0105), but `SinkDispatcher` never had a handler registered for it: a run

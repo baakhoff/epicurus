@@ -172,15 +172,22 @@ const queryClient = new QueryClient({
  * column. Distinguishes the two silences a cached PWA shell can hide — the device is
  * offline vs. the device is fine but epicurus isn't answering (a normal state on a
  * LAN/VPN self-hosted box, #460). State-driven, so it clears itself on recovery.
+ *
+ * Reads `confirmedDown`, not `coreDown` (#791): the store already debounced a single
+ * blip out before this ever renders — see src/stores/connection.ts. The `title` names
+ * the evidence that actually tripped it (method, path, failure class) so a flap can be
+ * attributed on hover instead of network-tab archaeology.
  */
 function ConnectionBanner() {
   const online = useConnection((s) => s.online);
-  const coreDown = useConnection((s) => s.coreDown);
-  if (online && !coreDown) return null;
+  const confirmedDown = useConnection((s) => s.confirmedDown);
+  const lastEvidence = useConnection((s) => s.lastEvidence);
+  if (online && !confirmedDown) return null;
   const Icon = online ? CloudOff : WifiOff;
   return (
     <div
       role="status"
+      title={lastEvidence ? `${lastEvidence.method} ${lastEvidence.path} — ${lastEvidence.kind}` : undefined}
       className="flex items-center justify-center gap-2 border-b border-edge bg-(--ep-moon-dim) px-4 py-1.5 text-xs text-(--ep-moon-strong)"
     >
       <Icon size={13} className="shrink-0" />

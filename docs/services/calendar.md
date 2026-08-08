@@ -78,6 +78,16 @@ Since **v0.16** (#532, ADR-0086) `calendar_update_event` can **clear** a recurre
 repeat picker on a recurring event now actually stops it repeating, where before it was a no-op
 (#528 containment). See *Clearing recurrence* under *Recurring events*, below.
 
+Since **v0.19** (#814) a **stale connected-account reference no longer empties the Calendar
+page**. `CollectionRouter` resolved a *missing provider* — an `enabled`/`active` ref whose
+account had since been disconnected, which nothing prunes when that happens — oppositely on
+write and read: `create_event` fell back to the local store, but the `list_events` aggregate
+skipped the same ref and never consulted local, so an event written through a stale ref was
+created, persisted, and absent from the page while the tool correctly reported success. Every
+read and write now resolves a ref through one rule, `_resolve_provider`, which degrades a
+missing provider to local and logs it. See *Resolution rule* under *Connected accounts &
+collections*, below.
+
 ## Contract
 
 ### MCP tools
@@ -259,8 +269,41 @@ via `PlatformClient.get_collections()` (a Postgres-only read at
   connected (#433). The New-event picker preselects the same default (Google lists the
   primary calendar first).
 
-If the core is briefly unreachable, the router degrades to the local default rather than
-failing (local-first).
+#### Resolution rule (`CollectionRouter._resolve_provider`, #814, v0.19.0)
+
+Every read and write path resolves a `CollectionRef` to a provider through this one function.
+A live provider for the ref's account is used as-is. Otherwise — the ref names an account that
+isn't (or is no longer) connected, most commonly a stale `enabled`/`active` entry left behind
+once its account was disconnected — it **degrades to the local collection**, logging a warning
+that names the account and collection. If the core itself is briefly unreachable, the prefs
+read degrades the same way, to a local-only selection. Local is always available and never
+fails, so a write that falls back to it is always found by the very next read (ADR-0030's
+local-is-the-silent-default, honoured end-to-end): never "write succeeded, read empty."
+
+The degraded ref is replaced by the local ref, not merely re-pointed, so a write is never
+handed the dead account's collection id, and the events a degraded read returns are tagged
+`calendar_id: "local"` — a token the page's per-calendar visibility toggles can actually match
+(#378) rather than a calendar the operator no longer has. A multi-ref read (the `list_events`
+aggregate, and the home-calendar → active → other-enabled → local search behind `get_event` /
+`update_event` / `delete_event`) de-duplicates by **effective** target, so more than one stale
+ref — or a stale ref alongside local already being enabled — reads local exactly once, not
+once per ref.
+
+Two neighbouring behaviours deliberately stay as they are. A source whose provider is live but
+whose *call* then fails is a different condition and keeps its own skip-and-log (#209) — it is
+a transient error, not a gone account. And with no `active` set, the write-default scan is
+*choosing* among candidates rather than honouring a stated one, so it simply passes over a ref
+whose provider is missing and continues down the #433 preference order; that is not a
+degradation and is not logged as one. An explicitly-set `active` that has gone stale **does**
+degrade — to local, deliberately not to whichever other external calendar the preference order
+would otherwise have reached, since quietly writing into a *different* account's calendar is a
+worse surprise than the always-available silent default.
+
+Nothing about *pruning* `prefs.enabled` changed — core-app's disconnect flow
+(`ModuleRegistry.disconnect_collections`) already best-effort removes a disconnected
+provider's refs, but that cleanup can fail silently and a ref can go stale by paths a central
+prune can't fully close; making every read/write path tolerate a stale ref regardless of *why*
+it went stale is the durable fix. Tasks carries the same rule for the same reason (#795).
 
 ### Calendar page (`calendar` archetype — ADR-0018)
 

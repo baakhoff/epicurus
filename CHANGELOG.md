@@ -12,6 +12,42 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Disabling a connected calendar account silently emptied the Calendar page** (#814) —
+  `CollectionRouter` resolved a *missing provider* in exactly opposite ways on the write and
+  read paths. The trigger is a stale `enabled`/`active` collection reference: nothing prunes
+  the operator's stored selection when the account behind a reference is disconnected, so the
+  dead reference stays in place. A write (`calendar_create_event`, `calendar_find_free`) hit
+  `self._provider_for(ref.account) or self._local` and fell back to the local store; the
+  `list_events` aggregate hit the same condition and `continue`d — and because its fallback
+  (`prefs.enabled or [_LOCAL_REF]`) only triggers when `enabled` is *empty*, never when a
+  reference inside it is dead, it never consulted local at all. So an event created through a
+  stale reference was written, persisted, and then absent from the Calendar page, while the
+  tool honestly reported a real, saved `Event`. Neither side was lying; they simply disagreed
+  about what "this reference's provider is gone" means. The skip was also completely silent —
+  the neighbouring transient-failure path logs, but a disconnected account left no trace, so
+  nothing in the logs hinted that a read source was being dropped. This is the calendar twin
+  of the same defect reported against tasks (#795); the blast radius was smaller here only
+  because `_search_refs` always appends the local reference, so single-event lookups
+  (`get_event`/`update_event`/`delete_event`) already walked past a dead reference and reached
+  local — the aggregate read had no such backstop.
+
+  Fixed by giving every read and write one shared rule, `_resolve_provider`: a live provider
+  for the reference's account is used as-is; a missing one **degrades to the local
+  collection** and logs a warning naming the account and collection that went missing. The
+  degraded reference is replaced by the local reference rather than merely re-pointed, so a
+  write is never handed the dead account's collection id and the events a degraded read
+  returns are tagged `local` — a token the page's per-calendar visibility toggles can match,
+  rather than a calendar the operator no longer has. A `_dedup_refs` helper applies the rule
+  across a multi-reference read and de-duplicates by *effective* target, so two independently
+  stale references — or a stale one landing on a local entry already enabled — read local once
+  instead of double-counting its events in the returned window. Transient read failures keep
+  their existing skip-and-log (#209): a provider that is live but erroring is a different
+  condition from one that is gone. With no `active` set the write-default scan is choosing
+  among candidates rather than honouring a stated one, so passing over a dead reference there
+  stays silent and unchanged; an explicitly-set `active` that has gone stale degrades to
+  local, deliberately not to some other external calendar the operator never named.
+  `calendar` 0.18.1→0.19.0 (MINOR).
+
 - **The MCP SDK moved to 2.0** (#792) — a genuine breaking API change in the two places that
   carry the module↔core contract: `epicurus_core.module`, imported by every module, and the
   core's MCP host. `FastMCP` became `MCPServer` (the decorator API itself unchanged), every

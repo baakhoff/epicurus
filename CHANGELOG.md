@@ -30,7 +30,7 @@ images to GHCR.
   learned while tool effects (tasks, mail, files) persist — like downloads from a private
   browser window; usage metering still records tokens (the events carry no content).
   Normal chats are byte-identically unaffected. `core-app` 0.105.0→0.106.0 (MINOR),
-  `web` 0.130.1→0.131.0 (MINOR).
+  `web` 0.132.1→0.133.0 (MINOR).
 
 - **Deleting a chat now deletes the chat — everything it produced, everywhere** (#771) —
   `DELETE /agent/sessions/{id}` removed only the `agent_messages` rows, so a "deleted"
@@ -51,7 +51,74 @@ images to GHCR.
   starts the session afresh), `notifications` carry no session linkage (kept), and facts
   distilled on *previous* nights are curated memory managed in the Memory view — the web
   confirm dialog now states that boundary honestly instead of implying total erasure.
-  `core-app` 0.104.0→0.105.0 (MINOR), `web` 0.130.0→0.130.1 (PATCH — confirm-dialog copy).
+  `core-app` 0.104.0→0.105.0 (MINOR), `web` 0.132.0→0.132.1 (PATCH — confirm-dialog copy).
+
+- **Tags become a first-class part of the tasks board: group by them, and pick them as
+  chips** (#763) — the model and tools carried `tags` all along, but the UX was half-wired:
+  a bare comma-separated text input and no grouping. **Group by → Tags** joins the board's
+  dimensions, offered (like *List*) only when a visible task actually has a tag — the first
+  **multi-membership** grouping: a task appears under **each** of its tags, untagged tasks
+  land in an **Untagged** column, and columns sort alphabetically (case-insensitive,
+  Untagged last, stable across reloads). The add/edit forms' tags field becomes a **chips
+  input** — "a box inside a box": removable chips inside the field, Enter/comma commits,
+  backspace erases into the chips — via a new `format: "tags"` hint (the ADR-0082 seam),
+  with a typeahead over the module's distinct tags supplied as **`field_suggestions`** (a
+  new open-valued `field_choices` sibling: suggestions are offered, never enforced, so a
+  new tag is created by typing it). Serialization stays the tool's comma-separated string —
+  the MCP contract is unchanged. **Google honesty**: tags are local-only (Google Tasks has
+  no such field; the provider ignores them on write), so the field is hidden wherever the
+  write would land on Google — a Google task's Edit form, and Add forms whenever the
+  (external-only) list picker shows — never a silent no-op; Google tasks group under
+  Untagged. Drag-and-drop stays honest too: list-grouped columns now carry their
+  **`list_id`** and the shell matches drop targets by id — never by a display title a tag
+  column might share — and with no list columns on screen, cards don't offer a grab that
+  could only dead-end (drag-to-retag deliberately not implemented in v1). `tasks`
+  0.20.0→0.21.0 (MINOR) · `web` 0.131.0→0.132.0 (MINOR).
+
+- **The Tasks page gets three representations of the same data — Board, List, and
+  Calendar — switchable in place** (#767). The `board` archetype gains a **reserved `view`
+  control** (an extension of ADR-0049's declarative controls): a board page declaring
+  `{id: "view"}` opts into the shell's client-side representations, rendered via the
+  standard segmented view switcher. **List** flattens the columns to one deduped row set —
+  title, due, priority, list, tag chips, the same per-card actions — with every column
+  client-side sortable (stable, missing values last); **Calendar** is a month grid
+  (Monday-start, the calendar archetype's geometry) placing each card on its due date,
+  with prev/today/next paging, chips toned by the board's overdue/today language, and a
+  chip opening the ordinary card + actions in a sheet (no new mutation paths anywhere).
+  To support this, board cards additionally carry their **structured fields** — `due`
+  (bare ISO date), `priority`, `tags`, `list_title` — as data beside the rendered badges
+  (additive; a board that sets none renders as before). The chosen view **persists per
+  page** (localStorage, the #743 pattern), a `?view=` deep-link wins over the stored
+  choice (and is kept in sync on switch), junk clamps to the kanban, and a board with no
+  `view` control ignores the param. The tasks module declares the control (Board / List /
+  Calendar), echoes the clamped `?view=`, and omits *Group by* off the Board view —
+  grouping shapes kanban columns; the flat/date-keyed views would render it as a dead
+  knob — while *Show* applies under every view; the payload is identical across views.
+  Undated tasks never appear in any of the three — they live in the Can (#766). The
+  calendar *page's* cross-module task overlay (#469) is untouched. `BoardView` is now
+  keyed per page in `ModulePageScreen`, so tasks' two board pages can't leak control
+  state onto each other. Day-cell quick-add is deferred. `tasks` 0.19.0→0.20.0 (MINOR) ·
+  `web` 0.130.0→0.131.0 (MINOR).
+
+- **The Can: undated tasks get their own backlog page, and the board shows only what's
+  scheduled** (#766) — undated tasks used to land on the Tasks board in a "No date" bucket
+  under the due grouping and inside every other grouping's columns, so the backlog and the
+  plan shared one surface. The tasks module now declares a second left-nav `board` page,
+  **Can** (`/m/tasks/can`): one flat **Backlog** column holding every task without a due
+  date, across the same enabled lists the board aggregates (category badges preserved). The
+  board and the Can partition the same fetch by `due` alone — the board excludes undated
+  tasks under **every** grouping (the "No date" bucket is gone). Each Can card leads with a
+  one-tap **Schedule** action (a due-only `tasks_update` form prefilled to today, rendered
+  as the shell's native date picker via a new `format: "date"` hint on both tools' `due`
+  params — the ADR-0082 format seam, no new web code); clearing a due date moves a task
+  back to the Can. The Can's Add offers no due or repeat field, and its only view control
+  is *Show*, so completed backlog items stay reachable. Nothing vanishes silently:
+  `tasks_add`'s description and both `due` param descriptions (which double as the web
+  form's field hints) say an undated task files into the Can, and a task's hover-card
+  `href` now targets the page it actually lives on. Purely a read-partition — no provider
+  or DB change; lead-time notifications are untouched (they key on due dates, which Can
+  items don't have — by design). `tasks` 0.18.0→0.19.0 (MINOR); no web change — the shell
+  already renders manifest pages, form actions, and the date field.
 
 - **Approving a delete suggestion no longer reports success when the file is already gone**
   (#761) — `SuggestionReview.approve`'s `delete` branch caught the file API's 404 (the vault

@@ -9,8 +9,9 @@ Everything is `0.x` while the platform settles — see [The 0.x phase](#the-0x-p
 ## Two version axes
 
 **1. Per-component version.** Every deployable unit owns its version in its own
-`pyproject.toml` — `libs/epicurus-core` and each `services/*` (core-app, web,
-echo, knowledge, storage, websearch, calendar, mail, tasks). Versions move
+manifest — `pyproject.toml` for `libs/epicurus-core` and the Python services
+(core-app, echo, knowledge, storage, websearch, calendar, mail, tasks), and
+`package.json` for `web`, the one JS/TS service. Versions move
 **independently**: a change to the mail module never forces a core-app bump.
 
 **2. Bundled-stack version.** A repo **git tag** (`vMAJOR.MINOR.PATCH`) marks a

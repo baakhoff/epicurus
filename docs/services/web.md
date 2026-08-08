@@ -500,6 +500,34 @@ action (its `to_list_id` picker), matched to the drop column by title, so the co
 unchanged — it takes effect only where a column maps to a list (a drop on a due/status/priority
 column is a no-op), with the action/form path as the pointer-free fallback.
 
+A `format: "tags"` tool field renders as the **chips input** (#763): current tags as
+removable chips inside the field box, Enter/comma committing a typed entry, backspace
+erasing into the chips, and a typeahead over the action's `field_suggestions` (a
+`field_choices` sibling for *open* values — offered, never enforced, so a brand-new tag is
+created by typing it). The serialized value stays the tool's comma-separated string.
+Drag-move drop targets now match a column's **`list_id`** against the move action's
+`to_list_id` choice values instead of comparing display titles (#763) — a tag/status
+column that shares a list's name can't misfire a move — and when no column carries a
+`list_id` (the board grouped by tags/due/status/priority), cards don't offer the grab
+affordance at all, so a drag can never end in a silent nothing.
+
+A board page declaring the **reserved `view` control** (#767) gets three client-side
+**representations of the same payload**, switchable in place via the standard segmented
+view switcher (the calendar page's affordance): **Board** (the kanban above), **List** —
+the columns flattened to one deduped row set in a table (title / due / priority / list /
+tag chips, every column client-side sortable, stable, missing values last; same per-card
+actions per row), and **Calendar** — a month grid (Monday-start, `boardViews.ts` shares the
+calendar archetype's geometry) placing each card by its structured `due` field, with
+prev/today/next paging and chips that open the ordinary card + actions in a sheet (overdue
+/ today chips carry the board's due-badge tones). The pure math (flatten/dedupe, sorting,
+month cells) lives in `src/components/archetypes/boardViews.ts` for DOM-free tests. The
+chosen view **persists per page** (`board-view:<module>/<page>` in localStorage, the #743
+pattern) and the URL's `?view=` is kept in sync on switch — an explicit `?view=` deep-link
+wins over the stored choice, junk clamps to the board, and a board with no `view` control
+ignores the param entirely. `BoardView` is keyed per `(module, pageId)` in
+`ModulePageScreen`, so two board pages from one module (tasks' board + Can, #766) never
+leak control state onto each other.
+
 The `editor` archetype (knowledge, notes) opens a document **rendered and editable** — its
 markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —
 ProseMirror + remark — lazy-loaded so it never enters the main bundle, #377), and an Edit/Preview
